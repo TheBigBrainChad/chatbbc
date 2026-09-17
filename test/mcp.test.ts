@@ -25,7 +25,8 @@ import { effectiveCapabilities, defaultConfig } from '../src/main/config.js';
 import { lastRequestAt, selfTestHeaders, startMcpServer, tunnelProbeHeaders, type McpEndpoint } from '../src/main/mcp/server.js';
 import { lastToolCallAt, type ToolContext } from '../src/main/mcp/tools.js';
 import { friendlyError } from '../src/main/mcp/kernel.js';
-import { SURFACE_LIST, surfaceDefinition, type SurfaceId } from '../src/main/mcp/surfaces.js';
+import { SURFACE_LIST, surfaceDefinition, CONNECTOR_BRAND, type SurfaceId } from '../src/main/mcp/surfaces.js';
+import { APP_TITLE } from '../src/main/version.js';
 import {
   createSession,
   initSessionStore,
@@ -859,8 +860,8 @@ describe('surface boundaries', () => {
 
   it('describes both surfaces well enough for a user to set them up and a model to find them', () => {
     for (const surface of SURFACE_LIST) {
-      expect(surface.serverName, surface.id).toMatch(/^chat-on-steroids-/);
-      expect(surface.connectorName, surface.id).toContain('Chat On Steroids');
+      expect(surface.serverName, surface.id).toMatch(/^chatbbc-/);
+      expect(surface.connectorName, surface.id).toContain('ChatBBC');
       expect(surface.cardSummary.length, surface.id).toBeGreaterThan(20);
       // The description is the only thing the model has before discovery, so it has to
       // carry real vocabulary rather than a label.
@@ -871,6 +872,9 @@ describe('surface boundaries', () => {
     }
     expect(surfaceDefinition('core').required).toBe(true);
     expect(surfaceDefinition('desktop').required).toBe(false);
+    // The connector brand and the app's own title are one identity, not two spellings of it:
+    // the name the user pastes into ChatGPT has to match the window and installer they saw.
+    expect(CONNECTOR_BRAND).toBe(APP_TITLE);
     // Distinct names, because the connector name is also the retrieval handle.
     expect(surfaceDefinition('core').connectorName).not.toBe(surfaceDefinition('desktop').connectorName);
   });
@@ -897,7 +901,7 @@ describe('2025-era clients', () => {
       clientInfo: { name: 'test-client', version: '1.0.0' }
     });
     expect(reply.status).toBe(200);
-    expect(reply.body.result.serverInfo.name).toBe('chat-on-steroids-core');
+    expect(reply.body.result.serverInfo.name).toBe('chatbbc-core');
     expect(reply.body.result.protocolVersion).toBeTruthy();
   });
 
