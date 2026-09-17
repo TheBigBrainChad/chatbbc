@@ -9,7 +9,7 @@ This supplement preserves full license texts omitted from the published native n
 - MPL-2.0.txt: https://www.mozilla.org/media/MPL/2.0/index.815ca599c9df.txt
 
 Retrieved 2026-09-08. These are unmodified license texts. Including GPLv3 here supplies
-the text incorporated by LGPLv3; it does not relicense Chat On Steroids as GPL software.
+the text incorporated by LGPLv3; it does not relicense ChatBBC as GPL software.
 
 Upstream build/source projects:
 - sharp: https://github.com/lovell/sharp
@@ -18,8 +18,8 @@ Upstream build/source projects:
 - libvips source: https://github.com/libvips/libvips
 
 The current dependency set uses sharp 0.35.4 / libvips 8.18.6. The release pipeline
-places `Chat-On-Steroids-Native-Sources.tar.gz` beside the matching installers at:
-https://github.com/totec448-spec/chat-on-steroids/releases
+places `ChatBBC-Native-Sources.tar.gz` beside the matching installers at:
+https://github.com/TheBigBrainChad/chatbbc/releases
 Use the source archive and checksums from the same release as your installer.
 
 It contains original component archives, locked Rust dependency sources, build repositories,

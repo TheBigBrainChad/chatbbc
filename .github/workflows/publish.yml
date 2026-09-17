@@ -139,7 +139,7 @@ jobs:
       - name: Download the candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: chat-on-steroids-candidate-${{ github.run_id }}
+          name: chatbbc-candidate-${{ github.run_id }}
           path: publish
 
       # The checksums were computed on the packaging runner. Re-checking them here proves
@@ -159,18 +159,18 @@ jobs:
           npm run verify:tunnel-current
           node scripts/check-release-absent.mjs
           gh release create "$TAG" \
-            publish/Chat-On-Steroids-Setup-x64.exe \
-            publish/Chat-On-Steroids-Setup-arm64.exe \
-            publish/Chat-On-Steroids-macOS-x64.dmg \
-            publish/Chat-On-Steroids-macOS-x64.zip \
-            publish/Chat-On-Steroids-macOS-arm64.dmg \
-            publish/Chat-On-Steroids-macOS-arm64.zip \
-            publish/Chat-On-Steroids-Linux-x64.AppImage \
-            publish/Chat-On-Steroids-Linux-x64.deb \
-            publish/Chat-On-Steroids-Linux-arm64.AppImage \
-            publish/Chat-On-Steroids-Linux-arm64.deb \
-            publish/Chat-On-Steroids-Extension.zip \
-            publish/Chat-On-Steroids-Native-Sources.tar.gz \
+            publish/ChatBBC-Setup-x64.exe \
+            publish/ChatBBC-Setup-arm64.exe \
+            publish/ChatBBC-macOS-x64.dmg \
+            publish/ChatBBC-macOS-x64.zip \
+            publish/ChatBBC-macOS-arm64.dmg \
+            publish/ChatBBC-macOS-arm64.zip \
+            publish/ChatBBC-Linux-x64.AppImage \
+            publish/ChatBBC-Linux-x64.deb \
+            publish/ChatBBC-Linux-arm64.AppImage \
+            publish/ChatBBC-Linux-arm64.deb \
+            publish/ChatBBC-Extension.zip \
+            publish/ChatBBC-Native-Sources.tar.gz \
             publish/SHA256SUMS.txt \
             --title "$(sed -n 's/^## //p' "docs/release-notes/$TAG.md" | head -n 1)" \
             --notes-file "docs/release-notes/$TAG.md"
