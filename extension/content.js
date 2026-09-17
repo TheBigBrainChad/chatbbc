@@ -5449,13 +5449,13 @@
    * `app_name` comes from the protected-resource metadata this app serves, not from what
    * the user typed into ChatGPT, so these are this app naming itself.
    *
-   * Exact names, never a prefix: `Chat On Steroids Backup` would be somebody else's
+   * Exact names, never a prefix: `ChatBBC Backup` would be somebody else's
    * connector, and a prefix test would have this app vouch for its traffic.
    */
   const OUR_CONNECTORS = [
-    'Chat On Steroids Core',
-    'Chat On Steroids Desktop',
-    'Chat On Steroids Plugins',
+    'ChatBBC Core',
+    'ChatBBC Desktop',
+    'ChatBBC Plugins',
     'TobisComputer'
   ];
 
