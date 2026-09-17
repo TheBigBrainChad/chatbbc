@@ -15,6 +15,16 @@
 export const APP_VERSION = '2.1.14';
 
 /**
+ * The app's own name, in two spellings that different peers need.
+ *
+ * `APP_TITLE` is for humans: the window, the connector, the installer. `APP_SLUG` is the
+ * machine spelling and is what the bridge stamps every `/hello` reply with, because the
+ * companion compares that field to decide whether the answer came from this app at all.
+ */
+export const APP_TITLE = 'ChatBBC';
+export const APP_SLUG = 'chatbbc';
+
+/**
  * Standalone extension recovery must stay on the app's own release. Using GitHub's moving
  * `latest` asset can pair an older installed app with a newer, incompatible bridge protocol.
  */
@@ -68,4 +78,9 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
 // draft ownership. A 12 companion would silently send text without these files.
 // 14 — exact native generated-image metadata and bounded preview observations. A 13 app
 // would ACK the journal while silently discarding that new event kind.
-export const BRIDGE_PROTOCOL = 14;
+// 15 — the app renamed itself from Chat On Steroids to ChatBBC, and the `/hello` `app`
+// stamp renamed from `chat-on-steroids` to `chatbbc` with it. A 14 companion compares that
+// field to decide the reply came from this app at all, so against a 15 app it discards
+// every answer and reports nothing — the same silent drop protocol 7 was bumped for. The
+// bump turns it into the 426 the user can act on.
+export const BRIDGE_PROTOCOL = 15;

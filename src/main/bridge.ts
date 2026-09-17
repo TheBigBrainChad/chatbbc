@@ -193,7 +193,7 @@ import {
 import type { ContinuationView } from './session/continuation.js';
 import { noteResumeOpening } from './session/resume-gate.js';
 import { readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
-import { APP_VERSION, BRIDGE_PROTOCOL } from './version.js';
+import { APP_SLUG, APP_VERSION, BRIDGE_PROTOCOL } from './version.js';
 import { conversationHasMcpCallSince } from './session/store.js';
 import { sessionWorkingAt } from '../shared/session-activity.js';
 import { requestCorrelation } from './session/correlation.js';
@@ -1775,7 +1775,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       res,
       200,
       {
-        app: 'chat-on-steroids',
+        app: APP_SLUG,
         version: APP_VERSION,
         bridge: BRIDGE_PROTOCOL,
         compatible: protocolCompatible(req),

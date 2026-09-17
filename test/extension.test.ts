@@ -12,7 +12,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
-const { APP_VERSION, BRIDGE_PROTOCOL } = await import('../src/main/version.js');
+const { APP_SLUG, APP_VERSION, BRIDGE_PROTOCOL } = await import('../src/main/version.js');
 
 let domSource = '';
 let backgroundSource = '';
@@ -39,8 +39,8 @@ describe('extension release metadata', () => {
     expect(lock.version).toBe(APP_VERSION);
     expect(lock.packages?.['']?.version).toBe(APP_VERSION);
     expect(manifest.version).toBe(APP_VERSION);
-    expect(BRIDGE_PROTOCOL).toBe(14);
-    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 14;');
+    expect(BRIDGE_PROTOCOL).toBe(15);
+    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 15;');
   });
 
   /**
@@ -481,7 +481,7 @@ interface WorkerHarness {
 
 function response(status: number, data: unknown) {
   const body =
-    data && typeof data === 'object' && (data as Record<string, unknown>).app === 'chat-on-steroids'
+    data && typeof data === 'object' && (data as Record<string, unknown>).app === APP_SLUG
       ? { bridge: BRIDGE_PROTOCOL, compatible: true, ...structuredClone(data as Record<string, unknown>) }
       : structuredClone(data);
   return {
@@ -807,7 +807,7 @@ describe('accepted helper tab cleanup', () => {
         },
         fetch: async (input) => {
           const route = new URL(input).pathname;
-          if (route === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+          if (route === '/hello') return response(200, { app: APP_SLUG, paired: true });
           if (route === '/input/answer') {
             if (outcome === 'navigated') url = `https://chatgpt.com/c/${other}`;
             return response(200, { ok: outcome !== 'rejected' });
@@ -840,7 +840,7 @@ describe('automatic Continue shares scheduled reload custody', () => {
       },
       fetch: async (address, init) => {
         const route = new URL(address).pathname;
-        if (route === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (route === '/hello') return response(200, { app: APP_SLUG, paired: true });
         if (route === '/input/claim') {
           const body = JSON.parse(String(init?.body)); actions.push(body.recoveryAction);
           if (body.recoveryAction === 'stopped') {
@@ -898,7 +898,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     let minted = 0;
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/closed') return response(200, { ok: true });
       if (url.pathname === '/status') {
         const repaired = url.searchParams.get('repaired');
@@ -966,7 +966,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
       const trace: string[] = [];
       const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
         const url = new URL(input);
-        if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
         if (url.pathname === '/repairs/claim') {
           trace.push('claim');
           expect(init.method).toBe('POST');
@@ -1024,7 +1024,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
       let armed = false, handed = false, claimed = false, receipts = 0;
       const fetch = vi.fn(async (input: string) => {
         const url = new URL(input);
-        if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
         if (url.pathname === '/repairs/claim') { claimed = true; return response(200, { allowed: true }); }
         if (url.pathname === '/status') {
           if (url.searchParams.has('repaired')) receipts++;
@@ -1120,7 +1120,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     let minted = 0;
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/closed') return response(200, { ok: true });
       if (url.pathname === '/status') {
         const repaired = url.searchParams.get('repaired');
@@ -1154,7 +1154,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     let closed = false;
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/closed' && init.method === 'POST') {
         closed = true;
         return response(200, { ok: true });
@@ -1271,7 +1271,7 @@ describe('active agent tab discard protection', () => {
     let live = true;
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/status') {
         return response(200, {
           ok: true,
@@ -1310,7 +1310,7 @@ describe('active agent tab discard protection', () => {
     const COMPACTED = 'cccccccc-dddd-4eee-8fff-000000000000';
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/status') {
         return response(200, {
           ok: true,
@@ -1350,7 +1350,7 @@ describe('active agent tab discard protection', () => {
     let live = true;
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/status') {
         return response(200, {
           ok: true,
@@ -1385,7 +1385,7 @@ describe('active agent tab discard protection', () => {
       session: new FakeStorageArea(),
       fetch: vi.fn(async (input: string, init?: Record<string, unknown>) => {
         const url = new URL(input);
-        if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
         if (url.pathname === '/status') {
           posted.push(JSON.parse(String(init?.body || '{}')));
           return response(200, { ok: true, repairs: [] });
@@ -1415,7 +1415,7 @@ describe('active agent tab discard protection', () => {
       session,
       fetch: vi.fn(async (input: string) => {
         const url = new URL(input);
-        if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
         if (url.pathname === '/status') {
           return response(200, { ok: true, repairs: [], inputs: [{ id: inputId }], inputOpeningIds: [inputId] });
         }
@@ -1444,7 +1444,7 @@ describe('app-owned retained tab pool', () => {
     const worker = loadWorker({
       local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
       session: new FakeStorageArea({ tabDocuments: Object.fromEntries(tabs.map(tab => [tab.id, `doc-${tab.id}`])), tabEpochs: Object.fromEntries(tabs.map(tab => [tab.id, 0])) }),
-      fetch: async input => response(200, new URL(input).pathname === '/hello' ? { app: 'chat-on-steroids', paired: true } : {
+      fetch: async input => response(200, new URL(input).pathname === '/hello' ? { app: APP_SLUG, paired: true } : {
         ok: true, repairs: [], tabsToKeepOpen: options.keep ?? 2, retiredConversations: options.retired ? [id(2), id(5)] : [],
         workerConversations: [1, 2, 3, 5].filter(n => n !== options.ordinary).map(id), sleepingWorkerConversations: [2, 3, 5].map(id),
         conversationActivityAt: Object.fromEntries([1, 2, 3, 5].map(n => [id(n), (options.reverseActivity ? 10 - n : n) * 1000])),
@@ -1514,7 +1514,7 @@ describe('worker settings authority', () => {
       tabsGet: async () => ({ id: 42, url: `https://chatgpt.com/c/${CHAT}` }),
       fetch: async input => {
         const route = new URL(input).pathname;
-        if (route === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (route === '/hello') return response(200, { app: APP_SLUG, paired: true });
         posted.push(route);
         return response(200, { ok: true, command: { type: 'stop', conversationId: CHAT, turnId: 'live-turn' } });
       }
@@ -1534,7 +1534,7 @@ describe('worker settings authority', () => {
     const posted: Record<string, unknown>[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/settings' && init.method === 'POST') {
         posted.push(JSON.parse(String(init.body || '{}')));
         return response(409, { error: 'worker_compaction_disabled' });
@@ -1554,7 +1554,7 @@ describe('worker settings authority', () => {
     const posted: Record<string, unknown>[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/compact' && init.method === 'POST') {
         posted.push(JSON.parse(String(init.body || '{}')));
         return response(200, { ok: true });
@@ -1584,7 +1584,7 @@ describe('worker settings authority', () => {
     const posted: Record<string, unknown>[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/compact' && init.method === 'POST') {
         posted.push(JSON.parse(String(init.body || '{}')));
         return response(200, { ok: true });
@@ -1618,7 +1618,7 @@ describe('worker settings authority', () => {
       : `https://chatgpt.com/g/g-p-abcdef1234567890abcdef1234567890/c/${CHAT}`;
     const posted: Record<string, unknown>[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
-      if (new URL(input).pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (new URL(input).pathname === '/compact') posted.push(JSON.parse(String(init.body)));
       return response(200, { ok: true });
     });
@@ -1652,7 +1652,7 @@ describe('worker settings authority', () => {
   it('opens the replacement chat in the window of the chat it continues', async () => {
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/compact' && init.method === 'POST') {
         return response(200, { stored: true, commandId: 'cmd-handoff', placement: { id: 'cmd-handoff' } });
       }
@@ -1689,7 +1689,7 @@ describe('worker settings authority', () => {
   it('leaves a compaction reply that places nothing to the app’s own opener', async () => {
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/compact' && init.method === 'POST') {
         // What an automatic pickup or a restart-restored resume answers with: there is no page
         // in flight to hand the successor to, so the app opened it the way it always did.
@@ -1717,7 +1717,7 @@ describe('worker settings authority', () => {
   it('refuses a settings write that names a different conversation than the source tab owns', async () => {
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       return response(200, {});
     });
     const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
@@ -1761,7 +1761,7 @@ describe('worker settings authority', () => {
     const posted: Record<string, unknown>[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/compact' && init.method === 'POST') {
         posted.push(JSON.parse(String(init.body || '{}')));
         return response(200, { allowed: true });
@@ -1787,7 +1787,7 @@ describe('worker settings authority', () => {
     const posted: Record<string, unknown>[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/compact' && init.method === 'POST') {
         posted.push(JSON.parse(String(init.body || '{}')));
         return response(200, { allowed: true });
@@ -1813,7 +1813,7 @@ describe('worker settings authority', () => {
 
   it.each(['conversation', 'pending-conversation', 'pending-foreign'])('refuses a replacement permit on a %s route', async state => {
     const fetch = vi.fn(async (input: string) => new URL(input).pathname === '/hello'
-      ? response(200, { app: 'chat-on-steroids', paired: true }) : response(200, { allowed: true }));
+      ? response(200, { app: APP_SLUG, paired: true }) : response(200, { allowed: true }));
     const home = 'https://chatgpt.com/?clf=cmd-successor';
     const chat = `https://chatgpt.com/c/${CHAT}`;
     const tab = { id: 48, url: state === 'conversation' ? chat : home,
@@ -1841,7 +1841,7 @@ describe('worker settings authority', () => {
     const posted: Record<string, unknown>[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/goal/objective') {
         posted.push(JSON.parse(String(init.body || '{}')));
         return response(200, { objective: 'build the sandbox', enabled: true, mode: 'loop' });
@@ -1887,7 +1887,7 @@ describe('extension command delivery', () => {
     const bodies: Array<Record<string, unknown>> = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/commands/redeem') {
         const body = JSON.parse(String(init.body));
         bodies.push(body);
@@ -1918,7 +1918,7 @@ describe('extension command delivery', () => {
     const session = new FakeStorageArea({ settled: ['cmd-done'] });
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       return response(200, { command: { id: 'cmd-done', text: 'again?' } });
     });
     const worker = loadWorker({ local, session, fetch });
@@ -1945,7 +1945,7 @@ describe('extension command delivery', () => {
     const session = new FakeStorageArea();
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       return response(404, {});
     });
     const worker = loadWorker({ local, session, fetch });
@@ -1992,7 +1992,7 @@ describe('extension command delivery', () => {
       const chat = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
       const fetch = vi.fn(async (input: string) => {
         const url = new URL(input);
-        if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
         if (url.pathname === '/status') return response(200, { ok: true, repairs: [], commandIds: [] });
         return response(404, {});
       });
@@ -2028,7 +2028,7 @@ describe('extension command delivery', () => {
       let commandIds: string[] | undefined = scenario === 'unknown-policy' ? undefined : ['cmd-handoff'];
       const fetch = vi.fn(async (input: string) => {
         const url = new URL(input);
-        if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
         if (url.pathname === '/status') return response(200, { ok: true, repairs: [], commandIds });
         return response(404, {});
       });
@@ -2090,7 +2090,7 @@ describe('extension command delivery', () => {
     const session = new FakeStorageArea();
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       return response(404, {});
     });
     const worker = loadWorker({ local, session, fetch });
@@ -2111,7 +2111,7 @@ describe('extension command delivery', () => {
       const url = new URL(input);
       const headers = (init.headers ?? {}) as Record<string, string>;
       seen.push({ path: url.pathname, auth: headers.authorization });
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: false });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: false });
       if (url.pathname === '/pair') return response(200, { token: 'fresh-token' });
       if (url.pathname === '/commands/redeem') return response(200, { command: null });
       return response(404, {});
@@ -2136,7 +2136,7 @@ describe('extension command delivery', () => {
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
       const headers = (init.headers ?? {}) as Record<string, string>;
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/pair') return response(200, { token: 'second-token' });
       if (url.pathname === '/commands/redeem') {
         tokens.push(headers.authorization);
@@ -2174,7 +2174,7 @@ describe('extension revival delivery', () => {
   const app = (route: 'status' | 'activity' = 'status') =>
     vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === `/${route}`) {
         return response(200, { ok: true, recoveryMonitoring: true, repairs: [], revival });
       }
@@ -2398,7 +2398,7 @@ describe('extension revival delivery', () => {
     });
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/commands/revivals/pending') return response(200, { pending: [] });
       return response(404, {});
     });
@@ -2415,7 +2415,7 @@ describe('extension revival delivery', () => {
     const local = new FakeStorageArea({ ...paired, deferredRevivals: [marker] });
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/commands/revivals/pending') return response(503, { error: 'bridge_recovering' });
       return response(404, {});
     });
@@ -2461,7 +2461,7 @@ describe('extension observation journal', () => {
     let drafts = 0;
     const worker = loadWorker({ local, session, fetch: async (input, init = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/events') {
         const batch = JSON.parse(String(init.body));
         posted.push(batch);
@@ -2515,7 +2515,7 @@ describe('extension observation journal', () => {
     const posted: string[] = [];
     const worker = loadWorker({ local, session, fetch: async (input, init = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/commands/ack') return healthy ? response(200, { ok: true }) : response(503, {});
       if (url.pathname === '/events') {
         const id = JSON.parse(String(init.body)).conversationId;
@@ -2556,7 +2556,7 @@ describe('extension observation journal', () => {
     const posted: string[] = [];
     const worker = loadWorker({ local, session, fetch: async (input, init = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/events') {
         const id = JSON.parse(String(init.body)).conversationId;
         posted.push(id);
@@ -2580,7 +2580,7 @@ describe('extension observation journal', () => {
     const session = new FakeStorageArea();
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/commands/ack') return response(200, { ok: true });
       return response(404, {});
     });
@@ -2597,7 +2597,7 @@ describe('extension observation journal', () => {
     const session = new FakeStorageArea();
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/events') return response(426, { error: 'upgrade_required' });
       return response(404, {});
     });
@@ -2628,7 +2628,7 @@ describe('extension observation journal', () => {
     let healthy = false;
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/events') return healthy ? response(200, { ok: true }) : response(503, { error: 'retry' });
       if (url.pathname === '/closed') return response(200, { ok: true });
       if (url.pathname === '/status') return response(200, { ok: true, repairs: [], recoveryMonitoring: false });
@@ -2660,7 +2660,7 @@ describe('extension observation journal', () => {
     const session = new FakeStorageArea();
     const firstFetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/commands/ack') return response(503, { error: 'temporarily_unavailable' });
       return response(404, {});
     });
@@ -2683,7 +2683,7 @@ describe('extension observation journal', () => {
     const bodies: Array<Record<string, unknown>> = [];
     const secondFetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/commands/ack') {
         bodies.push(JSON.parse(String(init.body)));
         return response(200, { ok: true, committed: true });
@@ -2709,7 +2709,7 @@ describe('extension observation journal', () => {
     const postedEvents: Array<Record<string, unknown>> = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/commands/ack') {
         return ackHealthy ? response(200, { ok: true, committed: true }) : response(503, { error: 'retry' });
       }
@@ -2905,7 +2905,7 @@ describe('extension observation journal', () => {
     const posted: Array<{ conversationId: string; events: Array<{ text?: string }> }> = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/events') {
         posted.push(JSON.parse(String(init.body)));
         return response(200, { sessionId: 'session', stored: 1 });
@@ -2940,7 +2940,7 @@ describe('extension observation journal', () => {
     const order: string[] = [];
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/events') {
         order.push('/events');
         return acceptEvents
@@ -3000,7 +3000,7 @@ describe('extension observation journal', () => {
     const seen: Array<{ route: string; client: string | null }> = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/activity') {
         seen.push({ route: url.pathname, client: url.searchParams.get('goalClient') });
         return response(200, { sessionId: 'session', entries: [], stream: [], nextSince: 0 });
@@ -3060,7 +3060,7 @@ describe('extension observation journal', () => {
     let drafts = 0;
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/events') return response(503, { error: 'temporarily_unavailable' });
       if (url.pathname === '/goal/draft') {
         drafts += 1;
@@ -3113,7 +3113,7 @@ describe('extension observation journal', () => {
     const closed: string[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/events') return response(200, { sessionId: 'session', stored: 1 });
       if (url.pathname === '/closed') {
         closed.push(JSON.parse(String(init.body)).conversationId);
@@ -3150,7 +3150,7 @@ describe('extension observation journal', () => {
     const detailBodies: unknown[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const path = new URL(input).pathname;
-      if (path === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (path === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (path === '/activity/detail') {
         detailBodies.push(JSON.parse(String(init.body)));
         return response(200, { ok: true, conversationId, callId: 'call-1', detailRevision: 17 });
@@ -3194,7 +3194,7 @@ describe('extension observation journal', () => {
     let tabUrl = `https://chatgpt.com/c/${conversationId}`;
     const fetch = vi.fn(async (input: string) => {
       const path = new URL(input).pathname;
-      if (path === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (path === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (path === '/activity/detail') {
         tabUrl = `https://chatgpt.com/c/${other}`;
         return response(200, { ok: true, conversationId, callId: 'call-1', detailRevision: 17 });
@@ -3230,7 +3230,7 @@ describe('extension observation journal', () => {
         },
         fetch: async (input, init = {}) => {
           const path = new URL(input).pathname;
-          if (path === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+          if (path === '/hello') return response(200, { app: APP_SLUG, paired: true });
           if (path === '/closed') closed.push(JSON.parse(String(init.body)).conversationId);
           return response(200, {});
         }
@@ -3257,7 +3257,7 @@ describe('extension observation journal', () => {
       tabsQuery: () => new Promise((resolve) => { finishQuery = resolve; }),
       fetch: async (input, init = {}) => {
         const path = new URL(input).pathname;
-        if (path === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (path === '/hello') return response(200, { app: APP_SLUG, paired: true });
         if (path === '/closed') closed.push(JSON.parse(String(init.body)).conversationId);
         return response(200, {});
       }
@@ -3283,7 +3283,7 @@ describe('extension observation journal', () => {
         url: `https://chatgpt.com/c/${conversationId}`, pendingUrl: 'https://example.com/away' }),
       fetch: async (input, init = {}) => {
         const path = new URL(input).pathname;
-        if (path === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (path === '/hello') return response(200, { app: APP_SLUG, paired: true });
         if (path === '/closed') closed.push(JSON.parse(String(init.body)).conversationId);
         return response(200, {});
       }
@@ -3300,7 +3300,7 @@ describe('extension observation journal', () => {
     const closed: string[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/events') return response(200, { sessionId: 'session', stored: 1 });
       if (url.pathname === '/closed') {
         closed.push(JSON.parse(String(init.body)).conversationId);
@@ -3337,7 +3337,7 @@ describe('extension observation journal', () => {
     const closed: string[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/events') return response(200, { sessionId: 'session', stored: 1 });
       if (url.pathname === '/closed') {
         closed.push(JSON.parse(String(init.body)).conversationId);
@@ -3369,7 +3369,7 @@ describe('extension observation journal', () => {
     const closed: string[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/closed') {
         closed.push(JSON.parse(String(init.body)).conversationId);
         return response(200, { ok: true });
@@ -3399,7 +3399,7 @@ describe('extension observation journal', () => {
     const closed: string[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/closed') {
         closed.push(JSON.parse(String(init.body)).conversationId);
         return response(200, { ok: true });
@@ -3432,7 +3432,7 @@ describe('extension observation journal', () => {
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
       calls.push(url.pathname);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/activity') return response(200, { sessionId: 'session', stream: [] });
       return response(200, { ok: true });
     });
@@ -3472,7 +3472,7 @@ describe('extension observation journal', () => {
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
       calls.push(url.pathname);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/activity') return response(200, { sessionId: 'session', stream: [] });
       return response(200, { ok: true });
     });
@@ -3505,7 +3505,7 @@ describe('extension observation journal', () => {
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
       calls.push(url.pathname);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/activity') return response(200, { sessionId: 'session', stream: [] });
       return response(200, { ok: true });
     });
@@ -3535,7 +3535,7 @@ describe('extension observation journal', () => {
     const closed: string[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/closed') closed.push(JSON.parse(String(init.body)).conversationId);
       return response(200, { ok: true });
     });
@@ -3683,7 +3683,7 @@ describe('extension observation journal', () => {
     let rejected = false;
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/events') {
         const body = JSON.parse(String(init.body));
         if (!rejected) {
@@ -3751,7 +3751,7 @@ describe('extension connection', () => {
       tokens: 0,
       async fetch(input: string) {
         state.calls.push(input);
-        if (input.endsWith('/hello')) return response(200, { app: 'chat-on-steroids', paired: true });
+        if (input.endsWith('/hello')) return response(200, { app: APP_SLUG, paired: true });
         if (input.endsWith('/pair')) {
           state.tokens++;
           return response(200, { token: `token-${state.tokens}` });
@@ -3790,7 +3790,7 @@ describe('extension connection', () => {
     let body: any = null;
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/correlations') {
         body = JSON.parse(String(init.body));
         return response(200, {
@@ -3836,7 +3836,7 @@ describe('extension connection', () => {
       const pathname = new URL(input).pathname;
       requested.push(pathname);
       return pathname === '/hello'
-        ? response(200, { app: 'chat-on-steroids', paired: true })
+        ? response(200, { app: APP_SLUG, paired: true })
         : response(200, { ok: true });
     });
     const worker = loadWorker({
@@ -3898,7 +3898,7 @@ describe('extension connection', () => {
     let pairCalls = 0;
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/pair') {
         pairCalls++;
         return response(200, { token: 'should-never-be-minted' });
@@ -3930,7 +3930,7 @@ describe('extension connection', () => {
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
       if (url.pathname === '/hello') {
-        return response(200, { app: 'chat-on-steroids', paired: false, disconnected: true });
+        return response(200, { app: APP_SLUG, paired: false, disconnected: true });
       }
       if (url.pathname === '/pair') {
         pairCalls++;
@@ -3962,7 +3962,7 @@ describe('extension connection', () => {
     });
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: false });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: false });
       if (url.pathname === '/pair') {
         pairStarted();
         await pairGate;
@@ -4088,7 +4088,7 @@ describe('the goal opening, which waits on a model', () => {
     const seen: { signal: AbortSignal | null } = { signal: null };
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
-      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
       if (url.pathname === '/goal/open') {
         const signal = init.signal as AbortSignal;
         seen.signal = signal;

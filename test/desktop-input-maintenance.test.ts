@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
-import { BRIDGE_PROTOCOL } from '../src/main/version.js';
+import { APP_SLUG, BRIDGE_PROTOCOL } from '../src/main/version.js';
 
 // The VM models a host without debugger; real module loading is covered by the MV3 entry fixture.
 const source = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf8').replace(/^import .*$/gm, '');
@@ -76,7 +76,7 @@ it.each(['empty', 'draft', 'navigated', 'rejected', 'transport', 'pinned', 'pinn
   await h.authorizeDocument({ tab: { id: 8 }, documentId: source.documentId, frameId: 0, url: h.tabs[0]!.url }, { navigationEpoch: 1 });
   h.fetch.mockImplementation(async input => ({ ok: mode !== 'transport', status: mode === 'transport' ? 503 : 200,
     json: async () => new URL(input).pathname === '/hello'
-      ? { app: 'chat-on-steroids', bridge: BRIDGE_PROTOCOL, compatible: true, paired: true }
+      ? { app: APP_SLUG, bridge: BRIDGE_PROTOCOL, compatible: true, paired: true }
       : { ok: true, outcome: mode === 'rejected' ? 'committed' : 'terminal-failure', committed: false } }));
   h.sendMessage.mockImplementation(async (_tabId, message): Promise<any> => {
     if (message.type === 'clf-tab-close-check') {
@@ -168,7 +168,7 @@ async function worker(inputs: Array<{ id: string; conversationId: string | null;
   const fetch = vi.fn(async (input: string, _init?: RequestInit): Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> => ({
     ok: true, status: 200,
     json: async () => new URL(input).pathname === '/hello'
-      ? { app: 'chat-on-steroids', bridge: BRIDGE_PROTOCOL, compatible: true, paired: true }
+      ? { app: APP_SLUG, bridge: BRIDGE_PROTOCOL, compatible: true, paired: true }
       : { ok: true, inputs, background: true, modelCatalogRequest }
   }));
   const context = vm.createContext({
@@ -447,7 +447,7 @@ describe('one browser maintenance flight per desktop outbox publication', () => 
   });
   it('creates a small owned restore size, then minimizes without changing geometry again', async () => {
     const h = await worker([{ id: firstId, conversationId: null }]);
-    h.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ app: 'chat-on-steroids', bridge: BRIDGE_PROTOCOL, compatible: true, paired: true, ok: true, inputs: [{ id: firstId, conversationId: null }], background: true, browserWindowBounds: { left: -1510, top: 220, width: 800, height: 600 } }) });
+    h.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ app: APP_SLUG, bridge: BRIDGE_PROTOCOL, compatible: true, paired: true, ok: true, inputs: [{ id: firstId, conversationId: null }], background: true, browserWindowBounds: { left: -1510, top: 220, width: 800, height: 600 } }) });
     await h.maintain();
     expect(h.windows.create).toHaveBeenCalledWith(expect.objectContaining({ focused: false, left: -1510, top: 220, width: 800, height: 600 }));
     expect(h.windows.update).toHaveBeenCalledExactlyOnceWith(80, { state: 'minimized', focused: false });
@@ -472,7 +472,7 @@ describe('one browser maintenance flight per desktop outbox publication', () => 
     const h = await worker([]);
     let offered = true;
     h.fetch.mockImplementation(async (input) => ({ ok: true, status: 200, json: async () => {
-      if (new URL(input).pathname === '/hello') return { app: 'chat-on-steroids', bridge: BRIDGE_PROTOCOL, compatible: true, paired: true };
+      if (new URL(input).pathname === '/hello') return { app: APP_SLUG, bridge: BRIDGE_PROTOCOL, compatible: true, paired: true };
       const placement = offered ? { id: firstId, background: true, model: 'gpt-5.6-sol', reasoningEffort: 'medium' } : null;
       offered = false;
       return { ok: true, placement, inputs: [], background: true };
@@ -552,7 +552,7 @@ describe('one browser maintenance flight per desktop outbox publication', () => 
     const h = await worker([{ id: firstId, conversationId: null }]);
     h.tabs.push({ id: 7, url, active: true });
     await h.authorizeDocument({ tab: { id: 7 }, documentId: 'idle', frameId: 0, url }, { navigationEpoch: 1 });
-    h.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ app: 'chat-on-steroids', bridge: BRIDGE_PROTOCOL, compatible: true, paired: true, ok: true, inputs: [{ id: firstId, conversationId: null }], reusableConversations: [secondId] }) });
+    h.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ app: APP_SLUG, bridge: BRIDGE_PROTOCOL, compatible: true, paired: true, ok: true, inputs: [{ id: firstId, conversationId: null }], reusableConversations: [secondId] }) });
     h.sendMessage.mockImplementation(async (_id, message) => {
       if (message.type === 'clf-input-reuse-state') return { ok: true, safe: true, navigationEpoch: 1 } as never;
       if (message.type === 'clf-prepare-desktop-input') h.tabs[0]!.url = `https://chatgpt.com/?cos-input=${firstId}`;
@@ -568,7 +568,7 @@ describe('one browser maintenance flight per desktop outbox publication', () => 
     const tab = { id: 7, url: `https://chatgpt.com/c/${secondId}`, pinned: scenario === 'pinned' };
     h.tabs.push(tab);
     await h.authorizeDocument({ tab: { id: 7 }, documentId: 'idle', frameId: 0, url: tab.url }, { navigationEpoch: 1 });
-    h.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ app: 'chat-on-steroids', bridge: BRIDGE_PROTOCOL, compatible: true, paired: true, ok: true,
+    h.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ app: APP_SLUG, bridge: BRIDGE_PROTOCOL, compatible: true, paired: true, ok: true,
       inputs: [{ id: firstId, conversationId: null }], reusableConversations: [secondId] }) });
     h.sendMessage.mockImplementation(async (_id, message) => {
       if (message.type === 'clf-input-reuse-state') { tab.pinned = true; return { ok: true, safe: true, navigationEpoch: 1 } as never; }
@@ -744,7 +744,7 @@ describe('one browser maintenance flight per desktop outbox publication', () => 
       const h = await worker([input]);
       h.tabs.push({ id: 7, url: `https://chatgpt.com/c/${secondId}` }, { id: 8, url: `https://chatgpt.com/c/${firstId}` });
       h.fetch.mockImplementation(async request => ({ ok: true, status: 200, json: async () => new URL(request).pathname === '/hello'
-        ? { app: 'chat-on-steroids', bridge: BRIDGE_PROTOCOL, compatible: true, paired: true }
+        ? { app: APP_SLUG, bridge: BRIDGE_PROTOCOL, compatible: true, paired: true }
         : { ok: true, inputs: [input], inputOpeningIds: [firstId], repairs: [{ conversationId: firstId, token: 'repair-one' }] } }));
       h.sendMessage.mockImplementation(async (_id, message) => message.type === 'clf-desktop-input'
         ? pendingOffer as never : { ok: true, ready: true });
@@ -770,7 +770,7 @@ describe('one browser maintenance flight per desktop outbox publication', () => 
     h.tabs.push({ id: 7, url: `https://chatgpt.com/c/${secondId}` });
     h.fetch.mockImplementation(async request => ({ ok: true, status: 200, json: async () => {
       const url = new URL(request);
-      if (url.pathname === '/hello') return { app: 'chat-on-steroids', bridge: BRIDGE_PROTOCOL, compatible: true, paired: true };
+      if (url.pathname === '/hello') return { app: APP_SLUG, bridge: BRIDGE_PROTOCOL, compatible: true, paired: true };
       if (url.searchParams.has('repaired')) { repaired = true; return { ok: true }; }
       return { ok: true, inputs: [input], inputOpeningIds: [firstId],
         repairs: repaired ? [] : [{ conversationId: secondId, token: 'repair-same' }] };
@@ -826,7 +826,7 @@ describe('one browser maintenance flight per desktop outbox publication', () => 
     h.tabs.push({ id: 7, url: initial });
     const sender = { tab: { id: 7 }, documentId: 'reuse-source', frameId: 0, url: initial };
     await h.authorizeDocument(sender, { navigationEpoch: 1 });
-    h.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ app: 'chat-on-steroids', bridge: BRIDGE_PROTOCOL, compatible: true, paired: true, ok: true,
+    h.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ app: APP_SLUG, bridge: BRIDGE_PROTOCOL, compatible: true, paired: true, ok: true,
       inputs: [{ id: firstId, conversationId: null }], reusableConversations: [secondId] }) });
     h.sendMessage.mockImplementation(async (_id, message): Promise<any> => {
       if (message.type === 'clf-input-reuse-state') return { safe: true, navigationEpoch: 1 };
