@@ -43,30 +43,35 @@ export interface PackSyncResult {
 }
 
 /**
- * Only the provenance one sync pass actually changed: id -> digest for what it wrote, id ->
- * null for a tombstoned entry whose record it dropped. An untouched entry is absent.
+ * The provenance one sync pass actually wrote: id -> digest, for the entries it copied. An
+ * entry it did not write is absent — including a tombstoned one it skipped.
  *
- * This is a delta rather than the whole `seeded` map on purpose. A sync runs outside
- * `mutateSkillState`'s serialization — it is a filesystem pass — so a toggle or another sync
- * can commit while it runs. A whole map would have been built from the state passed in, and
- * spreading it back would re-install that stale snapshot, silently discarding the provenance
- * another caller recorded in the meantime. A copy whose provenance is lost is preserved
- * forever from then on and can never be refreshed by a pack update again. A delta can only
- * ever name the entries this pass touched, so applying it cannot erase anyone else's work.
+ * This is a delta rather than the whole `seeded` map, and digests rather than a nullable
+ * sentinel, for the same reason: a sync runs outside `mutateSkillState`'s serialization — it
+ * is a filesystem pass — so another caller can commit while it runs. A whole map would have
+ * been built from the state passed in, and spreading it back would re-install that stale
+ * snapshot. Even a `null` "drop this record" marker is destructive, because a pass skips
+ * *every* id its snapshot saw tombstoned, and one of those may have been legitimately restored
+ * and re-seeded while the pass ran. A copy whose provenance is lost is preserved forever from
+ * then on and can never be refreshed by a pack update again.
+ *
+ * So a delta can only ever add what this pass wrote, and removing an id's record is left to
+ * `mergeSeedDelta`, which asks the state it is merging into rather than trusting a snapshot.
  */
-export type SeededDelta = Record<string, string | null>;
+export type SeededDelta = Record<string, string>;
 
 /**
- * Folds a sync's delta into a state read at mutation time. Callers apply it inside
- * `mutateSkillState`'s callback and never spread a delta over a whole `seeded` map, so the
- * merge is additive by construction.
+ * Folds a sync's delta into a state read at mutation time, so the merge is additive by
+ * construction: callers apply it inside `mutateSkillState`'s callback and never spread a delta
+ * over a whole `seeded` map.
+ *
+ * The one deletion here re-reads the authority it depends on. A removed id's stale digest is
+ * dropped only when that id is still tombstoned *now*, so a skill whose tombstone was cleared
+ * and which was re-seeded during the pass keeps its fresh record under any interleave.
  */
 export function mergeSeedDelta(state: SkillState, delta: SeededDelta): SkillState {
-  const seeded = { ...state.seeded };
-  for (const [id, digest] of Object.entries(delta)) {
-    if (digest === null) delete seeded[id];
-    else seeded[id] = digest;
-  }
+  const seeded = { ...state.seeded, ...delta };
+  for (const id of state.removed) delete seeded[id];
   return { ...state, seeded };
 }
 
@@ -152,7 +157,7 @@ async function copySkill(source: string, destination: string): Promise<void> {
 
 /**
  * Brings the managed library in line with the shipped pack. Returns what it changed — the
- * outcome, plus a `delta` naming only the provenance entries this pass wrote or dropped — which
+ * outcome, plus a `delta` naming only the provenance entries this pass wrote — which
  * the caller folds in with `mergeSeedDelta`. This function never writes state itself, so a test
  * can drive it directly. It does republish `skills.ts`'s catalog, but only when the destination
  * really is that library.
@@ -175,7 +180,7 @@ export async function syncSkillPack(options: {
   result.errors.push(...errors);
   for (const entry of entries) {
     const destination = path.join(managedRoot, entry.id);
-    if (state.removed.includes(entry.id)) { result.skipped.push(entry.id); delta[entry.id] = null; continue; }
+    if (state.removed.includes(entry.id)) { result.skipped.push(entry.id); continue; }
     const recorded = state.seeded[entry.id];
     let present = false;
     try { present = (await fs.lstat(destination)).isDirectory(); } catch { present = false; }

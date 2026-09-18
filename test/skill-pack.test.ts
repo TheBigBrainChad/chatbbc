@@ -62,12 +62,15 @@ it('never resurrects a skill the user removed', async () => {
   const first = await syncSkillPack({ managedRoot: managed, packRoot: pack, state: emptySkillState() });
   const state = mergeSeedDelta(emptySkillState(), first.delta);
   await fs.rm(path.join(managed, 'alpha'), { recursive: true });
-  const second = await syncSkillPack({ managedRoot: managed, packRoot: pack, state: { ...state, removed: ['alpha'] } });
+  const removed = { ...state, removed: ['alpha'] };
+  const second = await syncSkillPack({ managedRoot: managed, packRoot: pack, state: removed });
   expect(second.result.skipped).toContain('alpha');
   expect(await exists(path.join(managed, 'alpha'))).toBe(false);
-  // A tombstoned entry's record is dropped by the delta, so the next read cannot resurrect it.
-  expect(second.delta.alpha).toBeNull();
-  expect(mergeSeedDelta(state, second.delta).seeded.alpha).toBeUndefined();
+  // The omitted entry contributes nothing to the delta — this pass wrote nothing for it — and
+  // the merge drops the stale record because the id is still tombstoned in the state it is
+  // merging into. The next read therefore cannot resurrect it.
+  expect(second.delta.alpha).toBeUndefined();
+  expect(mergeSeedDelta(removed, second.delta).seeded.alpha).toBeUndefined();
   expect(second.result.refreshed).toContain('beta');
 });
 

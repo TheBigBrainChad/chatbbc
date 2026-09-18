@@ -181,6 +181,58 @@ it('keeps both skills\u2019 provenance when two resets overlap', async () => {
   expect(next.result.preserved).not.toContain(second);
 });
 
+/**
+ * The same overlap, but with the state a user actually produces: both skills are removed
+ * *before* either reset starts — "turn both back on" — rather than one being removed inside the
+ * other's window.
+ *
+ * That ordering is what exposes a delta that prunes by pointing at what the pass *saw* removed.
+ * The first reset's snapshot lists the second skill as tombstoned, so a "drop this record"
+ * marker for it gets carried through the pass; if the second skill is legitimately restored and
+ * re-seeded while the first is still copying, that stale marker lands afterwards and erases
+ * provenance the second reset had just written — permanent, silent, and identical in effect to
+ * the defect this delta was introduced to remove.
+ */
+it('keeps a skill restored while another reset was already running, when both were removed first', async () => {
+  const first = 'brainstorming', second = 'systematic-debugging';
+  // Both swept out up front, so the first reset's snapshot sees the second still tombstoned.
+  const { packRoot, managedRoot } = await tombstone(first);
+  await tombstone(second);
+  expect(currentSkillState().removed).toEqual(expect.arrayContaining([first, second]));
+
+  const gate = new EventEmitter();
+  let parked = false;
+  const realCopy = fs.cp.bind(fs);
+  const copier = vi.spyOn(fs, 'cp').mockImplementation(async (from, to, options) => {
+    if (!parked && path.basename(String(from)) === first) {
+      parked = true;
+      gate.emit('entered');
+      await once(gate, 'release');
+    }
+    return realCopy(from, to, options);
+  });
+
+  const firstReset = resetPackedSkill(first);
+  await once(gate, 'entered');
+  // The second reset now completes entirely inside the first one's parked window.
+  const secondState = await resetPackedSkill(second);
+  expect(secondState.seeded[second]).toBeDefined();
+  gate.emit('release');
+  const firstState = await firstReset.finally(() => copier.mockRestore());
+
+  // The second skill's fresh provenance survived the first reset's commit.
+  const seeded = currentSkillState().seeded;
+  expect(firstState.seeded[first]).toBeDefined();
+  expect(seeded[first]).toBe(await directoryDigest(path.join(packRoot, first)));
+  expect(seeded[second]).toBeDefined();
+  expect(seeded[second]).toBe(await directoryDigest(path.join(packRoot, second)));
+  // Both are still this app's own work, so a later launch refreshes rather than preserves them.
+  const next = await syncSkillPack({ managedRoot, packRoot, state: currentSkillState() });
+  expect(next.result.refreshed).toEqual(expect.arrayContaining([first, second]));
+  expect(next.result.preserved).not.toContain(first);
+  expect(next.result.preserved).not.toContain(second);
+});
+
 it('applies a choice from the renderer channel and refuses payloads outside the schema', async () => {
   registerIpc(() => null, () => undefined);
   const set = handlers.get('skills:set');
