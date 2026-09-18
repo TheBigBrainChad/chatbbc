@@ -16,7 +16,14 @@ import { t, ui } from './i18n.js';
  * anything — a countdown still grants no authority, and no second timer is introduced.
  */
 
-const textOf = (selector: string): string => $(selector)?.textContent?.trim() ?? '';
+/**
+ * The painted text of one element, addressed by its whole selector.
+ *
+ * This is `querySelector`, not `$`: every caller names an element *inside* a block
+ * (`#agentPlan .agent-plan-count`), and `getElementById` matches an id literally, so a
+ * compound selector there resolves to null and the segment silently disappears.
+ */
+const textOf = (selector: string): string => document.querySelector(selector)?.textContent?.trim() ?? '';
 
 /** The live segments, in the order the line reads them. */
 function segments(): string[] {
@@ -27,7 +34,7 @@ function segments(): string[] {
   const plan = $('agentPlan');
   if (!plan.hidden) {
     const progress = textOf('#agentPlan .agent-plan-count').replace(/\s+/g, '');
-    if (progress) parts.push(t("plan {0}", [progress.replace('/', '/')]));
+    if (progress) parts.push(t("plan {0}", [progress]));
   }
   const preview = $('taskPlanPreview');
   if (!preview.hidden) parts.push(preview.querySelector('.plan-stage') ? t("plan ready") : t("planning"));
