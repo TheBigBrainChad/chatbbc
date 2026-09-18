@@ -3687,6 +3687,9 @@
     // If the lifecycle moves meanwhile, localGenerationOf() below accepts the claim only while
     // finishGeneration's exact node/signature tombstone still proves the old ownership.
     const requestedLiveOwner = !settled ? currentGenerationOwner() : null;
+    const requestedQuestionId = requestedLiveOwner
+      ? [...CLF_DOM.messages()].reverse().find(message => message.role === 'user')?.id || null
+      : null;
     const requestedOwner = settled || requestedLiveOwner;
     let answer = await askFiber();
     if (answer === null) {
@@ -3734,9 +3737,35 @@
     // actually owns, and its `data-clf-fiber-turn` stamp names the descriptor exactly even
     // when the virtualized renderer published no page turn id at all. The page-id match
     // stays as the fallback for a scan whose stamps have not been applied yet.
-    const exactOwner = requestedLiveOwner && localGenerationOf(requestedLiveOwner.pageTurn) !== requestedLiveOwner.localTurnId
-      ? null
-      : requestedOwner;
+    // React can remove the exact section between the MAIN-world snapshot and this reply.
+    // Losing the node from the live DOM must not erase a final that the captured scan still
+    // stamps to that section. The exception requires the *same* open generation and question,
+    // every captured section unmounted, and no replacement assistant mounted after the question.
+    // A newer question, regenerated answer or reused section therefore cannot inherit it.
+    const capturedNodes = requestedLiveOwner
+      ? requestedLiveOwner.pageTurn.nodes || [requestedLiveOwner.pageTurn.node] : [];
+    const capturedUnmounted = capturedNodes.length > 0 && capturedNodes.every(node => node && !node.isConnected);
+    const capturedUnmountedOwnerCurrent = () => {
+      if (!requestedLiveOwner || !requestedQuestionId || !capturedUnmounted ||
+          !generating || turnId !== requestedLiveOwner.localTurnId) return false;
+      const messages = CLF_DOM.messages();
+      if ([...messages].reverse().find(message => message.role === 'user')?.id !== requestedQuestionId) return false;
+      const turns = CLF_DOM.turns();
+      const question = turns.findLastIndex(turn => turn.role === 'user');
+      return question >= 0 && !turns.slice(question + 1).some(turn => turn.role === 'assistant');
+    };
+    const newerQuestion = requestedLiveOwner && requestedQuestionId &&
+      [...CLF_DOM.messages()].reverse().find(message => message.role === 'user')?.id !== requestedQuestionId;
+    const localOwner = requestedLiveOwner ? localGenerationOf(requestedLiveOwner.pageTurn) : null;
+    const sameGeneration = requestedLiveOwner && generating && turnId === requestedLiveOwner.localTurnId;
+    // A settled node/signature tombstone still admits a late revision for its historical turn.
+    // A live genNode alone does not: it may point at a section React has already removed.
+    const ownerStillValid = !requestedLiveOwner ||
+      (!sameGeneration && localOwner === requestedLiveOwner.localTurnId) ||
+      (sameGeneration && !newerQuestion && (capturedUnmounted
+        ? capturedUnmountedOwnerCurrent() && Boolean(stampedFiberTurn(requestedLiveOwner.pageTurn, answer.turns, answer.scanToken))
+        : localOwner === requestedLiveOwner.localTurnId));
+    const exactOwner = ownerStillValid ? requestedOwner : null;
     const ownedPageNode = exactOwner?.pageTurn || null;
     const ownedPageTurnId = exactOwner?.pageTurnId || null;
     let ownedPageTurn = stampedFiberTurn(ownedPageNode, answer.turns, answer.scanToken);
@@ -4227,7 +4256,7 @@
       Boolean(answer.turns[activeTurnIndex]?.endMessageId)
     ) {
       fiberTerminalMessageId = answer.turns[activeTurnIndex].endMessageId;
-      const ended = generationTurn();
+      const ended = generationTurn() || (capturedUnmountedOwnerCurrent() ? exactOwner?.pageTurn : null);
       if (ended) {
         // Native completion resolves transport uncertainty even when its old
         // banner remains mounted; explicit user stop still wins in endOutcome.

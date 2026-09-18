@@ -17967,6 +17967,57 @@ describe('app Stop command uses current native turn proof', () => {
     } finally { window.removeEventListener('message', answer); window.setTimeout = instant; }
   });
 
+  it.each(['same-question', 'new-question', 'replacement-assistant'])('keeps final ownership exact when React unmounts the section (%s)', async question => {
+    live = await harness();
+    startGenerating(live.document);
+    const section = assistantTurn(live.document, 'unmounted-final-turn', []);
+    section.setAttribute('data-clf-fiber-turn', '0');
+    live.hook.observe(); await settle();
+    const opened = emitted(live.sent, 'turn_start').at(-1)!.event.turnId;
+    await bindFiberTurns([{ section, turn: {
+      turnId: 'unmounted-final-turn', endMessageId: null,
+      messages: [{ messageId: 'unmounted-final-message', rawMessageId: 'unmounted-final-message',
+        stable: true, rawText: 'The implementation is underway.', renderedHtml: '<p>The implementation is underway.</p>' }]
+    } }]);
+    prose(live.document, section, 'unmounted-final-message', 'The implementation is complete.');
+
+    const window = live.window as any;
+    const instant = window.setTimeout;
+    window.setTimeout = () => 777;
+    const answer = (event: any) => {
+      if (event.data?.source !== 'clf-fiber-ask') return;
+      // The scan captured this section and its exact final, then React removed the
+      // section before the isolated world received the result. No replacement
+      // section is yet mounted; generationTurn() cannot find the captured owner.
+      section.setAttribute('data-clf-fiber-turn', `${event.data.nonce}:0`);
+      if (question === 'new-question') userTurn(live!.document, 'later-question', 'Continue the implementation', { sent: false });
+      section.remove();
+      if (question === 'replacement-assistant') assistantTurn(live!.document, 'replacement-turn', []);
+      window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
+        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce,
+        v: 12, scanOk: true, rows: [], turns: [{
+          index: 0, turnId: 'unmounted-final-turn', conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          endMessageId: 'unmounted-final-message', calls: [], activities: [], messages: [{
+            messageId: 'unmounted-final-message', rawMessageId: 'unmounted-final-message',
+            stable: true, rawText: 'The implementation is complete.',
+            renderedHtml: '<p>The implementation is complete.</p>'
+          }]
+        }]
+      } }));
+    };
+    window.addEventListener('message', answer);
+    try {
+      await live.hook.refreshFiber();
+      await settle();
+      await live.hook.flush();
+      const final = emitted(live.sent, 'assistant_message').filter(row => row.event.final &&
+        row.event.messageId === 'unmounted-final-message' && row.event.turnId === opened);
+      const completed = emitted(live.sent, 'turn_end').filter(row => row.event.turnId === opened && row.event.outcome === 'completed');
+      expect(final).toHaveLength(question === 'same-question' ? 1 : 0);
+      expect(completed).toHaveLength(question === 'same-question' ? 1 : 0);
+    } finally { window.removeEventListener('message', answer); window.setTimeout = instant; }
+  });
+
   it.each(['same', 'retry', 'new-user'].flatMap(next => ['send', 'close'].map(operation => [next, operation])))('revalidates a stuck composer before %s / %s', async (next, operation) => {
     live = await harness();
     startGenerating(live.document);
