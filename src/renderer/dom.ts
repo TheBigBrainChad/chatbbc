@@ -97,3 +97,20 @@ export function compactNumber(value: number): string {
   if (value < 1_000_000) return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)}k`;
   return `${(value / 1_000_000).toFixed(1)}M`;
 }
+
+/**
+ * Bring `parent`'s children into `children` order, reusing the nodes already there.
+ *
+ * Both the timeline and the outbox repaint while the user may be reading or dragging a row,
+ * so an existing node is moved into place rather than replaced: that is what keeps focus,
+ * text selection and an in-progress drag attached to the row they belong to.
+ */
+export function reconcileChildren(parent: Element, children: HTMLElement[]): void {
+  const keep = new Set<Node>(children);
+  for (const old of [...parent.childNodes]) if (!keep.has(old)) old.remove();
+  let cursor = parent.firstChild;
+  for (const child of children) {
+    if (child !== cursor) parent.insertBefore(child, cursor);
+    cursor = child.nextSibling;
+  }
+}
