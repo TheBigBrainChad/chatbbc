@@ -30,9 +30,45 @@ the composer, and an unlabelled icon cluster in the composer toolbar.
 | 7 | Work panel | Tabbed right panel: Files · Sub-agents · Terminal |
 | 8 | Transcript content | Every content family has its own accent, glyph and edge; one shared geometry |
 | 9 | Full pages | Neutral pages; identity comes from the cards' category colours, not a page colour |
+| — | Identity | Session spine (§4.1) and delivery-stage messages (§4.2) are the product-derived elements; §2.1 records what is ordinary practice |
 
 Scope was explicitly set to **skin + layout, every feature kept**. No feature is removed, merged or
 re-routed; only where things sit and how they are drawn changes.
+
+## 2.1 Design identity — what is ours, and what is merely competent
+
+Research into other agent-harness UIs informed this design only at the level of *ordinary good
+practice*. Nothing in it is copied as a look, and no choice below is justified by "another app does
+it". The distinction matters, so it is written down:
+
+**Ours — exists because of this product's own durable model:**
+
+| Element | Why it can only be this product |
+|---|---|
+| The session spine (§4.1) | This app separates a durable local session from a replaceable ChatGPT chat. The spine is that separation made visible. |
+| Frontend segments (`frontend 1 · chat A`) | Only an app with Compact & Resume has numbered frontends inside one conversation. |
+| Delivery-stage messages (§4.2) | Seven recorded outbox states, four of which the product insists are different facts. |
+| Generated-control rows (§4.1) | The model distinguishes authored from generated text (`authoredSource`, `finishOwner`); the UI refuses to blur it. |
+| Worker identity (`worker-2` scoped to its prime) | Several independent prime families can each own a `worker-1`; the UI must name the family, not just the slot. |
+| Category identity per content family (§4.7) | 14 recorded event kinds with real differences (tool outcome, attribution, evidence level) rather than one generic "message". |
+| Follow-desktop theming (§5) | Derived from this machine's own Omarchy theme files. |
+
+**Ordinary practice — would be proposed for any dense desktop app:**
+
+Square corners because the desktop is square; monospace chrome for a developer tool; hairlines
+instead of card borders; labelled controls instead of bare icons; one status line instead of five
+stacked rows; a tabbed side panel; reduced radius on hover/active fills; a mono fallback chain;
+respecting `prefers-reduced-motion`. None of these is an identity, and none is claimed as one.
+
+**Deliberately rejected from the research.** Three patterns were considered and dropped because they
+conflict with this product's own contracts rather than because they are ugly:
+
+1. **Computed `--contrast-*` overlay tokens.** This repo already has a per-theme `contrast` integer
+   doing that job; two overlapping mechanisms would give one fact two owners (`AGENTS.md` §4).
+2. **A narrow centred transcript column.** A tool call, a patch, a diff and a worker report all need
+   width here; a 48rem column would force permanent horizontal scrolling on the content that matters.
+3. **Assistant messages with no author label at all.** Acceptable in a single-author chat app;
+   wrong here, where generated instructions and worker reports share the same stream as the user.
 
 ## 3. Design tokens
 
@@ -58,8 +94,8 @@ Today structure is carried by bordered cards (`1px solid var(--line)` + `--card`
 near-black ground. The new structure is **tonal bands separated by hairlines**:
 
 - Section separation: `border-top: 1px solid var(--line)` on the following row, never a wrapper box.
-- Group separation: one flat surface, rows divided by hairlines (the t3code `[&>*+*]:border-t`
-  idiom, which this repo can express as a `.stack > * + *` rule).
+- Group separation: one flat surface, rows divided by hairlines — expressed as this repo's own
+  `.stack > * + *` rule so the idiom has one definition.
 - Hover/selected state: a fill change (`--hover`, and the theme's `selection` for selected),
   never a border colour change.
 
@@ -113,16 +149,57 @@ tokens; every surface keeps reading named tokens, never raw hex. Two changes:
    behaviour with no argument is byte-identical to today.
 2. Sidebar derivation is unchanged (`mixColor(sidebar, background, .13)` when translucent).
 
-`--contrast-*`: not adopted. t3code's computed contrast layer is a good pattern, but this repo
-already has a per-theme `contrast` integer doing the same job, and adding a second overlapping
-mechanism would give one fact two owners. The existing `contrast` control is kept as the owner and
-the follow-mode palette supplies a sensible value (§5).
+`--contrast-*`: not adopted. This repo already has a per-theme `contrast` integer doing that job, and
+adding a second overlapping mechanism would give one fact two owners (see §2.1). The existing
+`contrast` control is kept as the owner and the follow-mode palette supplies a sensible value (§5).
 
 ## 4. Layout
 
-### 4.1 Transcript (`chat.ts`, `timeline-scroll.ts`, `styles.css`)
+### 4.1 The transcript is a durable local session, not a chat log
 
-**Real conversation → cards.** One card per authored user message and per assistant response:
+Before any card: the transcript's identity is **not** the ChatGPT conversation. In this product a
+*local session* is durable, and the ChatGPT chat it currently runs in is replaceable — Compact &
+Resume moves the same session from frontend A to frontend B while the session id, project, history,
+queue, worker family and terminal custody all stay (`AGENTS.md` §§1, 15).
+
+The current UI shows that as a `resumed` badge on a session row; inside the transcript the boundary
+between two frontends is invisible. The redesign makes the **spine** visible: the transcript is a
+continuous column belonging to the session, and each frontend it has run in is a labelled segment of
+that column.
+
+```
+╔ SESSION b7f2 · chatbbc · 4 hours ═══════════════════════════╗
+║                                                            ║
+║   ▏ frontend 1 · chat A · gpt-5.6 sol                      ║
+║   │                                                        ║
+║   │   ┌ YOU ──────── collapse the settings nav ┐           ║
+║   │   ┌ CHATBBC ─── Six destinations become… ┐             ║
+║   │                                                        ║
+║   ╞═ ⇄ COMPACT & RESUME · 14:52 · brief 4.1k ══════════════╡
+║   ▏   summary · capture · elect · commit · publish         ║
+║   │                                                        ║
+║   ▏ frontend 2 · chat B · gpt-5.6 sol                      ║
+║   │   ┌ CHATBBC ─── Resuming the same session… ┐           ║
+║   │                                                        ║
+╚════════════════════════════════════════════════════════════╝
+```
+
+- The spine is one vertical hairline down the left of the transcript, in the session's accent.
+- A **frontend segment header** opens each run: `frontend N · chat A|B · model`. `N` is derived from
+  the recorded handoff lineage (the same lineage the `resumed` badge already uses, `chat.ts:351`),
+  not from a new counter.
+- The handoff row sits **on** the spine, so a compaction reads as a joint in one continuous thing
+  rather than a new conversation that happens to follow another.
+- The queued input, project and worker family visually belong to the session — they are drawn
+  inside the spine, above the frontend they target.
+- The spine is presentation only. It reads `handoff`/`resume` events and session metadata that already
+  exist; it decides nothing and grants nothing.
+
+This is the single element of the redesign that could not be lifted onto another chat app: it exists
+because this product separates the durable session from the disposable frontend.
+
+**Real conversation → cards.** Inside a frontend segment, one card per authored user message and per
+assistant response:
 
 ```
 ┌ YOU · 14:31 ─────────────────────────── gpt-5.6 sol · high ┐
@@ -136,14 +213,13 @@ the follow-mode palette supplies a sensible value (§5).
 - User card: jade left edge (`border-left: 2px solid var(--accent)`), header label `YOU`.
 - Assistant card: hairline border, header label `CHATBBC`, header carries time and tokens.
 - Prose inside a card uses `--ui-font`; headers use `--ui-font-mono`.
-- Cards share one max-width column, and the composer aligns to that same column — fixing the
-  narrow-cards/full-width-composer mismatch visible in prototype B.
+- Cards share one max-width column, and the composer aligns to that same column.
 - Interim assistant prose keeps its existing distinct streaming presentation; it is not promoted to
   a final card until the turn's canonical final arrives (unchanged behaviour, restyled).
 
-**Generated work → control rows, not cards.** This is the load-bearing part. The data model already
-separates authored from generated text (`authoredSource`, `finishOwner`, agent reports); the UI
-must not flatten that into "looks like the user". Rows:
+**Generated work → control rows, not cards.** The data model already separates authored from
+generated text (`authoredSource`, `finishOwner`, agent reports); the UI must not flatten that into
+"looks like the user". Rows:
 
 ```
   ⇢ LOOP        keep going: verify the suite
@@ -163,42 +239,94 @@ Mapping of existing render kinds, so nothing is lost: local tool calls keep thei
 (dense single line, expandable); native ChatGPT tool/progress rows stay native; app error and
 recovery notices become `SYSTEM` control rows; worker reports become `WORKER` control rows.
 
-### 4.2 Composer and work surfaces (`index.html`, `chat.ts`, `agent-plan.ts`, `recovery.ts`)
+### 4.2 The message as a lifecycle object (Composer, outbox, status)
+
+This product's central claim is that **a message's delivery state is a fact with stages**, not a
+boolean. `src/main/session/input.ts` records seven real states:
+
+```
+state: z.enum(['queued', 'browser', 'tool', 'sent', 'cancelled', 'failed', 'decision'])
+```
+
+and the renderer currently flattens almost all of them into a bare `i-clock` icon with the real
+wording hidden in a `title` tooltip (`chat.ts:3328-3342`):
+
+```js
+entry.state === 'browser' ? t("Delivery confirmation pending")
+: entry.state === 'tool'  ? t("Sent to the active turn · awaiting receipt")
+: entry.delivery === 'tool' ? t("Waiting for the next tool call") : t("Queued")
+```
+
+**The redesign promotes the delivery stage to a first-class visual.** An authored message is not a
+bubble that appears and disappears; it is an object that travels, and its travel is legible:
+
+```
+ ╭ QUEUED     ──────────────────────────────────────────────╮
+ │ in the outbox · not yet in ChatGPT                       │
+ ╰──────────────────────────────────────────────────────────╯
+ ╭ SCHEDULED  ── after turn ends · 14:52 ────────────────────╮
+ │ in the outbox · waiting for a verified completion         │
+ ╰──────────────────────────────────────────────────────────╯
+ ╭ IN COMPOSER ── unelected tab 8765 ────────────────────────╮
+ │ inserted into the ChatGPT composer · not sent             │
+ ╰──────────────────────────────────────────────────────────╮
+ ╭ SENT       ── receipt 14:31:08 ───────────────────────────╮
+ │ ChatGPT accepted it · message id 0f3c…                    │
+ ╰──────────────────────────────────────────────────────────╯
+ ╭ NOT SENT   ── browser did not pick it up in 60s ──────────╮
+ │ still yours to retry or withdraw                          │
+ ╰──────────────────────────────────────────────────────────╯
+```
+
+Rules:
+
+- The state label is **text, always visible** — never a tooltip-only icon. The existing strings are
+  the source; they are promoted from `title` to label.
+- The four distinguishable facts from `AGENTS.md` §11 are never merged: *queued*, *put into the
+  composer*, *ChatGPT accepted it*, and *sent-to-the-turn awaiting receipt* each get their own label.
+- A stage **advances in place**: the same object changes label and edge as it moves, so the
+  transcript shows one message with a history rather than three lookalike rows.
+- `cancelled` and `failed` are terminal and visually distinct (red edge, `NOT SENT`); they stay
+  yours to retry or withdraw, and the retry affordance is the existing one.
+- No new state, no new timer, no new owner: this is a projection of `InputRow.state` plus the
+  existing `error`, `dueAt`, `deliveredAt`/`offeredAt` and receipt fields.
+
+The **composer** itself follows from that: it authors the object, so it is visually the *head* of
+the outbox rather than a detached card.
 
 `#composerDock` currently stacks five heterogeneous blocks: `agentPlan`, `recoveryStatus`,
-`taskPlanPreview`, `finishQueue`, `activeGoalRow`.
-
-They are replaced by **one status line above the composer**:
+`taskPlanPreview`, `finishQueue`, `activeGoalRow`. They are replaced by **one status line** directly
+above the composer:
 
 ```
 ▸ loop · plan 4/9 · queue 1 · settling 0:42
 ```
 
 - Segments appear only when that fact is live; an idle chat shows no status line at all.
-- Each segment is a projection of the same data the current block renders — the mode from the Goal
-  switch, `plan 4/9` from `plan.json`, `queue N` from the outbox, `settling 0:42` from the existing
+- Each segment projects the same data the current block renders — the mode from the Goal switch,
+  `plan 4/9` from `plan.json`, `queue N` from the outbox, `settling 0:42` from the existing
   recovery/listening deadline. No new timer, no new owner.
 - Clicking the line expands it in place to the current blocks' content. Expansion is presentation;
   the underlying rows keep their existing behaviour and identities.
 - The countdown segments keep the existing read-only contract: a countdown grants no authority.
 
-The composer itself becomes a square, hairline-bounded, flat surface. The toolbar's icon cluster is
-regrouped and **labelled**:
+The composer's own surface is square, hairline-bounded and flat. The toolbar's icon cluster is
+regrouped and **labelled** — the previous version left five unlabelled glyphs in a row, which is the
+worst part of the current UI:
 
 ```
 ┌──────────────────────────────────────────────────────────┐
 │ Reply to ChatBBC…                                        │
 ├──────────────────────────────────────────────────────────┤
-│ ＋ Attach   │   ◆ Goal ▾      gpt-5.6 sol ▾   high ▾   ↑  │
+│ ＋ Attach   │   ◆ Ordinary ▾   gpt-5.6 sol ▾   high ▾   ↑  │
 └──────────────────────────────────────────────────────────┘
 ```
 
 - `＋` becomes an explicit `Attach` control (it already opens `#attachmentMenu`).
 - The mode control (currently a radio group behind `#composerSettings`) becomes a visible labelled
   mode control: `Ordinary` / `Goal` / `Loop`.
-- The context meter (`#contextMeter`, the ring beside the model picker) is **a feature, not
-  clutter**: it becomes a labelled segment of the status region — `context 41.2k` — keeping its
-  existing tooltip text and its honest "estimated" wording.
+- The context meter (`#contextMeter`) is **a feature, not clutter**: it becomes a labelled segment of
+  the status region — `context 41.2k` — keeping its honest "estimated" wording.
 - The pet sprite gets a label or moves into the `＋` menu; it keeps its existing launcher visibility
   preference (`cos.ui.turTurPet.v1`).
 - The model and reasoning pickers keep their existing menus and are surfaced as labelled selects.
@@ -308,17 +436,21 @@ any Omarchy theme; a theme that supplies `cyan`, `magenta` and `amber` gets thos
 default theme supplies its existing equivalents.
 
 The mapping is a single lookup in the renderer, not a chain of conditionals. Two distinct
-vocabularies feed the transcript and must not be conflated:
+vocabularies feed the transcript and must not be conflated — the same word means different things
+in each:
 
-**Recorded `SessionEvent` kinds — 14** (`src/shared/session.ts`): `session_start`, `user_message`,
-`assistant_message`, `tool_call`, `page_tool`, `native_image`, `agent_message`, `progress`,
-`chat_error`, `note`, `handoff`, `resume`, `turn_start`, `turn_end`.
+**Recorded `SessionEvent` kinds — 13** (`src/shared/session.ts`, the `SessionEvent` union):
+`session_start`, `user_message`, `assistant_message`, `tool_call`, `page_tool`, `native_image`,
+`agent_message`, `progress`, `chat_error`, `note`, `handoff`, `turn_start`, `turn_end`.
 
-**Session-origin and control kinds — not events**: `worker` and `prime` are `origin.kind` values on a
-session (`chat.ts:147`, `:350`), `resumed`/`compaction`/`session_end` are renderer-side projections.
-These drive badges, the sub-agent panel and the handoff strip rather than a transcript row type.
+**`SessionOrigin` kinds — 4, not events** (`session.ts:460`): `'resume' | 'worker' | 'helper' |
+'desktop'`, with `fromSessionId`, `agentId` and `task`. These attach to a *session*, not a row.
 
-Category mapping for the recorded kinds, so every one of the 14 is covered:
+**The collision to avoid:** `resume` is **only** a `SessionOrigin` kind; it is not a `SessionEvent`.
+The session spine (§4.1) reads `SessionOrigin` lineage plus the `handoff` **event**, which carries
+`handoffId`, `chars` and `reason`. Getting this backwards would put the spine on the wrong owner.
+
+Category mapping for the 13 recorded kinds, so every one is covered:
 
 | Kind | Category |
 |---|---|
@@ -329,7 +461,7 @@ Category mapping for the recorded kinds, so every one of the 14 is covered:
 | `chat_error` | error |
 | `progress` | recovery |
 | `note` | note |
-| `handoff`, `resume` | compaction & handoff |
+| `handoff` | compaction & handoff (also draws the spine joint) |
 | `agent_message` | worker control row |
 | `session_start`, `turn_start`, `turn_end` | structural — no row unless the existing renderer already shows one |
 
@@ -475,9 +607,17 @@ a deliberate colour or geometry change is updated rather than silenced.
 **New evidence:**
 - Screenshots of every destination and the transcript at 1600×900 and a narrow width, from the real
   build with the Osaka Jade palette — the artifacts that decided this design, regenerated as
-  acceptance evidence.
-- A renderer test that `followDesktop: false` (and a malformed/missing field) yields exactly today's
-  tokens, so the default path cannot regress.
+  acceptance evidence. The session spine, a frontend segment boundary and a mid-flight message must
+  all be visible in at least one of them.
+- **Delivery-stage projection (§4.2):** a renderer test that each of the seven `InputRow.state` values
+  plus the scheduled and tool-delivery cases produces its own visible label — and specifically that
+  `browser` and `tool` are never rendered as the same fact. This is the test that would catch the
+  flattening this redesign exists to fix.
+- **Session spine (§4.1):** a renderer test that a recorded `handoff`/`resume` pair produces one
+  frontend boundary with correctly numbered segments, and that a session with no handoff renders no
+  spine — so the spine cannot appear where the product has no lineage to show.
+- A renderer test that `followDesktop: false`, a missing field and malformed input each yield exactly
+  today's tokens, so the default path cannot regress.
 - A main-process test for `readOmarchyTheme()` covering: valid theme, missing directory, unreadable
   file, unparseable content, malformed colour, oversized file — each returning `null`, none throwing.
 - A test that turning follow off restores the saved manual palette byte-for-byte.
@@ -507,6 +647,8 @@ Iosevka NF Mono and 0px corners:
 - `C.html` / `C.png` — prose column + metadata gutter
 - `categories.html` / `categories.png` — **the 12 transcript content categories with their colours,
   glyphs and edge treatments** (§4.7)
+- `identity.html` / `identity.png` — **the session spine and the message lifecycle** (§4.1, §4.2),
+  the two product-derived elements
 
 A and C are retained as the rejected alternatives and as the source of the tool-row and control-row
 idioms that B's implementation keeps. The `outputs/` directory is gitignored, so these are working
