@@ -68,6 +68,90 @@ it('requires exact own data fields and rejects getters, symbols and missing fiel
   expect(parseRichResponse(Object.create(null))).toBeNull();
 });
 
+it('uses root data descriptors rather than Proxy get traps for identity, status and output', () => {
+  let gets = 0;
+  const source = new Proxy({ ...good }, {
+    get(target, key, receiver) {
+      gets++;
+      if (key === 'conversationId') return 'https://example.test/secret';
+      if (key === 'status') return 'unavailable';
+      if (key === 'nodes') return [];
+      return Reflect.get(target, key, receiver);
+    }
+  });
+  const parsed = parseRichResponse(source);
+  expect(parsed).toEqual(good);
+  expect(gets).toBe(0);
+  expect(parseRichResponse(parsed)).toEqual(good);
+});
+
+it('uses one validated snapshot for changing node IDs, text and nested fields', () => {
+  let gets = 0;
+  let idReads = 0;
+  const unstable = new Proxy(text('safe', 'Visible'), {
+    get(target, key, receiver) {
+      gets++;
+      if (key === 'id') return ++idReads <= 3 ? 'safe' : 'https://example.test/secret';
+      return Reflect.get(target, key, receiver);
+    }
+  });
+  let textReads = 0;
+  const unstableText = new Proxy(text('second', 'Visible'), {
+    get(target, key, receiver) {
+      gets++;
+      if (key === 'text') return ++textReads === 1 ? 'Visible' : 'x'.repeat(100_000);
+      return Reflect.get(target, key, receiver);
+    }
+  });
+  const input = withNodes([unstable, unstableText]);
+  const parsed = parseRichResponse(input);
+  expect(parsed).toEqual(withNodes([text('safe', 'Visible'), text('second', 'Visible')]));
+  expect(gets).toBe(0);
+  expect(parseRichResponse(parsed)).toEqual(parsed);
+});
+
+it('never reads hostile Proxy properties on image, group, control or nested child nodes', () => {
+  let gets = 0;
+  const trap = <T extends object>(target: T): T => new Proxy(target, {
+    get(_target, _key) {
+      gets++;
+      throw new Error('untrusted property access');
+    }
+  });
+  const input = withNodes([
+    trap(image('picture')),
+    trap({ id: 'group', kind: 'group', layout: 'card', children: [trap(text('nested', 'Safe'))] }),
+    trap({ ...control('parent'), children: [trap(text('choice', 'One'))] })
+  ]);
+  const parsed = parseRichResponse(input);
+  expect(parsed).toEqual(withNodes([
+    image('picture'),
+    { id: 'group', kind: 'group', layout: 'card', children: [text('nested', 'Safe')] },
+    { ...control('parent'), children: [text('choice', 'One')] }
+  ]));
+  expect(gets).toBe(0);
+  expect(parseRichResponse(parsed)).toEqual(parsed);
+});
+
+it('rejects unsafe descriptor values even when Proxy get traps pretend fields are safe', () => {
+  let gets = 0;
+  const misleading = <T extends object>(target: T): T => new Proxy(target, {
+    get(_target, key) {
+      gets++;
+      if (key === 'conversationId') return good.conversationId;
+      if (key === 'id') return 'safe';
+      if (key === 'mediaId') return 'asset:safe';
+      if (key === 'status') return 'available';
+      return null;
+    }
+  });
+  expect(parseRichResponse(misleading({ ...good, conversationId: 'https://example.test/secret' }))).toBeNull();
+  expect(parseRichResponse(misleading({ ...good, status: 'execute' }))).toBeNull();
+  expect(parseRichResponse(withNodes([misleading({ ...text('unsafe'), id: 'https://example.test/secret' })]))).toBeNull();
+  expect(parseRichResponse(withNodes([misleading({ ...image('unsafe'), mediaId: 'https://example.test/secret' })]))).toBeNull();
+  expect(gets).toBe(0);
+});
+
 it('rejects indexed array accessors without calling them at the root or under groups and controls', () => {
   let calls = 0;
   for (const wrap of [

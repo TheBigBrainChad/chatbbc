@@ -26,14 +26,19 @@ type Obj = Record<string, unknown>;
 const object = (value: unknown): Obj | null =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Obj : null;
 
-// Reject accessors and hidden or unknown properties instead of executing model-supplied fields.
-const exact = (value: Obj, names: readonly string[]): boolean => {
+// Snapshot each own data descriptor once. A Proxy's ordinary property get may disagree with
+// its descriptor or change between reads, so only this detached snapshot is ever inspected.
+const snapshot = (value: Obj, names?: readonly string[]): Obj | null => {
   const keys = Reflect.ownKeys(value);
-  return keys.length === names.length && keys.every(key => {
-    if (typeof key !== 'string' || !names.includes(key)) return false;
+  if (keys.length > 9 || (names && keys.length !== names.length)) return null;
+  const fields = Object.create(null) as Obj;
+  for (const key of keys) {
+    if (typeof key !== 'string' || (names && !names.includes(key))) return null;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return descriptor !== undefined && descriptor.enumerable && 'value' in descriptor;
-  });
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) return null;
+    fields[key] = descriptor.value;
+  }
+  return fields;
 };
 
 // Admit only a dense JSON-style array. Reading indexed descriptors avoids invoking untrusted
@@ -68,11 +73,13 @@ const geometry = (value: unknown): value is number | null =>
  */
 export function parseRichResponse(input: unknown): RichResponse | null {
   try {
-    const root = object(input);
-    if (!root || !exact(root, [
+    const sourceRoot = object(input);
+    if (!sourceRoot) return null;
+    const root = snapshot(sourceRoot, [
       'version', 'status', 'reason', 'conversationId', 'messageId', 'providerMessageId',
       'revision', 'accessibleText', 'nodes'
-    ]) || root.version !== 1 || (root.status !== 'available' && root.status !== 'unavailable') ||
+    ]);
+    if (!root || root.version !== 1 || (root.status !== 'available' && root.status !== 'unavailable') ||
       typeof root.revision !== 'number' || !Number.isSafeInteger(root.revision) || root.revision < 0 ||
       typeof root.conversationId !== 'string' || !/^[a-z0-9-]{8,64}$/i.test(root.conversationId) ||
       typeof root.messageId !== 'string' || root.messageId.length === 0 || root.messageId.length > 256 ||
@@ -91,7 +98,7 @@ export function parseRichResponse(input: unknown): RichResponse | null {
     let count = 0;
     let controls = 0;
     let media = 0;
-    const seen = new WeakSet<object>([root]);
+    const seen = new WeakSet<object>([sourceRoot]);
     const ids = new Set<string>();
 
     const string = (value: unknown, limit: number = RICH_LIMITS.textNode): value is string => {
@@ -112,40 +119,42 @@ export function parseRichResponse(input: unknown): RichResponse | null {
       const item = object(value);
       if (!item || seen.has(item) || depth > RICH_LIMITS.depth || ++count > RICH_LIMITS.nodes) return null;
 
-      // Check the discriminator's descriptor before reading it; no getter may classify a node.
-      const kind = Object.getOwnPropertyDescriptor(item, 'kind');
-      if (!kind || !kind.enumerable || !('value' in kind)) return null;
-      const names = kind.value === 'text' ? ['id', 'kind', 'text', 'style'] :
-        kind.value === 'image' ? ['id', 'kind', 'mediaId', 'alt', 'width', 'height'] :
-          kind.value === 'group' ? ['id', 'kind', 'layout', 'children'] :
-            kind.value === 'control' ? [
+      const fields = snapshot(item);
+      if (!fields) return null;
+      const kind = fields.kind;
+      const names = kind === 'text' ? ['id', 'kind', 'text', 'style'] :
+        kind === 'image' ? ['id', 'kind', 'mediaId', 'alt', 'width', 'height'] :
+          kind === 'group' ? ['id', 'kind', 'layout', 'children'] :
+            kind === 'control' ? [
               'id', 'kind', 'control', 'label', 'groupId', 'value', 'selected', 'disabled', 'children'
             ] : null;
-      if (!names || !exact(item, names) || !opaque(item.id) || ids.has(item.id) || !string(item.id, 190)) return null;
+      if (!names || Object.keys(fields).length !== names.length ||
+        !names.every(name => Object.hasOwn(fields, name)) ||
+        !opaque(fields.id) || ids.has(fields.id) || !string(fields.id, 190)) return null;
       seen.add(item);
-      ids.add(item.id);
+      ids.add(fields.id);
 
-      if (kind.value === 'text') {
-        if (!string(item.text) || !['body', 'heading', 'caption', 'code'].includes(item.style as string)) return null;
-        return { id: item.id, kind: 'text', text: item.text, style: item.style as Extract<RichNode, { kind: 'text' }>['style'] };
+      if (kind === 'text') {
+        if (!string(fields.text) || !['body', 'heading', 'caption', 'code'].includes(fields.style as string)) return null;
+        return { id: fields.id, kind: 'text', text: fields.text, style: fields.style as Extract<RichNode, { kind: 'text' }>['style'] };
       }
 
-      if (kind.value === 'image') {
-        if (!opaque(item.mediaId) || !string(item.mediaId, 190) || !string(item.alt) ||
-          !geometry(item.width) || !geometry(item.height) || ++media > RICH_LIMITS.media) return null;
-        return { id: item.id, kind: 'image', mediaId: item.mediaId, alt: item.alt,
-          width: item.width, height: item.height };
+      if (kind === 'image') {
+        if (!opaque(fields.mediaId) || !string(fields.mediaId, 190) || !string(fields.alt) ||
+          !geometry(fields.width) || !geometry(fields.height) || ++media > RICH_LIMITS.media) return null;
+        return { id: fields.id, kind: 'image', mediaId: fields.mediaId, alt: fields.alt,
+          width: fields.width, height: fields.height };
       }
 
-      const sourceChildren = arrayElements(item.children);
+      const sourceChildren = arrayElements(fields.children);
       if (!sourceChildren) return null;
-      if (kind.value === 'group') {
-        if (!['row', 'column', 'grid', 'card', 'list', 'table', 'diagram'].includes(item.layout as string)) return null;
+      if (kind === 'group') {
+        if (!['row', 'column', 'grid', 'card', 'list', 'table', 'diagram'].includes(fields.layout as string)) return null;
       } else if (++controls > RICH_LIMITS.controls ||
-        !['choice', 'continue', 'button', 'checkbox', 'radio', 'select', 'input', 'link'].includes(item.control as string) ||
-        !string(item.label) || (item.groupId !== null && (!opaque(item.groupId) || !string(item.groupId, 190))) ||
-        (item.value !== null && !string(item.value)) ||
-        typeof item.selected !== 'boolean' || typeof item.disabled !== 'boolean') return null;
+        !['choice', 'continue', 'button', 'checkbox', 'radio', 'select', 'input', 'link'].includes(fields.control as string) ||
+        !string(fields.label) || (fields.groupId !== null && (!opaque(fields.groupId) || !string(fields.groupId, 190))) ||
+        (fields.value !== null && !string(fields.value)) ||
+        typeof fields.selected !== 'boolean' || typeof fields.disabled !== 'boolean') return null;
 
       const children: RichNode[] = [];
       for (let index = 0; index < sourceChildren.length; index++) {
@@ -154,14 +163,14 @@ export function parseRichResponse(input: unknown): RichResponse | null {
         children.push(parsed);
       }
 
-      if (kind.value === 'group') return {
-        id: item.id, kind: 'group', layout: item.layout as Extract<RichNode, { kind: 'group' }>['layout'], children
+      if (kind === 'group') return {
+        id: fields.id, kind: 'group', layout: fields.layout as Extract<RichNode, { kind: 'group' }>['layout'], children
       };
       return {
-        id: item.id, kind: 'control', control: item.control as Extract<RichNode, { kind: 'control' }>['control'],
-        label: item.label as string, groupId: item.groupId as string | null,
-        value: item.value as string | null, selected: item.selected as boolean,
-        disabled: item.disabled as boolean, children
+        id: fields.id, kind: 'control', control: fields.control as Extract<RichNode, { kind: 'control' }>['control'],
+        label: fields.label as string, groupId: fields.groupId as string | null,
+        value: fields.value as string | null, selected: fields.selected as boolean,
+        disabled: fields.disabled as boolean, children
       };
     };
 
