@@ -5,6 +5,8 @@ import { mergeAppearance, effectiveAppearance, effectiveTheme } from '../shared/
 import { prepareSessionPrompt, prepareSkillFollowup } from './session/prompt.js';
 import { listSkills } from './skills.js';
 import { listSkillLibrary } from './skill-library.js';
+import { assertSkillId, resetPackedSkill, setSkillEnabled, setSkillImplicit } from './skill-management.js';
+import { currentSkillState } from './skill-state.js';
 import { noteChatOrigin } from './session/recorder.js';
 import { REASONING_EFFORTS } from '../shared/session.js';
 import { safeExternalLink } from '../shared/external-link.js';
@@ -576,6 +578,25 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
 
   handle('projects:list', () => listProjects());
   handle('skills:list', () => listSkills());
+  // The payload only says which choices to make. The id is checked here as well as in the
+  // action owner, because a payload may carry the id without either switch — a renderer is a
+  // boundary, and no id it sends is accepted on the strength of being unused.
+  handle('skills:set', async payload => {
+    const { id, enabled, implicit } = z.object({
+      id: z.string().min(1).max(64),
+      enabled: z.boolean().optional(),
+      implicit: z.boolean().optional()
+    }).strict().parse(payload);
+    assertSkillId(id);
+    if (enabled !== undefined) await setSkillEnabled(id, enabled);
+    if (implicit !== undefined) await setSkillImplicit(id, implicit);
+    // Neither switch present is a read of the current choices, not an error.
+    return currentSkillState();
+  });
+  handle('skills:reset', async payload => {
+    const { id } = z.object({ id: z.string().min(1).max(64) }).strict().parse(payload);
+    return resetPackedSkill(id);
+  });
   handle('skills:library', async payload => {
     const scope = z.object({ sessionId: z.string().min(1).max(80).nullable().optional(), projectId: z.string().uuid().nullable().optional() }).strict().parse(payload ?? {});
     const folder = () => scope.sessionId ? getSessionProject(scope.sessionId)
