@@ -152,7 +152,6 @@ const imageDrafts = new Map<string, Array<InputImage | InputAttachment>>();
 const startingInputs = new Map<string, InputEntry>();
 // Window-local presentation only: a new incident or changed status is visible again.
 const dismissedRecoveryNotices = new Map<string, string>();
-// Dismisses presentation only; durable cancellation and late receipts remain in the outbox.
 function authoredComposerText(): string { return skillPicker?.authoredText() ?? $<HTMLTextAreaElement>('chatInput').value; }
 function rememberDraft(): void {
   inputDrafts.set(draftKey(), authoredComposerText());
@@ -205,25 +204,6 @@ let toolActivityTimer: number | undefined;
 let sessionsLoadGeneration = 0;
 let detailLoadGeneration = 0;
 let handoffLoadGeneration = 0;
-
-// ------------------------------------------------------------------ sessions
-
-
-
-
-/**
- * What a row is, and what it is doing right now.
- *
- * Once resume and multi-agent mode are in use, most rows in the list are chats this app
- * opened, and they are all recorded within a minute of each other. A name alone cannot
- * separate them — which run a chat belonged to, whether its tab ever opened, whether the
- * worker in it ever joined — and that is how a user loses track of a delayed tab. The
- * first badge is durable and comes from the session itself; the second is live and comes
- * from the swarm or the compaction currently reported by the app.
- */
-
-
-
 
 /**
  * Blocks or releases the Unattributed stream by moving the one switch that governs it.
@@ -3005,9 +2985,6 @@ const sessionHost: SessionListHost = {
   sessions: () => sessions,
   projects: () => projects,
   selectedId: () => selectedId,
-  activeId: () => activeId,
-  blockedChats: () => blockedChats,
-  swarm: () => swarm,
   sidebarOrder: () => sidebarOrder,
   expandedWorkers,
   expandedProjects,
@@ -3065,7 +3042,7 @@ const deliveryHost: DeliveryHost = {
   sessions: () => sessions,
   adoptSession: summary => { sessions = mergeSessionRows(sessions, [summary]); },
   selectSession,
-  paintDetail: () => paintDetail(),
+  paintDetail: followBottom => paintDetail(followBottom),
   inputDrafts: () => inputDrafts,
   newChatTasks: () => newChatTasks,
   retireQueueReads: () => ++inputQueueGeneration,

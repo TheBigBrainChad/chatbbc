@@ -74,8 +74,14 @@ export interface DeliveryHost {
   adoptSession(summary: SessionSummary): void;
   /** Open a session in the main pane, retiring the draft that came before it. */
   selectSession(id: string): void;
-  /** Repaint the transcript the outbox rows sit above. */
-  paintDetail(): void;
+  /**
+   * Repaint the transcript the outbox rows sit above.
+   *
+   * `followBottom` is passed through, never implied: a queue refresh must hold the reader's
+   * anchor rather than follow the bottom, so the outbox asks for the same explicit `false`
+   * the queue read always used.
+   */
+  paintDetail(followBottom?: boolean): void;
   /** The per-draft composer text and the unsent New Chat task drafts. */
   inputDrafts(): Map<string, string>;
   newChatTasks(): Map<string, { objective: string; automation: string; loopDelivery: string }>;
@@ -514,7 +520,7 @@ export async function refreshInputQueue(host: DeliveryHost): Promise<void> {
     }
     return card;
   }));
-  host.paintDetail();
+  host.paintDetail(false);
   for (const node of $('inputQueue').querySelectorAll(':scope > .queued-input')) node.remove();
   for (const helper of pausedHelpers ?? []) {
     if (helper.sourceSessionId !== host.selectedId()) continue;

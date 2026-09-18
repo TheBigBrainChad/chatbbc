@@ -21,9 +21,6 @@ export interface SessionListHost {
   sessions(): SessionSummary[];
   projects(): LocalProject[];
   selectedId(): string | null;
-  activeId(): string | null;
-  blockedChats(): Set<string>;
-  swarm(): SwarmState | null;
   sidebarOrder(): ReturnType<typeof createSidebarOrder> | undefined;
   /** Window-local disclosure intent: the same sets chat.ts mutates when a selection opens a group. */
   expandedWorkers: Set<string>;
@@ -165,6 +162,16 @@ export function unattributedBlocked(state: AppState | null): boolean {
   return state?.config.multiAgent.allowUnattributedCalls === false;
 }
 
+/**
+ * What a row is, and what it is doing right now.
+ *
+ * Once resume and multi-agent mode are in use, most rows in the list are chats this app
+ * opened, and they are all recorded within a minute of each other. A name alone cannot
+ * separate them — which run a chat belonged to, whether its tab ever opened, whether the
+ * worker in it ever joined — and that is how a user loses track of a delayed tab. The
+ * first badge is durable and comes from the session itself; the second is live and comes
+ * from the swarm or the compaction currently reported by the app.
+ */
 export function sessionBadges(summary: SessionSummary, paint: SessionListPaint): Badge[] {
   const badges: Badge[] = [];
   const origin = summary.origin;
@@ -452,7 +459,14 @@ export function paintSessions(host: SessionListHost): void {
       remove.type = 'button'; remove.append(icon('i-trash'));
       ui(remove, 'title', () => t("Remove project from sidebar; keep conversations and files"));
       ui(remove, 'aria-label', () => t("Remove project {0}", [project.name]));
-      remove.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); void host.removeProject(id); });
+      remove.addEventListener('click', async event => {
+        event.preventDefault(); event.stopPropagation();
+        // One removal at a time: the button is the only in-flight guard, exactly as before.
+        if (remove.disabled) return;
+        remove.disabled = true;
+        try { await host.removeProject(id); }
+        finally { remove.disabled = false; }
+      });
       heading.append(remove);
     }
     const tasks = projectRows.get(id) ?? [];
