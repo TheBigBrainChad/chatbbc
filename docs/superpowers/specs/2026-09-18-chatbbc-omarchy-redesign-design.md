@@ -27,6 +27,9 @@ the composer, and an unlabelled icon cluster in the composer toolbar.
 | 5 | Theme | `Theme = Light \| Dark \| Follow desktop`, explicit toggle; manual colors apply in Light/Dark only |
 | 5b | Font | Read the desktop's terminal font; fall back through a mono chain |
 | 6 | Motion | Functional motion only; icon sprite redrawn as one uniform stroke set |
+| 7 | Work panel | Tabbed right panel: Files · Sub-agents · Terminal |
+| 8 | Transcript content | Every content family has its own accent, glyph and edge; one shared geometry |
+| 9 | Full pages | Neutral pages; identity comes from the cards' category colours, not a page colour |
 
 Scope was explicitly set to **skin + layout, every feature kept**. No feature is removed, merged or
 re-routed; only where things sit and how they are drawn changes.
@@ -243,6 +246,109 @@ The icon sprite is redrawn as one uniform set: 1.5px stroke on the existing 24 g
 tiers, all `currentColor`, replacing today's mixed weights. Icon *ids* are unchanged, so no
 consumer changes.
 
+### 4.6 Work panel — Files · Sub-agents · Terminal
+
+Files and Sub-agents currently share one resizable right slot (`work-panel-resize.ts`), and the
+human terminal is a separate bottom drawer (`workspace-terminal.ts`, up to eight tabs).
+
+They become **one tabbed right panel** with a dense mono tab strip:
+
+```
+│ prose column                 │ Files │ Sub-agents │ Terminal │
+│                              │───────────────────────────────│
+│                              │ ▾ src/                        │
+│                              │   main/                       │
+```
+
+- One geometry, three tenants. Selecting a tab keeps the others' state; the panel remembers the
+  active tab.
+- The tab strip is one row of mono labels with a fill on the active tab — the same selected-state
+  fill the sidebar uses, not an underline.
+- Resizing keeps the existing `work-panel-resize.ts` behaviour (host width minus 360px for chat,
+  no fixed maximum).
+- **The terminal tab needs room.** A terminal in a 400px panel is ~50 columns, which is not a usable
+  build-output width. The terminal tab therefore widens the panel to its existing maximum when
+  selected, and the existing per-tab PTY behaviour, the 256 KiB output pause, the 5,000-line
+  scrollback and the eight-tab limit are all unchanged.
+- Panel hiding, Escape, watcher retirement and unsaved-draft retention keep their existing owners.
+  Nothing about `file-panel.ts`'s 500-entry directory reads, 128 watches, or its 8 unsaved drafts
+  changes.
+
+### 4.7 Transcript content categories
+
+The transcript carries 24 recorded `kind`s. Rather than one generic block, **each content family
+has its own identity** — its own accent colour, glyph and edge treatment — while sharing one
+geometry contract.
+
+Shared geometry (non-negotiable, so the transcript stays scannable):
+
+- every category is left-aligned to the same column, with or without the card indent;
+- one 1px hairline (`var(--line)` family) as the outer edge;
+- one header height and one header type size (`calc(10.5px * var(--text-scale))`);
+- accent colour appears only on the **left rail, the glyph, the header label and the metadata** —
+  never as a large fill, so a busy transcript does not become a patchwork.
+
+| Category | Accent | Glyph | Distinctive treatment |
+|---|---|---|---|
+| Authored | jade | — | 2px jade left rail, `YOU` label |
+| Assistant prose | neutral | — | plain hairline card, `CHATBBC` label, sans prose |
+| Code | cyan | `◆` | line-number gutter, language tag, copy action |
+| Diff | green/red | `±` | `+`/`−` gutter columns, hunk header, `+n −n` summary |
+| Image | neutral | `▣` | framed preview, caption strip with dimensions and size |
+| Tool call | green status | `●` | dense one-line row, timing and exit as columns |
+| Error | red | `!` | red left rail, action row (`Show diff`, `Retry`) |
+| Recovery | amber | `◔` | live countdown in tabular numerals |
+| Generated control row | per origin | `⇢` | tag column (`LOOP` / `GOAL` / `CHECKPOINT` / `WORKER n` / `SYSTEM`) |
+| Compaction & handoff | ice blue | `⇄` | five-step phase strip (`summary · capture · elect · commit · publish`) |
+| Agent plan | jade | `▤` | numbered steps, done steps struck through, current step on the selected fill |
+| Note | faint | — | no edge, centred rule, muted |
+
+Category colours come from the followed palette's own roles (§3.4) so they remain meaningful under
+any Omarchy theme; a theme that supplies `cyan`, `magenta` and `amber` gets those, and the built-in
+default theme supplies its existing equivalents.
+
+The mapping is a single lookup in the renderer, not a chain of conditionals. Two distinct
+vocabularies feed the transcript and must not be conflated:
+
+**Recorded `SessionEvent` kinds — 14** (`src/shared/session.ts`): `session_start`, `user_message`,
+`assistant_message`, `tool_call`, `page_tool`, `native_image`, `agent_message`, `progress`,
+`chat_error`, `note`, `handoff`, `resume`, `turn_start`, `turn_end`.
+
+**Session-origin and control kinds — not events**: `worker` and `prime` are `origin.kind` values on a
+session (`chat.ts:147`, `:350`), `resumed`/`compaction`/`session_end` are renderer-side projections.
+These drive badges, the sub-agent panel and the handoff strip rather than a transcript row type.
+
+Category mapping for the recorded kinds, so every one of the 14 is covered:
+
+| Kind | Category |
+|---|---|
+| `user_message` | authored |
+| `assistant_message` | assistant prose |
+| `tool_call`, `page_tool` | tool row |
+| `native_image` | image |
+| `chat_error` | error |
+| `progress` | recovery |
+| `note` | note |
+| `handoff`, `resume` | compaction & handoff |
+| `agent_message` | worker control row |
+| `session_start`, `turn_start`, `turn_end` | structural — no row unless the existing renderer already shows one |
+
+`test/renderer-timeline.test.ts` and `test/renderer-agent-plan.test.ts` cover the existing transcript
+rendering; they are extended, not replaced, to assert the category mapping.
+
+### 4.8 Full pages
+
+Pages stay **neutral**: they carry no page-level accent colour. Differentiation comes from the
+category identity of the cards inside them (§4.7), so no new colour vocabulary is introduced.
+
+Each page keeps the shared block geometry; only the card accents vary. The constraint from §4.7
+applies — accent on edge, glyph, label and metadata only, never a large fill, so a dense page like
+Plugins does not read as a patchwork.
+
+Existing page behaviour is unchanged: plugin install/enable/disable state, the usage charts and
+their local-estimate wording, the activity feed, the Workspace health checks and root management,
+and the six-step Setup wizard with its screenshots.
+
 ## 5. Theme engine
 
 ### 5.1 Source of truth
@@ -393,9 +499,15 @@ redesign does not touch those layers.
 
 ## 10. Prototypes
 
-`outputs/redesign-baseline/prototypes/{A,B,C}.{html,png}` — the three transcript directions rendered
-in real Chromium with the Osaka Jade palette, Iosevka NF Mono and 0px corners.
+`outputs/redesign-baseline/prototypes/` — all rendered in real Chromium with the Osaka Jade palette,
+Iosevka NF Mono and 0px corners:
 
-B is the approved direction; A and C are retained as the rejected alternatives and as the source of
-the tool-row and control-row idioms that B's implementation keeps. The `outputs/` directory is
-gitignored, so these are working artifacts, not committed source.
+- `A.html` / `A.png` — left rail + one-line tool rows
+- `B.html` / `B.png` — bordered message cards **(approved turn shape)**
+- `C.html` / `C.png` — prose column + metadata gutter
+- `categories.html` / `categories.png` — **the 12 transcript content categories with their colours,
+  glyphs and edge treatments** (§4.7)
+
+A and C are retained as the rejected alternatives and as the source of the tool-row and control-row
+idioms that B's implementation keeps. The `outputs/` directory is gitignored, so these are working
+artifacts, not committed source.
