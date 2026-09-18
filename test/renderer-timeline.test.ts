@@ -7,6 +7,7 @@ import { prependUserPrompt } from '../src/shared/user-prompt.js';
 import type { Handoff, SessionEvent, SessionSummary } from '../src/shared/session.js';
 import type { InputArgs, InputEntry } from '../src/main/session/input.js';
 import type { LocalProject } from '../src/shared/projects.js';
+import type { RichResponse } from '../src/shared/rich-response.js';
 vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTerminal: () => ({
   // The real contract (workspace-terminal.ts) is element/show/hide/update, and the pane is CLOSED
   // until something opens it: the work panel reads a pane's own `hidden` as the single statement
@@ -1659,6 +1660,111 @@ it('keeps a streaming message anchor and its following tool group across canonic
   expect(timeline.querySelector<HTMLElement>('.ev-assistant_message')!.dataset.timelineKey).toBe(anchor);
   expect(timeline.querySelector('.tool-group')).toBe(group);
   expect(group.open).toBe(true);
+});
+
+it('shows an image-only rich answer and repaints same-text rich revisions without changing its row, viewport or focused region', async () => {
+  const rich = (revision: number, label: string): RichResponse => ({
+    version: 1, status: 'available', reason: null,
+    conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    messageId: 'rich-only', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb', revision,
+    accessibleText: label,
+    nodes: [{ id: 'diagram', kind: 'group', layout: 'diagram', children: [
+      { id: 'label', kind: 'text', style: 'body', text: label },
+      { id: 'illustration', kind: 'image', mediaId: 'image-one', alt: 'Illustration', width: 4, height: 3 }
+    ] }]
+  });
+  const original: Extract<SessionEvent, { kind: 'assistant_message' }> = {
+    kind: 'assistant_message', seq: 1, origin: 1, time: T0, source: 'extension', messageId: 'rich-only',
+    message: text(''), final: true, rich: rich(1, 'First layout')
+  };
+  const { w, append } = await boot([original, toolCall(2, 'following'), toolCall(3, 'second')]);
+  const pane = w.document.getElementById('chatBody')!;
+  const timeline = w.document.getElementById('timeline')!;
+  const row = timeline.querySelector<HTMLElement>('.ev-assistant_message')!;
+  // jsdom does not measure geometry; make a genuinely scrollable viewport and a stable
+  // canonical-row rectangle so this tests anchor retention rather than bottom-following.
+  Object.defineProperties(pane, { clientHeight: { value: 400 }, scrollHeight: { value: 1000 } });
+  row.getBoundingClientRect = () => ({ top: 200 - pane.scrollTop, bottom: 300 - pane.scrollTop,
+    height: 100 } as DOMRect);
+  expect(row.hidden).toBe(false);
+  expect(row.textContent).toContain('First layout');
+  expect(row.querySelector('img')).toBeNull();
+  const region = row.querySelector<HTMLElement>('.rich-diagram')!;
+  region.focus();
+  expect(w.document.activeElement).toBe(region);
+  pane.scrollTop = 140;
+  const group = timeline.querySelector<HTMLDetailsElement>('.tool-group')!;
+  group.open = true;
+  group.dispatchEvent(new w.Event('toggle'));
+  await append([{ ...original, seq: 4, rich: rich(2, 'Updated layout') }]);
+  const updated = timeline.querySelector<HTMLElement>('.ev-assistant_message')!;
+  expect(updated).toBe(row);
+  expect(updated.dataset.timelineKey).toBe(row.dataset.timelineKey);
+  expect(updated.textContent).toContain('Updated layout');
+  expect(updated.textContent).not.toContain('First layout');
+  expect(w.document.activeElement).toBe(updated.querySelector('.rich-diagram'));
+  expect(pane.scrollTop).toBe(140);
+  expect(timeline.querySelector('.tool-group')).toBe(group);
+  expect(group.open).toBe(true);
+});
+
+it('does not infer rich UI from ordinary authored component code or hide an unavailable-rich empty text row', async () => {
+  const source = '```xml\n<text>code example</text>\n```';
+  const plain: SessionEvent = { kind: 'assistant_message', seq: 1, time: T0, source: 'extension',
+    messageId: 'literal-code', message: text(source), final: true };
+  const unavailable: SessionEvent = { kind: 'assistant_message', seq: 2, time: T0 + 1, source: 'extension',
+    messageId: 'unsupported-rich', message: text(''), richMediaUnavailable: 'unsupported', final: true };
+  const { w } = await boot([plain, unavailable]);
+  const rows = [...w.document.querySelectorAll<HTMLElement>('.ev-assistant_message')];
+  expect(rows).toHaveLength(2);
+  expect(rows[0]!.querySelector('pre code')?.textContent).toBe('<text>code example</text>\n');
+  expect(rows[0]!.querySelector('.rich-unavailable')).toBeNull();
+  expect(rows[1]!.hidden).toBe(false);
+  expect(rows[1]!.querySelector('details.rich-source')).not.toBeNull();
+});
+
+it('charges each rich tree against the existing resident paint budget even when source text is empty', async () => {
+  const events: SessionEvent[] = Array.from({ length: 30 }, (_, index) => ({
+    kind: 'assistant_message' as const, seq: index + 1, time: T0 + index, source: 'extension' as const,
+    messageId: `rich-budget-${index}`, final: true, message: text(''),
+    rich: {
+      version: 1 as const, status: 'available' as const, reason: null,
+      conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      messageId: `rich-budget-${index}`, providerMessageId: null, revision: 1,
+      accessibleText: `Answer ${index}`, nodes: [
+        { id: 'answer', kind: 'text' as const, style: 'body' as const, text: `Answer ${index}` }
+      ]
+    }
+  }));
+  const { w } = await boot(events);
+  const visible = [...w.document.querySelectorAll<HTMLElement>('.ev-assistant_message')];
+  expect(visible.length).toBeGreaterThan(0);
+  expect(visible.length).toBeLessThanOrEqual(16); // 16 × 128 KiB reaches the 2 MiB budget.
+  expect(visible.at(-1)!.textContent).toContain('Answer 29');
+});
+
+it('retains explicit unavailable-source disclosure and keyboard focus across a rich-status revision', async () => {
+  const unavailable: RichResponse = {
+    version: 1, status: 'unavailable', reason: 'unsupported',
+    conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    messageId: 'rich-source', providerMessageId: null, revision: 1,
+    accessibleText: '', nodes: []
+  };
+  const event: Extract<SessionEvent, { kind: 'assistant_message' }> = {
+    kind: 'assistant_message', seq: 1, origin: 1, time: T0, source: 'extension',
+    messageId: 'rich-source', message: text('<grid>canonical source</grid>'), final: true, rich: unavailable
+  };
+  const { w, append } = await boot([event]);
+  const row = w.document.querySelector<HTMLElement>('.ev-assistant_message')!;
+  const disclosure = row.querySelector<HTMLDetailsElement>('details.rich-source')!;
+  disclosure.open = true;
+  disclosure.querySelector('summary')!.focus();
+  await append([{ ...event, seq: 2, rich: { ...unavailable, revision: 2, reason: 'ambiguous' } }]);
+  expect(w.document.querySelector('.ev-assistant_message')).toBe(row);
+  const updated = row.querySelector<HTMLDetailsElement>('details.rich-source')!;
+  expect(updated.open).toBe(true);
+  expect(w.document.activeElement).toBe(updated.querySelector('summary'));
+  expect(updated.querySelector('pre')?.textContent).toBe('<grid>canonical source</grid>');
 });
 
 it('keeps an unfolded tool row as the same open node while the chat keeps appending', async () => {

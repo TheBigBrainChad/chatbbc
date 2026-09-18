@@ -16,6 +16,8 @@ import { messageReaction, withoutMessageReaction } from '../shared/message-react
 import { goalErrorMessage } from '../shared/goal-errors.js';
 import type { GoalModel } from '../shared/goal-reasoning.js';
 import { renderGoalReasoning } from './goal-reasoning.js';
+import { renderRichResponse, renderUnavailableRichResponse } from './rich-response.js';
+import { RICH_LIMITS } from '../shared/rich-response.js';
 import { preserveTimelineViewport } from './timeline-scroll.js';
 import { createSidebarOrder } from './sidebar-order.js';
 import { toolResultText } from './tool-result.js';
@@ -1267,7 +1269,9 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
     case 'assistant_message': {
       const box = el('div', 'said');
       box.append(el('b', '', () => event.final ? 'ChatGPT' : t("ChatGPT (partial)")));
-      box.append(renderedMarkdown(event.message.text, event.renderedHtml));
+      box.append(event.rich ? renderRichResponse(event.rich, event.message.text)
+        : event.richMediaUnavailable ? renderUnavailableRichResponse(event.message.text)
+          : renderedMarkdown(event.message.text, event.renderedHtml));
       return box;
     }
     case 'native_image': {
@@ -1398,7 +1402,8 @@ function eventRow(event: SessionEvent): HTMLElement {
   // this builder only says which family a row belongs to. `ev-<kind>` stays: it is the
   // hook the reconciliation, grouping and fixtures already select on.
   const row = el('div', `ev ev-${event.kind} tl-row ${categoryClass(categoryFor(event.kind))}`);
-  if (event.kind === 'assistant_message' && !withoutMessageReaction(event.message.text).trim()) row.hidden = true;
+  if (event.kind === 'assistant_message' && !event.rich && !event.richMediaUnavailable &&
+      !withoutMessageReaction(event.message.text).trim()) row.hidden = true;
   tagImageRow(row, event);
   const time = document.createElement('time');
   time.textContent = clockTime(event.time);
@@ -1479,8 +1484,12 @@ function visibleEvents(): SessionEvent[] {
 function eventTextCost(event: SessionEvent): number {
   switch (event.kind) {
     case 'user_message':
+      return event.message.text.length;
     case 'assistant_message':
-      return event.message.text.length + (event.kind === 'assistant_message' ? (event.renderedHtml?.text.length ?? 0) : 0);
+      // Charge the schema's maximum rather than traversing an untrusted tree for each page.
+      // Text/HTML plus rich must share the existing 2 MiB resident paint budget.
+      return event.message.text.length + (event.renderedHtml?.text.length ?? 0) +
+        (event.rich ? RICH_LIMITS.bytes : 0) + (event.richMediaUnavailable ? 128 : 0);
     case 'progress':
     case 'chat_error':
     case 'note':
@@ -1877,7 +1886,9 @@ function itemSignature(item: TimelineItem): string {
       parts.push(event.message.chars);
       break;
     case 'assistant_message':
-      parts.push(event.message.chars, event.renderedHtml?.chars ?? 0, event.state ?? '', event.final ? 'final' : '');
+      parts.push(event.message.chars, event.renderedHtml?.chars ?? 0, event.state ?? '', event.final ? 'final' : '',
+        event.rich?.revision ?? '', event.rich?.status ?? '', event.rich?.reason ?? '',
+        event.richMediaUnavailable ?? '');
       break;
     case 'native_image':
       parts.push(event.messageId, event.providerAssetId, event.providerStatus ?? '', event.previewStatus, event.asset?.id ?? '',
@@ -2027,6 +2038,7 @@ function paintDetail(followBottom = historyBefore === null): void {
   // height above it; retaining absolute scrollTop would move the reader's content.
   const pane = $('chatBody');
   const restoreViewport = preserveTimelineViewport(pane, $('timeline'), followBottom);
+  let restoreRichFocus: (() => void) | null = null;
   const timelineRows: HTMLElement[] = [];
   const keep = new Set<string>();
   let activityBoundary = '';
@@ -2077,7 +2089,29 @@ function paintDetail(followBottom = historyBefore === null): void {
       timelineRows.push(cached.row);
       continue;
     }
-    const row = item.kind === 'compaction' ? compactionRow(item.block, cached?.row) : eventRow(item.event);
+    let row = item.kind === 'compaction' ? compactionRow(item.block, cached?.row) : eventRow(item.event);
+    if (cached && item.kind === 'event' && item.event.kind === 'assistant_message') {
+      // Revision cursor changes a bubble's contents, not its immutable viewport identity.
+      // Keep the outer row mounted and recover keyboard focus by validated semantic node id.
+      const active = document.activeElement as HTMLElement | null;
+      const focused = active && cached.row.contains(active) ? active.closest<HTMLElement>('[data-rich-node-id]') : null;
+      const focusId = focused?.dataset.richNodeId;
+      const focusTag = active?.tagName;
+      const oldDisclosure = cached.row.querySelector<HTMLDetailsElement>('details.rich-source');
+      const newDisclosure = row.querySelector<HTMLDetailsElement>('details.rich-source');
+      if (oldDisclosure?.open && newDisclosure) newDisclosure.open = true;
+      cached.row.replaceChildren(...row.childNodes);
+      cached.row.hidden = row.hidden;
+      cached.row.className = row.className;
+      row = cached.row;
+      if (focusId && focusTag) restoreRichFocus = () => {
+        const owner = [...row.querySelectorAll<HTMLElement>('[data-rich-node-id]')]
+          .find(node => node.dataset.richNodeId === focusId);
+        const target = owner?.tagName === focusTag ? owner
+          : [...(owner?.querySelectorAll<HTMLElement>('*') ?? [])].find(node => node.tagName === focusTag);
+        target?.focus({ preventScroll: true });
+      };
+    }
     row.dataset.timelineKey = key;
     row.dataset.activityBoundary = activityBoundary;
     paintInputReceipt(row, item);
@@ -2103,6 +2137,7 @@ function paintDetail(followBottom = historyBefore === null): void {
   paintPendingInputs(deliveryHost);
   $('timelineEmpty').hidden = selectedId !== null || timelineRows.length > 0 || $('inputQueue').childElementCount > 0;
   restoreViewport();
+  restoreRichFocus?.();
 
   const facts: string[] = [];
   if (summary) {
