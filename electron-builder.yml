@@ -42,6 +42,10 @@ extraResources:
     filter:
       - '**/*'
       - '!**/*.map'
+  - from: skill-pack
+    to: skill-pack
+    filter:
+      - '**/*'
 
 npmRebuild: false
 

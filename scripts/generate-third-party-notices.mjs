@@ -27,6 +27,14 @@ notices.push('='.repeat(80), 'OpenAI Codex — adapted coding instructions and u
 for (const file of ['LICENSE', 'NOTICE']) {
   notices.push(`--- Codex ${file} ---`, await fs.readFile(path.join(root, 'docs/licenses/codex', file), 'utf8'), '');
 }
+notices.push('='.repeat(80), 'obra/superpowers — bundled Skill pack (adapted)',
+  'Source: https://github.com/obra/superpowers/tree/b36e0829c6d0140e93cfef2ca599b1b07d4a7797',
+  'ChatBBC bundles 14 of these skills as an instruction pack. Wording is adapted to ChatBBC\'s',
+  'tool surface: harness-specific tool names are translated, and three skills are partly',
+  'rewritten because their original instructions assume local code subagents ChatBBC does not',
+  'have. See skill-pack/PROVENANCE.md for the exact changes.', '');
+notices.push('--- superpowers LICENSE ---',
+  await fs.readFile(path.join(root, 'docs/licenses/superpowers/LICENSE'), 'utf8'), '');
 let count = 0;
 for (const [relative, entry] of Object.entries(lock.packages).sort(([a], [b]) => a.localeCompare(b))) {
   if (!relative || entry.dev === true) continue;

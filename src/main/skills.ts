@@ -441,8 +441,14 @@ export function removeSkill(id: string, moveToTrash: (directory: string) => Prom
   });
 }
 
-/** Synchronous projection for MCP/opening instructions; async owners refresh it first. */
-export function skillCatalogInstructions(): string {
+/**
+ * Synchronous projection for MCP/opening instructions; async owners refresh it first.
+ *
+ * `visible` is the set of managed ids that survived policy resolution, supplied by the caller
+ * that owns that decision (`skill-library.ts`). This module holds the managed library and knows
+ * nothing about the user's choices, so it renders the subset it is handed and never decides it.
+ */
+export function skillCatalogInstructions(visible?: ReadonlySet<string>): string {
   const directory = root;
   const lines = [
     '# Installed skills',
@@ -453,7 +459,8 @@ export function skillCatalogInstructions(): string {
     'Skills are text at /skills/<id>/SKILL.md. Use them when requested. Leading /<id> or /prompt <id> inserts the full skill before project AGENTS.md.',
     'Install or maintain requested skills with existing filesystem and command capabilities under current guards. Skills add no tools, hooks or permissions and never change the project working directory.'
   ];
-  if (!catalog.length) lines.push('No skills are installed.');
-  else lines.push(...catalog.map(summary => `- ${JSON.stringify(summary)}`));
+  const shown = visible ? catalog.filter(summary => visible.has(summary.id)) : catalog;
+  if (!shown.length) lines.push('No skills are installed.');
+  else lines.push(...shown.map(summary => `- ${JSON.stringify(summary)}`));
   return lines.join('\n');
 }

@@ -44,6 +44,20 @@ export function filterSettingsSections(view: HTMLElement, search: string): void 
   if (empty) empty.hidden = !query || matches > 0;
 }
 
+/**
+ * Re-apply the settings search to the settings view as it currently stands.
+ *
+ * The filter is text-based, so any section whose rows arrive after the query was typed was
+ * evaluated against an empty pane and stays hidden with no reason to be re-examined. A pane that
+ * fills asynchronously calls this once its rows land. Reading the live input value here, rather
+ * than taking a copy, is what makes that correct: the user may have typed more in the meantime.
+ */
+export function applySettingsFilter(): void {
+  const view = document.querySelector<HTMLElement>('[data-view="settings"]');
+  const search = document.getElementById('settingsSearch') as HTMLInputElement | null;
+  if (view && search) filterSettingsSections(view, search.value);
+}
+
 let toastTimer: number | undefined;
 
 export function toast(message: string): void {
@@ -96,6 +110,13 @@ export function compactNumber(value: number): string {
   if (value < 1000) return String(value);
   if (value < 1_000_000) return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)}k`;
   return `${(value / 1_000_000).toFixed(1)}M`;
+}
+
+/** "812 B", "12.3 KB", "1.4 MB" — a file or skill size, read as a size rather than a count. */
+export function humanBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 }
 
 /**

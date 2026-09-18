@@ -221,7 +221,7 @@ it('does not let an unpublished connector accept a receipt', async () => {
 });
 it('captures actual registered object schemas without executing handlers', async () => {
   const config = defaultConfig(); let observed: PluginToolSchema[] = [];
-  const server = buildServer({ roots: [], caps: config.capabilities, readOnly: false }, 'core', (_name, _version, _instructions, definitions) => { observed = definitions; });
+  const server = await buildServer({ roots: [], caps: config.capabilities, readOnly: false }, 'core', (_name, _version, _instructions, definitions) => { observed = definitions; });
   expect(observed.some(tool => tool.name === 'read')).toBe(true);
   expect(observed.every(tool => tool.inputSchema.type === 'object')).toBe(true);
   expect(observed.some(tool => tool.name === 'computer')).toBe(false);

@@ -69,7 +69,7 @@ it('refreshes root-sensitive read descriptions without rebuilding unrelated decl
   const ctx: ToolContext = { roots: [{ name: 'first', path: '/unused' }], caps: { ...DEFAULT_CAPABILITIES, read: true }, readOnly: false, sessionTools: false, agentTools: false, exposedFinishTool: false };
   const declarations = async () => {
     let tools: PluginToolSchema[] = [];
-    const server = buildServer(ctx, 'core', (_name, _version, _instructions, published) => { tools = published; });
+    const server = await buildServer(ctx, 'core', (_name, _version, _instructions, published) => { tools = published; });
     await server.close();
     return tools;
   };

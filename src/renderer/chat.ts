@@ -2,6 +2,7 @@ import { createWorkspaceTerminal } from './workspace-terminal.js';
 import { ui, t } from './i18n.js';
 import { initComposerStatusLine, paintComposerStatusLine } from './composer-status-line.js';
 import { initSkills } from './skills.js';
+import { initSkillsLibrary, type SkillsLibraryView } from './skills-library.js';
 import { imageStorageButton } from './image-storage.js';
 import { applyChatModels, applyComposerSessionModel, initChatModels, confirmedComposerModel, ensureComposerModel } from './chat-models.js';
 import { marked, Marked } from 'marked';
@@ -65,7 +66,7 @@ import {
   MAX_GOAL_SYSTEM_PROMPT_CHARS
 } from '../shared/goal.js';
 import { browserExtensionRequired, type AppState, type Config } from '../shared/types.js';
-import { $, ago, clockTime, compactNumber, el, filterSettingsSections, icon, reconcileChildren, run, toast } from './dom.js';
+import { $, ago, applySettingsFilter, clockTime, compactNumber, el, icon, reconcileChildren, run, toast } from './dom.js';
 import {
   KIND_ICON, mergeSessionRows, maybePageSessions, paintSessions, pressureOf, projectGroup,
   repaintBadges, selectedLocalProject, sessionWorking, unattributedBlocked,
@@ -167,6 +168,11 @@ function rememberDraft(): void {
   });
 }
 let skillPicker: ReturnType<typeof initSkills> | undefined;
+let skillsLibrary: SkillsLibraryView | undefined;
+/** The project/session scope the Skills page last read, so a scope change can be told from a repaint. */
+let skillsLibraryScopeKey: string | undefined;
+/** Whether the page has ever read the library; until it has, nothing needs re-reading. */
+let skillsLibraryLoaded = false;
 function restoreDraft(): void {
   skillPicker?.close();
   cancelGoalRequest();
@@ -2994,6 +3000,11 @@ function showView(name: string): void {
     view.hidden = view.dataset.view !== name;
   }
   $('chatSettingsBtn').classList.toggle('is-on', name === 'settings');
+  // The Skills list describes what is on disk, and opening the sheet is when the user is asking
+  // about it. Reading it here rather than at startup keeps a filesystem scan off the launch path
+  // for a page most launches never open, and a reopening always shows current truth rather than
+  // whatever was true when the window appeared.
+  if (name === 'settings') { skillsLibraryLoaded = true; void skillsLibrary?.refresh(); }
 }
 
 function selectSession(id: string): void {
@@ -3138,8 +3149,19 @@ function updatePanels(): void {
   agentPanel?.update(selectedId, sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId && selectedId !== null));
   filePanel?.update(selectedLocalProject(sessionHost));
   workspaceTerminal?.update(selectedLocalProject(sessionHost));
+  // The Skills page lists what this session's project can see, and its scope is the same object
+  // the composer's picker sends. A selection that changes it invalidates the list — but only if
+  // the page ever read one, so a launch that never opens Settings pays for no scan at all.
+  const scope = JSON.stringify(skillsLibraryScope());
+  if (skillsLibraryLoaded && skillsLibraryScopeKey !== scope) void skillsLibrary?.refresh();
+  skillsLibraryScopeKey = scope;
   // A tool with nothing to offer is disabled rather than hidden, so the strip keeps its shape.
   workPanel?.refresh();
+}
+
+/** The Skills page's scope, kept in step with the composer picker's own. */
+function skillsLibraryScope(): { sessionId: string | null; projectId: string | null } {
+  return { sessionId: selectedId, projectId: selectedLocalProject(sessionHost)?.id ?? selectedProjectId };
 }
 
 /**
@@ -3430,6 +3452,17 @@ export function initChat(next: Deps): void {
       automation.dispatchEvent(new Event('change', { bubbles: true }));
     } });
   skillPicker.restore();
+  // Same scope as the picker above, so the page and the composer can never disagree about which
+  // skills exist: a repo skill in the open project belongs on both, or on neither.
+  skillsLibrary = initSkillsLibrary({
+    host: $('skillsLibraryList'),
+    list: () => api.skillLibrary(skillsLibraryScope()),
+    set: payload => api.setSkill(payload),
+    notify: toast
+  });
+  // Loaded when the settings sheet is opened (`showView`), not here: a launch that never opens
+  // Settings should not pay for the scan.
+  skillsLibraryScopeKey = JSON.stringify(skillsLibraryScope());
   $('generateFinishGoal').addEventListener('click', async () => {
     const button = $<HTMLButtonElement>('generateFinishGoal'), id = selectedId, turnId = controlledTurnId;
     if (!id || !turnId || button.hidden || button.disabled || controlledSessionId !== id || controlledSelection !== selectionGeneration) return;
@@ -3491,9 +3524,7 @@ export function initChat(next: Deps): void {
       if (generation === selectionGeneration) selectNewChat(project.id); else paintSessions(sessionHost);
     } finally { button.disabled = false; }
   });
-  $('settingsSearch').addEventListener('input', () => {
-    filterSettingsSections(document.querySelector<HTMLElement>('[data-view="settings"]')!, $<HTMLInputElement>('settingsSearch').value);
-  });
+  $('settingsSearch').addEventListener('input', () => applySettingsFilter());
   const composerMenus = [...document.querySelectorAll<HTMLDetailsElement>('.composer-menu, .session-controls')];
   document.addEventListener('click', (event) => {
     for (const menu of composerMenus) if (!menu.contains(event.target as Node) || ((event.target as HTMLElement).closest('button') && !(event.target as HTMLElement).closest('[data-keep-menu]'))) menu.open = false;

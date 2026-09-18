@@ -254,6 +254,7 @@ Paths in this section are repository-relative. Most mechanisms have `main`, `sha
 | Appearance | `src/shared/appearance.ts`, `src/main/appearance-schema.ts`, `src/renderer/appearance.ts`: bounded saved colors/typography, field-wise Settings merge, immediate semantic CSS projection. `window-layout.ts` shares native caption/backing colors. |
 | Native Desktop | `src/main/computer/{index,helper,browser-chords,windows-api,windows-capture,windows-apps,windows-keys}.ts`, `src/shared/windows-computer.ts`, `mcp/tools-desktop-{windows,macos}.ts`, `native/macos-desktop-helper/*`, `native/macos-desktop-addon/*`. |
 | Direct browser control | `src/main/browser-control.ts`, `mcp/tools-browser.ts`, `src/shared/browser-control.ts`, `extension/browser-control{,-page}.js`: short-lived RPCs, session-owned debugger tabs, bounded DOM/diagnostics and background input. |
+| Skill pack | `skill-pack/**`, `src/main/skill-pack.ts`, `skill-state.ts`, `skill-management.ts`: bundled instruction pack, provenance, enablement. |
 | Delivery/build | `src/main/{update,extension-path,version,logger,durable}.ts`, `electron.vite.config.ts`, `electron-builder.yml`, `scripts/*`, `.github/workflows/*`, `vitest.config.ts`. |
 
 ### One durable fact, one authoritative owner
@@ -436,6 +437,15 @@ canonical paths and remain stable when similarly named packages appear. `skill-m
 bounded YAML/TOML parsing and layered configuration. Invalid policy never enables implicit use.
 `skill-package.ts` stages resource copies and publishes SKILL.md last; the existing serialized
 managed-library owner controls imports and removals. Scripts/assets remain inert resources.
+
+A bundled pack of 14 adapted `obra/superpowers` skills ships in `skill-pack/` (MIT; see
+`docs/licenses/superpowers/LICENSE` and `skill-pack/PROVENANCE.md`). It is mirrored into the
+managed library at startup, so `/skills/<id>/…` works with the existing reader. `state/skills.json`
+is the single owner of seeding provenance, user enablement, implicit invocation and removal
+tombstones. `resolveSkillPolicy()` layers app choice over external Codex rules over the skill's
+own declaration; a disabled skill is absent from the catalog and from `/` completion. Refresh
+preserves a skill the user has edited, decided by the recorded digest, and a tombstone prevents
+a removed skill from being re-seeded.
 
 Input `authoredSource` identifies which existing field contains the human request: `text`
 by default, `objective` for generated Goal/workflow openings, and `none` for generated

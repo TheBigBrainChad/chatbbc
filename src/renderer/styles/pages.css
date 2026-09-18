@@ -1361,6 +1361,46 @@ input.num {
 
 .settings-section-title { margin: 34px 0 14px; font-family: var(--ui-font-mono); font-size: calc(14px * var(--text-scale, 1)); font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--ink); }
 
+/* ------------------------------------------------------------ the Skills library */
+
+/* Rows rather than settings rows: each one carries a heading, a sentence and two controls, so
+   it is a card in a list, not a label/value pair. The list is a single column for the same
+   reason `.pane` is — an implicit `auto` track is floored by the widest child's min-content
+   width, and these rows are wide. */
+.skills-library-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.skills-library-list:empty { display: none; }
+
+.skill-library-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  background: var(--card);
+}
+
+.skill-library-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.skill-library-head strong { font-family: var(--ui-font-mono); font-size: calc(13px * var(--text-scale, 1)); font-weight: 550; }
+.skill-library-scope, .skill-library-size {
+  font-family: var(--ui-font-mono); font-size: calc(10.5px * var(--text-scale, 1)); color: var(--faint);
+}
+.skill-library-size { margin-left: auto; font-variant-numeric: tabular-nums; }
+.skill-library-description { margin: 0; font-family: var(--ui-font-mono); font-size: calc(11.5px * var(--text-scale, 1)); line-height: 1.5; color: var(--soft); }
+
+.skill-library-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.skill-library-switch { display: inline-flex; align-items: center; gap: 8px; font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); color: var(--soft); cursor: pointer; }
+.skill-library-switch input { accent-color: var(--accent-fill, var(--blue)); }
+
+/* A skill the user switched off is still listed, and is still a skill: the group heading above
+   it says why it is here. Only the body dims, so the way back stays as legible as the row. */
+.skill-library-row.is-disabled .skill-library-description { color: var(--faint); }
+
+.skill-library-group {
+  margin: 6px 0 0; padding-top: 12px; border-top: 1px solid var(--line);
+  font-family: var(--ui-font-mono); font-size: calc(10.5px * var(--text-scale, 1));
+  font-weight: 600; letter-spacing: 0.11em; text-transform: uppercase; color: var(--faint);
+}
+
 .usage-panel .setting { gap: 24px; }
 .usage-panel .setting-text { flex: 1; min-width: 0; }
 .usage-panel .setting > input, .usage-panel .setting > select { flex: 0 0 160px; width: 160px; max-width: 45%; }

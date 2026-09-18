@@ -819,6 +819,12 @@
                     <button class="btn" id="swarmReset" type="button">Clear swarm</button>
                   </div>
                 </div>
+                <h2 class="settings-section-title">Skills</h2>
+                <div class="pane">
+                  <div class="setting"><span class="setting-text"><b>Installed skills</b><em>Instruction packs ChatGPT can follow. Turning one off removes it from the catalog; the file stays on disk so you can turn it back on.</em></span><button class="btn" id="skillsRefresh" type="button">Refresh</button></div>
+                  <div id="skillsLibraryList" class="skills-library-list" role="list"></div>
+                  <p id="skillsLibraryEmpty" class="muted" role="status" hidden>No skills are installed yet.</p>
+                </div>
                 <h2 class="settings-section-title">Keep the turn open</h2>
                 <div class="pane">
                   <label class="setting"><span class="setting-text"><b>Plan generation</b><em>Create staged tasks. ChatGPT uses the Goal, Loop and Plan model above; API uses the model and reasoning in API provider settings.</em></span><select id="planBackend"><option value="chatgpt">ChatGPT</option><option value="api">API provider</option></select></label>

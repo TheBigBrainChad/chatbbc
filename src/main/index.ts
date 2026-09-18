@@ -17,7 +17,9 @@ import { initSecretsPath } from './secrets.js';
 import { pluginManager } from './plugins/manager.js';
 import { setBrowserOpener, setBrowserWorkArea, shutdownBridge, startBridge } from './bridge.js';
 import { flushSessions, initSessionStore } from './session/store.js';
-import { initSkillsPath } from './skills.js';
+import { initSkillsPath, skillsDirectory } from './skills.js';
+import { currentSkillState, mutateSkillState, restoreSkillState } from './skill-state.js';
+import { bundledSkillPackRoot, mergeSeedDelta, syncSkillPack } from './skill-pack.js';
 import { usageOverview } from './session/usage.js';
 import {
   flushRecorder,
@@ -323,6 +325,21 @@ void app.whenReady().then(async () => {
   try { await initSkillsPath(userData); }
   catch (error) { logWarn(`Skills library unavailable: ${error instanceof Error ? error.message : String(error)}`); }
   initDurableStore(userData);
+  try {
+    await restoreSkillState();
+    const packRoot = bundledSkillPackRoot();
+    const managed = skillsDirectory();
+    if (packRoot && managed) {
+      const { result, delta } = await syncSkillPack({ managedRoot: managed, packRoot, state: currentSkillState() });
+      // Merged against the state at commit time, not a snapshot taken before the pass: a delta
+      // names only the entries this sync touched, so a concurrent toggle's own record survives.
+      if (Object.keys(delta).length) await mutateSkillState(state => mergeSeedDelta(state, delta));
+      if (result.errors.length) logWarn(`Skill pack: ${result.errors.join('; ')}`);
+    }
+  } catch (error) {
+    // A damaged or absent pack must never stop the app or disable the existing library.
+    logWarn(`Skill pack unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
   await restoreChatModels();
   if (windowActivation.isDisabled()) return;
   await loadConfig();

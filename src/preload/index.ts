@@ -9,7 +9,7 @@ import type { UsageOverview } from '../shared/usage.js';
 import type { InputArgs, InputEntry } from '../main/session/input.js';
 import type { LocalProject } from '../shared/projects.js';
 import type { ProjectDirectoryListing, ProjectFileMutationResult, ProjectFilePreview, ProjectFileSaveResult, ProjectFilesChanged } from '../shared/project-files.js';
-import type { SkillSummary, SkillLibrary, SkillsDraftScope } from '../shared/skills.js';
+import type { SkillSummary, SkillLibraryPage, SkillsDraftScope, SkillState } from '../shared/skills.js';
 import type { PluginSnapshot, PluginInstallRequest, PluginConfigPatch } from '../shared/plugins.js';
 /**
  * The entire renderer-facing API.
@@ -111,7 +111,13 @@ const api = {
   },
   chooseFiles: () => call<InputAttachment[]>('sessions:files'),
   listSkills: () => call<SkillSummary[]>('skills:list'),
-  skillLibrary: (scope: SkillsDraftScope) => call<SkillLibrary>('skills:library', scope),
+  skillLibrary: (scope: SkillsDraftScope) => call<SkillLibraryPage>('skills:library', scope),
+  // `enabled`/`implicit` are optional so an omitted field means "leave this one alone"; there
+  // is no separate channel for the two switches, and no channel that removes a skill, so
+  // `resetSkill` has no renderer caller yet — `resetPackedSkill` in the main process is the
+  // entry point a future removal UI will use.
+  setSkill: (payload: { id: string; enabled?: boolean; implicit?: boolean }) => call<SkillState>('skills:set', payload),
+  resetSkill: (payload: { id: string }) => call<SkillState>('skills:reset', payload),
   dropFiles: async (files: File[]): Promise<Reply<InputAttachment[]>> => {
     if (!files.length || files.length > 20) return { ok: false, error: 'Attach up to 20 files per message' };
     try {
