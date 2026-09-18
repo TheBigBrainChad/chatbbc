@@ -290,6 +290,38 @@ export type RichOrigin = {
   navigationEpoch: number;
 };
 
+/** An exact image node's metadata on its canonical assistant shard, not a timeline event. */
+export type RichMediaState = {
+  mediaId: string;
+  nodeId: string;
+  source: { kind: 'native'; providerMessageId: string; providerAssetId: string }
+    | { kind: 'page'; nodeId: string };
+  status: 'pending' | 'available' | 'unavailable';
+  reason?: 'not_loaded' | 'unsupported' | 'ambiguous' | 'tainted' | 'oversized' | 'invalid' | 'quota' | 'removed';
+  previewWidth?: number;
+  previewHeight?: number;
+  asset?: AssetRef;
+};
+
+/** Untrusted future wire shape. Its claimed ownership never authenticates a live observation. */
+export type RichMediaObservation = {
+  conversationId: string;
+  messageId: string;
+  providerMessageId: string;
+  documentId: string;
+  navigationEpoch: number;
+  bindingRevision: number;
+  mediaId: string;
+  nodeId: string;
+  richRevision: number;
+  source: RichMediaState['source'];
+  status: RichMediaState['status'];
+  previewDataUrl?: string;
+  previewWidth?: number;
+  previewHeight?: number;
+  reason?: RichMediaState['reason'];
+};
+
 export type SessionEvent =
   | (BaseEvent & { kind: 'session_start'; conversationId: string | null; title: string })
   | (BaseEvent & {
@@ -334,6 +366,8 @@ export type SessionEvent =
       /** Validated presentation only, written by the canonical store's dedicated rich upsert. */
       rich?: import('./rich-response.js').RichResponse;
       richOrigin?: RichOrigin;
+      /** Store-validated exact image-node metadata only; no rich assets until durable all-owner cleanup exists. */
+      richMedia?: RichMediaState[];
       richMediaUnavailable?: 'unsupported';
       retiredRichImageAssetIds?: string[];
       state?: MessageState;

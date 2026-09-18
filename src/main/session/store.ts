@@ -33,6 +33,7 @@ import type {
   ImageStorageInfo,
   NewSessionEvent,
   ReasoningEffort,
+  RichMediaState,
   RichOrigin,
   SessionEvent,
   SessionOrigin,
@@ -291,6 +292,94 @@ function storedTextEqual(left: StoredText | undefined, right: StoredText | undef
     left.assetId === right.assetId &&
     left.digest === right.digest
   );
+}
+
+/** Copy only own enumerable data descriptors; neither extra fields nor getters are metadata. */
+function richMediaFields(value: unknown, required: readonly string[], allowed: readonly string[]): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object') return null;
+  try {
+    if (Array.isArray(value)) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length < required.length || keys.length > allowed.length ||
+        keys.some(key => typeof key !== 'string' || !allowed.includes(key))) return null;
+    const result: Record<string, unknown> = Object.create(null);
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (typeof key !== 'string' || !descriptor?.enumerable || !('value' in descriptor)) return null;
+      result[key] = descriptor.value;
+    }
+    return required.every(key => Object.hasOwn(result, key)) ? result : null;
+  } catch { return null; }
+}
+
+const richMediaOpaque = (value: unknown): value is string =>
+  typeof value === 'string' && /^[a-z0-9:_-]{1,190}$/i.test(value);
+const richMediaReasons = new Set(['not_loaded', 'unsupported', 'ambiguous', 'tainted', 'oversized', 'invalid', 'quota', 'removed']);
+
+/** Only metadata may enter this store seam. Task 6/10 must precede pixels and asset references. */
+function parseMetadataRichMedia(value: unknown): RichMediaState | null {
+  const fields = richMediaFields(value, ['mediaId', 'nodeId', 'source', 'status'],
+    ['mediaId', 'nodeId', 'source', 'status', 'reason']);
+  if (!fields || !richMediaOpaque(fields.mediaId) || !richMediaOpaque(fields.nodeId) ||
+      (fields.status !== 'pending' && fields.status !== 'unavailable')) return null;
+  const status = fields.status;
+  if (status === 'pending'
+    ? Object.hasOwn(fields, 'reason') && fields.reason !== 'not_loaded'
+    : !richMediaReasons.has(fields.reason as string)) return null;
+  const source = richMediaFields(fields.source, ['kind'],
+    ['kind', 'nodeId', 'providerMessageId', 'providerAssetId']);
+  if (!source) return null;
+  let cleanSource: RichMediaState['source'];
+  if (source.kind === 'page' && Object.keys(source).length === 2 &&
+      source.nodeId === fields.nodeId) {
+    cleanSource = { kind: 'page', nodeId: fields.nodeId };
+  } else if (source.kind === 'native' && Object.keys(source).length === 3 &&
+      typeof source.providerMessageId === 'string' && /^[a-z0-9-]{8,100}$/i.test(source.providerMessageId) &&
+      richMediaOpaque(source.providerAssetId)) {
+    cleanSource = { kind: 'native', providerMessageId: source.providerMessageId, providerAssetId: source.providerAssetId };
+  } else return null;
+  return { mediaId: fields.mediaId, nodeId: fields.nodeId, source: cleanSource, status,
+    ...(Object.hasOwn(fields, 'reason') ? { reason: fields.reason as RichMediaState['reason'] } : {}) };
+}
+
+/** One opaque media identity must resolve to precisely one validated rich image node. */
+function exactRichImageNode(rich: RichResponse, mediaId: string, nodeId: string): boolean {
+  if (rich.status !== 'available') return false;
+  let count = 0;
+  const pending = [...rich.nodes];
+  while (pending.length) {
+    const node = pending.pop()!;
+    if (node.kind === 'image' && node.mediaId === mediaId) {
+      count++;
+      if (node.id !== nodeId || count > 1) return false;
+    }
+    if (node.kind === 'group' || node.kind === 'control') pending.push(...node.children);
+  }
+  return count === 1;
+}
+
+/** Null means corrupt or mismatched durable predecessor; [] is a valid absent adjunct. */
+function validatedRichMedia(value: unknown, rich: RichResponse, providerMessageId: string): RichMediaState[] | null {
+  if (value === undefined) return [];
+  try {
+    if (!Array.isArray(value)) return null;
+    const length = Object.getOwnPropertyDescriptor(value, 'length');
+    if (!length || !('value' in length) || !Number.isSafeInteger(length.value) || length.value > 64 ||
+        length.value < 0 || length.enumerable || length.configurable ||
+        Reflect.ownKeys(value).length !== length.value + 1) return null;
+    const clean: RichMediaState[] = [];
+    const ids = new Set<string>();
+    for (let index = 0; index < length.value; index++) {
+      const field = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!field?.enumerable || !('value' in field)) return null;
+      const media = parseMetadataRichMedia(field.value);
+      if (!media || ids.has(media.mediaId) || !exactRichImageNode(rich, media.mediaId, media.nodeId) ||
+          (media.source.kind === 'native' && media.source.providerMessageId !== providerMessageId)) return null;
+      ids.add(media.mediaId);
+      clean.push(media);
+    }
+    return clean;
+  } catch { return null; }
 }
 
 function emptySummary(id: string, title: string, conversationId: string | null): SessionSummary {
@@ -1115,7 +1204,7 @@ export function upsertMessageEvent(
     const write = entry.queue.then(async () => {
       // Rich is store-owned: ordinary text upserts cannot insert page-claimed structure.
       if (event.kind === 'assistant_message') {
-        const { rich: _rich, richOrigin: _richOrigin, richMediaUnavailable: _unavailable,
+        const { rich: _rich, richOrigin: _richOrigin, richMedia: _media, richMediaUnavailable: _unavailable,
           retiredRichImageAssetIds: _retired, ...plain } = event;
         event = plain as NewMessageEvent;
       }
@@ -1157,6 +1246,10 @@ export function upsertMessageEvent(
         previous?.kind === event.kind && storedTextEqual(previous.message, event.message);
       const sameRichOwner = previous?.kind === 'assistant_message' && event.kind === 'assistant_message' &&
         sameMessage && previous.providerMessageId === (event.providerMessageId ?? previous.providerMessageId);
+      const retainedRichMedia = sameRichOwner && previous.rich && previous.richOrigin &&
+        parseRichOrigin(previous.richOrigin) && parseRichResponse(previous.rich) && previous.providerMessageId
+          ? validatedRichMedia(previous.richMedia, previous.rich, previous.providerMessageId)
+          : null;
 
       const nextEvent: NewMessageEvent =
         previous?.kind === 'assistant_message' && event.kind === 'assistant_message'
@@ -1181,6 +1274,7 @@ export function upsertMessageEvent(
                 ? { renderedHtml: previous.renderedHtml }
                 : {}),
               ...(sameRichOwner && previous.rich ? { rich: previous.rich, richOrigin: previous.richOrigin } : {}),
+              ...(retainedRichMedia?.length ? { richMedia: retainedRichMedia } : {}),
               ...(sameRichOwner && previous.richMediaUnavailable ? { richMediaUnavailable: previous.richMediaUnavailable } : {}),
               // Removal tombstones survive ordinary re-observations even if authored text changes.
               ...(previous.retiredRichImageAssetIds ? { retiredRichImageAssetIds: previous.retiredRichImageAssetIds } : {})
@@ -1242,6 +1336,8 @@ export function upsertMessageEvent(
         (nextEvent.kind !== 'user_message' || previous.kind !== 'user_message' ||
           (nextEvent.reaction === previous.reaction && nextEvent.inputId === previous.inputId && nextEvent.authoredText === previous.authoredText && nextEvent.inputDelivery === previous.inputDelivery && JSON.stringify(nextEvent.assets) === JSON.stringify(previous.assets) && JSON.stringify(nextEvent.retiredImageAssetIds) === JSON.stringify(previous.retiredImageAssetIds) && JSON.stringify(nextEvent.attachments) === JSON.stringify(previous.attachments))) &&
         (previous.turnId ?? undefined) === settledTurnId &&
+        (previous.kind !== 'assistant_message' || JSON.stringify(previous.richMedia) === JSON.stringify(
+          nextEvent.kind === 'assistant_message' ? nextEvent.richMedia : undefined)) &&
         (nextEvent.agent === undefined || previous.agent === nextEvent.agent) &&
         (!preferTime || previous.time === nextEvent.time)
       ) {
@@ -1361,10 +1457,13 @@ export function upsertRichMessage(
     const sameOrigin = priorOrigin && priorOrigin.conversationId === capture.conversationId &&
       priorOrigin.bindingRevision === capture.bindingRevision && priorOrigin.documentId === capture.documentId &&
       priorOrigin.navigationEpoch === capture.navigationEpoch;
-    if (sameContent && sameOrigin) return 'unchanged';
+    const keptMedia = sameContent && sameOrigin && previous.rich && previous.providerMessageId
+      ? validatedRichMedia(previous.richMedia, previous.rich, previous.providerMessageId) : [];
+    if (sameContent && sameOrigin && keptMedia !== null) return 'unchanged';
 
+    const { richMedia: _priorMedia, ...priorWithoutMedia } = previous;
     const full: Extract<SessionEvent, { kind: 'assistant_message' }> = {
-      ...previous, rich: sameContent && previous.rich ? previous.rich : storedRich,
+      ...priorWithoutMedia, rich: sameContent && previous.rich ? previous.rich : storedRich,
       richOrigin: capture,
       seq: entry.nextSeq // presentation delivery cursor only; never advance content/work/Goal.
     };
@@ -1375,6 +1474,65 @@ export function upsertRichMessage(
     scheduleMeta(entry);
     return 'stored';
   }));
+}
+
+/**
+ * Synthetic/internal metadata-only boundary. A caller must establish trusted native capture
+ * provenance separately; the live recorder currently refuses rich_media entirely. This API
+ * does not create sessions, messages, image rows, asset references or pixels.
+ */
+export function upsertRichMedia(
+  sessionId: string, messageId: string, media: RichMediaState, origin: RichOrigin,
+  expectedRichRevision: number
+): Promise<'stored' | 'unchanged' | 'refused'> {
+  return ensureOpen(sessionId).then(entry => enqueueSessionOperation(entry, 'rich media upsert', async () => {
+    if (!getConfig().sessions.record) return 'refused';
+    const capture = parseRichOrigin(origin);
+    const clean = parseMetadataRichMedia(media);
+    if (!capture || !clean || !messageId || !Number.isSafeInteger(expectedRichRevision) ||
+        expectedRichRevision < 1 || entry.summary.conversationId !== capture.conversationId ||
+        (entry.summary.bindingRevision ?? 0) !== capture.bindingRevision) return 'refused';
+
+    const key = `assistant_message\u0000${messageId}`;
+    const previous = entry.messages.get(key);
+    if (!previous || previous.kind !== 'assistant_message' || previous.messageId !== messageId ||
+        !previous.providerMessageId || !previous.rich || !previous.richOrigin) return 'refused';
+    const storedOrigin = parseRichOrigin(previous.richOrigin);
+    const storedRich = parseRichResponse(previous.rich);
+    if (!storedOrigin || !storedRich || storedRich.status !== 'available' ||
+        storedRich.revision !== expectedRichRevision || storedRich.messageId !== messageId ||
+        storedRich.conversationId !== capture.conversationId ||
+        storedRich.providerMessageId !== previous.providerMessageId ||
+        storedOrigin.conversationId !== capture.conversationId ||
+        storedOrigin.bindingRevision !== capture.bindingRevision ||
+        storedOrigin.documentId !== capture.documentId ||
+        storedOrigin.navigationEpoch !== capture.navigationEpoch ||
+        !exactRichImageNode(storedRich, clean.mediaId, clean.nodeId) ||
+        (clean.source.kind === 'native' && clean.source.providerMessageId !== previous.providerMessageId)) return 'refused';
+    // Provider aliases are forensic records, never a second authority to attach a slot.
+    if ([...entry.messages.entries()].some(([otherKey, other]) => otherKey !== key &&
+        other.kind === 'assistant_message' && other.providerMessageId === previous.providerMessageId)) return 'refused';
+
+    const current = validatedRichMedia(previous.richMedia, storedRich, previous.providerMessageId);
+    if (!current) return 'refused';
+    const existing = current.find(item => item.mediaId === clean.mediaId);
+    if (existing && (existing.nodeId !== clean.nodeId ||
+        JSON.stringify(existing.source) !== JSON.stringify(clean.source) ||
+        (existing.status === 'unavailable' && clean.status === 'pending'))) return 'refused';
+    if (existing && JSON.stringify(existing) === JSON.stringify(clean)) return 'unchanged';
+    if (!existing && current.length >= 64) return 'refused';
+    const nextMedia = existing ? current.map(item => item.mediaId === clean.mediaId ? clean : item) : [...current, clean];
+    const full: Extract<SessionEvent, { kind: 'assistant_message' }> = {
+      ...previous, richMedia: nextMedia,
+      seq: entry.nextSeq // Presentation cursor only; content/Goal/turn/summary are untouched.
+    };
+    await writeCanonicalMessage(sessionId, key, full);
+    entry.messages.set(key, full);
+    entry.nextSeq += 1;
+    entry.historySeq = full.seq;
+    scheduleMeta(entry);
+    return 'stored';
+  }), () => 'refused' as const);
 }
 
 /**

@@ -391,6 +391,31 @@ beforeEach(async () => {
 });
 
 describe('rich observations require capture-time Chrome document authority', () => {
+  it('does not admit rich_media from an authenticated HTTP body while live provenance is unproven', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const providerMessageId = randomUUID();
+    const first = await request('POST', '/events', { body: { conversationId,
+      events: [{ kind: 'assistant_message', time: Date.now(), messageId: 'assistant:forged',
+        providerMessageId, text: 'Canonical prose', final: true, state: 'final' }] } });
+    const sessionId = first.body.sessionId as string;
+    const before = await readEvents(sessionId);
+    const forged = { kind: 'rich_media', time: Date.now(), conversationId,
+      messageId: 'assistant:forged', providerMessageId, documentId: 'claimed-document',
+      navigationEpoch: 9, bindingRevision: 0, mediaId: 'card-image', nodeId: 'image-node',
+      richRevision: 1, source: { kind: 'page', nodeId: 'image-node' }, status: 'pending' };
+    expect((await import('../src/main/bridge.js')).parseObservations([forged], [
+      { tab: 42, documentId: 'claimed-document', navigationEpoch: 9, routeVerified: true, conversationId }
+    ], conversationId)).toEqual([]);
+    const reply = await request('POST', '/events', { body: { conversationId,
+      events: [forged], sourceCaptures: [{ tab: 42, documentId: 'claimed-document',
+        navigationEpoch: 9, routeVerified: true, conversationId }] } });
+    expect(reply.status).toBe(200);
+    expect(reply.body.sessionId).toBe(sessionId);
+    expect(await readEvents(sessionId)).toEqual(before);
+    expect(before.find(row => row.kind === 'assistant_message')).not.toHaveProperty('richMedia');
+  });
+
   it('validates the rich tree and aligned sender envelope field-wise before the recorder', async () => {
     const { parseObservations } = await import('../src/main/bridge.js');
     const conversationId = randomUUID();
