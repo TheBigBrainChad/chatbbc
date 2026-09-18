@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto';
 import { promises as fs, existsSync } from 'node:fs';
 import { app } from 'electron';
 import { SKILL_ID_PATTERN } from '../shared/skills.js';
-import { readSkillTextSnapshot } from './skills.js';
+import { readSkillTextSnapshot, listSkills, skillsDirectory } from './skills.js';
 import type { SkillState } from './skill-state.js';
 
 export const SKILL_PACK_DIR = 'skill-pack';
@@ -125,6 +125,13 @@ async function copySkill(source: string, destination: string): Promise<void> {
 /**
  * Brings the managed library in line with the shipped pack. Returns the provenance map the
  * caller persists; this function never writes state itself, so a test can drive it directly.
+ * It does republish `skills.ts`'s catalog, but only when the destination really is that library.
+ *
+ * Each entry is isolated. A failure on one — a transient EACCES, a full disk — must not strand
+ * the rest: the loop continues, so the entries after it still seed on this launch. It also must
+ * not throw, because the caller persists the returned map only when this resolves; losing that
+ * would be the expensive half. A skill copied but not recorded looks provenance-unknown on the
+ * next launch, is preserved from then on, and can never be refreshed by a pack update again.
  */
 export async function syncSkillPack(options: {
   managedRoot: string;
@@ -142,22 +149,47 @@ export async function syncSkillPack(options: {
     const recorded = state.seeded[entry.id];
     let present = false;
     try { present = (await fs.lstat(destination)).isDirectory(); } catch { present = false; }
-    if (!present) {
-      await copySkill(entry.source, destination);
-      seeded[entry.id] = entry.digest;
-      result.added.push(entry.id);
-      continue;
+    try {
+      if (!present) {
+        await copySkill(entry.source, destination);
+        seeded[entry.id] = entry.digest;
+        result.added.push(entry.id);
+        continue;
+      }
+      const current = await directoryDigest(destination).catch(() => null);
+      if (current !== null && recorded !== undefined && current === recorded) {
+        await copySkill(entry.source, destination);
+        seeded[entry.id] = entry.digest;
+        result.refreshed.push(entry.id);
+        continue;
+      }
+      // Either the user edited it, or provenance is unknown. Both mean "do not touch".
+      result.preserved.push(entry.id);
+      if (recorded !== undefined) seeded[entry.id] = recorded;
+    } catch (error) {
+      // Only the two copy branches reach here, and both destinations are this app's own work —
+      // never the user's content — so a half-written copy is discarded rather than left behind,
+      // where it would read as a user edit and be preserved forever.
+      await fs.rm(destination, { recursive: true, force: true }).catch(() => undefined);
+      result.errors.push(`${entry.id}: ${error instanceof Error ? error.message : String(error)}`);
     }
-    const current = await directoryDigest(destination).catch(() => null);
-    if (current !== null && recorded !== undefined && current === recorded) {
-      await copySkill(entry.source, destination);
-      seeded[entry.id] = entry.digest;
-      result.refreshed.push(entry.id);
-      continue;
-    }
-    // Either the user edited it, or provenance is unknown. Both mean "do not touch".
-    result.preserved.push(entry.id);
-    if (recorded !== undefined) seeded[entry.id] = recorded;
+  }
+  // Copying writes directories directly, so `skills.ts`'s cache still describes the scan
+  // `initSkillsPath` took before any of this existed — which is why a connector asking for
+  // instructions on a fresh install was handed "No skills are installed." while all fourteen
+  // sat on disk. `listSkills` is that cache's owner (scan, then publish) and is the only thing
+  // allowed to refresh it; doing it here, rather than at the call site, means no caller can
+  // forget. A preserved entry changes nothing the catalog did not already describe.
+  //
+  // Guarded, because the catalog describes exactly one directory. Syncing any other root — a
+  // test's, another profile's — must not publish that root's contents as the app's library.
+  //
+  // Its failure is reported, never thrown: this runs after the copies, and a throw here would
+  // discard the whole provenance map — the same degradation the loop's isolation exists to
+  // prevent.
+  if ((result.added.length || result.refreshed.length) && skillsDirectory() === managedRoot) {
+    try { await listSkills(); }
+    catch (error) { result.errors.push(`catalog: ${error instanceof Error ? error.message : String(error)}`); }
   }
   return { result, seeded };
 }
