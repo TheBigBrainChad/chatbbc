@@ -9,6 +9,35 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## [2.1.16] — cheaper companion, working resumes
+
+Ported from upstream after their 2.1.14/2.1.15 work.
+
+**The Tur Tur Sahur companion no longer burns CPU.** It had been running a permanent
+animation loop: every visible pet re-armed the next frame at display refresh rate,
+including while its menu was open, and each frame re-queried the menu and rewrote values
+that had not changed. Measured here: idle fell from 165 to 2.7 animation callbacks per
+second, and an open menu from 165 to zero. Motion, poses and the sprite atlas are
+identical — only the wake schedule changed.
+
+**Compact & Resume works again.** ChatGPT's Markdown serializer escapes punctuation as
+it round-trips inserted text, so `[[CLF-RESUME:<token>]]` comes back as
+`[[CLF-RESUME\:<token>]]`. Every reader matched only the unescaped form, so the app
+stopped recognising its own bootstrap and the resume fold card was never built. Readers
+now accept either form and strip the exact span that matched, leaving literal backslashes
+in the brief alone.
+
+**Also fixed:** calls arriving through the Plugins connector are attributed to this app
+again; duplicate error notices dedupe correctly when ChatGPT's alert includes its own
+Retry label; a Compact & Resume committed after its run ended no longer strands the
+worker fleet in the old chat; broker reports for a superseded chat no longer create a
+shadow session; and the transcript's tail reserve is measured correctly when eviction
+leaves less than one viewport of content.
+
+Upstream's manual-close suspension and its Thinking-failed deadline change are
+deliberately not included; both reverse behaviour this repo documents as explicit user
+decisions.
+
 ## [2.1.15] — a shell that belongs to your desktop
 
 This release is also the first to ship the **ChatBBC** identity, which had been staged but never
