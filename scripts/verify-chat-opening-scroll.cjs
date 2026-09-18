@@ -14,7 +14,11 @@ const { app, BrowserWindow } = require('electron');
 app.whenReady().then(async () => {
   const root = path.join(__dirname, '..');
   const code = require('esbuild').buildSync({ entryPoints: [path.join(root, 'src/renderer/chat.ts')],
-    bundle: true, write: false, platform: 'browser', format: 'iife', globalName: 'chat' }).outputFiles[0].text;
+    bundle: true, write: false, platform: 'browser', format: 'iife', globalName: 'chat',
+    // chat.ts reaches workspace-terminal.ts, which imports xterm's CSS. This bundler has no output
+    // path for a stylesheet and the fixture reads the renderer's own sheets below, so the import is
+    // emptied rather than resolved — without this the whole script dies before any assertion runs.
+    loader: { '.css': 'empty' } }).outputFiles[0].text;
   // The renderer's stylesheet is split by responsibility: the modules are read in link
   // order, which is also cascade order, so this sees the same rules the renderer applies.
   const sheets = ['base', 'shell', 'transcript', 'composer', 'panels', 'pages', 'dialogs'];
