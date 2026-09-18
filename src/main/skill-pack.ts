@@ -43,6 +43,34 @@ export interface PackSyncResult {
 }
 
 /**
+ * Only the provenance one sync pass actually changed: id -> digest for what it wrote, id ->
+ * null for a tombstoned entry whose record it dropped. An untouched entry is absent.
+ *
+ * This is a delta rather than the whole `seeded` map on purpose. A sync runs outside
+ * `mutateSkillState`'s serialization — it is a filesystem pass — so a toggle or another sync
+ * can commit while it runs. A whole map would have been built from the state passed in, and
+ * spreading it back would re-install that stale snapshot, silently discarding the provenance
+ * another caller recorded in the meantime. A copy whose provenance is lost is preserved
+ * forever from then on and can never be refreshed by a pack update again. A delta can only
+ * ever name the entries this pass touched, so applying it cannot erase anyone else's work.
+ */
+export type SeededDelta = Record<string, string | null>;
+
+/**
+ * Folds a sync's delta into a state read at mutation time. Callers apply it inside
+ * `mutateSkillState`'s callback and never spread a delta over a whole `seeded` map, so the
+ * merge is additive by construction.
+ */
+export function mergeSeedDelta(state: SkillState, delta: SeededDelta): SkillState {
+  const seeded = { ...state.seeded };
+  for (const [id, digest] of Object.entries(delta)) {
+    if (digest === null) delete seeded[id];
+    else seeded[id] = digest;
+  }
+  return { ...state, seeded };
+}
+
+/**
  * Where the pack ships, or null when it is not present in this build.
  *
  * Each candidate is checked for existence rather than assumed: a dev run may have the pack in
@@ -123,13 +151,15 @@ async function copySkill(source: string, destination: string): Promise<void> {
 }
 
 /**
- * Brings the managed library in line with the shipped pack. Returns the provenance map the
- * caller persists; this function never writes state itself, so a test can drive it directly.
- * It does republish `skills.ts`'s catalog, but only when the destination really is that library.
+ * Brings the managed library in line with the shipped pack. Returns what it changed — the
+ * outcome, plus a `delta` naming only the provenance entries this pass wrote or dropped — which
+ * the caller folds in with `mergeSeedDelta`. This function never writes state itself, so a test
+ * can drive it directly. It does republish `skills.ts`'s catalog, but only when the destination
+ * really is that library.
  *
  * Each entry is isolated. A failure on one — a transient EACCES, a full disk — must not strand
  * the rest: the loop continues, so the entries after it still seed on this launch. It also must
- * not throw, because the caller persists the returned map only when this resolves; losing that
+ * not throw, because the caller persists the returned delta only when this resolves; losing that
  * would be the expensive half. A skill copied but not recorded looks provenance-unknown on the
  * next launch, is preserved from then on, and can never be refreshed by a pack update again.
  */
@@ -137,35 +167,35 @@ export async function syncSkillPack(options: {
   managedRoot: string;
   packRoot: string;
   state: SkillState;
-}): Promise<{ result: PackSyncResult; seeded: Record<string, string> }> {
+}): Promise<{ result: PackSyncResult; delta: SeededDelta }> {
   const { managedRoot, packRoot, state } = options;
   const result: PackSyncResult = { added: [], refreshed: [], preserved: [], skipped: [], errors: [] };
-  const seeded: Record<string, string> = { ...state.seeded };
+  const delta: SeededDelta = {};
   const { entries, errors } = await readPackEntries(packRoot);
   result.errors.push(...errors);
   for (const entry of entries) {
     const destination = path.join(managedRoot, entry.id);
-    if (state.removed.includes(entry.id)) { result.skipped.push(entry.id); delete seeded[entry.id]; continue; }
+    if (state.removed.includes(entry.id)) { result.skipped.push(entry.id); delta[entry.id] = null; continue; }
     const recorded = state.seeded[entry.id];
     let present = false;
     try { present = (await fs.lstat(destination)).isDirectory(); } catch { present = false; }
     try {
       if (!present) {
         await copySkill(entry.source, destination);
-        seeded[entry.id] = entry.digest;
+        delta[entry.id] = entry.digest;
         result.added.push(entry.id);
         continue;
       }
       const current = await directoryDigest(destination).catch(() => null);
       if (current !== null && recorded !== undefined && current === recorded) {
         await copySkill(entry.source, destination);
-        seeded[entry.id] = entry.digest;
+        delta[entry.id] = entry.digest;
         result.refreshed.push(entry.id);
         continue;
       }
-      // Either the user edited it, or provenance is unknown. Both mean "do not touch".
+      // Either the user edited it, or provenance is unknown. Both mean "do not touch", and a
+      // preserved entry is not in the delta at all: it keeps whatever record the state holds.
       result.preserved.push(entry.id);
-      if (recorded !== undefined) seeded[entry.id] = recorded;
     } catch (error) {
       // Only the two copy branches reach here, and both destinations are this app's own work —
       // never the user's content — so a half-written copy is discarded rather than left behind,
@@ -185,11 +215,10 @@ export async function syncSkillPack(options: {
   // test's, another profile's — must not publish that root's contents as the app's library.
   //
   // Its failure is reported, never thrown: this runs after the copies, and a throw here would
-  // discard the whole provenance map — the same degradation the loop's isolation exists to
-  // prevent.
+  // discard the whole delta — the same degradation the loop's isolation exists to prevent.
   if ((result.added.length || result.refreshed.length) && skillsDirectory() === managedRoot) {
     try { await listSkills(); }
     catch (error) { result.errors.push(`catalog: ${error instanceof Error ? error.message : String(error)}`); }
   }
-  return { result, seeded };
+  return { result, delta };
 }

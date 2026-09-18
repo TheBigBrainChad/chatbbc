@@ -19,7 +19,7 @@ import { setBrowserOpener, setBrowserWorkArea, shutdownBridge, startBridge } fro
 import { flushSessions, initSessionStore } from './session/store.js';
 import { initSkillsPath, skillsDirectory } from './skills.js';
 import { currentSkillState, mutateSkillState, restoreSkillState } from './skill-state.js';
-import { bundledSkillPackRoot, syncSkillPack } from './skill-pack.js';
+import { bundledSkillPackRoot, mergeSeedDelta, syncSkillPack } from './skill-pack.js';
 import { usageOverview } from './session/usage.js';
 import {
   flushRecorder,
@@ -330,10 +330,10 @@ void app.whenReady().then(async () => {
     const packRoot = bundledSkillPackRoot();
     const managed = skillsDirectory();
     if (packRoot && managed) {
-      const { result, seeded } = await syncSkillPack({ managedRoot: managed, packRoot, state: currentSkillState() });
-      if (JSON.stringify(seeded) !== JSON.stringify(currentSkillState().seeded)) {
-        await mutateSkillState(state => ({ ...state, seeded }));
-      }
+      const { result, delta } = await syncSkillPack({ managedRoot: managed, packRoot, state: currentSkillState() });
+      // Merged against the state at commit time, not a snapshot taken before the pass: a delta
+      // names only the entries this sync touched, so a concurrent toggle's own record survives.
+      if (Object.keys(delta).length) await mutateSkillState(state => mergeSeedDelta(state, delta));
       if (result.errors.length) logWarn(`Skill pack: ${result.errors.join('; ')}`);
     }
   } catch (error) {

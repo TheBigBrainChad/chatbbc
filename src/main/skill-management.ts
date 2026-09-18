@@ -13,7 +13,7 @@
 
 import { SKILL_ID_PATTERN } from '../shared/skills.js';
 import { currentSkillState, mutateSkillState, type SkillState } from './skill-state.js';
-import { bundledSkillPackRoot, syncSkillPack } from './skill-pack.js';
+import { bundledSkillPackRoot, mergeSeedDelta, syncSkillPack } from './skill-pack.js';
 import { skillsDirectory } from './skills.js';
 
 /**
@@ -74,6 +74,11 @@ export async function resetPackedSkill(id: string): Promise<SkillState> {
   const managedRoot = skillsDirectory();
   if (!packRoot || !managedRoot) throw new Error('The bundled skill pack is unavailable');
   await mutateSkillState(state => ({ ...state, removed: state.removed.filter(entry => entry !== id) }));
-  const { seeded } = await syncSkillPack({ managedRoot, packRoot, state: currentSkillState() });
-  return mutateSkillState(current => ({ ...current, seeded }));
+  const { delta } = await syncSkillPack({ managedRoot, packRoot, state: currentSkillState() });
+  // The delta is merged inside the mutation, against the state as it is at commit time. Folding
+  // it into a snapshot read before the sync would re-install that snapshot and discard any
+  // provenance another caller recorded while the filesystem pass was running — a copy whose
+  // record is lost can never be refreshed again. `mergeSeedDelta` only touches the ids this
+  // pass actually wrote, so it cannot erase them.
+  return mutateSkillState(current => mergeSeedDelta(current, delta));
 }

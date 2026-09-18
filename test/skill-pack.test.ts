@@ -4,7 +4,7 @@ import path from 'node:path';
 import { makeTempDir, removeTempDir } from './helpers.js';
 import { emptySkillState } from '../src/main/skill-state.js';
 import { skillCatalogInstructions, initSkillsPath, listSkills, skillsDirectory } from '../src/main/skills.js';
-import { directoryDigest, readPackEntries, syncSkillPack } from '../src/main/skill-pack.js';
+import { directoryDigest, mergeSeedDelta, readPackEntries, syncSkillPack } from '../src/main/skill-pack.js';
 
 let root: string, pack: string, managed: string;
 const skill = (name: string, body = 'Body.') => `---\nname: ${name}\ndescription: A test skill for ${name}.\n---\n${body}`;
@@ -25,20 +25,19 @@ beforeEach(async () => {
 afterEach(async () => { await removeTempDir(root); });
 
 it('seeds every packed skill into an empty library', async () => {
-  const { result, seeded } = await syncSkillPack({ managedRoot: managed, packRoot: pack, state: emptySkillState() });
+  const { result, delta } = await syncSkillPack({ managedRoot: managed, packRoot: pack, state: emptySkillState() });
   expect(result.added.sort()).toEqual(['alpha', 'beta']);
   expect(result.errors).toEqual([]);
   expect(await fs.readFile(path.join(managed, 'alpha', 'SKILL.md'), 'utf8')).toBe(skill('Alpha'));
   expect(await fs.readFile(path.join(managed, 'beta', 'reference.md'), 'utf8')).toBe('Supporting bytes.');
-  expect(Object.keys(seeded).sort()).toEqual(['alpha', 'beta']);
+  // The delta names exactly what the pass wrote — everything, for a library that had nothing.
+  expect(Object.keys(delta).sort()).toEqual(['alpha', 'beta']);
 });
 
 it('is a no-op when the managed copy still matches what we wrote', async () => {
   const first = await syncSkillPack({ managedRoot: managed, packRoot: pack, state: emptySkillState() });
-  const second = await syncSkillPack({
-    managedRoot: managed, packRoot: pack,
-    state: { ...emptySkillState(), seeded: first.seeded }
-  });
+  const state = mergeSeedDelta(emptySkillState(), first.delta);
+  const second = await syncSkillPack({ managedRoot: managed, packRoot: pack, state });
   expect(second.result.added).toEqual([]);
   expect(second.result.preserved).toEqual([]);
   expect(second.result.refreshed.sort()).toEqual(['alpha', 'beta']);
@@ -46,37 +45,38 @@ it('is a no-op when the managed copy still matches what we wrote', async () => {
 
 it('preserves a skill the user edited instead of overwriting it', async () => {
   const first = await syncSkillPack({ managedRoot: managed, packRoot: pack, state: emptySkillState() });
+  const state = mergeSeedDelta(emptySkillState(), first.delta);
   await write(path.join(managed, 'alpha', 'SKILL.md'), skill('Alpha', 'My own edit.'));
   const edited = await directoryDigest(path.join(managed, 'alpha'));
-  const second = await syncSkillPack({
-    managedRoot: managed, packRoot: pack,
-    state: { ...emptySkillState(), seeded: first.seeded }
-  });
+  const second = await syncSkillPack({ managedRoot: managed, packRoot: pack, state });
   expect(second.result.preserved).toContain('alpha');
   expect(await fs.readFile(path.join(managed, 'alpha', 'SKILL.md'), 'utf8')).toBe(skill('Alpha', 'My own edit.'));
-  // The stale provenance hash is retained, so the edit keeps being preserved next launch.
-  expect(second.seeded.alpha).toBe(first.seeded.alpha);
-  expect(edited).not.toBe(first.seeded.alpha);
+  // A preserved entry is untouched, so it is absent from the delta and keeps the stale hash
+  // the state already holds — which is what makes the edit keep being preserved next launch.
+  expect(second.delta.alpha).toBeUndefined();
+  expect(mergeSeedDelta(state, second.delta).seeded.alpha).toBe(state.seeded.alpha);
+  expect(edited).not.toBe(state.seeded.alpha);
 });
 
 it('never resurrects a skill the user removed', async () => {
-  const { seeded } = await syncSkillPack({ managedRoot: managed, packRoot: pack, state: emptySkillState() });
+  const first = await syncSkillPack({ managedRoot: managed, packRoot: pack, state: emptySkillState() });
+  const state = mergeSeedDelta(emptySkillState(), first.delta);
   await fs.rm(path.join(managed, 'alpha'), { recursive: true });
-  const { result, seeded: next } = await syncSkillPack({
-    managedRoot: managed, packRoot: pack,
-    state: { ...emptySkillState(), seeded, removed: ['alpha'] }
-  });
-  expect(result.skipped).toContain('alpha');
+  const second = await syncSkillPack({ managedRoot: managed, packRoot: pack, state: { ...state, removed: ['alpha'] } });
+  expect(second.result.skipped).toContain('alpha');
   expect(await exists(path.join(managed, 'alpha'))).toBe(false);
-  expect(next.alpha).toBeUndefined();
-  expect(result.refreshed).toContain('beta');
+  // A tombstoned entry's record is dropped by the delta, so the next read cannot resurrect it.
+  expect(second.delta.alpha).toBeNull();
+  expect(mergeSeedDelta(state, second.delta).seeded.alpha).toBeUndefined();
+  expect(second.result.refreshed).toContain('beta');
 });
 
 it('re-seeds a removed-then-reinstalled skill only once its tombstone is cleared', async () => {
-  const { seeded } = await syncSkillPack({ managedRoot: managed, packRoot: pack, state: emptySkillState() });
+  const first = await syncSkillPack({ managedRoot: managed, packRoot: pack, state: emptySkillState() });
+  const state = mergeSeedDelta(emptySkillState(), first.delta);
   await fs.rm(path.join(managed, 'alpha'), { recursive: true });
-  await syncSkillPack({ managedRoot: managed, packRoot: pack, state: { ...emptySkillState(), seeded, removed: ['alpha'] } });
-  const cleared = await syncSkillPack({ managedRoot: managed, packRoot: pack, state: { ...emptySkillState(), seeded } });
+  await syncSkillPack({ managedRoot: managed, packRoot: pack, state: { ...state, removed: ['alpha'] } });
+  const cleared = await syncSkillPack({ managedRoot: managed, packRoot: pack, state });
   expect(cleared.result.added).toContain('alpha');
   expect(await exists(path.join(managed, 'alpha', 'SKILL.md'))).toBe(true);
 });
@@ -123,14 +123,16 @@ it('isolates a failed copy so later skills still seed and provenance still lands
   expect(first.result.errors.join(' ')).toMatch(/alpha/);
   expect(first.result.errors.join(' ')).toMatch(/EACCES/);
   expect(first.result.added).toEqual(['beta']);
-  expect(first.seeded.alpha).toBeUndefined();
+  // The failed entry contributes nothing to the delta; only the copy that landed is recorded.
+  expect(first.delta.alpha).toBeUndefined();
+  expect(first.delta.beta).toBeDefined();
   expect(await exists(path.join(managed, 'beta', 'SKILL.md'))).toBe(true);
   // The digest for the skill that did copy has to survive the failure. Without it the next
   // launch reads the directory as provenance-unknown, preserves it, and the pack can never
   // refresh that skill again.
   const next = await syncSkillPack({
     managedRoot: managed, packRoot: pack,
-    state: { ...emptySkillState(), seeded: first.seeded }
+    state: mergeSeedDelta(emptySkillState(), first.delta)
   });
   expect(next.result.refreshed).toContain('beta');
   expect(next.result.added).toContain('alpha');

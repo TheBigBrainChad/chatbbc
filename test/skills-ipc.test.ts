@@ -8,6 +8,7 @@
 
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
+import { EventEmitter, once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { makeTempDir, removeTempDir } from './helpers.js';
@@ -94,7 +95,10 @@ async function tombstone(id: string): Promise<{ packRoot: string; managedRoot: s
   const managedRoot = skillsDirectory();
   if (!packRoot || !managedRoot) throw new Error('The bundled skill pack must be present for this suite');
   await fs.rm(path.join(managedRoot, id), { recursive: true, force: true });
-  setSkillStateForTests({ ...emptySkillState(), removed: [id] });
+  // Merged into the current state rather than replacing it: a removal records one tombstone and
+  // touches nothing else, which matters while another reset's provenance is in flight.
+  const current = currentSkillState();
+  setSkillStateForTests({ ...current, removed: [...current.removed.filter(entry => entry !== id), id] });
   return { packRoot, managedRoot };
 }
 
@@ -122,6 +126,59 @@ it('leaves the restored choice on disk, so a restart keeps the skill', async () 
   await resetPackedSkill(id);
   await restoreSkillState();
   expect(currentSkillState().removed).not.toContain(id);
+});
+
+/**
+ * Two resets can overlap: the IPC layer has no busy guard, and a sync is a filesystem pass
+ * that runs outside `mutateSkillState`'s serialization. Provenance recorded by one while the
+ * other is mid-pass must survive the other's commit — a copy whose record is dropped is read
+ * as provenance-unknown next launch, preserved forever, and never refreshed again.
+ *
+ * The interleave is forced deterministically, without any waiting on the clock: the first
+ * reset's sync awaits a gate at its first copy, the second reset runs to completion inside
+ * that window, and only then is the first released.
+ */
+it('keeps both skills\u2019 provenance when two resets overlap', async () => {
+  const first = 'brainstorming', second = 'systematic-debugging';
+  const { packRoot, managedRoot } = await tombstone(first);
+
+  // The parked copy signals that it has arrived, so the test awaits the real event rather
+  // than guessing how long the pass takes. `once` is used instead of a hand-rolled deferred
+  // because this project's typecheck targets ES2023, which has no `Promise.withResolvers`.
+  const gate = new EventEmitter();
+  let parked = false;
+  const realCopy = fs.cp.bind(fs);
+  const copier = vi.spyOn(fs, 'cp').mockImplementation(async (from, to, options) => {
+    // Only the first reset's pass is parked; the second's copies pass straight through.
+    if (!parked && path.basename(String(from)) === first) {
+      parked = true;
+      gate.emit('entered');
+      await once(gate, 'release');
+    }
+    return realCopy(from, to, options);
+  });
+
+  const firstReset = resetPackedSkill(first);
+  await once(gate, 'entered');
+  // The first reset is provably mid-pass here. Let the second complete entirely, then release.
+  await tombstone(second);
+  const secondState = await resetPackedSkill(second);
+  expect(secondState.seeded[second]).toBeDefined();
+  gate.emit('release');
+  const firstState = await firstReset.finally(() => copier.mockRestore());
+
+  // Neither reset's records erased the other's.
+  const seeded = currentSkillState().seeded;
+  expect(firstState.seeded[first]).toBeDefined();
+  expect(seeded[first]).toBe(await directoryDigest(path.join(packRoot, first)));
+  expect(seeded[second]).toBeDefined();
+  // And a later launch still recognizes both as this app's own work, refreshing rather than
+  // preserving them, so the permanent degradation the delta prevents is actually absent.
+  const next = await syncSkillPack({ managedRoot, packRoot, state: currentSkillState() });
+  expect(next.result.refreshed).toContain(first);
+  expect(next.result.refreshed).toContain(second);
+  expect(next.result.preserved).not.toContain(first);
+  expect(next.result.preserved).not.toContain(second);
 });
 
 it('applies a choice from the renderer channel and refuses payloads outside the schema', async () => {
