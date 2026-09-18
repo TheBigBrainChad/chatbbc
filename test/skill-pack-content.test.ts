@@ -34,13 +34,14 @@ it('every SKILL.md has frontmatter, fits the admission limits, and is plain UTF-
 
 it('carries no foreign harness vocabulary', async () => {
   const forbidden = [/\bsuperpowers:/, /\bClaude\b/, /\bTodoWrite\b/, /\bAnthropic\b/, /\bTask tool\b/];
+  // Walk, not readdir: the shipped `scripts/` helpers are exactly the files whose comments
+  // carried upstream's harness vocabulary, and a shallow scan would let a re-vendor restore
+  // them while every test still passed.
   for (const id of EXPECTED) {
-    const files = await fs.readdir(path.join(pack, id), { withFileTypes: true });
-    for (const entry of files) {
-      if (!entry.isFile()) continue;
-      const body = await fs.readFile(path.join(pack, id, entry.name), 'utf8');
+    for await (const file of walk(path.join(pack, id))) {
+      const body = await fs.readFile(file, 'utf8');
       for (const pattern of forbidden) {
-        expect(pattern.test(body), `${id}/${entry.name} matches ${pattern}`).toBe(false);
+        expect(pattern.test(body), `${path.relative(pack, file)} matches ${pattern}`).toBe(false);
       }
     }
   }

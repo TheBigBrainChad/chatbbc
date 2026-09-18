@@ -1,11 +1,15 @@
 # Scoped Re-Review Prompt Template
 
-Use this template when dispatching a re-review after a fix round. The
+Use this template when spawning a re-review after a fix round. The
 re-reviewer verifies the findings were addressed and checks the fix diff for
 new breakage. It is not a fresh review — the full review already happened.
 
 **Purpose:** Verify each finding from the previous review was addressed, and
 that the fix itself broke nothing.
+
+**Keep this `task` body under 4,000 characters** — ChatBBC's hard cap per worker
+task (`MAX_TASK_CHARS`, `src/main/agents.ts`). This body fits today; a re-vendor
+must not push it over, and a long `[FINDINGS]` list counts toward the limit.
 
 ```
 agents action=spawn

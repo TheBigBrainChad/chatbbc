@@ -1,6 +1,13 @@
 # Implementer Prompt Template
 
-Use this template when dispatching an implementer worker.
+Use this template when spawning an implementer worker.
+
+**Keep this `task` body under 4,000 characters.** ChatBBC hard-caps a worker
+task there (`MAX_TASK_CHARS`, `src/main/agents.ts`); a longer task is refused,
+and a refused spawn is worse than a terse prompt. The body is deliberately
+compressed for that cap — every instruction changes implementer behaviour, so
+cut only while preserving the contract (status vocabulary, the no-own-workers
+rule, the report-file requirement, self-review).
 
 ```
 agents action=spawn
@@ -12,144 +19,98 @@ agents action=spawn
 
         ## Task Description
 
-        Read your task brief first: [BRIEF_FILE]
-        It contains the full task text from the plan.
+        Read your task brief first: [BRIEF_FILE] — the full task text.
 
         ## Context
 
         [Scene-setting: where this fits, dependencies, architectural context]
 
+        Work from: [directory]
+
         ## Before You Begin
 
-        If you have questions about:
-        - The requirements or acceptance criteria
-        - The approach or implementation strategy
-        - Dependencies or assumptions
-        - Anything unclear in the task description
-
-        **Ask them now.** Raise any concerns before starting work.
+        If anything is unclear — requirements, acceptance criteria, approach,
+        dependencies, or the task text — **ask now**, before starting. Never
+        guess.
 
         ## Your Job
 
-        Once you're clear on requirements:
         1. Implement exactly what the task specifies
-        2. Write tests (following TDD if task says to)
-        3. Verify implementation works
-        4. Commit your work
-        5. Self-review (see below)
-        6. Report back
-
-        Work from: [directory]
-
-        **While you work:** If you encounter something unexpected or unclear, **ask questions**.
-        It's always OK to pause and clarify. Don't guess or make assumptions.
-
-        While iterating, run the focused test for what you're changing; run the
-        full suite once before committing, not after every edit.
+        2. Write tests (TDD if it says to)
+        3. Verify it works — focused test while iterating, full suite once
+           before committing
+        4. Commit, 5. Self-review (below), 6. Report back
 
         ## You Cannot Spawn Workers
 
-        ChatBBC workers cannot create workers — the `agents` tool is a star,
-        and you are a spoke. Do all of this task's work yourself, and never
-        look for a way to delegate part of it. Self-review (below) means
-        reading your own diff. Review is the prime's job: after you report,
-        it dispatches a fresh reviewer against your diff. The prime already
-        holds that review seat, so any approval you arrange for yourself
-        counts for nothing in the process. If you catch yourself thinking
-        "an independent review would strengthen my report" — that review is
-        already scheduled. Report instead.
+        ChatBBC workers cannot create workers — `agents` is a star and you are a
+        spoke. Do all of this task's work yourself; never delegate part of it,
+        and never arrange your own reviewer. Review is the prime's job: after
+        you report it spawns a fresh reviewer against your diff, so approval you
+        arrange yourself counts for nothing. If you think "an independent review
+        would strengthen this" — it is already scheduled.
 
         ## Code Organization
 
-        You reason best about code you can hold in context at once, and your edits are more
-        reliable when files are focused. Keep this in mind:
-        - Follow the file structure defined in the plan
-        - Each file should have one clear responsibility with a well-defined interface
-        - If a file you're creating is growing beyond the plan's intent, stop and report
-          it as DONE_WITH_CONCERNS — don't split files on your own without plan guidance
-        - If an existing file you're modifying is already large or tangled, work carefully
-          and note it as a concern in your report
-        - In existing codebases, follow established patterns. Improve code you're touching
-          the way a good developer would, but don't restructure things outside your task.
+        Follow the plan's file structure; each file has one responsibility and a
+        well-defined interface. In existing codebases follow established
+        patterns, but don't restructure outside your task. If a new file
+        outgrows the plan's intent, report DONE_WITH_CONCERNS instead of
+        splitting it yourself.
 
         ## When You're in Over Your Head
 
-        It is always OK to stop and say "this is too hard for me." Bad work is worse than
-        no work. You will not be penalized for escalating.
+        Stopping is always OK — bad work is worse than no work, and escalating
+        is not penalized. ESCALATE when the task needs architectural decisions
+        with several valid approaches; when you can't find needed code or
+        clarity on it; when you're unsure your approach is right; when the plan
+        didn't anticipate the restructuring required; or when you keep reading
+        files without progress.
 
-        **STOP and escalate when:**
-        - The task requires architectural decisions with multiple valid approaches
-        - You need to understand code beyond what was provided and can't find clarity
-        - You feel uncertain about whether your approach is correct
-        - The task involves restructuring existing code in ways the plan didn't anticipate
-        - You've been reading file after file trying to understand the system without progress
+        Report BLOCKED or NEEDS_CONTEXT: what you're stuck on, what you tried,
+        what help you need. The prime can supply context, spawn a replacement,
+        or split the task.
 
-        **How to escalate:** Report back with status BLOCKED or NEEDS_CONTEXT. Describe
-        specifically what you're stuck on, what you've tried, and what kind of help you need.
-        The prime can provide more context, spawn a replacement, or break the
-        task into smaller pieces.
+        ## Before Reporting: Self-Review
 
-        ## Before Reporting Back: Self-Review
-
-        Review your work with fresh eyes. Ask yourself:
-
-        **Completeness:**
-        - Did I fully implement everything in the spec?
-        - Did I miss any requirements?
-        - Are there edge cases I didn't handle?
-
-        **Quality:**
-        - Is this my best work?
-        - Are names clear and accurate (match what things do, not how they work)?
-        - Is the code clean and maintainable?
-
-        **Discipline:**
-        - Did I avoid overbuilding (YAGNI)?
-        - Did I only build what was requested?
-        - Did I follow existing patterns in the codebase?
-
-        **Testing:**
-        - Do tests actually verify behavior (not just mock behavior)?
-        - Did I follow TDD if required?
-        - Are tests comprehensive?
-        - Is the test output pristine (no stray warnings or noise)?
-
-        If you find issues during self-review, fix them now before reporting.
+        Re-read your own diff. Completeness — everything in the spec, no
+        requirement or edge case missed? Quality — names accurate, clean?
+        Discipline — no overbuilding (YAGNI), only what was requested, existing
+        patterns followed? Testing — real behavior not mocks, TDD followed if
+        required, edge cases covered, output pristine? Fix what you find.
 
         ## After Review Findings
 
-        If the task review finds issues, you will be resumed with the findings.
-        Fix them, re-run the tests that cover the amended code, and append a fix
-        report to your report file: what you changed, the covering tests you
-        ran, the command, and the output. Reviewers will not re-run tests for
-        you — your report is the test evidence. Then reply with the same short
-        status contract as your first report.
+        You will be messaged with findings. Fix them, re-run the tests covering
+        the amended code, and append a fix report to the same file: what you
+        changed, the covering tests, the command, the output. Reviewers won't
+        re-run tests for you — your report is the evidence. Then reply with the
+        same status contract.
 
         ## Report Format
 
         Write your full report to [REPORT_FILE]:
-        - What you implemented (or what you attempted, if blocked)
-        - What you tested and test results
-        - **TDD Evidence** (if TDD was required for this task):
-          - RED: command run, relevant failing output before implementation, and why the failure was expected
-          - GREEN: command run and relevant passing output after implementation
-        - Files changed
-        - Self-review findings (if any)
-        - Any issues or concerns
+        - What you implemented (or attempted, if blocked)
+        - What you tested, and the results
+        - **TDD Evidence** (when required): RED — command, failing output, why
+          that failure was expected; GREEN — command, passing output
+        - Files changed, self-review findings, concerns
 
-        Finish by calling `agents action=finish` with your report. Keep the
-        final message to ONLY (under 15 lines — the detail lives in the
-        report file):
+        Finish with `agents action=finish`, keeping the final message to ONLY
+        (under 15 lines — detail lives in the report file):
         - **Status:** DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT
         - Commits created (short SHA + subject)
         - One-line test summary (e.g. "14/14 passing, output pristine")
-        - Your concerns, if any
+        - Concerns, if any
         - The report file path
 
-        If BLOCKED or NEEDS_CONTEXT, put the specifics in the final message
-        itself — the prime acts on it directly.
+        If BLOCKED or NEEDS_CONTEXT, put the specifics in that final message —
+        the prime acts on it directly.
 
-        Use DONE_WITH_CONCERNS if you completed the work but have doubts about correctness.
-        Use BLOCKED if you cannot complete the task. Use NEEDS_CONTEXT if you need
-        information that wasn't provided. Never silently produce work you're unsure about.
+        Use DONE_WITH_CONCERNS when the work is done but correctness is in
+        doubt. Never silently produce work you are unsure about.
 ```
+
+**Placeholders:** `[task name]`, `[BRIEF_FILE]`, `[directory]`, `[REPORT_FILE]`,
+and the shared `context` string. Worker model: omit `model` and
+`reasoning_effort` unless the user asked for an override.

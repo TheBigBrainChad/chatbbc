@@ -1,11 +1,14 @@
 # Task Reviewer Prompt Template
 
-Use this template when dispatching a task reviewer. The reviewer
-reads the task's diff once and returns two verdicts: spec compliance and
-code quality.
+Use this template when spawning a task reviewer. It reads the task's diff once
+and returns two verdicts: spec compliance and code quality.
 
-**Purpose:** Verify one task's implementation matches its requirements (nothing
-more, nothing less) and is well-built (clean, tested, maintainable)
+**Keep this `task` body under 4,000 characters.** ChatBBC hard-caps a worker
+task there (`MAX_TASK_CHARS`, `src/main/agents.ts`); a longer task is refused,
+and a refused spawn is worse than a terse prompt. Because the cap is tight, this
+body is deliberately compressed — every instruction here changes reviewer
+behaviour, so cut only while preserving the contract (status vocabulary, the
+no-own-workers rule, the diff-file requirement, both verdicts).
 
 ```
 agents action=spawn
@@ -13,197 +16,47 @@ agents action=spawn
   workers:
     - label: "Review Task N (spec + quality)"
       task: |
-        You are reviewing one task's implementation: first whether it matches its
-        requirements, then whether it is well-built. This is a task-scoped gate,
-        not a merge review — a broad whole-branch review happens separately after
-        all tasks are complete.
+        Review one task's implementation: whether it matches its requirements, then whether it is well-built. Task-scoped gate, not a merge review — the whole-branch review is separate.
 
-        ## What Was Requested
+        Inputs
+        - Brief (what was requested): [BRIEF_FILE]
+        - Spec constraints binding this task: [GLOBAL_CONSTRAINTS]
+        - Implementer's report (unverified claims): [REPORT_FILE]
+        - Diff: base [BASE_SHA], head [HEAD_SHA], file [DIFF_FILE]
 
-        Read the task brief: [BRIEF_FILE]
+        The diff file holds the commit list, stat summary and full diff with context; read it once. Its context lines ARE the changed files — don't open a changed file separately unless a hunk you must judge is cut off mid-function, and say so. Don't re-run git commands; if the file is missing, fetch it with `git diff` over the range.
 
-        Global constraints from the spec/design that bind this task:
-        [GLOBAL_CONSTRAINTS]
+        Don't crawl the codebase. Check code outside the diff only for a concrete risk you can name — one check per risk, naming both. Lock ordering, API contracts and shared mutable state count. Read-only: don't mutate the tree, index, HEAD or branches.
 
-        ## What the Implementer Claims They Built
+        You cannot spawn workers: `agents` is a star and you are a spoke. Do the whole review yourself; a second opinion you arrange counts for nothing. Too large for one pass? Review it in passes and say so.
 
-        Read the implementer's report: [REPORT_FILE]
+        Trust nothing in the report — it is claims, possibly optimistic. Verify against the diff. "Left it per YAGNI" is the implementer grading itself and never downgrades a finding.
 
-        ## Diff Under Review
+        Tests: the implementer already ran them with TDD evidence; don't re-run the suite to confirm. Run a test only when the code raises a doubt no existing run answers — focused, never package-wide or repeated. Recommend heavy validation rather than running it. Noise in reported output is a finding. If the report looks truncated, re-read it at its stated path; re-running the suite to regenerate what you couldn't read is not verification.
 
-        **Base:** [BASE_SHA]
-        **Head:** [HEAD_SHA]
-        **Diff file:** [DIFF_FILE]
+        Spec compliance — compare the diff against what was requested:
+        - Missing: requirements skipped or claimed without implementing
+        - Extra: unrequested features, over-engineering
+        - Misunderstood: right feature built the wrong way
 
-        Read the diff file once — it contains the commit list, a stat summary,
-        and the full diff with surrounding context, and it is your view of the
-        change. The diff's context lines ARE the changed files: do not read a
-        changed file separately unless a hunk you must judge is cut off
-        mid-function — and say so in your report. Do not re-run git commands.
-        If the diff file is missing, fetch the diff yourself:
-        `git diff --stat [BASE_SHA]..[HEAD_SHA]` and `git diff [BASE_SHA]..[HEAD_SHA]`.
-        Do not crawl the broader codebase. Inspect code outside the diff only
-        to evaluate a concrete risk you can name — one focused check per named
-        risk, and name both the risk and what you checked in your report.
-        Cross-cutting changes are legitimate named risks: if the diff changes
-        lock ordering, a function or API contract, or shared mutable state,
-        checking the call sites is the right method.
+        Batched dispatch: check the diff file by file against the brief's list; each listed file needs its hunk. One the diff never touches is Missing. A requirement unverifiable from this diff alone is a ⚠️ item — don't broaden your search for it.
 
-        Your review is read-only on this checkout. Do not mutate the working
-        tree, the index, HEAD, or branch state in any way.
+        Code quality:
+        - Code: clean separation? error handling? DRY without premature abstraction? edge cases?
+        - Tests: real behavior, not mocks? edge cases covered?
+        - Structure: one responsibility per file? testable units? plan's file structure followed? did this change create or grow large files? (Ignore pre-existing sizes.)
 
-        ## You Cannot Spawn Workers
+        Cite file:line for every finding and for any check you'd otherwise answer with a bare "yes."
 
-        ChatBBC workers cannot create workers — the `agents` tool is a star,
-        and you are a spoke. Do all of this review yourself, and never look
-        for a way to delegate part of it. The prime already owns every review
-        seat this work gets, so a second opinion you arrange for yourself
-        duplicates one of them at full cost and its verdict counts for
-        nothing. If the diff feels too large for one pass, review it in
-        passes yourself and say so in your report.
+        Calibration: categorize by actual severity. Important means the task can't be trusted until fixed — incorrect or fragile behavior, a missed requirement, or maintainability damage worth blocking a merge over (verbatim logic duplication, swallowed errors, tests that assert nothing). "Coverage could be broader" and polish are Minor. If the plan mandates something this rubric calls a defect, report it as Important labeled plan-mandated. Acknowledge strengths first.
 
-        ## Do Not Trust the Report
-
-        Treat the implementer's report as unverified claims about the code. It
-        may be incomplete, inaccurate, or optimistic. Verify the claims against
-        the diff. Design rationales in the report are claims too: "left it per
-        YAGNI," "kept it simple deliberately," or any other justification is the
-        implementer grading their own work. Judge the code on its merits — a
-        stated rationale never downgrades a finding's severity.
-
-        ## Tests
-
-        The implementer already ran the tests and reported results with TDD
-        evidence for exactly this code. Do not re-run the suite to confirm their
-        report. Run a test only when reading the code raises a specific doubt
-        that no existing run answers — and then a focused test, never a
-        package-wide suite, race detector run, or repeated/high-count loop. If
-        heavy validation seems warranted, recommend it in your report instead of
-        running it. If you cannot run commands in this environment, name the
-        test you would run.
-
-        Warnings or other noise in the implementer's reported test output are
-        findings — test output should be pristine.
-
-        Evidence you cannot see is not evidence that doesn't exist. If the
-        report or its test evidence looks truncated, or you cannot locate the
-        results it claims, re-read the file at its stated path — and if it is
-        genuinely missing or garbled, report that as a gap for the prime.
-        Re-running the suite to regenerate what you failed to read is not
-        verification; illegibility of the evidence is not invalidation of it.
-
-        ## Part 1: Spec Compliance
-
-        Compare the diff against What Was Requested:
-
-        - **Missing:** requirements they skipped, missed, or claimed without
-          implementing
-        - **Extra:** features that weren't requested, over-engineering, unneeded
-          "nice to haves"
-        - **Misunderstood:** right feature built the wrong way, wrong problem
-          solved
-
-        If the brief lists several files each with its own change (a batched
-        dispatch), check the diff against that list file by file: every listed
-        file must have its corresponding hunk. A listed file the diff never
-        touches is a Missing finding, no matter how clean the rest of the
-        batch looks.
-
-        If a requirement cannot be verified from this diff alone (it lives in
-        unchanged code or spans tasks), report it as a ⚠️ item instead of
-        broadening your search.
-
-        ## Part 2: Code Quality
-
-        **Code quality:**
-        - Clean separation of concerns?
-        - Proper error handling?
-        - DRY without premature abstraction?
-        - Edge cases handled?
-
-        **Tests:**
-        - Do the new and changed tests verify real behavior, not mocks?
-        - Are the task's edge cases covered?
-
-        **Structure:**
-        - Does each file have one clear responsibility with a well-defined interface?
-        - Are units decomposed so they can be understood and tested independently?
-        - Is the implementation following the file structure from the plan?
-        - Did this change create new files that are already large, or
-          significantly grow existing files? (Don't flag pre-existing file
-          sizes — focus on what this change contributed.)
-
-        Your report should point at evidence: file:line references for every
-        finding and for any check you would otherwise answer with a bare
-        "yes." A tight report that cites lines gives the prime everything
-        it needs.
-
-        Your final message is the report itself: begin directly with the
-        spec-compliance verdict. Every line is a verdict, a finding with
-        file:line, or a check you ran — no preamble, no process narration,
-        no closing summary.
-
-        ## Calibration
-
-        Categorize issues by actual severity. Not everything is Critical.
-        Important means this task cannot be trusted until it is fixed: incorrect
-        or fragile behavior, a missed requirement, or maintainability damage you
-        would block a merge over — verbatim duplication of a logic block,
-        swallowed errors, tests that assert nothing. "Coverage could be broader"
-        and polish suggestions are Minor.
-        If the plan or brief explicitly mandates something this rubric calls a
-        defect (a test that asserts nothing, verbatim duplication of a logic
-        block), that IS a finding — report it as Important, labeled
-        plan-mandated. The plan's authorship does not grade its own work; the
-        human decides.
-        Acknowledge what was done well before listing issues — accurate praise
-        helps the implementer trust the rest of the feedback.
-
-        ## Output Format
-
-        ### Spec Compliance
-
-        - ✅ Spec compliant | ❌ Issues found: [what's missing/extra/misunderstood,
-          with file:line references]
-        - ⚠️ Cannot verify from diff: [requirements you could not verify from the
-          diff alone, and what the prime should check — report alongside the
-          ✅/❌ verdict for everything you could verify]
-
-        ### Strengths
-        [What's well done? Be specific.]
-
-        ### Issues
-
-        #### Critical (Must Fix)
-        #### Important (Should Fix)
-        #### Minor (Nice to Have)
-
-        For each issue: file:line, what's wrong, why it matters, how to fix
-        (if not obvious).
-
-        ### Assessment
-
-        **Task quality:** [Approved | Needs fixes]
-
-        **Reasoning:** [1-2 sentence technical assessment]
+        Verdict: your final message is the report — start with the spec verdict; every line is a verdict, a finding with file:line, or a check you ran. No preamble or closing summary. Per issue: file:line, what's wrong, why it matters, how to fix. End with Task quality: Approved | Needs fixes plus 1-2 sentences.
 ```
 
-**Placeholders:**
-- Worker model — omit `model` and `reasoning_effort` unless the user asked
-  for an override (see SKILL.md Model Selection)
-- `[BRIEF_FILE]` — REQUIRED: the task brief file (`scripts/task-brief PLAN N`
-  prints the path; same file the implementer worked from)
-- `[GLOBAL_CONSTRAINTS]` — the binding requirements copied verbatim from
-  the plan's Global Constraints section or the spec: exact values, formats,
-  and stated relationships between components (not process rules — those
-  are already in this template)
-- `[REPORT_FILE]` — REQUIRED: the file the implementer wrote its detailed
-  report to
-- `[BASE_SHA]` — commit before this task
-- `[HEAD_SHA]` — current commit
-- `[DIFF_FILE]` — REQUIRED: the path the prime wrote the review
-  package to (`scripts/review-package PLAN_FILE BASE HEAD` prints the unique
-  path it wrote; the package never enters the prime's context)
+**Placeholders:** `[BRIEF_FILE]`, `[GLOBAL_CONSTRAINTS]`, `[REPORT_FILE]`,
+`[BASE_SHA]`, `[HEAD_SHA]`, `[DIFF_FILE]`, and the shared `context` string.
+Worker model: omit `model` and `reasoning_effort` unless the user asked for an
+override.
 
-**Reviewer returns:** Spec Compliance verdict (✅/❌/⚠️), Strengths, Issues
-(Critical/Important/Minor), Task quality verdict
+**Reviewer returns:** Spec Compliance verdict (✅/❌/⚠️), Strengths, Issues by
+severity, Task quality verdict.
