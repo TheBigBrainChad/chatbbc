@@ -62,7 +62,7 @@ Hard cut, same class as the historical rename to Chat On Steroids.
 
 - New process identity installs **beside** CoS. It does not uninstall CoS or reuse its `appId`.
 - `userData` starts empty. No copy of sessions, `config.json`, `secrets.bin`, pairing token, swarm, or Goal ledgers from the CoS directory.
-- Bridge `/hello` `app` stamp becomes ChatBBC. **Bump `BRIDGE_PROTOCOL`** (today 14) so a leftover CoS companion gets 426 instead of silently dropping replies. Pairing remains loopback + `chrome-extension://` origin; the token lives in the new secrets file.
+- Bridge `/hello` `app` stamp becomes ChatBBC. **Bump `BRIDGE_PROTOCOL`** (today 14). Note the two gates are separate, and only the second fails with 426: a predecessor companion compares the reply's `app` field against its own slug, so it discards ChatBBC's `/hello` reply entirely and reports the app as not running (the app is never reached); the 426 `incompatible_extension` gate applies to a companion whose slug matches but whose protocol integer does not — the case a later companion-version skew produces. Pairing remains loopback + `chrome-extension://` origin; the token lives in the new secrets file.
 - Extension `manifest.json` name/description become ChatBBC companion. Version still matches `APP_VERSION`.
 - Stop every `totec448-spec/chat-on-steroids` download, homepage, and updater URL. Point package metadata at `TheBigBrainChad/chatbbc`. The repo is private: GitHub `latest` is not a public extension zip. The packaged extension mirrored into `userData/extension` remains the load path.
 
@@ -107,10 +107,10 @@ Do not add tests whose only job is counting the substring `ChatBBC`. Fix suites 
 ## 6. Risks
 
 - Running CoS and ChatBBC at once: two `appId`s and two `userData` dirs, but both still try bridge ports 8765–8769 and may fight if both are open. Don’t run both.
-- Forgetting to bump `BRIDGE_PROTOCOL` reproduces the protocol-7 silent-drop failure.
+- Forgetting to bump `BRIDGE_PROTOCOL` along with the slug reproduces the protocol-7 silent-drop failure for a companion whose slug matches but whose integer does not; the slug move by itself is what breaks a predecessor companion.
 - Keeping any `chat-on-steroids-*` `serverName` makes ChatGPT treat this fork as CoS.
 - Private-repo updater: must not keep fetching upstream CoS artifacts.
 
 ## 7. Acceptance
 
-A ChatBBC install, with its own companion loaded, publishes `chatbbc-core|desktop|plugins`. ChatGPT connector titles are ChatBBC Core/Desktop/Plugins. Window, tray, installer, and extension say ChatBBC. No user- or model-facing “Chat On Steroids” or “CoS”. A CoS companion against this app fails with 426. `userData` is a new empty `chatbbc` directory. LICENSE and contributor history still credit the upstream project.
+A ChatBBC install, with its own companion loaded, publishes `chatbbc-core|desktop|plugins`. ChatGPT connector titles are ChatBBC Core/Desktop/Plugins. Window, tray, installer, and extension say ChatBBC. No user- or model-facing “Chat On Steroids” or “CoS”. A predecessor CoS companion does not connect to this app: it accepts only `/hello` replies stamped with its own `app` slug, so it discards ChatBBC's reply and reports a not-running app. The 426 `incompatible_extension` gate covers a slug-matching companion whose protocol integer differs. `userData` is a new empty `chatbbc` directory. LICENSE and contributor history still credit the upstream project.
