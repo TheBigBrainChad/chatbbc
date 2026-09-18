@@ -13,7 +13,7 @@ the latest version, include that result in the private report.
 
 ## Security model
 
-Chat On Steroids is a permission boundary between ChatGPT and the logged-in OS user running the app:
+ChatBBC is a permission boundary between ChatGPT and the logged-in OS user running the app:
 
 - Filesystem tools validate paths against folders you explicitly approve.
 - Read-only mode disables effective file writes, commands, desktop control and clipboard writes.
@@ -28,7 +28,7 @@ Chat On Steroids is a permission boundary between ChatGPT and the logged-in OS u
 
 Local permissions control access to your machine; they do not authorize bypassing a provider's safety decision, usage limit or account restriction. Do not route a blocked action through another tool, worker, connector or account. Follow the [responsible-use notice](README.md#responsible-use-and-provider-rules) and the applicable provider terms.
 
-CoS is an independent beta used at your own risk. Its browser automation and local recording are not an OpenAI approval or a guarantee of compliance or continued account access. Review the security model and limitations on this page, supervise tool use and stop workflows that receive a provider restriction or policy warning. Account enforcement questions belong with the provider's support or appeal process; keep private notices and account identifiers out of public reports.
+ChatBBC is an independent beta used at your own risk. Its browser automation and local recording are not an OpenAI approval or a guarantee of compliance or continued account access. Review the security model and limitations on this page, supervise tool use and stop workflows that receive a provider restriction or policy warning. Account enforcement questions belong with the provider's support or appeal process; keep private notices and account identifiers out of public reports.
 
 ## Expected limitations
 

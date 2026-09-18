@@ -9,6 +9,26 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## Unreleased — renamed to ChatBBC
+
+This fork is now **ChatBBC** in everything a person, installer, extension or ChatGPT connector
+reads. It is a hard identity cut, not an in-place update:
+
+- **New app identity.** `appId` is `com.chatbbc.app`, the Linux package/executable is `chatbbc`
+  and the app installs beside Chat On Steroids. User data starts empty in a new `chatbbc`
+  folder; sessions, settings, secrets and pairing are not migrated from the old directory.
+- **New MCP server names.** `chatbbc-core`, `chatbbc-desktop` and `chatbbc-plugins`, with the
+  connector titles **ChatBBC Core**, **ChatBBC Desktop** and **ChatBBC Plugins**.
+- **Recreate the ChatGPT connectors.** Delete the three Chat On Steroids apps in Developer mode,
+  create the three ChatBBC apps with the MCP URLs Setup shows, then refresh ChatGPT's connector
+  snapshot. Old app ids are not mapped onto the new names.
+- **Reload the companion.** Load the ChatBBC companion from **Open extension folder**; the
+  packaged extension is the only supported source, and the old Chat On Steroids extension is
+  refused.
+- **Bridge protocol 15.** A leftover Chat On Steroids companion now fails with 426
+  (`incompatible_extension`) instead of silently dropping replies. Do not run both apps at once:
+  they contend for the same local bridge ports.
+
 ## [2.1.14] — dead to openai/anthropic. JOIN THE RESISTANCE @dummerspast39 on x
 
 - Add the optional animated Tur Tur Sahur desktop companion.

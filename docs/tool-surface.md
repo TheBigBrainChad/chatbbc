@@ -6,14 +6,14 @@ authoritative; `src/main/mcp/surfaces.ts`, `src/main/mcp/tools-core.ts`,
 
 ## Connectors
 
-Chat On Steroids publishes Core on Windows, macOS and Linux. Windows and macOS additionally publish
+ChatBBC publishes Core on Windows, macOS and Linux. Windows and macOS additionally publish
 the optional Desktop connector. They are separate discovery and permission boundaries and use
 separate secret tokenized local paths.
 
 | Connector | Purpose | Possible tools |
 | --- | --- | --- |
-| **Chat On Steroids Core** | Approved files, patches, terminal, task plans, workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `update_plan`, `agents` |
-| **Chat On Steroids Desktop** | **Windows/macOS:** screen, windows, mouse/keyboard and clipboard | `observe`, `computer` |
+| **ChatBBC Core** | Approved files, patches, terminal, task plans, workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `update_plan`, `agents` |
+| **ChatBBC Desktop** | **Windows/macOS:** screen, windows, mouse/keyboard and clipboard | `observe`, `computer` |
 
 The Desktop connector is optional on Windows/macOS. Core is the main connector everywhere.
 

@@ -4,19 +4,30 @@
 
 ## Before connecting
 
-Read the [responsible-use notice and provider rules](../README.md#responsible-use-and-provider-rules). CoS is an independent beta, used at your own risk. Its companion observes and automates the ChatGPT browser UI and records conversation content locally; this is not a public ChatGPT automation API. MCP/tunnel access does not establish permission for every automated workflow. Your account's terms, usage limits, safety decisions and workspace rules still apply.
+Read the [responsible-use notice and provider rules](../README.md#responsible-use-and-provider-rules). ChatBBC is an independent beta, used at your own risk. Its companion observes and automates the ChatGPT browser UI and records conversation content locally; this is not a public ChatGPT automation API. MCP/tunnel access does not establish permission for every automated workflow. Your account's terms, usage limits, safety decisions and workspace rules still apply.
 
 ## Quick start
 
-1. **Install and open CoS.** Choose the download for your operating system and CPU.
+1. **Install and open ChatBBC.** Choose the download for your operating system and CPU.
 2. **Choose what ChatGPT may access.** In **Settings → Workspace**, approve a project folder and review the tool permissions.
-3. **Connect the local tools.** Configure a tunnel in **Settings → Setup**, press **Connect**, then add the **Core** app in ChatGPT's Developer mode.
+3. **Connect the local tools.** Configure a tunnel in **Settings → Setup**, press **Connect**, then add the **ChatBBC Core** app in ChatGPT's Developer mode.
 4. **Load the companion extension.** Press **Open extension folder**. In `chrome://extensions`, enable Developer mode, choose **Load unpacked** and select that folder. Pairing is automatic.
-5. **Start a task.** Choose a project and model in CoS, write your request and send it.
+5. **Start a task.** Choose a project and model in ChatBBC, write your request and send it.
 
 Want screen and keyboard control? Enable **Desktop** permissions and connect its separate app. On macOS, also grant Screen Recording and Accessibility in System Settings.
 
-**After an update:** reload the companion extension and refresh the CoS apps in ChatGPT when prompted. These are two separate steps.
+**After an update:** reload the companion extension and refresh the ChatBBC apps in ChatGPT when prompted. These are two separate steps.
+
+## Upgrading from Chat On Steroids
+
+ChatBBC is a hard identity cut from Chat On Steroids, not an in-place update.
+
+1. **Install and open ChatBBC.** It installs beside Chat On Steroids under the app id `com.chatbbc.app` and its own `chatbbc` user data folder. Do not run both at once: they contend for the same local bridge ports.
+2. **Load the ChatBBC companion.** Use **Open extension folder** and load that copy, replacing the Chat On Steroids extension in `chrome://extensions`.
+3. **Delete the three Chat On Steroids connectors** in ChatGPT's Developer mode.
+4. **Create the ChatBBC connectors.** Use the names and MCP URLs this app's Setup shows: **ChatBBC Core**, **ChatBBC Desktop**, **ChatBBC Plugins**.
+5. **Refresh ChatGPT's connector snapshot** when Setup asks. The new connector names and schemas do not map onto the old app ids.
+6. **Nothing is migrated.** Sessions, settings, secrets and pairing from the Chat On Steroids user data folder stay there. A leftover Chat On Steroids companion is refused with protocol 15 rather than silently ignored.
 
 ## Tunnel setup
 
@@ -24,24 +35,24 @@ Want screen and keyboard control? Enable **Desktop** permissions and connect its
 
 1. Create a tunnel in [Platform → Tunnels](https://platform.openai.com/settings/organization/tunnels), in the same workspace you use in ChatGPT.
 2. Create a **Restricted** [API key](https://platform.openai.com/settings/organization/api-keys) with **Tunnels: Read** and **Tunnels: Use**.
-3. Enter the tunnel ID and key in CoS and press **Connect**.
+3. Enter the tunnel ID and key in ChatBBC and press **Connect**.
 4. In ChatGPT, enable Developer mode under **Settings → Apps → Advanced settings**, then create a custom app of type **Tunnel**. Review and enable its actions.
 
-Core, Desktop and Plugins are separate connectors. Configure each surface you enable. Release packages include the pinned, checksum-verified `tunnel-client`.
+ChatBBC Core, ChatBBC Desktop and ChatBBC Plugins are separate connectors. Configure each surface you enable. Release packages include the pinned, checksum-verified `tunnel-client`.
 
 ### Other tunnels
 
-**Cloudflare quick tunnel:** connect in CoS and use the displayed public URL as the MCP server URL in ChatGPT. The random path is a secret and changes on restart.
+**Cloudflare quick tunnel:** connect in ChatBBC and use the displayed public URL as the MCP server URL in ChatGPT. The random path is a secret and changes on restart.
 
-**Your own HTTPS tunnel:** forward to the loopback URL shown by CoS and preserve its secret path. Treat the resulting URL like a password.
+**Your own HTTPS tunnel:** forward to the loopback URL shown by ChatBBC and preserve its secret path. Treat the resulting URL like a password.
 
 ## Permissions and connectors
 
 | Connector | What it adds |
 | --- | --- |
-| **Core** | Local files, patches, terminals, generated-file downloads, session history, plans and workers. Available on all supported platforms. |
-| **Desktop** | Screen inspection, mouse, keyboard and clipboard. Windows and macOS; macOS requires explicit enablement and OS permissions. |
-| **Plugins** | External MCP tools such as Blender, Playwright and Memory, plus custom local or remote servers. [Plugin guide](plugins.md). |
+| **ChatBBC Core** | Local files, patches, terminals, generated-file downloads, session history, plans and workers. Available on all supported platforms. |
+| **ChatBBC Desktop** | Screen inspection, mouse, keyboard and clipboard. Windows and macOS; macOS requires explicit enablement and OS permissions. |
+| **ChatBBC Plugins** | External MCP tools such as Blender, Playwright and Memory, plus custom local or remote servers. [Plugin guide](plugins.md). |
 
 You choose the approved folders and capabilities. File tools enforce those roots; shell commands run with your normal user privileges. Desktop access applies to the desktop, and external plugins have their own permissions. **Read-only mode** disables writes, command execution and desktop control.
 
@@ -65,16 +76,17 @@ These continuity features do not grant additional quota or access. Do not use ne
 
 ## Troubleshooting
 
-- **Missing or stale tools:** refresh the relevant CoS app in ChatGPT. Reloading the Chrome extension is a separate action.
+- **Missing or stale tools:** refresh the relevant ChatBBC connector in ChatGPT. Reloading the Chrome extension is a separate action.
 - **Provider usage limit or policy warning:** stop the affected workflow and disable its Goal/Loop automation. Follow the provider's stated reset or support/appeal process. Do not switch accounts, chats, models, connectors or tunnels to evade the restriction. A local retry or reconnection is not evidence that a policy restriction has been lifted. Keep account notices and appeal details private; a GitHub issue cannot resolve an account enforcement decision.
 - **Tunnel rejects the API key or tunnel ID:** check the saved tunnel ID, the selected setup profile, and that its key has Tunnels Read + Use for that tunnel. Extension pairing does not authenticate the tunnel. If Platform offers no matching ChatGPT workspace, retain the exact error for an access investigation; a different tunnel does not establish account eligibility.
 - **ChatGPT blocks a tool for safety:** local permission alone does not prove that ChatGPT accepted or dispatched the call. Inspect the local tool history for the exact request. If no result exists, execution is unconfirmed; do not replay a potentially executed operation or route it through another connector. Keep the task's progress and report the provider's error, selected Chat/Work surface, and app/extension versions without credentials or private content. A plan label alone does not diagnose a provider refusal.
-- **CoS returns `TOOL_DISABLED`:** check Read-only and the named local capability. `CALLER_IDENTITY_REQUIRED` or `WORKER_IDENTITY_LOST` instead concerns exact caller ownership; neither proves that command execution is globally disabled.
-- **Extension version mismatch:** reload the unpacked companion after updating CoS, then reload the ChatGPT page.
+- **ChatBBC returns `TOOL_DISABLED`:** check Read-only and the named local capability. `CALLER_IDENTITY_REQUIRED` or `WORKER_IDENTITY_LOST` instead concerns exact caller ownership; neither proves that command execution is globally disabled.
+- **Extension version mismatch:** reload the unpacked companion after updating ChatBBC, then reload the ChatGPT page.
+- **Connector says `incompatible_extension` (426):** the loaded companion is the old Chat On Steroids build. Load the ChatBBC extension from **Open extension folder**, then reload.
 - **Models missing:** use **Reload ChatGPT models**. The picker reflects availability in your signed-in account.
-- **`UNIDENTIFIED_CALLER`:** use that conversation in the paired browser so the extension can prove its request identity. CoS does not guess from the active tab.
+- **`UNIDENTIFIED_CALLER`:** use that conversation in the paired browser so the extension can prove its request identity. ChatBBC does not guess from the active tab.
 - **`COMPACTION_IN_PROGRESS`:** let the source chat finish its handoff. Work continues in the replacement conversation.
-- **Linux credential storage unavailable:** unlock GNOME Keyring or KWallet, then restart CoS.
+- **Linux credential storage unavailable:** unlock GNOME Keyring or KWallet, then restart ChatBBC.
 - **A chat will not stop:** **Block** revokes local tools for that exact conversation. It does not claim to cancel the provider's generation.
 
 ## Build from source and contribute
