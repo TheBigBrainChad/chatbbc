@@ -4,7 +4,7 @@ import type { ProjectDirectoryListing, ProjectFileEntry, ProjectFileKind, Projec
 import { safeExternalLink } from '../shared/external-link.js';
 import { marked } from 'marked';
 import { t, ui } from './i18n.js';
-import { el, icon, run, toast } from './dom.js';
+import { el, humanBytes, icon, run, toast } from './dom.js';
 import { attachWorkPanelResize } from './work-panel-resize.js';
 import type { ProjectCodeEditor } from './file-code-editor.js';
 import type { ProjectPdfViewer } from './file-pdf-viewer.js';
@@ -53,12 +53,6 @@ function samePreview(a: ProjectFilePreview | null, b: ProjectFilePreview | null)
   if (!a || !b) return false;
   const keys = Object.keys(a) as (keyof ProjectFilePreview)[];
   return keys.length === Object.keys(b).length && keys.every(key => a[key] === b[key]);
-}
-
-function humanBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 }
 
 function markdownPreview(source: string): HTMLElement {

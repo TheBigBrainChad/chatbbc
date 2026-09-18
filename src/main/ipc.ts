@@ -4,7 +4,7 @@ import { appearanceSchema } from './appearance-schema.js';
 import { mergeAppearance, effectiveAppearance, effectiveTheme } from '../shared/appearance.js';
 import { prepareSessionPrompt, prepareSkillFollowup } from './session/prompt.js';
 import { listSkills } from './skills.js';
-import { listSkillLibrary } from './skill-library.js';
+import { listSkillLibraryPage } from './skill-library.js';
 import { assertSkillId, resetPackedSkill, setSkillEnabled, setSkillImplicit } from './skill-management.js';
 import { currentSkillState } from './skill-state.js';
 import { noteChatOrigin } from './session/recorder.js';
@@ -602,9 +602,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     const folder = () => scope.sessionId ? getSessionProject(scope.sessionId)
       : scope.projectId ? projectWorkspace(scope.projectId) : Promise.resolve(null);
     const before = await folder();
-    const library = await listSkillLibrary({ projectPath: before?.real ?? null });
+    // One read, two projections. The catalog omits what the user switched off, which is right for
+    // the model and wrong for Settings: a page that can turn a skill off but not back on is a
+    // one-way door. `disabled` is the same read's other half, split by the same resolved policy.
+    const page = await listSkillLibraryPage({ projectPath: before?.real ?? null });
     if ((await folder())?.real !== before?.real) throw new Error('The project changed while Skills were loading');
-    return library;
+    return page;
   });
   handle('projects:remove', async (payload) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(payload);

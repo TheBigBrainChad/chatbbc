@@ -9,7 +9,7 @@ import { logWarn } from './logger.js';
 import { listSkills, readSkill, readSkillTextSnapshot, skillCatalogInstructions, skillsDirectory, type SkillDocument } from './skills.js';
 import { parseSkillConfiguration, parseSkillFrontmatter, parseSkillInterface, type SkillConfiguration } from './skill-metadata.js';
 import { currentSkillState, resolveSkillPolicy } from './skill-state.js';
-import type { LibrarySkill, SkillLibrary, SkillMetadata, SkillScope, SkillSource } from '../shared/skills.js';
+import type { LibrarySkill, SkillLibrary, SkillLibraryPage, SkillMetadata, SkillScope, SkillSource } from '../shared/skills.js';
 
 export interface SkillLibraryScope { projectPath?: string | null }
 type Candidate = { file: string; scope: SkillScope; source: SkillSource };
@@ -89,8 +89,8 @@ async function locations(scope: SkillLibraryScope): Promise<{ roots: Candidate[]
  * Every skill that exists, each row carrying the policy resolved for it.
  *
  * Both catalog readers come through here, so the two can never disagree about what "off" means:
- * `listSkillLibrary` drops the disabled rows, `listSkillInventory` keeps them so Settings can
- * offer a way back.
+ * `listSkillLibraryPage` splits the rows by `enabled`, and the two projections of that split —
+ * the model-facing catalog and the Settings page's disabled group — are the only consumers.
  */
 async function libraryWithPolicy(scope: SkillLibraryScope): Promise<SkillLibrary> {
   const managed = await listSkills();
@@ -145,6 +145,7 @@ async function libraryWithPolicy(scope: SkillLibraryScope): Promise<SkillLibrary
     const policy = policyFor(summary.id, extra.allowImplicitInvocation, metadata.name, file);
     library.skills.push({
       ...summary, ...metadata, ...extra, allowImplicitInvocation: policy.implicit, enabled: policy.enabled,
+      bytes: Buffer.byteLength(document.text, 'utf8'),
       scope: 'managed', source: 'managed', managed: true
     });
     seen.add(identity(file));
@@ -189,6 +190,7 @@ async function libraryWithPolicy(scope: SkillLibraryScope): Promise<SkillLibrary
               const extra = await interfaceFor(current.directory, false, library.errors);
               const policy = policyFor(id, extra.allowImplicitInvocation, metadata.name, document.real);
               library.skills.push({ id, ...metadata, path: document.virtual, ...extra, allowImplicitInvocation: policy.implicit, enabled: policy.enabled,
+                bytes: Buffer.byteLength(document.text, 'utf8'),
                 scope: candidate.scope, source: candidate.source, managed: false });
               seen.add(identity(document.real));
             }
@@ -208,10 +210,39 @@ async function libraryWithPolicy(scope: SkillLibraryScope): Promise<SkillLibrary
   return library;
 }
 
-/** The model-facing catalog: only the skills the user has left switched on. */
+/**
+ * Whether a row survives into the model-facing catalog.
+ *
+ * Named once and used by both projections because `enabled` is optional: absent means the user
+ * expressed no choice and the resolved default applied, which is not the same as an explicit
+ * `true`. Two copies of that comparison is how the page and the prompt start disagreeing.
+ */
+const isEnabled = (skill: LibrarySkill): boolean => skill.enabled !== false;
+
+/**
+ * Both projections of one library read: the model-facing catalog, and the rows it hides.
+ *
+ * The catalog must not carry a skill the user switched off, and Settings must still be able to
+ * show it — otherwise turning a skill off is a one-way door. Both projections come from one
+ * `libraryWithPolicy` pass and test the same predicate, so they partition the read exactly.
+ */
+export async function listSkillLibraryPage(scope: SkillLibraryScope = {}): Promise<SkillLibraryPage> {
+  const library = await libraryWithPolicy(scope);
+  const skills: LibrarySkill[] = [], disabled: LibrarySkill[] = [];
+  for (const skill of library.skills) (isEnabled(skill) ? skills : disabled).push(skill);
+  return { ...library, skills, disabled };
+}
+
+/**
+ * The model-facing catalog on its own: only the skills the user has left switched on.
+ *
+ * Its own filter rather than a discarded half of `listSkillLibraryPage`: this is read while
+ * preparing every outgoing message, and building the disabled rows only to drop them would be
+ * an allocation on that path for no reader.
+ */
 export async function listSkillLibrary(scope: SkillLibraryScope = {}): Promise<SkillLibrary> {
   const library = await libraryWithPolicy(scope);
-  library.skills = library.skills.filter(skill => skill.enabled !== false);
+  library.skills = library.skills.filter(isEnabled);
   return library;
 }
 
@@ -238,16 +269,6 @@ export async function visibleSkillCatalogInstructions(scope: SkillLibraryScope =
     logWarn(`Skill catalog for connector instructions could not resolve policy: ${errorText(error)}`);
     return skillCatalogInstructions();
   }
-}
-
-/**
- * Every skill that exists, with its resolved policy, including ones the user switched off.
- * Settings needs the disabled rows to offer a way back; the model must not see them. One
- * function resolves the policy for both, so neither can disagree with the other about "off".
- */
-export async function listSkillInventory(scope: SkillLibraryScope = {}): Promise<{ skills: LibrarySkill[]; errors: string[] }> {
-  const library = await libraryWithPolicy(scope);
-  return { skills: library.skills, errors: library.errors };
 }
 
 export async function readLibrarySkill(id: string, scope: SkillLibraryScope = {}, library?: SkillLibrary): Promise<SkillDocument> {

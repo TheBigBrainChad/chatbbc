@@ -252,3 +252,23 @@ it('applies a choice from the renderer channel and refuses payloads outside the 
   expect(currentSkillState().removed).not.toContain('brainstorming');
   expect(await reset!(null, { id: '../escape' })).toMatchObject({ ok: false });
 });
+
+/**
+ * The channel the Settings page reads. A skill the user switched off must leave the catalog and
+ * must still be named, or the page could turn it off and never back on.
+ */
+it('hands the page the omitted rows beside the catalog it filtered them from', async () => {
+  registerIpc(() => null, () => undefined);
+  const library = handlers.get('skills:library');
+  expect(library).toBeTypeOf('function');
+  setSkillStateForTests({ ...emptySkillState(), enabled: { alpha: false } });
+
+  const reply = await library!(null, {});
+  expect(reply.ok, reply.error).toBe(true);
+  const { skills, disabled } = reply.data as { skills: Array<{ id: string }>; disabled: Array<{ id: string; enabled?: boolean; bytes?: number }> };
+  expect(skills.map(row => row.id)).not.toContain('alpha');
+  expect(disabled.map(row => row.id)).toEqual(['alpha']);
+  expect(disabled[0]!.enabled).toBe(false);
+  // The size travels with the omitted row too, so a skill does not get cheaper by being off.
+  expect(disabled[0]!.bytes).toBeGreaterThan(0);
+});

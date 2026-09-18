@@ -6,9 +6,10 @@ import { makeTempDir, removeTempDir } from './helpers.js';
 import { defaultConfig, initConfigPath, saveConfig } from '../src/main/config.js';
 import { initSkillsPath } from '../src/main/skills.js';
 import { buildServer } from '../src/main/mcp/tools.js';
-import { listSkillInventory, listSkillLibrary, skillLibraryInstructions } from '../src/main/skill-library.js';
+import { listSkillLibrary, listSkillLibraryPage, skillLibraryInstructions } from '../src/main/skill-library.js';
 import { emptySkillState, setSkillStateForTests } from '../src/main/skill-state.js';
 import { DEFAULT_CAPABILITIES } from '../src/shared/types.js';
+import type { LibrarySkill } from '../src/shared/skills.js';
 
 let root: string, home: string;
 const contents = (name: string) => `---\nname: ${name}\ndescription: Use when testing ${name}.\n---\nBody for ${name}.`;
@@ -33,6 +34,17 @@ afterEach(async () => { vi.unstubAllEnvs(); await removeTempDir(root); });
 it('lists a managed skill by default', async () => {
   const library = await listSkillLibrary({});
   expect(library.skills.map(skill => skill.id)).toContain('writing-plans');
+});
+
+it('reports the body size as UTF-8 bytes, so Settings can show what a skill costs', async () => {
+  // Multi-byte content on purpose: the em dash is three bytes and 'ü' two, so a character count
+  // would report fewer bytes than the file holds and the row would understate the skill.
+  await writeSkillPackage(path.join(root, 'skills', 'accented'), 'Accented — näh');
+  const library = await listSkillLibrary({});
+  const row = library.skills.find((skill: LibrarySkill) => skill.id === 'accented')!;
+  const body = await fs.readFile(path.join(root, 'skills', 'accented', 'SKILL.md'), 'utf8');
+  expect(row.bytes).toBe(Buffer.byteLength(body, 'utf8'));
+  expect(row.bytes).toBeGreaterThan(body.length);
 });
 
 it('omits a skill the user switched off', async () => {
@@ -71,13 +83,16 @@ it('advertises proactive reading only while a listed skill allows it', async () 
   expect(skillLibraryInstructions(library)).not.toMatch(/read its file/i);
 });
 
-it('reports a disabled skill through the inventory the catalog omits', async () => {
+it('reports a disabled skill through the page the catalog omits', async () => {
   setSkillStateForTests({ ...emptySkillState(), enabled: { 'writing-plans': false } });
   const catalog = await listSkillLibrary({});
-  const inventory = await listSkillInventory({});
+  const page = await listSkillLibraryPage({});
   expect(catalog.skills.map(skill => skill.id)).not.toContain('writing-plans');
-  const row = inventory.skills.find(skill => skill.id === 'writing-plans');
+  const row = page.disabled.find((skill: LibrarySkill) => skill.id === 'writing-plans');
   expect(row?.enabled).toBe(false);
+  // The two halves are one split of one read, so a row cannot appear in both or in neither.
+  expect(page.skills.map(skill => skill.id)).not.toContain('writing-plans');
+  expect([...page.skills, ...page.disabled].map(skill => skill.id)).toContain('writing-plans');
 });
 
 it('resolves policy for an id that names an Object.prototype member', async () => {

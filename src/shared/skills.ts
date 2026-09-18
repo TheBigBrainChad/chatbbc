@@ -23,6 +23,11 @@ export interface LibrarySkill extends SkillSummary, SkillMetadata {
   managed: boolean;
   /** Resolved for this skill. Present on inventory reads; the model-facing catalog carries only enabled rows. */
   enabled?: boolean;
+  /**
+   * UTF-8 size of the skill body, so Settings can show what a skill costs before it is sent.
+   * Present wherever the body was already read to build the row; informational only, never a gate.
+   */
+  bytes?: number;
 }
 export interface SkillLibrary {
   skills: LibrarySkill[];
@@ -30,6 +35,16 @@ export interface SkillLibrary {
   roots: Array<{ path: string; scope: SkillScope; source: SkillSource }>;
   includeInstructions: boolean;
   maxContextTokens?: number;
+}
+/**
+ * The Settings page's view of the library: the model-facing catalog, plus the rows it omits.
+ *
+ * The catalog must not carry a skill the user switched off, and the page must still be able to
+ * show it — otherwise turning a skill off would be a one-way door. Both are projected from one
+ * pass over the library, so the two can never disagree about what "off" means.
+ */
+export interface SkillLibraryPage extends SkillLibrary {
+  disabled: LibrarySkill[];
 }
 export interface SkillsDraftScope { sessionId?: string | null; projectId?: string | null }
 
