@@ -9,6 +9,45 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## [2.1.17] — a skill pack you can switch on and off
+
+Jesse Vincent's [obra/superpowers](https://github.com/obra/superpowers) skills, bundled with the
+app and controllable per skill from Settings.
+
+### Added
+
+- **Fourteen bundled skills** — brainstorming, writing-plans, executing-plans,
+  subagent-driven-development, test-driven-development, systematic-debugging, using-git-worktrees,
+  dispatching-parallel-agents, requesting-code-review, receiving-code-review,
+  verification-before-completion, finishing-a-development-branch, writing-skills and
+  using-superpowers. Mirrored into the managed library on launch; selected with `/` as usual.
+- **Prose adapted to ChatBBC**, not shipped verbatim. Skill references use ChatBBC slash commands,
+  `TodoWrite` becomes `update_plan`, and file/shell tools are named as ChatBBC exposes them.
+  `subagent-driven-development` and `dispatching-parallel-agents` were partly rewritten: their
+  original instructions assume local code subagents, while ChatBBC's workers are separate browser
+  conversations in a star topology that cannot spawn descendants.
+- **A Skills section in Settings** — one row per skill with an on/off switch, a separate switch
+  for implicit invocation, and the body's size. A switched-off skill moves to a "Turned off" group
+  with a control to bring it back.
+- **Layered enablement**, resolved in one place: your explicit choice, then an external Codex rule,
+  then the skill's own declaration, then on.
+
+### Fixed
+
+- **The advertised catalog no longer lists skills you switched off.** The connector's handshake
+  instructions read the unfiltered library, so a disabled skill was still offered and then failed
+  when selected.
+- **Regenerated `THIRD-PARTY-NOTICES.txt`**, which had gone stale and still carried a previous
+  product name. Shipping was unaffected: packaging regenerates it before building.
+
+### Notes
+
+- The pack is MIT licensed; attribution lives in `skill-pack/PROVENANCE.md`,
+  `docs/licenses/superpowers/LICENSE` and the notices file.
+- Implicit invocation is scoped to a chat's opening message. The catalog is injected when a
+  conversation starts, so ChatGPT cannot discover a skill mid-chat that it was not told about.
+- A skill you edit is preserved across updates; only copies you have not touched are refreshed.
+
 ## [2.1.16] — cheaper companion, working resumes
 
 Ported from upstream after their 2.1.14/2.1.15 work.
