@@ -82,10 +82,19 @@ Two type roles, both explicit tokens:
   tool names, diffs, code, metadata, everything in the sidebar and settings.
 - **Sans (`--ui-font`)**: authored and assistant prose only, in the transcript.
 
-Base scale drops. `--text-scale` keeps deriving from `fontSize`, but the default `fontSize` moves
-from 14 to 12, and chrome sizes are expressed as `calc(Npx * var(--text-scale))` with `N` chosen so
-the chrome lands near 11–12px — matching the shell bar's base-size 11 rather than the terminal's 8,
-because 8px chrome in a 1080p window is unreadable at normal viewing distance.
+Base scale is unchanged, and that is deliberate. `--text-scale` is `fontSize / 14`
+(`src/renderer/appearance.ts:24`) and **241 rules** in `styles.css` are written as
+`calc(Npx * var(--text-scale))`. Changing the default `fontSize` would move all 241 at once, so the
+default stays **14** and density is instead authored where it belongs — in the chrome rules:
+
+```css
+/* chrome: dense by default, still honours the user's text-size preference */
+.nav a, .card .hd, .trow { font-size: calc(11px * var(--text-scale, 1)); }
+```
+
+`fontSize` keeps one owner (the user's text-size preference, 12–18, validated as today) and the
+design's own density is a stylesheet decision. A user who picks 18 gets 14px chrome and 18px prose;
+the default gives 11px chrome and 14px prose.
 
 `FONT_FAMILIES.mono` currently reads `'"Cascadia Mono", Consolas, monospace'` — a Windows-first
 chain. It is replaced by the mono chain in §6.
@@ -338,18 +347,24 @@ is last and `monospace` is the final backstop.
 
 This is a renderer/shell change, so the proof is visual plus the repo's existing Electron fixtures.
 
-**Must pass unchanged**, because they encode contracts this design must not break:
-`verify-appearance.cjs` (popover/sidebar palette equality, colour save, translucency, dirty-push,
-reload, reset, overflow at width/zoom), `verify-chat-width.cjs`, `verify-composer-layout.cjs`,
+**Must pass unchanged**, because they encode contracts this design keeps:
+`verify-appearance.cjs`, `verify-chat-width.cjs`, `verify-composer-layout.cjs`,
 `verify-dropdown-layout.cjs`, `verify-settings-focus.cjs`, `verify-sidebar-setup.cjs`,
-`verify-connection-*.cjs`, `verify-renderer-label-memory.cjs`, `verify-history-scroll.cjs`,
-`verify-chat-opening-scroll.cjs`, `verify-chat-switch.cjs`, `verify-composer-context.cjs`,
-`verify-setup-guide.cjs`, `verify-disconnect-ui.cjs`, `verify-workspace-terminal.cjs`,
-`verify-pet-electron.cjs`.
+`verify-connection-compact.cjs`, `verify-connection-layer.cjs`, `verify-renderer-label-memory.cjs`,
+`verify-history-scroll.cjs`, `verify-chat-opening-scroll.cjs`, `verify-chat-switch.cjs`,
+`verify-composer-context.cjs`, `verify-setup-guide.cjs`, `verify-disconnect-ui.cjs`,
+`verify-goal-status-layout.cjs`, `verify-plan-collapse.cjs`, `verify-pr-workspace.cjs`,
+`verify-workspace-terminal.cjs`, `verify-pet-electron.cjs`.
 
-**Retargeted, not deleted**, where this design deliberately changes the asserted fact:
-`verify-appearance.cjs` asserts `fontSize` defaults and `refreshReset` values; the default changes
-from 14 to 12 (§3.3). The assertion moves with the contract.
+No `verify-*.cjs` script asserts a radius, so `rounding = 0` and the hairline idiom do not require
+retargeting any of them. `verify-appearance.cjs` does assert type, and both assertions keep passing:
+`:130` expects the body font family to follow the *prose* picker to serif, and `:132`/`:146` expect
+the text size to follow the picker and reset to 14. This design leaves the prose font picker, the
+text-size control and their defaults untouched (§3.3) and adds a separate `--ui-font-mono` for
+chrome, so no existing type assertion moves. The assertions that will need attention are
+`test/renderer-layout.test.ts` and `test/appearance.test.ts` if the mono chrome changes measured
+widths; they are retargeted to the new contract, not deleted, and any script that fails **only** on
+a deliberate colour or geometry change is updated rather than silenced.
 
 **New evidence:**
 - Screenshots of every destination and the transcript at 1600×900 and a narrow width, from the real
@@ -368,12 +383,13 @@ redesign does not touch those layers.
 
 | Risk | Mitigation |
 |---|---|
-| The dense mono layout is harder to read than expected | Chrome lands at 11–12px, not the terminal's 8; prose keeps sans. The appearance fixture already renders at multiple widths and zoom levels. |
+| The dense mono layout is harder to read than expected | Chrome is authored at 11px and still scales with the user's text-size preference, not fixed at the terminal's 8; prose keeps sans. `verify-appearance.cjs` already renders the real renderer at four width/zoom combinations. |
 | `rounding = 0` looks unfinished on controls | Hover/active fills and hairline borders carry affordance; this is the desktop's own idiom. |
 | Control rows are mistaken for cards | Different component, different shape, `⇢` glyph, no fill, no border. |
 | Cards become heavy in long transcripts | Only real conversation gets a card; tool calls stay single lines; generated work is rows. |
 | Follow mode reads a file that changes shape | §5.2 returns `null` on anything unexpected and falls back; the app never fails to start over a theme file. |
-| Existing verify scripts assert the old look | Each affected script is named in §8 and retargeted to the new contract rather than removed. |
+| Existing verify scripts or tests assert the old look | §8 names which ones keep passing unchanged and which two test files may need retargeting; nothing is removed to make a change land. |
+| The mono chrome changes measured widths and breaks a layout assertion | The width and overflow fixtures in §8 are run before and after the type change; a failure there is a real regression to fix, not an assertion to relax. |
 
 ## 10. Prototypes
 
