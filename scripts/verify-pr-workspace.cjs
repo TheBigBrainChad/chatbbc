@@ -216,7 +216,7 @@ app.whenReady().then(async () => {
     await js(`document.getElementById('composerAddSkill').closest('details').open=true`);
     assert.ok(await js(`(()=>{const n=document.getElementById('composerAddSkill'),r=n.getBoundingClientRect();return r.width>0&&r.height>0&&n.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))})()`));
     await js(`document.getElementById('composerAddSkill').click()`);
-    assert.ok(await js('document.getElementById("chatInput").value.startsWith("Please add the following skills to my COS skills:")'));
+    assert.ok(await js('document.getElementById("chatInput").value.startsWith("Please add the following skills to my ChatBBC skills:")'));
     await js(`window.fixture.readyConnection();document.getElementById('headerConnect').click()`);
     await until('document.getElementById("headerConnect").hidden && document.getElementById("sidebarConnection").classList.contains("is-connected")');
     const errors=await js('window.fixtureErrors');

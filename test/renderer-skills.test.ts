@@ -90,7 +90,7 @@ it('adds only the requested prompt from the popup and removes the slash-menu foo
   expect(f.host.querySelector('.skill-add, .skill-menu-footer')).toBeNull();
   const add = document.getElementById('add') as HTMLButtonElement;
   add.click();
-  expect(f.input.value).toBe('Please add the following skills to my COS skills:\n');
+  expect(f.input.value).toBe('Please add the following skills to my ChatBBC skills:\n');
   expect(f.host.hidden).toBe(true);
 });
 it('opens completion from the popup without losing draft text or selected skills', async () => {
@@ -107,7 +107,7 @@ it('opens completion from the popup without losing draft text or selected skills
   expect(f.picker.authoredText()).toBe('/audit\n/review\nKeep this task');
   f.owner('b:2'); f.type('Other');
   (document.getElementById('add') as HTMLButtonElement).click();
-  expect(f.input.value).toBe('Please add the following skills to my COS skills:\nOther');
+  expect(f.input.value).toBe('Please add the following skills to my ChatBBC skills:\nOther');
   f.owner('a:3'); expect(f.picker.authoredText()).toBe('/audit\n/review\nKeep this task');
 });
 
