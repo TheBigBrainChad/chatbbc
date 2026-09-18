@@ -41,7 +41,7 @@
 .plugin-count, .plugin-section-head > .muted { color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); font-weight: 400; letter-spacing: 0; }
 .plugin-section-head .btn { color: var(--ink); font-family: var(--ui-font-mono); font-size: calc(11.5px * var(--text-scale, 1)); }
 #pluginsInstalled, .plugin-directory, .plugin-catalog { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 12px; }
-.plugin-card { position: relative; min-width: 0; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--card); transition: background .14s; }
+.plugin-card { position: relative; min-width: 0; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--card); transition: background var(--motion-state); }
 .plugin-card:hover, .plugin-card:focus-within { background: var(--hover); }
 .plugin-entry { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 88px; padding: 15px 16px; border: 0; border-radius: inherit; background: transparent; color: var(--ink); text-align: left; font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); cursor: pointer; }
 .plugin-entry .plugin-icon { width: 36px; height: 36px; border-radius: 10px; }
@@ -62,7 +62,7 @@
 .plugin-menu-actions .btn { display: flex; width: 100%; padding: 9px 11px; border-radius: var(--r-xs); color: var(--ink); text-align: left; font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); }
 .plugin-menu-actions .plugin-destructive { color: var(--red); border-top: 1px solid var(--line); border-radius: 0 0 var(--r-xs) var(--r-xs); margin-top: 4px; }
 .plugin-catalog { margin: 20px 0 28px; }
-.plugin-catalog-card { display: flex; align-items: center; gap: 13px; min-width: 0; min-height: 90px; padding: 15px 16px; border: 1px solid transparent; border-radius: var(--r-lg); background: transparent; color: var(--ink); text-align: left; font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); cursor: pointer; transition: background .14s; }
+.plugin-catalog-card { display: flex; align-items: center; gap: 13px; min-width: 0; min-height: 90px; padding: 15px 16px; border: 1px solid transparent; border-radius: var(--r-lg); background: transparent; color: var(--ink); text-align: left; font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); cursor: pointer; transition: background var(--motion-state); }
 .plugin-catalog-card:hover { background: var(--hover); }
 .plugin-no-results { grid-column: 1 / -1; padding: 24px 0; font-family: var(--ui-font-mono); font-size: calc(13px * var(--text-scale, 1)); line-height: 1.6; }
 .plugin-empty { grid-column: 1 / -1; display: grid; justify-items: center; padding: 32px 24px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--card); text-align: center; }
@@ -191,7 +191,7 @@
   width: 13px;
   height: 13px;
   color: var(--faint);
-  transition: transform 0.15s;
+  transition: transform var(--motion-state);
 }
 
 .perm.is-open .perm-main .chev {
@@ -224,7 +224,7 @@
   inset: 0;
   border-radius: var(--pill);
   background: var(--track);
-  transition: background 0.15s;
+  transition: background var(--motion-state);
   pointer-events: none;
 }
 
@@ -236,7 +236,7 @@
   border-radius: 50%;
   background: var(--knob-off);
   box-shadow: 0 1px 2px rgb(0 0 0 / 22%);
-  transition: transform 0.15s, background 0.15s;
+  transition: transform var(--motion-state), background 0var(--motion-state);
 }
 
 .sw input:checked + i {
@@ -1085,7 +1085,7 @@ input[readonly] {
 }
 
 .sum-chev {
-  transition: transform 0.15s;
+  transition: transform var(--motion-state);
   color: var(--faint);
 }
 

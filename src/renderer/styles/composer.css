@@ -248,8 +248,8 @@
 .subhead-note.is-working::before { content: ''; width: 6px; height: 6px; flex: none; border-radius: 50%; background: currentColor; animation: working-pulse 1.4s ease-in-out infinite; }
 .composer-menu[open] > .composer-popover { transform-origin: bottom right; animation: surface-in 140ms ease-out; }
 
-.pending-message.is-entering { animation: message-in 160ms ease-out; }
-.send-button { transition: background 120ms ease, transform 120ms ease; }
+.pending-message.is-entering { animation: message-in var(--motion-fade) ease-out; }
+.send-button { transition: background var(--motion-state) ease, transform var(--motion-state) ease; }
 .send-button:active { transform: scale(.94); }
 .pending-message .btn { font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); padding: 3px 6px; }
 .queued-input { display: flex; align-items: center; gap: 12px; font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); color: var(--faint); padding: 5px 0; }
@@ -323,7 +323,7 @@
 #composerSettings #loopDeliveryRow { flex-direction: column; align-items: stretch; gap: 7px; padding: 12px 9px 6px; }
 #loopDeliveryRow select { width: 100%; max-width: 100%; padding: 9px 11px; border-radius: 9px; line-height: 1.4; }
 .automation-switch { display: flex; padding: 3px; gap: 3px; border-radius: 10px; background: var(--sunk); }
-.automation-switch button { justify-content: center; padding: 8px 12px; transition: background .15s ease; color: var(--soft); }
+.automation-switch button { justify-content: center; padding: 8px 12px; transition: background var(--motion-state); color: var(--soft); }
 .automation-switch button[aria-checked='true'] { background: color-mix(in srgb, var(--accent) 18%, var(--card)); color: var(--ink); box-shadow: 0 1px 3px #0002; }
 .session-controls-menu label { display: block; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); margin-bottom: 7px; }
 .session-controls-menu select { width: 100%; margin-bottom: 12px; }
@@ -389,7 +389,7 @@
 .composer-status-line { display: block; min-width: 0; }
 .composer-status-line > summary { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 5px 12px; list-style: none; cursor: pointer; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
 .composer-status-line > summary::-webkit-details-marker { display: none; }
-.composer-status-line > summary::before { content: ''; flex: none; width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform 120ms ease; }
+.composer-status-line > summary::before { content: ''; flex: none; width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform var(--motion-state) ease; }
 .composer-status-line[open] > summary::before { transform: rotate(45deg); }
 .composer-status-line > summary:hover, .composer-status-line[open] > summary { color: var(--ink); background: var(--hover); }
 .composer-status-line > summary:focus-visible { outline: 2px solid var(--ink); outline-offset: -3px; }

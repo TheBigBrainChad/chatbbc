@@ -52,7 +52,7 @@
 .sidebar-session-heading::-webkit-details-marker { display: none; }
 .sidebar-session-heading:hover { color: var(--ink); }
 .sidebar-session-label { display: flex; align-items: center; gap: 7px; min-width: 0; font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); font-weight: 600; }
-.sidebar-section-chev { width: 12px; height: 12px; transition: transform 130ms ease; }
+.sidebar-section-chev { width: 12px; height: 12px; transition: transform var(--motion-state) ease; }
 .sidebar-session-section[open] > .sidebar-session-heading .sidebar-section-chev { transform: rotate(90deg); }
 .sidebar-session-heading .acts { display: flex; align-items: center; gap: 2px; flex: none; }
 .sidebar-session-heading .acts .btn { display: grid; place-items: center; width: 24px; height: 24px; padding: 4px; color: var(--faint); font-family: var(--ui-font-mono); font-size: 0; }
@@ -108,7 +108,7 @@
 .connection-advanced > summary::-webkit-details-marker { display: none; }
 .connection-advanced > summary:hover { background: var(--hover); color: var(--ink); }
 .connection-advanced > summary:focus-visible { outline: 1px solid var(--accent-edge); }
-.connection-advanced > summary .ico { width: 14px; height: 14px; transition: transform 130ms ease; }
+.connection-advanced > summary .ico { width: 14px; height: 14px; transition: transform var(--motion-state) ease; }
 .connection-advanced[open] > summary .ico { transform: rotate(45deg); }
 .connection-advanced-age { display: block; color: var(--faint); font-family: var(--ui-font-mono); font-size: calc(10px * var(--text-scale, 1)); margin-bottom: 6px; }
 .connection-advanced-body { display: grid; gap: 6px; padding: 8px 0 0; margin-top: 6px; border-top: 1px solid var(--edge); overflow-wrap: anywhere; }
@@ -261,7 +261,7 @@ header {
   cursor: pointer;
   background: var(--accent-wash);
   color: var(--accent);
-  transition: background 140ms ease, border-color 140ms ease;
+  transition: background var(--motion-state) ease, border-color var(--motion-state) ease;
 }
 
 .power.is-running {
@@ -481,7 +481,7 @@ main {
   font-size: calc(12px * var(--text-scale, 1));
   font-weight: 550;
   cursor: pointer;
-  transition: background 0.14s, color 0.14s;
+  transition: background 0var(--motion-state), color 0var(--motion-state);
 }
 
 .btn:hover:not(:disabled) {
@@ -591,7 +591,7 @@ main {
 
 .worker-group { padding-left: 16px; margin: 0 0 6px; }
 .worker-toggle { flex: none; width: 24px; height: 26px; display: grid; place-items: center; color: var(--faint); background: transparent; border: 0; padding: 0; cursor: pointer; border-radius: 0; }
-.worker-toggle .ico { width: 12px; height: 12px; transition: transform 140ms ease; }
+.worker-toggle .ico { width: 12px; height: 12px; transition: transform var(--motion-state) ease; }
 .worker-toggle[aria-expanded="true"] .ico { transform: rotate(90deg); }
 .worker-toggle:hover { color: var(--ink); }
 

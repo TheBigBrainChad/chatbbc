@@ -83,6 +83,12 @@
   --r-xl: 0;
   --pill: 0;
 
+  /* Two durations, and nothing else. `--motion-state` is a control changing under the pointer
+     (hover, press, a toggle); `--motion-fade` is content appearing. Both collapse to 0 under
+     reduced motion, which the global guard below already enforces. */
+  --motion-state: 140ms;
+  --motion-fade: 120ms;
+
   /* Chrome type. Text and labels are monospace — the desktop's own idiom —
      while authored and assistant prose keep --ui-font. */
   --ui-font-mono: "Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono Nerd Font", "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
@@ -195,13 +201,16 @@ html:lang(zh-TW) body { font-family: var(--ui-font, "Microsoft JhengHei UI", "Mi
   display: none !important;
 }
 
+/* One icon set: a 1.5px stroke on the shared 24 grid, inheriting currentColor. Every inline glyph
+   and every sprite <use> resolves through this, so one glyph cannot drift to a heavier weight than
+   its neighbours — which is what the 1.7 and 1.8 outliers did. */
 .ico {
   width: 17px;
   height: 17px;
   flex: 0 0 auto;
   stroke: currentColor;
   fill: none;
-  stroke-width: 1.7;
+  stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -253,13 +262,13 @@ html[data-theme="light"] { color-scheme: light; }
 /* Keep the native select's keyboard, focus and form semantics while styling both
    the trigger and its top-layer picker consistently across the workspace. */
 select, select::picker(select) { appearance: base-select; }
-select { min-width: 0; gap: 12px; white-space: normal; cursor: pointer; transition: border-color 140ms, background 140ms; }
+select { min-width: 0; gap: 12px; white-space: normal; cursor: pointer; transition: border-color var(--motion-state), background var(--motion-state); }
 select:hover:not(:disabled) { border-color: var(--soft); }
 select:disabled { opacity: .5; cursor: default; }
 select::picker-icon {
   content: ''; width: 7px; height: 7px; margin-inline: auto 3px; flex-shrink: 0;
   border-right: 1.5px solid var(--soft); border-bottom: 1.5px solid var(--soft);
-  transform: translateY(-2px) rotate(45deg); transition: rotate 140ms;
+  transform: translateY(-2px) rotate(45deg); transition: rotate var(--motion-state);
 }
 select:open::picker-icon { rotate: 180deg; }
 select::picker(select) {
