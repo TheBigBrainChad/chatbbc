@@ -68,6 +68,75 @@ it('requires exact own data fields and rejects getters, symbols and missing fiel
   expect(parseRichResponse(Object.create(null))).toBeNull();
 });
 
+it('rejects indexed array accessors without calling them at the root or under groups and controls', () => {
+  let calls = 0;
+  for (const wrap of [
+    (nodes: unknown[]) => withNodes(nodes),
+    (nodes: unknown[]) => withNodes([{ id: 'group', kind: 'group', layout: 'row', children: nodes }]),
+    (nodes: unknown[]) => withNodes([{ ...control('parent'), children: nodes }])
+  ]) {
+    const nodes: unknown[] = [text('actual')];
+    Object.defineProperty(nodes, '0', { enumerable: true, configurable: true, get: () => {
+      calls++;
+      return text('forged');
+    } });
+    expect(parseRichResponse(wrap(nodes))).toBeNull();
+  }
+  expect(calls).toBe(0);
+});
+
+it('rejects extra array keys, URLs, symbols and overridden iterators at every tree level', () => {
+  for (const wrap of [
+    (nodes: unknown[]) => withNodes(nodes),
+    (nodes: unknown[]) => withNodes([{ id: 'group', kind: 'group', layout: 'column', children: nodes }]),
+    (nodes: unknown[]) => withNodes([{ ...control('parent'), children: nodes }])
+  ]) {
+    const source = [text('actual')];
+    Object.defineProperty(source, 'source', { value: 'https://example.test/signed', enumerable: false });
+    expect(parseRichResponse(wrap(source))).toBeNull();
+
+    const symbol = [text('actual')];
+    Object.defineProperty(symbol, Symbol('hidden'), { value: 'javascript' });
+    expect(parseRichResponse(wrap(symbol))).toBeNull();
+
+    const forged = [{ ...text('unsafe'), onclick: 'run()' }];
+    Object.defineProperty(forged, Symbol.iterator, { value: function* () { yield text('forged'); } });
+    expect(parseRichResponse(wrap(forged))).toBeNull();
+  }
+});
+
+it('rejects sparse arrays including inherited index values at the root and nested levels', () => {
+  for (const wrap of [
+    (nodes: unknown[]) => withNodes(nodes),
+    (nodes: unknown[]) => withNodes([{ id: 'group', kind: 'group', layout: 'row', children: nodes }]),
+    (nodes: unknown[]) => withNodes([{ ...control('parent'), children: nodes }])
+  ]) {
+    const sparse = new Array<unknown>(1);
+    expect(parseRichResponse(wrap(sparse))).toBeNull();
+    const inherited = Object.create(Array.prototype) as unknown[];
+    inherited[0] = text('inherited');
+    Object.setPrototypeOf(sparse, inherited);
+    expect(parseRichResponse(wrap(sparse))).toBeNull();
+  }
+});
+
+it('reads indexed array data descriptors without trusting proxy get traps or inherited iterators', () => {
+  for (const wrap of [
+    (nodes: unknown[]) => withNodes(nodes),
+    (nodes: unknown[]) => withNodes([{ id: 'group', kind: 'group', layout: 'row', children: nodes }]),
+    (nodes: unknown[]) => withNodes([{ ...control('parent'), children: nodes }])
+  ]) {
+    const data = [text('actual')];
+    const nodes = new Proxy(data, {
+      get(target, key, receiver) {
+        if (key === 'length' || key === '0' || key === Symbol.iterator) throw new Error('untrusted array read');
+        return Reflect.get(target, key, receiver);
+      }
+    });
+    expect(parseRichResponse(wrap(nodes))).not.toBeNull();
+  }
+});
+
 it('rejects invalid canonical identities, revisions, root versions and unknown status', () => {
   for (const input of [
     { ...good, version: 2 }, { ...good, status: 'loading' },

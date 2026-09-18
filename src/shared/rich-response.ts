@@ -36,6 +36,25 @@ const exact = (value: Obj, names: readonly string[]): boolean => {
   });
 };
 
+// Admit only a dense JSON-style array. Reading indexed descriptors avoids invoking untrusted
+// getters, custom iterators and inherited values; the exact key count excludes extra data.
+const arrayElements = (value: unknown): unknown[] | null => {
+  if (!Array.isArray(value)) return null;
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  if (!lengthDescriptor || !('value' in lengthDescriptor) || lengthDescriptor.enumerable ||
+    lengthDescriptor.configurable || !Number.isSafeInteger(lengthDescriptor.value) ||
+    lengthDescriptor.value < 0 || lengthDescriptor.value > RICH_LIMITS.nodes) return null;
+  const length: number = lengthDescriptor.value;
+  if (Reflect.ownKeys(value).length !== length + 1) return null;
+  const elements: unknown[] = [];
+  for (let index = 0; index < length; index++) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) return null;
+    elements.push(descriptor.value);
+  }
+  return elements;
+};
+
 const opaque = (value: unknown): value is string =>
   typeof value === 'string' && /^[a-z0-9:_-]{1,190}$/i.test(value);
 
@@ -58,12 +77,14 @@ export function parseRichResponse(input: unknown): RichResponse | null {
       typeof root.conversationId !== 'string' || !/^[a-z0-9-]{8,64}$/i.test(root.conversationId) ||
       typeof root.messageId !== 'string' || root.messageId.length === 0 || root.messageId.length > 256 ||
       (root.providerMessageId !== null &&
-        (typeof root.providerMessageId !== 'string' || !/^[a-z0-9-]{8,100}$/i.test(root.providerMessageId))) ||
-      !Array.isArray(root.nodes) || root.nodes.length > RICH_LIMITS.nodes) return null;
+        (typeof root.providerMessageId !== 'string' || !/^[a-z0-9-]{8,100}$/i.test(root.providerMessageId)))) return null;
+
+    const rootNodes = arrayElements(root.nodes);
+    if (!rootNodes) return null;
 
     if (root.status === 'available' ? root.reason !== null :
       root.reason !== 'unsupported' && root.reason !== 'oversized' && root.reason !== 'ambiguous') return null;
-    if (root.status === 'unavailable' && root.nodes.length !== 0) return null;
+    if (root.status === 'unavailable' && rootNodes.length !== 0) return null;
 
     const encoder = new TextEncoder();
     let utf8 = 0;
@@ -116,7 +137,8 @@ export function parseRichResponse(input: unknown): RichResponse | null {
           width: item.width, height: item.height };
       }
 
-      if (!Array.isArray(item.children) || item.children.length > RICH_LIMITS.nodes) return null;
+      const sourceChildren = arrayElements(item.children);
+      if (!sourceChildren) return null;
       if (kind.value === 'group') {
         if (!['row', 'column', 'grid', 'card', 'list', 'table', 'diagram'].includes(item.layout as string)) return null;
       } else if (++controls > RICH_LIMITS.controls ||
@@ -126,8 +148,8 @@ export function parseRichResponse(input: unknown): RichResponse | null {
         typeof item.selected !== 'boolean' || typeof item.disabled !== 'boolean') return null;
 
       const children: RichNode[] = [];
-      for (const child of item.children) {
-        const parsed = node(child, depth + 1);
+      for (let index = 0; index < sourceChildren.length; index++) {
+        const parsed = node(sourceChildren[index], depth + 1);
         if (!parsed) return null;
         children.push(parsed);
       }
@@ -144,8 +166,8 @@ export function parseRichResponse(input: unknown): RichResponse | null {
     };
 
     const nodes: RichNode[] = [];
-    for (const value of root.nodes) {
-      const parsed = node(value, 1);
+    for (let index = 0; index < rootNodes.length; index++) {
+      const parsed = node(rootNodes[index], 1);
       if (!parsed) return null;
       nodes.push(parsed);
     }
