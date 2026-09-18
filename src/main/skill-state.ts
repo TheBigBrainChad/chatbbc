@@ -11,7 +11,7 @@
  * toggle of another skill.
  */
 
-import { readDurable, writeDurableNow } from './durable.js';
+import { readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
 import { logWarn } from './logger.js';
 import type { SkillState } from '../shared/skills.js';
 
@@ -70,6 +70,9 @@ export function sanitizeSkillState(raw: unknown): SkillState {
   return state;
 }
 
+/** The complete key set `emptySkillState` produces. Anything else is not this app's own shape. */
+const STATE_KEYS = ['version', 'seeded', 'enabled', 'implicit', 'removed'];
+
 function looksLikeIdRecord(value: unknown, entryIsValid: (entry: unknown) => boolean): boolean {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const entries = Object.entries(value as Record<string, unknown>);
@@ -84,13 +87,17 @@ function looksLikeIdRecord(value: unknown, entryIsValid: (entry: unknown) => boo
  *
  * `sanitizeSkillState` is a repair: it keeps whatever it can trust. This is the stricter
  * question a mutation must answer before anything is stored. It accepts exactly the states
- * the repair leaves alone — the same version, the same field shapes, within the same bounds —
- * so a change that returns something the app never produces fails loudly instead of being
- * silently truncated into a valid state and written as if it were intended.
+ * the repair leaves unchanged — the same version, the same five keys, the same field shapes,
+ * within the same bounds — so a change that returns something the app never produces fails
+ * loudly instead of being silently truncated into a valid state and written as if it were
+ * intended. Unknown keys are rejected for that reason: sanitize would strip them, so accepting
+ * them here would let the cache hold a state its own next read could not reproduce.
  */
 function isOwnSkillState(value: unknown): value is SkillState {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const state = value as Record<string, unknown>;
+  if (Object.keys(state).length !== STATE_KEYS.length) return false;
+  if (!STATE_KEYS.every(key => Object.hasOwn(state, key))) return false;
   if (!Array.isArray(state.removed) || state.removed.length > MAX_IDS) return false;
   const removed = new Set(state.removed);
   return (
@@ -127,13 +134,26 @@ export async function restoreSkillState(): Promise<void> {
 
 /**
  * Applies one change and returns the published state. Serialized, so two toggles cannot
- * interleave a read and a write. The durable write happens before the cache advances.
+ * interleave a read and a write. The durable write happens before the cache advances, so a
+ * caller that sees the new state knows it survived a crash.
+ *
+ * A failed write is refused *and* superseded. durable.ts deliberately keeps a failed generation
+ * pending and retries it, which is right when the value is still wanted, but here the caller is
+ * being told the change was not stored — so that generation has to be replaced by the state that
+ * is still authoritative before it is allowed to land later. Otherwise the refused value would be
+ * written moments after the refusal and resurrected by the next `restoreSkillState`, leaving disk
+ * ahead of the cache: the exact divergence this module exists to prevent.
  */
 export function mutateSkillState(change: (state: SkillState) => SkillState): Promise<SkillState> {
   return serial(async () => {
     const next = change(cache);
     if (!isOwnSkillState(next)) throw new Error('Refusing to store an invalid Skill state');
-    await writeDurableNow(SKILL_STATE, next);
+    try {
+      await writeDurableNow(SKILL_STATE, next);
+    } catch (error) {
+      writeDurableSoon(SKILL_STATE, cache);
+      throw error;
+    }
     cache = next;
     return next;
   });
@@ -145,6 +165,12 @@ export function mutateSkillState(change: (state: SkillState) => SkillState): Pro
  * Enablement: app choice, then an external discovery rule, then on. A skill's own metadata has
  * no enablement concept, so it contributes no layer here.
  * Implicit: app choice, then the skill's own `allow_implicit_invocation` declaration.
+ *
+ * Both maps are plain objects, so a bare `map[id]` would find `Object.prototype` members for ids
+ * like `constructor` — a valid skill id that is also an inherited key. That would read an
+ * inherited function as a stored choice, skip the rule and the default, and return a non-boolean
+ * the IPC layer cannot structured-clone. `Object.hasOwn` asks the only question that matters
+ * here: did the app store a choice for this id?
  */
 export function resolveSkillPolicy(
   id: string,
@@ -152,10 +178,9 @@ export function resolveSkillPolicy(
   external: boolean | undefined,
   state: SkillState
 ): SkillPolicy {
-  const chosen = state.enabled[id];
-  const enabled = chosen !== undefined ? chosen : external !== undefined ? external : true;
-  const chosenImplicit = state.implicit[id];
-  return { enabled, implicit: chosenImplicit !== undefined ? chosenImplicit : declaration };
+  const enabled = Object.hasOwn(state.enabled, id) ? state.enabled[id]! : (external ?? true);
+  const implicit = Object.hasOwn(state.implicit, id) ? state.implicit[id]! : declaration;
+  return { enabled, implicit };
 }
 
 export function logSkillStateProblem(message: string): void {

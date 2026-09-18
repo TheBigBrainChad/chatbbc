@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { promises as fs } from 'node:fs';
 import { makeTempDir, removeTempDir } from './helpers.js';
-import { initDurableStore, readDurable, resetDurableForTests } from '../src/main/durable.js';
+import { flushDurable, initDurableStore, readDurable, resetDurableForTests } from '../src/main/durable.js';
 import {
   currentSkillState, emptySkillState, mutateSkillState, resolveSkillPolicy,
   restoreSkillState, sanitizeSkillState, setSkillStateForTests
@@ -12,7 +13,7 @@ beforeEach(async () => {
   initDurableStore(root);
   setSkillStateForTests(emptySkillState());
 });
-afterEach(async () => { resetDurableForTests(); await removeTempDir(root); });
+afterEach(async () => { vi.restoreAllMocks(); resetDurableForTests(); await removeTempDir(root); });
 
 it('treats a missing state file as inherit-everything', async () => {
   await restoreSkillState();
@@ -73,4 +74,41 @@ it('serializes mutations and publishes only after the durable write', async () =
 it('drops a mutation that returns an invalid state rather than writing it', async () => {
   await expect(mutateSkillState(() => ({ version: 3 } as never))).rejects.toThrow(/state/i);
   expect(await readDurable('skills')).toBeNull();
+});
+
+it('reads inherited object keys as absent choices, not as stored ones', () => {
+  // `constructor` satisfies SKILL_ID_PATTERN, and a bare map lookup would find the inherited
+  // Object constructor — bypassing both the external rule and the default, and returning a
+  // function where SkillPolicy declares a boolean.
+  const state = emptySkillState();
+  expect(resolveSkillPolicy('constructor', false, false, state)).toEqual({ enabled: false, implicit: false });
+  expect(resolveSkillPolicy('constructor', true, undefined, state)).toEqual({ enabled: true, implicit: true });
+  const chosen = { ...emptySkillState(), enabled: { constructor: true }, implicit: { toString: false } };
+  expect(resolveSkillPolicy('constructor', true, false, chosen).enabled).toBe(true);
+  expect(resolveSkillPolicy('toString', true, undefined, chosen).implicit).toBe(false);
+  // An inherited key that no list stores still resolves to booleans.
+  for (const id of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+    const policy = resolveSkillPolicy(id, true, undefined, state);
+    expect(typeof policy.enabled).toBe('boolean');
+    expect(typeof policy.implicit).toBe('boolean');
+  }
+});
+
+it('rejects a mutation carrying keys the state file never holds', async () => {
+  await expect(mutateSkillState(() => ({ ...emptySkillState(), note: 'x' } as never)))
+    .rejects.toThrow(/state/i);
+  expect(await readDurable('skills')).toBeNull();
+});
+
+it('supersedes a failed write so the refused state cannot land later', async () => {
+  await mutateSkillState(state => ({ ...state, enabled: { a: false } }));
+  const rename = vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('disk unavailable'));
+  await expect(mutateSkillState(state => ({ ...state, enabled: { ...state.enabled, b: true } })))
+    .rejects.toThrow('disk unavailable');
+  rename.mockRestore();
+  // durable.ts retains the failed generation and retries it. The refusal must replace it with
+  // the state that is still authoritative, or `b: true` would be written after being refused.
+  await flushDurable();
+  expect(await readDurable('skills')).toEqual({ version: 1, seeded: {}, enabled: { a: false }, implicit: {}, removed: [] });
+  expect(currentSkillState().enabled).toEqual({ a: false });
 });
