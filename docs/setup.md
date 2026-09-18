@@ -27,7 +27,7 @@ ChatBBC is a hard identity cut from Chat On Steroids, not an in-place update.
 3. **Delete the three Chat On Steroids connectors** in ChatGPT's Developer mode.
 4. **Create the ChatBBC connectors.** Use the names and MCP URLs this app's Setup shows: **ChatBBC Core**, **ChatBBC Desktop**, **ChatBBC Plugins**.
 5. **Refresh ChatGPT's connector snapshot** when Setup asks. The new connector names and schemas do not map onto the old app ids.
-6. **Nothing is migrated.** Sessions, settings, secrets and pairing from the Chat On Steroids user data folder stay there. A leftover Chat On Steroids companion is refused with protocol 15 rather than silently ignored.
+6. **Nothing is migrated.** Sessions, settings, secrets and pairing from the Chat On Steroids user data folder stay there. The old companion does not connect to ChatBBC: it only accepts a reply stamped with its own app slug, so it reports ChatBBC as an app that is not running. Loading this app's companion is the fix.
 
 ## Tunnel setup
 
@@ -82,7 +82,8 @@ These continuity features do not grant additional quota or access. Do not use ne
 - **ChatGPT blocks a tool for safety:** local permission alone does not prove that ChatGPT accepted or dispatched the call. Inspect the local tool history for the exact request. If no result exists, execution is unconfirmed; do not replay a potentially executed operation or route it through another connector. Keep the task's progress and report the provider's error, selected Chat/Work surface, and app/extension versions without credentials or private content. A plan label alone does not diagnose a provider refusal.
 - **ChatBBC returns `TOOL_DISABLED`:** check Read-only and the named local capability. `CALLER_IDENTITY_REQUIRED` or `WORKER_IDENTITY_LOST` instead concerns exact caller ownership; neither proves that command execution is globally disabled.
 - **Extension version mismatch:** reload the unpacked companion after updating ChatBBC, then reload the ChatGPT page.
-- **Connector says `incompatible_extension` (426):** the loaded companion is the old Chat On Steroids build. Load the ChatBBC extension from **Open extension folder**, then reload.
+- **Connector says the app is not running, but it is:** the loaded companion is the old Chat On Steroids build. A companion only accepts `/hello` replies stamped with its own app slug, so it discards ChatBBC's reply and reports ChatBBC as absent. Load the ChatBBC companion from **Open extension folder**, then reload.
+- **Connector says `incompatible_extension` (426):** the companion is this app's companion but a different bridge protocol — for example an older installed build. Load the companion packaged with this app version, then reload.
 - **Models missing:** use **Reload ChatGPT models**. The picker reflects availability in your signed-in account.
 - **`UNIDENTIFIED_CALLER`:** use that conversation in the paired browser so the extension can prove its request identity. ChatBBC does not guess from the active tab.
 - **`COMPACTION_IN_PROGRESS`:** let the source chat finish its handoff. Work continues in the replacement conversation.

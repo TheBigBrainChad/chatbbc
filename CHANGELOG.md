@@ -23,11 +23,13 @@ reads. It is a hard identity cut, not an in-place update:
   create the three ChatBBC apps with the MCP URLs Setup shows, then refresh ChatGPT's connector
   snapshot. Old app ids are not mapped onto the new names.
 - **Reload the companion.** Load the ChatBBC companion from **Open extension folder**; the
-  packaged extension is the only supported source, and the old Chat On Steroids extension is
-  refused.
-- **Bridge protocol 15.** A leftover Chat On Steroids companion now fails with 426
-  (`incompatible_extension`) instead of silently dropping replies. Do not run both apps at once:
-  they contend for the same local bridge ports.
+  packaged extension is the only supported source. The old Chat On Steroids companion does not
+  connect to this app: it accepts only replies stamped with its own app slug, so it treats
+  ChatBBC as not running instead of reporting a pairing problem.
+- **Bridge protocol 15.** The protocol integer moved with the rename. A companion whose app slug
+  matches but whose protocol integer does not is refused with 426 (`incompatible_extension`)
+  rather than silently dropping replies. Do not run both apps at once: they contend for the
+  same local bridge ports.
 
 ## [2.1.14] — dead to openai/anthropic. JOIN THE RESISTANCE @dummerspast39 on x
 

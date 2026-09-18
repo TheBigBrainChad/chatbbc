@@ -24,8 +24,12 @@ mixed into the happy path as features.
 Source alignment: **2026-09-17**, including the 2.1.14 release candidate. App/extension **2.1.14**,
 bridge protocol **15** in the checked declarations (`package.json`, `src/main/version.ts`,
 `extension/manifest.json`, `extension/background.js`). This rename is the second hard identity
-cut: an app and a companion that disagree about the `/hello` `app` slug or the protocol integer
-must fail loudly (426), not silently drop replies. This does not prove release, installation or
+cut. The two halves identify each other twice: the companion accepts a `/hello` reply only when
+`app` equals its own expected slug, and it separately compares the protocol integer. A
+companion that disagrees only about the integer is refused with 426
+`incompatible_extension` rather than served; a companion carrying the predecessor's slug
+discards this app's replies as not-its-own and reports the app as not running, so it fails
+closed without ever reaching the protocol gate. This does not prove release, installation or
 live Chrome behavior.
 
 ## 1. What the whole app is meant to do
@@ -1635,11 +1639,16 @@ Status, event upload, activity, claims, receipts and bounded attachment chunks h
 contracts; a successful status read is not proof that a browser action happened.
 
 Every `/hello` reply is stamped with `app: APP_SLUG` (`chatbbc`) and the current
-`BRIDGE_PROTOCOL` (15). The companion compares both before trusting a reply, and a mismatch is
-answered 426 `incompatible_extension` instead of being silently dropped — that is the whole
-reason the integer moved for this rename, and it is why a companion left over from the
-previous identity fails visibly here. The ports themselves are deliberately unchanged, so both
-apps cannot hold them at once; the setup guide tells the user not to run them together.
+`BRIDGE_PROTOCOL` (15), and the companion checks both: it treats a reply as its own only when
+`app` matches, and it rejects a reply whose `bridge` integer differs. The app enforces the same
+integer on every protected route and answers 426 `incompatible_extension`, which is why the
+slug and the integer moved together for this rename — and why the two failure modes differ. A
+companion left over from the previous identity never reaches the protocol gate: it discards the
+reply as someone else's and reports this app as not running. That is the correct closed outcome,
+but a much less specific message, so the fix is to load the companion from this app's **Open
+extension folder** rather than to look for a protocol error. The ports themselves are
+deliberately unchanged, so both apps cannot hold them at once; the setup guide tells the user
+not to run them together.
 
 ### Commands and receipts
 
@@ -2575,8 +2584,9 @@ Runtime data is under Electron userData: `%APPDATA%/chatbbc` on Windows,
 `~/Library/Application Support/chatbbc` on macOS and the XDG config location on Linux.
 The directory name follows Electron's derivation from `package.json` `name`. ChatBBC is a new
 identity that installs beside the previous product and starts with an empty directory: nothing
-reads, copies or migrates the old userData, and a companion left over from that product is
-refused by the protocol-15 gate rather than served.
+reads, copies or migrates the old userData. A companion left over from that product cannot
+attach to it either — it accepts only replies stamped with its own app slug, so it reports
+ChatBBC as an app that is not running instead of pairing.
 Inspect exact session/state files (§4), never edit live ledgers as a repair shortcut. `logger.ts`
 keeps a redacted 500-entry ring and bounded async `app.log` batches with rotation, explicit
 overload omissions, a two-second final flush and separate `.crash` snapshot. Logs are human
