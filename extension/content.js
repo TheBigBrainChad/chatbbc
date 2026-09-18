@@ -709,6 +709,17 @@
   let userSendReceipt = null;
   const pageViewChecks = new Set(); // Existing readiness waits also observe accepted MAIN-world snapshots.
   const sendText = (value) => String(value || '').replace(/\s+/g, '');
+  /** Undo page-readback punctuation escapes only; never rewrite authored Send text. */
+  const unescapeMarkdown = (value) => String(value || '').replace(/\\([!-\/:-@\[-`{-~])/g, '$1');
+  /** The leading continuation marker, as typed or as the composer escaped it. */
+  const markedAs = (value) => {
+    const text = String(value || '');
+    // Bounded to the marker's own neighbourhood: the brief behind it is prose the page may
+    // legitimately escape, and nothing here has any business rewriting that.
+    const match = text.match(CONTINUATION_MARKER) || text.slice(0, 200).match(CONTINUATION_MARKER_ESCAPED);
+    if (match) match[2] = unescapeMarkdown(match[2]);
+    return match;
+  };
   /** Receipt, transcript and presentation share the same exact native user source. */
   function userMessageSource(message) {
     if (!message || message.role !== 'user' || !message.id || !message.node?.isConnected ||
@@ -2052,7 +2063,7 @@
         // the stable ChatGPT-authored identity. This is the reload path after the URL command
         // marker has already disappeared. reconcileContinuationMarker() releases the gate on
         // the app's answer, committed or refused; only an unreachable app keeps it shut.
-        const continuation = text.match(CONTINUATION_MARKER);
+        const continuation = markedAs(text);
         // The app's settled disposition outlives this DOM row. A remount or a later
         // quotation of its marker cannot turn a committed chat back into a shadow.
         const settledContinuation = continuation && [...reconciledContinuations.keys()].some(
@@ -3745,7 +3756,7 @@
     // id that can join the call to B. A marker-shaped string alone is never authority: the app
     // must accept the exact destination message first, or the provisional answer is discarded.
     const newestUser = [...CLF_DOM.messages()].reverse().find((message) => message.role === 'user');
-    const currentContinuationMarker = String(newestUser?.text || '').match(CONTINUATION_MARKER);
+    const currentContinuationMarker = markedAs(newestUser?.text);
     let committedResumeOwner = null;
     if (currentContinuationMarker?.[1] === 'RESUME') {
       const resumeEntry = markedContinuationTurns(answer.turns).find(
@@ -8648,6 +8659,9 @@
   }
 
   const CONTINUATION_MARKER = /^\s*\[\[CLF-(HANDOFF|RESUME):([A-Za-z0-9_-]{16,64})\]\](?:\s|$)/;
+  // Page readback escapes ASCII punctuation. Letters and digits cannot be escaped, and the
+  // token grammar stays narrow so `\0`/`\a` and a doubled backslash are still refused.
+  const CONTINUATION_MARKER_ESCAPED = /^\s*(?:\\?\[){2}CLF\\?-(HANDOFF|RESUME)\\?:((?:[A-Za-z0-9]|\\?[_-]){16,64})(?:\\?\]){2}(?:\s|$)/;
   const continuationReconciliations = new Map();
   /**
    * Proof key → how the app answered the marker: `committed` is ownership proof for the
@@ -8694,7 +8708,7 @@
       const turn = turns[index];
       for (const message of turn.messages || []) {
         if (message.role !== 'user' || message.stable !== true) continue;
-        const match = String(message.rawText || '').match(CONTINUATION_MARKER);
+        const match = markedAs(message.rawText);
         if (!match) continue;
         const key = `${match[1]}:${match[2]}`;
         const marked = {
@@ -10146,7 +10160,7 @@
       return void (await fail('the composer changed before bootstrap send; the draft was preserved'));
     }
     if (await failIfRetargeted()) return;
-    const resumeMarker = boot.type === 'resume' ? String(boot.text || '').match(CONTINUATION_MARKER) : null;
+    const resumeMarker = boot.type === 'resume' ? markedAs(boot.text) : null;
     // The last custody writes await HTTP. They cannot preserve the composer or SPA route
     // that was checked above; prove both again after each write and at the native click.
     const exactBootstrapDraft = () => squeeze(CLF_DOM.composer()?.textContent) === expectedText;
