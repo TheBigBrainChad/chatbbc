@@ -45,6 +45,7 @@ import {
   type SurfaceRegistrar,
   type ToolContent
 } from './kernel.js';
+import { CONNECTOR_BRAND } from './surfaces.js';
 
 const DEFAULT_WINDOW_RESULTS = 60;
 
@@ -465,7 +466,7 @@ export function registerMacOSDesktopTools(reg: SurfaceRegistrar): void {
           // would hide which of them the user actually has to switch on.
           if (!caps.control && actions.some((a) => a.type !== 'wait' && !a.type.endsWith('_clipboard'))) {
             return fail(
-              'TOOL_DISABLED: mouse and keyboard control is disabled by the current Chat On Steroids permissions. ' +
+              `TOOL_DISABLED: mouse and keyboard control is disabled by the current ${CONNECTOR_BRAND} permissions. ` +
                 'Ask the user to enable "Control mouse and keyboard" in the app, then retry.'
             );
           }

@@ -14,6 +14,7 @@ import { logInfo } from '../logger.js';
 import { getSession, readSessionPlan, saveHandoff } from './store.js';
 import { destinationContinuationMarker } from './handoff-prompt.js';
 import { userPromptText } from '../../shared/user-prompt.js';
+import { APP_TITLE } from '../version.js';
 
 export interface PrepareHandoffInput {
   sessionId: string;
@@ -41,7 +42,7 @@ export function resumeBootstrapText(summary: string, token = ''): string {
   const identity = destinationContinuationMarker(token);
   return (
     (identity ? `${identity}\n\n` : '') +
-    'Continuing a Chat On Steroids session that was compacted. This is the brief the previous chat wrote about ' +
+    `Continuing a ${APP_TITLE} session that was compacted. This is the brief the previous chat wrote about ` +
     'its own work; carry on from it rather than starting again.\n\n' +
     summary
   );

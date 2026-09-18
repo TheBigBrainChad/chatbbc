@@ -9,6 +9,8 @@
  * worth having in one named place whatever ends up reading it.
  */
 
+import { APP_TITLE } from '../version.js';
+
 /** The rules and headings. */
 export const HANDOFF_BRIEF_RULES = `Rules:
 - Treat the user's messages as the highest-authority source in the entire handoff. They are the specification. Preserve the original task, every requirement, every later correction, every constraint, every explicit preference, and every request about what should happen next. If a later message changed an earlier requirement, state the final position and say that it changed. Never let an assistant plan, guess, TODO, or tool-side interpretation override what the user actually said.
@@ -63,7 +65,7 @@ export function nativeHandoffPrompt(token = '', includeToolCalls = true): string
   const identity = sourceContinuationMarker(token);
   return (
     (identity ? `${identity}\n\n` : '') +
-    'Chat On Steroids is compacting this conversation so a fresh chat can continue the work. ' +
+    `${APP_TITLE} is compacting this conversation so a fresh chat can continue the work. ` +
     'Stop whatever you were doing and do only this.\n\n' +
     'Write a handoff brief so a different coding agent can continue this unfinished task in a brand-new ' +
     "conversation, with no memory of anything here. Everything you know about this session — the user's " +

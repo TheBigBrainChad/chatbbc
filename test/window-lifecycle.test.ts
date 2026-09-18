@@ -11,6 +11,7 @@ import {
   shouldBeginAppBootstrap,
   shouldQuitOnWindowAllClosed
 } from '../src/main/window-lifecycle.js';
+import { APP_TITLE } from '../src/main/version.js';
 
 describe('native window activation', () => {
   it.each(['darwin', 'win32', 'linux'])('keeps native fullscreen available on macOS (%s)', (platform) => {
@@ -22,9 +23,10 @@ describe('native window activation', () => {
       BrowserWindow: function (value: Record<string, unknown>) { options = value; },
       layout: {}, icon: null, process: { platform },
       titleBarOverlayForTheme: () => ({}), windowBackgroundForTheme: () => '#181818', getConfig: () => ({ ui: { theme: 'dark' } }),
-      UI_BASE_ZOOM: 1, path: { join: () => 'preload.js' }, __dirname: '/app'
+      UI_BASE_ZOOM: 1, path: { join: () => 'preload.js' }, __dirname: '/app', APP_TITLE
     });
     expect(options?.fullscreenable).toBe(platform === 'darwin');
+    expect(options?.title).toBe(APP_TITLE);
     expect(options?.webPreferences).toMatchObject({ sandbox: true, contextIsolation: true, nodeIntegration: false });
   });
 

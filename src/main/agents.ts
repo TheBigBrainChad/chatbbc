@@ -21,6 +21,7 @@ import { getChatModels } from './chat-models.js';
 import type { ChatModelOption } from '../shared/chat-models.js';
 import { logInfo, logWarn } from './logger.js';
 import { inheritWorkspace, releasePrimeWorkspace, bindAgentWorkspace } from './workspace.js';
+import { APP_TITLE } from './version.js';
 
 export const PRIME_ID = 'prime';
 
@@ -129,7 +130,7 @@ export class AgentsBusyError extends AgentError {
 export class IdentityLostError extends AgentError {
   constructor(message?: string) {
     super(
-      message ?? ('WORKER_IDENTITY_LOST: Chat On Steroids could not tell which conversation this call came from, so it cannot ' +
+      message ?? (`WORKER_IDENTITY_LOST: ${APP_TITLE} could not tell which conversation this call came from, so it cannot ` +
         'act on the run from here. No agent operation was performed. Wait briefly and retry this operation once. ' +
         'If it is still refused, preserve your result in the chat and report that delivery is unconfirmed; ' +
         'do not claim the message or finish report reached its recipient.')
@@ -562,7 +563,7 @@ export interface Caller {
 
 function requireEnabled(): void {
   if (!getConfig().multiAgent.enabled) {
-    throw new AgentError('Multi-agent mode is switched off in Chat On Steroids. Ask the user to enable it.');
+    throw new AgentError(`Multi-agent mode is switched off in ${APP_TITLE}. Ask the user to enable it.`);
   }
 }
 
@@ -2522,7 +2523,7 @@ function planRevivalText(agent: Agent): { text: string; messageIds: string[] } {
   const body = waiting.map((message) => message.text).join('\n\n');
   const text =
     (body || 'The prime agent has more work for you; check your inbox on the next tool result.') +
-    `\n\n(Chat On Steroids: you are still ${agent.info.id} in the same run, and this is the prime agent talking to ` +
+    `\n\n(${APP_TITLE}: you are still ${agent.info.id} in the same run, and this is the prime agent talking to ` +
     'you again in the chat you already know. Pick up from what you did here before rather than starting over. ' +
     'Report with agents action=message to="prime" as you go and action=finish when this piece is done.)';
   return { text, messageIds: waiting.map((message) => message.id) };

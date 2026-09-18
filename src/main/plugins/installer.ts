@@ -8,6 +8,7 @@ import { pluginCatalog, reviewedPluginLicense } from './catalog.js';
 import { getDefaultEnvironment } from '@modelcontextprotocol/client/stdio';
 import { terminateProcessTree } from '../exec.js';
 import { envValue, pathEntries, setEnvValue } from '../env.js';
+import { APP_TITLE } from '../version.js';
 
 /** One minimal environment for runtime discovery, installation and plugin startup. */
 export function pluginEnvironment(inherited = getDefaultEnvironment(), platform = process.platform): Record<string, string> {
@@ -143,7 +144,7 @@ export async function runInstaller(command: string, args: string[], cwd: string)
     }, 180000);
     child.once('error', () => {
       clearTimeout(timer);
-      reject(new Error(`Required runtime ${path.basename(command)} is unavailable; install it and restart CoS`));
+      reject(new Error(`Required runtime ${path.basename(command)} is unavailable; install it and restart ${APP_TITLE}`));
     });
     child.once('exit', (code) => {
       clearTimeout(timer);
@@ -230,7 +231,7 @@ export async function installSource(source: PluginSource, dir: string): Promise<
       try {
         await fs.access(npm);
       } catch {
-        throw new Error('Install the standard Node.js distribution including npm, then restart CoS');
+        throw new Error(`Install the standard Node.js distribution including npm, then restart ${APP_TITLE}`);
       }
       await runInstaller(node, [npm, ...args], dir);
     } else await runInstaller('npm', args, dir);
@@ -285,5 +286,5 @@ async function findExecutable(name: string): Promise<string> {
       /* next PATH entry */
     }
   }
-  throw new Error(`Install ${name} and restart CoS`);
+  throw new Error(`Install ${name} and restart ${APP_TITLE}`);
 }

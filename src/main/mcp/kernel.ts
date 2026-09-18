@@ -66,7 +66,7 @@ import {
   stageQueuedWorkerRevivals,
   swarmRunning
 } from '../agents.js';
-import type { SurfaceId } from './surfaces.js';
+import { CONNECTOR_BRAND, type SurfaceId } from './surfaces.js';
 import {
   currentCall,
   emptyEvidence,
@@ -1203,7 +1203,7 @@ export function createRegistrar(server: McpServer | null, ctx: ToolContext, surf
     },
     featureDisabled(feature, setting) {
       return fail(
-        `FEATURE_DISABLED: ${feature} is switched off in Chat On Steroids. ` +
+        `FEATURE_DISABLED: ${feature} is switched off in ${CONNECTOR_BRAND}. ` +
           `Ask the user to enable "${setting}" in the app, then try again.`
       );
     }

@@ -80,7 +80,7 @@ import {
   unpair
 } from './bridge.js';
 import { extensionDir } from './extension-path.js';
-import { extensionDownloadUrl } from './version.js';
+import { APP_TITLE, extensionDownloadUrl } from './version.js';
 import {
   deleteSession,
   clearImageStorage,
@@ -625,7 +625,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   handle('roots:rename', async (payload) => {
     const { name, newName } = renameRoot.parse(payload);
     if (RESERVED_ROOT_NAMES.has(newName)) {
-      throw new SandboxError(`/${newName} is reserved by Chat On Steroids and cannot be used as a folder name`);
+      throw new SandboxError(`/${newName} is reserved by ${APP_TITLE} and cannot be used as a folder name`);
     }
     await updateConfig((config) => {
       if (!config.roots.some((root) => root.name === name)) throw new Error(`/${name} is not an approved folder`);

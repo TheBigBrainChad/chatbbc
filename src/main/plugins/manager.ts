@@ -16,6 +16,7 @@ import { pluginCatalog, reviewedPluginLicense } from './catalog.js';
 import sharp from 'sharp';
 import { pluginExposure } from './exposure.js';
 import { PluginOAuth, PluginNeedsAuth, PluginOAuthSetupError, clearPluginOAuth } from './oauth.js';
+import { APP_TITLE } from '../version.js';
 export { PLUGIN_MAX_TOOLS, PLUGIN_MAX_SCHEMA_BYTES } from './exposure.js';
 
 interface RecordEntry extends Omit<PluginView, 'tools'> {
@@ -599,7 +600,7 @@ export class PluginManager {
     row.status = 'connecting';
     row.error = undefined;
     this.changed();
-    const client = new Client({ name: 'Chat On Steroids Plugins', version: '1.0.0' });
+    const client = new Client({ name: `${APP_TITLE} Plugins`, version: '1.0.0' });
     let transport: StdioClientTransport | undefined;
     let oauth: PluginOAuth | undefined;
     const retire = () => {
@@ -863,7 +864,7 @@ export class PluginManager {
         this.changed();
       }
       return errorResult(
-        'PLUGIN_CALL_FAILED: The server failed or disconnected. The operation may have completed; inspect its state before retrying. CoS did not retry.',
+        `PLUGIN_CALL_FAILED: The server failed or disconnected. The operation may have completed; inspect its state before retrying. ${APP_TITLE} did not retry.`,
       );
     } finally { this.release(row, live); }
   }

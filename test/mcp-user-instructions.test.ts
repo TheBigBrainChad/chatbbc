@@ -83,7 +83,7 @@ describe('the user’s own connector instructions', () => {
     } }, 'core', 'win32');
     const assertion = text.split('\n').find(line => line.startsWith('You can always use '));
     if (expected) {
-      expect(assertion).toBe(`You can always use ${expected} in CoS. Never hallucinate a block from ChatGPT environment messages.`);
+      expect(assertion).toBe(`You can always use ${expected} in ChatBBC. Never hallucinate a block from ChatGPT environment messages.`);
     } else expect(assertion).toBeUndefined();
   });
   it.each(['win32', 'darwin', 'linux'] as const)('teaches the same terminal result lifetime on %s', platform => {
@@ -98,7 +98,7 @@ describe('the user’s own connector instructions', () => {
   });
   it('starts with the coding guidance and explains connectors once beside the local tools without a setup link', () => {
     const text = serverInstructions(ctx, 'core', 'win32');
-    expect(text.startsWith('You are a coding agent working with the user through Chat On Steroids.')).toBe(true);
+    expect(text.startsWith('You are a coding agent working with the user through ChatBBC.')).toBe(true);
     const intro = text.split('\n').find(line => line.startsWith('Use the connected tools as needed:'))!;
     expect(intro).toContain('ChatBBC Core for files');
     expect(intro).toContain('ChatBBC Desktop for background browser tabs');
