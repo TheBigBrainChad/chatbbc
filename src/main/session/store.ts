@@ -33,12 +33,15 @@ import type {
   ImageStorageInfo,
   NewSessionEvent,
   ReasoningEffort,
+  RichOrigin,
   SessionEvent,
   SessionOrigin,
   SessionSummary,
   StoredText
 } from '../../shared/session.js';
 import { continuationMarkerOf, eventTokens, MAX_TOOL_RESULT_TOKENS, normalizedToolOutcome, storedTextTokens, workSequence } from '../../shared/session.js';
+import { parseRichResponse, type RichResponse } from '../../shared/rich-response.js';
+import { parseRichOrigin } from './rich-response.js';
 import { chronological, positionOf } from '../../shared/chronology.js';
 import { automaticTitle, firstTitleMessage, legacyContextTitle, refreshUserTitle } from './title.js';
 import { agentPlanSchema, agentPlanUpdateSchema, MAX_AGENT_PLAN_BYTES, type AgentPlan, type AgentPlanUpdate } from '../../shared/agent-plan.js';
@@ -296,6 +299,7 @@ function emptySummary(id: string, title: string, conversationId: string | null):
     id,
     title,
     conversationId,
+    bindingRevision: 0,
     chatIds: conversationId ? [conversationId] : [],
     startedAt: now,
     updatedAt: now,
@@ -1109,6 +1113,12 @@ export function upsertMessageEvent(
   if (!directKey) throw new Error('Canonical message update requires ChatGPT messageId');
   return ensureOpen(sessionId).then((entry) => {
     const write = entry.queue.then(async () => {
+      // Rich is store-owned: ordinary text upserts cannot insert page-claimed structure.
+      if (event.kind === 'assistant_message') {
+        const { rich: _rich, richOrigin: _richOrigin, richMediaUnavailable: _unavailable,
+          retiredRichImageAssetIds: _retired, ...plain } = event;
+        event = plain as NewMessageEvent;
+      }
       // Provider create_time can change after a tab reload while the actual message
       // UUID stays identical. Preserve the first canonical anchor on that exact
       // evidence; never collapse distinct authored segments by working-turn tuple
@@ -1145,6 +1155,8 @@ export function upsertMessageEvent(
       // every streaming observation.
       const sameMessage =
         previous?.kind === event.kind && storedTextEqual(previous.message, event.message);
+      const sameRichOwner = previous?.kind === 'assistant_message' && event.kind === 'assistant_message' &&
+        sameMessage && previous.providerMessageId === (event.providerMessageId ?? previous.providerMessageId);
 
       const nextEvent: NewMessageEvent =
         previous?.kind === 'assistant_message' && event.kind === 'assistant_message'
@@ -1167,7 +1179,11 @@ export function upsertMessageEvent(
               // markup for different content.
               ...(event.renderedHtml === undefined && sameMessage
                 ? { renderedHtml: previous.renderedHtml }
-                : {})
+                : {}),
+              ...(sameRichOwner && previous.rich ? { rich: previous.rich, richOrigin: previous.richOrigin } : {}),
+              ...(sameRichOwner && previous.richMediaUnavailable ? { richMediaUnavailable: previous.richMediaUnavailable } : {}),
+              // Removal tombstones survive ordinary re-observations even if authored text changes.
+              ...(previous.retiredRichImageAssetIds ? { retiredRichImageAssetIds: previous.retiredRichImageAssetIds } : {})
             }
           : previous?.kind === 'user_message' && event.kind === 'user_message'
             ? { ...event, inputId: event.inputId ?? previous.inputId,
@@ -1297,6 +1313,68 @@ export function upsertMessageEvent(
     );
     return write;
   });
+}
+
+/**
+ * Only an already-recorded exact logical assistant row can own a rich projection. A caller
+ * must separately corroborate Chrome MessageSender and DOM/Fiber association; this layer
+ * checks the supplied origin against the durable binding under the SAME queue as rebind.
+ */
+export function upsertRichMessage(
+  sessionId: string, messageId: string, rich: RichResponse, origin: RichOrigin
+): Promise<'stored' | 'unchanged' | 'refused'> {
+  return ensureOpen(sessionId).then(entry => enqueueSessionOperation(entry, 'rich message upsert', async () => {
+    if (!getConfig().sessions.record) return 'refused';
+    const capture = parseRichOrigin(origin);
+    if (!capture) return 'refused';
+    const clean = parseRichResponse(rich);
+    if (!clean || !messageId || clean.messageId !== messageId ||
+        clean.conversationId !== capture.conversationId || !clean.providerMessageId ||
+        entry.summary.conversationId !== capture.conversationId ||
+        (entry.summary.bindingRevision ?? 0) !== capture.bindingRevision) return 'refused';
+
+    const key = `assistant_message\u0000${messageId}`;
+    const previous = entry.messages.get(key);
+    if (!previous || previous.kind !== 'assistant_message' || previous.messageId !== messageId ||
+        !previous.providerMessageId || previous.providerMessageId !== clean.providerMessageId) return 'refused';
+    // A provider UUID claimed by two logical rows cannot corroborate either one.
+    if ([...entry.messages.entries()].some(([otherKey, other]) => otherKey !== key &&
+        other.kind === 'assistant_message' && other.providerMessageId === clean.providerMessageId)) return 'refused';
+
+    // A malformed durable predecessor cannot authorize a replacement snapshot.
+    const priorOrigin = previous.richOrigin ? parseRichOrigin(previous.richOrigin) : null;
+    if (previous.richOrigin && !priorOrigin) return 'refused';
+    if (previous.rich && !priorOrigin) return 'refused';
+    if (priorOrigin) {
+      if (priorOrigin.conversationId !== capture.conversationId ||
+          priorOrigin.bindingRevision > capture.bindingRevision) return 'refused';
+      if (priorOrigin.bindingRevision === capture.bindingRevision &&
+          (priorOrigin.documentId !== capture.documentId || priorOrigin.navigationEpoch > capture.navigationEpoch)) return 'refused';
+    }
+    if ((previous.rich?.revision ?? 0) >= Number.MAX_SAFE_INTEGER) return 'refused';
+    const nextRevision = (previous.rich?.revision ?? 0) + 1;
+    // Store, never the extension, assigns revision. A re-observation of identical structure
+    // from a newer navigation may refresh provenance without claiming changed content.
+    const storedRich = { ...clean, revision: nextRevision };
+    const sameContent = previous.rich && JSON.stringify({ ...previous.rich, revision: 0 }) ===
+      JSON.stringify({ ...storedRich, revision: 0 });
+    const sameOrigin = priorOrigin && priorOrigin.conversationId === capture.conversationId &&
+      priorOrigin.bindingRevision === capture.bindingRevision && priorOrigin.documentId === capture.documentId &&
+      priorOrigin.navigationEpoch === capture.navigationEpoch;
+    if (sameContent && sameOrigin) return 'unchanged';
+
+    const full: Extract<SessionEvent, { kind: 'assistant_message' }> = {
+      ...previous, rich: sameContent && previous.rich ? previous.rich : storedRich,
+      richOrigin: capture,
+      seq: entry.nextSeq // presentation delivery cursor only; never advance content/work/Goal.
+    };
+    await writeCanonicalMessage(sessionId, key, full);
+    entry.nextSeq += 1;
+    entry.messages.set(key, full);
+    entry.historySeq = full.seq;
+    scheduleMeta(entry);
+    return 'stored';
+  }));
 }
 
 /**
@@ -2027,6 +2105,8 @@ function normalizeSummary(id: string, raw: string): MetaCheckpoint | null {
         ...publicSummary,
         // Keep in-place increments numeric until the forced rebuild supplies the real values.
         processExitNonzero: publicSummary.processExitNonzero ?? 0,
+        bindingRevision: Number.isSafeInteger(publicSummary.bindingRevision) && publicSummary.bindingRevision! >= 0
+          ? publicSummary.bindingRevision : 0,
         toolRejected: publicSummary.toolRejected ?? 0,
         toolInternalErrors: publicSummary.toolInternalErrors ?? 0,
         // A two-minute display clock is not worth replaying every legacy session during the
@@ -2754,6 +2834,8 @@ export async function rebindSession(
   const entry = await ensureOpen(id);
   return enqueueSessionOperation(entry, 'rebind', async () => {
     if (entry.summary.conversationId !== fromConversationId) return false;
+    if (!Number.isSafeInteger(entry.summary.bindingRevision ?? 0) ||
+        (entry.summary.bindingRevision ?? 0) >= Number.MAX_SAFE_INTEGER) return false;
     // Browser conversation ids are UUID-like. A handful of store unit tests deliberately
     // use short symbolic ids and reuse them across retained temp sessions; ownership safety
     // applies to the real identity domain rather than manufacturing a test-only collision.
@@ -2769,6 +2851,7 @@ export async function rebindSession(
     const staged: SessionSummary = {
       ...entry.summary,
       conversationId: toConversationId,
+      bindingRevision: (entry.summary.bindingRevision ?? 0) + 1,
       chatIds: entry.summary.chatIds.includes(toConversationId)
         ? [...entry.summary.chatIds]
         : [...entry.summary.chatIds, toConversationId],

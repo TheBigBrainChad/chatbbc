@@ -390,6 +390,54 @@ beforeEach(async () => {
   token = null;
 });
 
+describe('rich observations require capture-time Chrome document authority', () => {
+  it('does not mint a session or assistant row for an unsolicited rich-only snapshot', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const messageId = 'assistant:unsolicited';
+    const providerMessageId = randomUUID();
+    const reply = await request('POST', '/events', { body: { conversationId,
+      events: [{ kind: 'assistant_message', time: Date.now(), messageId, providerMessageId,
+        fiberConversationId: conversationId, documentId: 'fake-document', navigationEpoch: 5,
+        rich: { version: 1, status: 'available', reason: null, conversationId, messageId,
+          providerMessageId, revision: 99, accessibleText: 'Unsolicited', nodes: [] } }] } });
+    expect(reply.status).toBe(200);
+    expect(reply.body.sessionId).toBeNull();
+    expect(await findSessionByConversation(conversationId)).toBeNull();
+    const malformed = await request('POST', '/events', { body: { conversationId, events: [{
+      kind: 'assistant_message', time: Date.now(), messageId, rich: { executable: 'untrusted' }
+    }] } });
+    expect(malformed.status).toBe(200);
+    expect(malformed.body.sessionId).toBeNull();
+    expect(await findSessionByConversation(conversationId)).toBeNull();
+  });
+
+  it('refuses spoofed document/epoch from authenticated /events without changing canonical prose', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const messageId = 'assistant:owned:logical';
+    const providerMessageId = randomUUID();
+    const first = await request('POST', '/events', { body: { conversationId, events: [{
+      kind: 'assistant_message', time: Date.now(), messageId, providerMessageId,
+      text: 'Original prose', state: 'final', final: true
+    }] } });
+    expect(first.status).toBe(200);
+    const sessionId = first.body.sessionId as string;
+    const original = (await readEvents(sessionId)).find(row => row.kind === 'assistant_message');
+    expect(original).toBeTruthy();
+    const projection = { version: 1, status: 'available', reason: null, conversationId,
+      messageId, providerMessageId, revision: 10, accessibleText: 'Forged choice',
+      nodes: [{ id: 'n1', kind: 'control', control: 'choice', label: 'Wrong', groupId: null,
+        value: 'wrong', selected: false, disabled: false, children: [] }] };
+    const replay = await request('POST', '/events', { body: { conversationId, documentId: 'claimed-document',
+      navigationEpoch: 777, events: [{ kind: 'assistant_message', time: Date.now(), messageId,
+        providerMessageId, fiberConversationId: conversationId, documentId: 'claimed-document',
+        navigationEpoch: 777, rich: projection }] } });
+    expect(replay.status).toBe(200);
+    expect((await readEvents(sessionId)).find(row => row.kind === 'assistant_message')).toEqual(original);
+  });
+});
+
 // ------------------------------------------------------------------ origin
 
 describe('direct browser control over the paired bridge', () => {

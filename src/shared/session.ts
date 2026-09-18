@@ -282,6 +282,14 @@ interface BaseEvent {
   turnId?: string;
 }
 
+/** Capture provenance, never derivable from a provider DOM attribute or current tab selection. */
+export type RichOrigin = {
+  conversationId: string;
+  bindingRevision: number;
+  documentId: string;
+  navigationEpoch: number;
+};
+
 export type SessionEvent =
   | (BaseEvent & { kind: 'session_start'; conversationId: string | null; title: string })
   | (BaseEvent & {
@@ -323,6 +331,11 @@ export type SessionEvent =
       renderedHtml?: StoredText;
       /** Public provider object UUID. Evidence for identity drift; not a canonical key or turn owner. */
       providerMessageId?: string;
+      /** Validated presentation only, written by the canonical store's dedicated rich upsert. */
+      rich?: import('./rich-response.js').RichResponse;
+      richOrigin?: RichOrigin;
+      richMediaUnavailable?: 'unsupported';
+      retiredRichImageAssetIds?: string[];
       state?: MessageState;
       /** Compatibility mirror for older consumers; equivalent to state === 'final'. */
       final: boolean;
@@ -536,6 +549,8 @@ export interface SessionSummary {
    * commit, and nothing else ever changes it.
    */
   conversationId: string | null;
+  /** Durable attachment generation. Legacy recordings start at zero; each successful rebind increments. */
+  bindingRevision?: number;
   /**
    * Every ChatGPT conversation this session has lived in, oldest first, current last.
    *

@@ -87,6 +87,7 @@ import {
   startGoalDraft
 } from './goal.js';
 import { logInfo, logWarn } from './logger.js';
+import { parseRichResponse } from '../shared/rich-response.js';
 import {
   closeConversation,
   liveConversations,
@@ -1158,6 +1159,16 @@ function parseObservations(input: unknown): ChatObservation[] {
     if (typeof item['fiberConversationId'] === 'string') {
       const fiberId = conversationId(item['fiberConversationId']);
       if (fiberId) observation.fiberConversationId = fiberId;
+    }
+    if (kind === 'assistant_message' && item['rich'] !== undefined) {
+      // Parsing is structural validation, not identity authority. The current /events
+      // journal has discarded capture-time Chrome sender provenance; recorder refuses this
+      // projection until the coordinated document-bound transport exists.
+      if (observation.text === undefined) observation.richOnly = true;
+      const parsed = parseRichResponse(item['rich']);
+      if (parsed && parsed.messageId === observation.messageId && parsed.providerMessageId &&
+          parsed.providerMessageId === observation.providerMessageId &&
+          parsed.conversationId === observation.fiberConversationId) observation.rich = parsed;
     }
     if (item['final'] === true) observation.final = true;
     if (typeof item['outcome'] === 'string' && OUTCOMES.has(item['outcome'])) {

@@ -30,6 +30,7 @@ import type {
   TurnOutcome
 } from '../../shared/session.js';
 import { estimateTokens, originTitle } from '../../shared/session.js';
+import type { RichResponse } from '../../shared/rich-response.js';
 import { chatErrorMessageKey } from '../../shared/chat-error.js';
 import { getConfig } from '../config.js';
 import { logInfo, logWarn } from '../logger.js';
@@ -1676,6 +1677,10 @@ export interface ChatObservation {
   reaction?: string | null;
   /** ChatGPT's already-rendered authored markup for this same logical message. */
   renderedHtml?: string;
+  /** Schema-validated rich projection only; NOT evidence of Chrome document ownership. */
+  rich?: RichResponse;
+  /** Bridge-derived marker: a rich payload arrived without authored prose, valid or not. */
+  richOnly?: boolean;
   messageId?: string;
   /** Raw public provider message UUID, retained as evidence, never used to guess ownership. */
   providerMessageId?: string;
@@ -1915,6 +1920,20 @@ export function recordChatObservations(
   });
 }
 
+/**
+ * Future trusted sender integration must corroborate Chrome MessageSender.documentId,
+ * navigationEpoch and the exact DOM/Fiber association BEFORE entering store upsert.
+ * Today's /events journal strips capture-time sender identity. Neither a body field nor
+ * the currently selected document proves the snapshot's owner, so refuse even valid trees.
+ * Do not create sessions or persist a transient rich cache in this fail-closed path.
+ */
+export async function recordRichObservation(
+  _conversationId: string, _item: ChatObservation
+): Promise<'stored' | 'unchanged' | 'refused'> {
+  if (!recordingEnabled()) return 'refused';
+  return 'refused';
+}
+
 /** Transcript and MCP lifecycle changes share the same per-conversation publication order. */
 function serializeObservations<T>(conversationId: string, action: () => Promise<T>): Promise<T> {
   const prior = observationChains.get(conversationId) ?? Promise.resolve();
@@ -1979,6 +1998,11 @@ async function recordSupersededMessages(
         { preferTime: item.authoredTime === true }
       );
     } else if (item.kind === 'assistant_message') {
+      // Rich-only transport must never replace authoritative prose with an empty string.
+      if (item.text === undefined && (item.rich || item.richOnly)) {
+        if (item.rich) await recordRichObservation(item.rich.conversationId, item);
+        continue;
+      }
       const state = item.state ?? (item.final === true ? 'final' : 'streaming');
       written = await upsertMessageEvent(
         sessionId,
@@ -2018,6 +2042,12 @@ async function recordChatObservationsNow(
 }> {
   const activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; endedTurnId?: string } = { meaningful: false, working: false, terminal: false };
   if (!recordingEnabled()) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
+  // No canonical text/event evidence exists in a rich-only batch; reject before the normal
+  // first-sight path could create an otherwise empty session for an untrusted projection.
+  if (observations.length > 0 && observations.every(item => item.kind === 'assistant_message' &&
+      item.text === undefined && (item.rich !== undefined || item.richOnly === true))) {
+    return { sessionId: null, stored: 0, activity, goalCandidates: [] };
+  }
   if (!conversations.has(conversationId)) {
     const lineage = await supersededLineage(conversationId);
     if (lineage) {
@@ -2094,6 +2124,11 @@ async function recordChatObservationsNow(
       }
       case 'assistant_message': {
         if (!item.messageId) continue;
+        // A rich-only update has no authored text and no authority to create/change it.
+        if (item.text === undefined && (item.rich || item.richOnly)) {
+          if (item.rich) await recordRichObservation(conversationId, item);
+          continue;
+        }
         const state = item.state ?? (item.final === true ? 'final' : 'streaming');
         // A reload can destroy the document-local generation id after this recorder already
         // made the only honest lifecycle verdict it could: unknown/failed/interrupted/stalled.
@@ -2138,6 +2173,7 @@ async function recordChatObservationsNow(
           ...(item.providerMessageId ? { providerMessageId: item.providerMessageId } : {}),
           ...(goalEligible && state === 'final' ? { goalEligible: true } : {})
         }, { preferTime: item.authoredTime === true, work: item.activeNow === true });
+        if (item.rich) await recordRichObservation(conversationId, item);
         const canonicalTurn = written.event.turnId;
         // A stopped partial answer stays streaming in history. Re-observing its
         // DOM after restart cannot renew work, nor can an old message borrow a

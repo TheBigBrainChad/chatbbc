@@ -9,7 +9,7 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { positionOf } from '../src/shared/chronology.js';
 import sharp from 'sharp';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -105,6 +105,18 @@ const evidence = (patch: Partial<ReturnType<typeof emptyEvidence>> = {}) => ({ .
 // ------------------------------------------------------------------- store
 
 describe('session store', () => {
+  it('persists monotonically increasing attachment revisions across A→B→A and restart', async () => {
+    const [a, b] = [randomUUID(), randomUUID()];
+    const session = await createSession({ title: 'binding revisions', conversationId: a });
+    expect(session.bindingRevision).toBe(0);
+    expect(await rebindSession(session.id, a, b)).toBe(true);
+    expect(await rebindSession(session.id, b, a)).toBe(true);
+    expect(await rebindSession(session.id, b, a)).toBe(false);
+    await flushSessions();
+    resetSessionStoreForTests();
+    expect(await getSession(session.id)).toMatchObject({ conversationId: a, bindingRevision: 2, chatIds: [a, b] });
+  });
+
   it('uses original call time and exact conversation for late attribution health proof', async () => {
     const conversationId = 'health-current';
     const session = await createSession({ title: 'attribution health', conversationId });
