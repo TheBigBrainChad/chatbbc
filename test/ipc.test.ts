@@ -422,12 +422,28 @@ describe('explicit settings replace the published tool contract', () => {
     const initial = getConfig();
     await saveConfig({ ...initial, ui: { ...initial.ui, finishTool: true }, capabilities: { ...initial.capabilities, read: true } });
     const endpoint = await startMcpServer(() => ({ roots: [], caps: effectiveCapabilities(getConfig()), readOnly: getConfig().readOnly }));
-    const snapshot = () => {
-      endpoint.publication!('core', (name, version, instructions, tools) => publishPluginSurface('core', name, version, instructions, tools));
+    // `buildServer` is async — it consults `listSkillLibrary`, which walks the filesystem — so its
+    // `observe` callback runs after an await rather than synchronously inside `publication()`.
+    // Counting this call's own publication is what makes the read below deterministic: waiting for
+    // a row to merely exist would pass on the previous call's stale row, which is exactly the
+    // failure this test is about. `setImmediate` rather than a microtask drain, because the wait
+    // has to cover real I/O, and a bounded loop rather than a sleep, so a genuine break reports
+    // itself instead of hanging.
+    let published = 0;
+    const snapshot = async () => {
+      const mark = published;
+      endpoint.publication!('core', (name, version, instructions, tools) => {
+        published += 1;
+        publishPluginSurface('core', name, version, instructions, tools);
+      });
+      for (let attempt = 0; published === mark; attempt++) {
+        if (attempt >= 5_000) throw new Error('the tool contract was never republished');
+        await new Promise(resolve => setImmediate(resolve));
+      }
       return pluginRefreshPublications().find(row => row.surface === 'core')!;
     };
     try {
-      const before = snapshot();
+      const before = await snapshot();
       const tool = kind === 'finish' ? 'session_finish' : 'exec_command';
       expect(before.tools.map(row => row.name)).toContain(tool);
       expect(before.tools.map(row => row.name)).not.toContain('session');
@@ -436,13 +452,13 @@ describe('explicit settings replace the published tool contract', () => {
         ? { ui: { ...current.ui, finishTool: false } }
         : { capabilities: { ...current.capabilities, command: false } }) };
       expect((await save(patch)).ok).toBe(true);
-      const after = snapshot();
+      const after = await snapshot();
       expect(after.tools.map(row => row.name)).not.toContain(tool);
       expect(after.tools.map(row => row.name)).not.toContain('session');
       expect(after.schemaId).not.toBe(before.schemaId);
       const saved = getConfig();
       expect((await save({ ...saved, ui: { ...saved.ui, theme: 'dark' } })).ok).toBe(true);
-      expect(snapshot().schemaId).toBe(after.schemaId);
+      expect((await snapshot()).schemaId).toBe(after.schemaId);
     } finally { await endpoint.stop(); resetPluginRefreshForTests(); }
   });
 });
