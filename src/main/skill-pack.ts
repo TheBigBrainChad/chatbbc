@@ -181,7 +181,12 @@ export async function syncSkillPack(options: {
   for (const entry of entries) {
     const destination = path.join(managedRoot, entry.id);
     if (state.removed.includes(entry.id)) { result.skipped.push(entry.id); continue; }
-    const recorded = state.seeded[entry.id];
+    // `Object.hasOwn`, not a bare index: `SKILL_ID_PATTERN` admits inherited key names —
+    // `constructor` is a valid skill id — and a prototype member would read as a recorded digest
+    // that never equals the real one. That entry would then take the preserve branch on every
+    // launch and could never be refreshed by a pack update again. The same rule is stated in
+    // `resolveSkillPolicy`, which is why that function exists in one place.
+    const recorded = Object.hasOwn(state.seeded, entry.id) ? state.seeded[entry.id] : undefined;
     let present = false;
     try { present = (await fs.lstat(destination)).isDirectory(); } catch { present = false; }
     try {

@@ -66,7 +66,7 @@ import {
   MAX_GOAL_SYSTEM_PROMPT_CHARS
 } from '../shared/goal.js';
 import { browserExtensionRequired, type AppState, type Config } from '../shared/types.js';
-import { $, ago, clockTime, compactNumber, el, filterSettingsSections, icon, reconcileChildren, run, toast } from './dom.js';
+import { $, ago, applySettingsFilter, clockTime, compactNumber, el, icon, reconcileChildren, run, toast } from './dom.js';
 import {
   KIND_ICON, mergeSessionRows, maybePageSessions, paintSessions, pressureOf, projectGroup,
   repaintBadges, selectedLocalProject, sessionWorking, unattributedBlocked,
@@ -3524,9 +3524,7 @@ export function initChat(next: Deps): void {
       if (generation === selectionGeneration) selectNewChat(project.id); else paintSessions(sessionHost);
     } finally { button.disabled = false; }
   });
-  $('settingsSearch').addEventListener('input', () => {
-    filterSettingsSections(document.querySelector<HTMLElement>('[data-view="settings"]')!, $<HTMLInputElement>('settingsSearch').value);
-  });
+  $('settingsSearch').addEventListener('input', () => applySettingsFilter());
   const composerMenus = [...document.querySelectorAll<HTMLDetailsElement>('.composer-menu, .session-controls')];
   document.addEventListener('click', (event) => {
     for (const menu of composerMenus) if (!menu.contains(event.target as Node) || ((event.target as HTMLElement).closest('button') && !(event.target as HTMLElement).closest('[data-keep-menu]'))) menu.open = false;

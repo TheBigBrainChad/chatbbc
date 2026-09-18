@@ -4,6 +4,7 @@ import path from 'node:path';
 import { makeTempDir, removeTempDir } from './helpers.js';
 import { emptySkillState } from '../src/main/skill-state.js';
 import { skillCatalogInstructions, initSkillsPath, listSkills, skillsDirectory } from '../src/main/skills.js';
+import { SKILL_ID_PATTERN } from '../src/shared/skills.js';
 import { directoryDigest, mergeSeedDelta, readPackEntries, syncSkillPack } from '../src/main/skill-pack.js';
 
 let root: string, pack: string, managed: string;
@@ -56,6 +57,30 @@ it('preserves a skill the user edited instead of overwriting it', async () => {
   expect(second.delta.alpha).toBeUndefined();
   expect(mergeSeedDelta(state, second.delta).seeded.alpha).toBe(state.seeded.alpha);
   expect(edited).not.toBe(state.seeded.alpha);
+});
+
+/**
+ * `SKILL_ID_PATTERN` admits key names that exist on `Object.prototype`, and `constructor` is a
+ * valid skill id. Reading `state.seeded[id]` without `Object.hasOwn` therefore yields the
+ * inherited constructor function rather than undefined, so the recorded digest never compares
+ * equal to the real one and the entry takes the preserve branch on every launch — permanently
+ * unrefreshable, which is the outcome the preserve branch exists to avoid.
+ */
+it('refreshes a skill whose id is an inherited Object.prototype key', async () => {
+  const shadow = 'constructor';
+  await write(path.join(pack, shadow, 'SKILL.md'), skill('Constructor'));
+  expect(SKILL_ID_PATTERN.test(shadow)).toBe(true);
+
+  const first = await syncSkillPack({ managedRoot: managed, packRoot: pack, state: emptySkillState() });
+  expect(first.result.added).toContain(shadow);
+  const state = mergeSeedDelta(emptySkillState(), first.delta);
+  expect(Object.hasOwn(state.seeded, shadow)).toBe(true);
+
+  // The copy matches what we wrote, so it must REFRESH — not be preserved as a user edit.
+  const second = await syncSkillPack({ managedRoot: managed, packRoot: pack, state });
+  expect(second.result.refreshed).toContain(shadow);
+  expect(second.result.preserved).not.toContain(shadow);
+  expect(second.delta[shadow]).toBeDefined();
 });
 
 it('never resurrects a skill the user removed', async () => {

@@ -14,7 +14,7 @@
  */
 
 import type { LibrarySkill, SkillLibraryPage, SkillState } from '../shared/skills.js';
-import { el, humanBytes } from './dom.js';
+import { applySettingsFilter, el, humanBytes } from './dom.js';
 import { t } from './i18n.js';
 
 type Reply<T> = { ok: true; data: T } | { ok: false; error: string };
@@ -160,6 +160,11 @@ export function initSkillsLibrary(options: SkillsLibraryOptions): SkillsLibraryV
     for (const skill of enabled) host.append(row(skill, true, options, refresh));
     if (disabled.length) host.append(groupHeading(t('Turned off'), disabled.length));
     for (const skill of disabled) host.append(row(skill, false, options, refresh));
+    // The rows arrived after the search box may have been typed into. `filterSettingsSections`
+    // runs only from that input handler, so a query entered while this read was in flight was
+    // matched against an empty pane; without re-applying it here the section stays hidden and
+    // reports "No settings match your search" while matching skills are on screen.
+    applySettingsFilter();
   };
 
   document.getElementById('skillsRefresh')?.addEventListener('click', () => void refresh());
