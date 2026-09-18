@@ -31,6 +31,24 @@ export interface SkillLibrary {
 }
 export interface SkillsDraftScope { sessionId?: string | null; projectId?: string | null }
 
+/**
+ * The app's own record of the bundled Skill pack and the user's choices about it.
+ *
+ * Declared here, not in the main process, because the renderer and the preload bridge show
+ * and set the same choices; a second declaration would be a divergence waiting to happen.
+ */
+export interface SkillState {
+  version: 1;
+  /** Skill id -> sha256 of the directory contents this app last wrote. */
+  seeded: Record<string, string>;
+  /** User enablement. Absent means inherit. */
+  enabled: Record<string, boolean>;
+  /** User implicit-invocation choice. Absent means inherit. */
+  implicit: Record<string, boolean>;
+  /** Bundled ids the user removed. Never re-seeded. */
+  removed: string[];
+}
+
 export const MAX_SKILLS = 64;
 export const MAX_SKILL_BYTES = 128_000;
 export const MAX_SKILL_CHARS = 96_000;
