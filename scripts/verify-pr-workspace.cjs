@@ -205,7 +205,7 @@ app.whenReady().then(async () => {
     const heights=await js(`['appearanceFont','appearanceSize','setupProfile'].map(id=>{const n=document.getElementById(id).closest('.setting');return n.getBoundingClientRect().height})`);
     assert.ok(Math.max(...heights)-Math.min(...heights)<2,JSON.stringify(heights));
     await screenshot('appearance-aligned');
-    await js(`document.querySelector('[data-tab=setup]').click();window.fixture.setLanguage('es')`);
+    await js(`document.querySelector('[data-tab=workspace]').click();document.getElementById('openSetup').click();window.fixture.setLanguage('es')`);
     const setup=await js(`(()=>{const h=document.querySelector('.setup-heading');return {display:getComputedStyle(h).display,columns:getComputedStyle(h).gridTemplateColumns}})()`);
     assert.equal(setup.display,'grid'); await screenshot('setup-spanish-aligned');
     await js(`document.getElementById('backToChat').click();const input=document.getElementById('chatInput');input.value='/';input.setSelectionRange(1,1);input.dispatchEvent(new Event('input',{bubbles:true}));`);

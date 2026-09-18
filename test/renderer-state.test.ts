@@ -1046,7 +1046,9 @@ it('keeps folder access discoverable after setup and navigates without granting 
   const styles = doc.createElement('style');
   styles.textContent = await readRendererStyles();
   doc.head.append(styles);
-  doc.querySelector<HTMLButtonElement>('[data-tab="setup"]')!.click();
+  // Setup is reached from the Workspace page now rather than from the nav, so the wizard's
+  // own entry is what opens it.
+  doc.querySelector<HTMLButtonElement>('#openSetup')!.click();
 
   expect(doc.getElementById('wizard')!.classList.contains('is-tidy')).toBe(true);
   const manage = doc.getElementById('wizManageFolders')!;

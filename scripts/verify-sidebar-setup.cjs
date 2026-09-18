@@ -122,7 +122,7 @@ app.whenReady().then(async () => {
     win.webContents.setZoomFactor(1);
     await js(`document.querySelector('.project-show-more').click()`);
     assert.equal(await js(`document.querySelectorAll('.project-group > .sess').length`),13);
-    await js(`document.querySelector('[data-tab="setup"]').click(); document.getElementById('wizExpand').click()`);
+    await js(`document.querySelector('[data-tab="workspace"]').click();document.getElementById('openSetup').click(); document.getElementById('wizExpand').click()`);
     assert.equal(await js(`document.getElementById('wizard').classList.contains('is-tidy')`),true);
     assert.equal(await js(`document.querySelector('[data-panel="setup"]').classList.contains('is-active')`),true);
     await new Promise(r=>setTimeout(r,200));

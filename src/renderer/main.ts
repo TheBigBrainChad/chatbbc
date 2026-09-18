@@ -128,31 +128,49 @@ let setupKeySave: Promise<boolean> = Promise.resolve(true);
 
 // ------------------------------------------------------------------- tabs
 
+/**
+ * Which panel draws each destination.
+ *
+ * The nav names the five destinations; the panels are regrouped onto those names by a
+ * separate task, so the two lists are not identical yet: `workspace` is still drawn by the
+ * `home` panel and `automation` by the chat panel's settings view, exactly the two panels
+ * the old `home`/`settings` tabs chose. Every other destination is already its own panel.
+ */
+const DESTINATION_PANEL: Readonly<Record<string, string>> = {
+  workspace: 'home',
+  automation: 'chat',
+  appearance: 'appearance',
+  usage: 'usage',
+  activity: 'activity',
+  setup: 'setup'
+};
+
+/**
+ * Settings is not a second screen: the one sidebar rail shows this nav in place of the session
+ * list, and `← Back to chat` is the way out. `is-settings` is the whole of that state, so the
+ * list and the nav are never both on screen and no second nav exists.
+ */
 function showTab(name: string): void {
   const settings = name !== 'chat' && name !== 'plugins';
+  const panel = DESTINATION_PANEL[name] ?? name;
   document.querySelector<HTMLElement>('.app')!.dataset.screen = name === 'plugins' ? 'library' : settings ? 'settings' : 'chat';
-  document.querySelector<HTMLElement>('.sidebar-brand')!.hidden = settings;
-  $('sidebarPrimary').hidden = settings;
+  document.querySelector<HTMLElement>('.sidebar')!.classList.toggle('is-settings', settings);
   $('workspaceSettings').hidden = false;
   $('workspaceSettings').classList.toggle('is-sel', settings);
   if (name === 'usage') void refreshUsage();
-  $('tabs').hidden = !settings;
-  $('backToChat').hidden = !settings;
-  document.querySelector<HTMLElement>('.sidebar-sessions')!.hidden = settings;
-  $('newChat').hidden = settings;
-  if (name === 'settings') openChatView('settings');
+  if (name === 'automation') openChatView('settings');
   else if (name === 'chat') openChatView('timeline');
 
   for (const tab of document.querySelectorAll<HTMLElement>('nav button')) {
     tab.classList.toggle('is-sel', tab.dataset.tab === name);
   }
   for (const item of document.querySelectorAll<HTMLElement>('[data-sidebar-page]')) item.classList.toggle('is-sel', item.dataset.sidebarPage === name);
-  for (const panel of document.querySelectorAll<HTMLElement>('.panel')) {
-    panel.classList.toggle('is-active', panel.dataset.panel === (name === 'settings' ? 'chat' : name));
+  for (const node of document.querySelectorAll<HTMLElement>('.panel')) {
+    node.classList.toggle('is-active', node.dataset.panel === panel);
   }
   // The Chat panel is the only one that costs anything to keep fresh, so it only
   // reloads while it is on screen.
-  chatVisible(name === 'chat' || name === 'settings');
+  chatVisible(panel === 'chat');
   // A feed that was appended to while its panel was hidden could not be scrolled then —
   // a hidden element has no scroll height. Pin it now that it has one, so a panel always
   // opens on the newest line rather than on whatever was oldest in the buffer.
@@ -189,11 +207,11 @@ function positionConnectionPopover(): void {
 window.addEventListener('resize', () => positionConnectionPopover());
 
 $('backToChat').addEventListener('click', () => showTab('chat'));
-$('workspaceSettings').addEventListener('click', () => showTab('home'));
+$('workspaceSettings').addEventListener('click', () => showTab('workspace'));
 $('sidebarConnection').addEventListener('click', () => {
   setConnectionPopover(Boolean($('connectionPopover').hidden));
 });
-$('chatSettingsBtn').addEventListener('click', () => showTab('settings'));
+$('chatSettingsBtn').addEventListener('click', () => showTab('automation'));
 $('sessionList').addEventListener('click', event => {
   if ((event.target as HTMLElement).closest('[data-id], [data-new-project]')) showTab('chat');
 }, { capture: true });
@@ -1693,7 +1711,7 @@ $('readOnlyBtn').addEventListener('click', () => {
 $('addFolder').addEventListener('click', () => void addFolder());
 $('wizAddFolder').addEventListener('click', () => void addFolder());
 $('wizManageFolders').addEventListener('click', () => {
-  showTab('home');
+  showTab('workspace');
   $('foldersCard').scrollIntoView({ block: 'nearest' });
   $('addFolder').focus({ preventScroll: true });
 });
@@ -1725,6 +1743,8 @@ $('wizExpand').addEventListener('click', () => {
   showAllSteps = $('wizard').classList.contains('is-tidy');
   if (state) apply(state);
 });
+// Setup is no longer a destination of its own, so this card is the way in to the wizard.
+$('openSetup').addEventListener('click', () => showTab('setup'));
 $('updateGet').addEventListener('click', () => void run(api.openLink(RELEASES_PAGE)));
 
 /**
