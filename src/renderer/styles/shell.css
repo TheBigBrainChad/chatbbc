@@ -332,15 +332,15 @@ main {
 }
 
 /* Workspace is a settings page: a single readable column. */
-[data-panel='home'] {
+[data-panel='workspace'] {
   display: none; overflow-y: auto; align-content: start; gap: 26px;
   padding: 52px max(28px, calc((100% - 760px) / 2)) 64px;
 }
-[data-panel='home'].is-active { display: block; }
-[data-panel='home'] .top { display: grid; grid-template-columns: minmax(0, 1fr); gap: 28px; }
-[data-panel='home'] .card { margin-bottom: 28px; min-height: 0; overflow: visible; }
-[data-panel='home'] .scroll { overflow: visible; }
-[data-panel='home'] #homeFeed { max-height: 220px; overflow: auto; }
+[data-panel='workspace'].is-active { display: block; }
+[data-panel='workspace'] .top { display: grid; grid-template-columns: minmax(0, 1fr); gap: 28px; }
+[data-panel='workspace'] .card { margin-bottom: 28px; min-height: 0; overflow: visible; }
+[data-panel='workspace'] .scroll { overflow: visible; }
+[data-panel='workspace'] #homeFeed { max-height: 220px; overflow: auto; }
 
 [data-panel='activity'] {
   padding: 12px 14px 14px;

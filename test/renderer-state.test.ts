@@ -1063,7 +1063,7 @@ it('keeps folder access discoverable after setup and navigates without granting 
   expect(doc.getElementById('wizFolders')!.textContent).toBe('/repo');
   manage.click();
 
-  expect(doc.querySelector('.panel.is-active')?.getAttribute('data-panel')).toBe('home');
+  expect(doc.querySelector('.panel.is-active')?.getAttribute('data-panel')).toBe('workspace');
   expect(doc.activeElement).toBe(doc.getElementById('addFolder'));
   expect(doc.getElementById('rootList')!.textContent).toContain('/repo');
   expect(addRoot).not.toHaveBeenCalled();

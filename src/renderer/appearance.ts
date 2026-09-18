@@ -5,6 +5,7 @@ import {
 import type { OmarchyTheme } from '../main/omarchy-theme.js';
 import type { UiPrefs } from '../shared/types.js';
 import { $ } from './dom.js';
+import { ui, t } from './i18n.js';
 
 const FONT_FAMILIES = {
   system: '', sans: 'Arial, Helvetica, sans-serif',
@@ -62,8 +63,14 @@ export function applyAppearance(theme: AppearanceTheme, settings?: AppearanceSet
  * The controls always edit the *saved* palettes, even while a followed desktop theme is
  * what is drawn — so following and unfollowing never destroys a manual colour, and the
  * panel keeps showing what turning follow off will restore.
+ *
+ * `refreshDesktop` re-reads the desktop theme on demand. There is no watcher: following a desktop
+ * is a choice, and a silent repaint mid-session is worse than one the reader asks for.
  */
-export function initAppearance(save: (patch: { theme?: AppearanceTheme; appearance?: AppearanceSettings }) => void): { apply(ui: UiPrefs, omarchy?: OmarchyTheme | null): void } {
+export function initAppearance(
+  save: (patch: { theme?: AppearanceTheme; appearance?: AppearanceSettings }) => void,
+  refreshDesktop?: () => void
+): { apply(ui: UiPrefs, omarchy?: OmarchyTheme | null): void } {
   const panel = $('appearancePanel');
   let theme: AppearanceTheme = 'dark';
   let current = defaultAppearance();
@@ -79,6 +86,15 @@ export function initAppearance(save: (patch: { theme?: AppearanceTheme; appearan
     $<HTMLInputElement>('appearanceContrast').value = String(current[theme].contrast);
     $('appearanceContrastValue').textContent = String(current[theme].contrast);
     $<HTMLInputElement>('appearanceTranslucent').checked = current.translucentSidebar;
+    // The toggle shows what will happen on save; the name is what was actually detected, so a
+    // machine with no Omarchy theme says so instead of implying one is being followed.
+    $<HTMLInputElement>('appearanceFollowDesktop').checked = current.followDesktop === true;
+    const detected = live?.name ?? '';
+    ui($('appearanceDesktopName'), 'textContent', () => detected || t('none'));
+    $('appearanceRefreshRow').hidden = live === null;
+    // A followed desktop theme draws its own colors, so the pickers below describe the palettes
+    // that return when follow is turned off. They stay editable, which is what makes that honest.
+    panel.classList.toggle('is-following-desktop', followedTheme({ appearance: current }, live) !== null);
     for (const key of colorKeys) {
       const color = current[theme][key];
       panel.querySelector<HTMLInputElement>(`[data-color="${key}"]`)!.value = color;
@@ -102,6 +118,7 @@ export function initAppearance(save: (patch: { theme?: AppearanceTheme; appearan
     else if (control.id === 'appearanceContrast') current = { ...current, [theme]: { ...current[theme], contrast: Number(control.value) } };
     else if (control.id === 'appearanceFont') current = { ...current, font: control.value as AppearanceSettings['font'] };
     else if (control.id === 'appearanceTranslucent') current = { ...current, translucentSidebar: (control as HTMLInputElement).checked };
+    else if (control.id === 'appearanceFollowDesktop') current = { ...current, followDesktop: (control as HTMLInputElement).checked };
     else return false;
     paint();
     return true;
@@ -129,6 +146,10 @@ export function initAppearance(save: (patch: { theme?: AppearanceTheme; appearan
   $('appearanceReset').addEventListener('click', () => {
     editing = false; current = defaultAppearance(); paint(); save({ appearance: current });
   });
+  // The desktop theme is read at startup and on save, never by a watcher. This asks the main
+  // process for a fresh snapshot, so a theme the user changed a moment ago becomes visible without
+  // restarting — and it is a deliberate action rather than a silent repaint.
+  $('appearanceRefreshDesktop').addEventListener('click', () => refreshDesktop?.());
   return { apply(ui, omarchy) {
     live = omarchy ?? null;
     if (editing) return;

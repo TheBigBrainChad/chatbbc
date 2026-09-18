@@ -275,7 +275,7 @@
 @media (max-width: 850px) {
   .app { --sidebar-default: 205px; }
   .app > header .live em { display: none; }
-  [data-panel='home'] { grid-template-rows: none; }
+  [data-panel='workspace'] { grid-template-rows: none; }
   .composer { width: calc(100% - 32px); padding: 14px 12px 10px; }
   #chatBody { padding: 20px 22px; }
 }

@@ -509,7 +509,7 @@ describe('the session timeline', () => {
 
 describe('the window as a whole', () => {
   it('keeps workspace settings in a scrollable column', () => {
-    expect(rule("[data-panel='home']")).toContain('overflow-y: auto');
+    expect(rule("[data-panel='workspace']")).toContain('overflow-y: auto');
   });
 
   /**

@@ -53,7 +53,7 @@ initSetupGuide();
 // Escape the translucent sidebar's backdrop-filter containing block.
 document.body.append($('connectionPopover'));
 const connectionAdvanced = initConnectionAdvanced();
-const appearance = initAppearance(patch => { void save(patch); });
+const appearance = initAppearance(patch => { void save(patch); }, () => { void refresh(); });
 
 /** Same shape the platform uses; mirrored here only to grey out step 2 until it is valid. */
 const TUNNEL_ID_PATTERN = /^tunnel_[0-9a-f]{32}$/;
@@ -131,13 +131,11 @@ let setupKeySave: Promise<boolean> = Promise.resolve(true);
 /**
  * Which panel draws each destination.
  *
- * The nav names the five destinations; the panels are regrouped onto those names by a
- * separate task, so the two lists are not identical yet: `workspace` is still drawn by the
- * `home` panel and `automation` by the chat panel's settings view, exactly the two panels
- * the old `home`/`settings` tabs chose. Every other destination is already its own panel.
+ * Every destination is its own panel except `automation`, which is the chat panel's settings
+ * view: the automation controls belong beside the chat they govern, so that destination shows
+ * the chat card with its settings view open rather than a separate page.
  */
 const DESTINATION_PANEL: Readonly<Record<string, string>> = {
-  workspace: 'home',
   automation: 'chat',
   appearance: 'appearance',
   usage: 'usage',
