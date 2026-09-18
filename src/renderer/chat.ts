@@ -20,6 +20,7 @@ import { createSidebarOrder } from './sidebar-order.js';
 import { toolResultText } from './tool-result.js';
 import { chatErrorPresentation, duplicateChatErrors } from './chat-error.js';
 import { categoryFor, categoryClass } from './transcript-categories.js';
+import { frontendSegments, type FrontendSegment } from './session-spine.js';
 import { renderRecoveryCountdowns } from './recovery.js';
 import type { RecoveryCountdown } from '../shared/recovery.js';
 import { communicationTitle, foldAgentCommunication } from './agent-communication.js';
@@ -1795,6 +1796,44 @@ function compactionRow(block: CompactionBlock, previous?: HTMLElement): HTMLElem
   return row;
 }
 
+/**
+ * The header that opens one ChatGPT frontend's run inside this durable local session.
+ *
+ * The spine itself is drawn by the `.spine` container; these headers are the labelled divisions
+ * on it. They read only what the session metadata and recorded events already say — the segment
+ * list comes from `frontendSegments`, so nothing here decides lineage.
+ */
+function spineSegmentRow(segment: FrontendSegment): HTMLElement {
+  const row = el('div', 'spine-seg');
+  row.dataset.spineSegment = String(segment.index);
+  const label = el('span', 'spine-seg-label', segment.label);
+  row.append(label);
+  if (segment.startsWithHandoff) row.classList.add('is-after-handoff');
+  return row;
+}
+
+/**
+ * Insert a frontend segment header ahead of each segment's first row.
+ *
+ * Compaction rows are the joints on the spine: a segment after the first begins immediately after
+ * one. The existing row pipeline is untouched — a header is spliced between rows rather than
+ * tagging every row. When a segment contributes no rows of its own (a compaction recorded before
+ * any answer) its header is still emitted at the boundary, so the reader sees that it existed.
+ */
+function withSpineSegments(rows: HTMLElement[], spine: FrontendSegment[]): HTMLElement[] {
+  const out: HTMLElement[] = [spineSegmentRow(spine[0]!)];
+  let next = 1;
+  for (const row of rows) {
+    out.push(row);
+    // A joint closes the segment above it and opens the one below.
+    if (next < spine.length && row.classList.contains('ev-compaction')) {
+      out.push(spineSegmentRow(spine[next]!));
+      next++;
+    }
+  }
+  return out;
+}
+
 /** What a row was drawn from; a different signature is a different row. */
 function itemSignature(item: TimelineItem): string {
   if (item.kind === 'compaction') {
@@ -2038,7 +2077,16 @@ function paintDetail(followBottom = historyBefore === null): void {
   }
   appendRetiredInputs(Infinity);
   for (const key of rowCache.keys()) if (!keep.has(key)) rowCache.delete(key);
-  reconcileChildren($('timeline'), groupImageRows(groupToolRows(timelineRows)));
+
+  // The spine is a projection of recorded lineage: no handoff and no continuation origin means no
+  // spine, and the transcript renders exactly as it did before this existed. A session that has
+  // been compacted reads as one continuous column with a labelled frontend per run.
+  const spine = frontendSegments(shown, summary?.origin ?? null);
+  const timeline = $('timeline');
+  timeline.classList.toggle('spine', spine.length > 0);
+  reconcileChildren(timeline, spine.length === 0
+    ? groupImageRows(groupToolRows(timelineRows))
+    : withSpineSegments(groupImageRows(groupToolRows(timelineRows)), spine));
   paintPendingInputs(deliveryHost);
   $('timelineEmpty').hidden = selectedId !== null || timelineRows.length > 0 || $('inputQueue').childElementCount > 0;
   restoreViewport();

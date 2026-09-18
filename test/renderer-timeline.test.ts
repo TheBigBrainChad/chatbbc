@@ -1286,7 +1286,10 @@ it('folds a whole Compact & Resume into one row that says the new chat opened', 
   // The card sits where the compaction happened, between the two calls. Asserted as the
   // rows' semantic identity, not their class string: a row's exact classes are
   // presentation and change with the stylesheet, the fold order is the behaviour here.
-  const order = [...timeline.children].map((row) => row.classList.contains('ev-compaction') ? 'compaction'
+  // The spine's frontend-segment headers are structural labels on the column, not transcript
+  // rows, so they are excluded here and the fold order below is unchanged.
+  const order = [...timeline.children].filter((row) => !row.classList.contains('spine-seg'))
+    .map((row) => row.classList.contains('ev-compaction') ? 'compaction'
     : row.classList.contains('ev-tool_call') ? 'tool_call' : row.className);
   expect(order).toEqual(['tool_call', 'compaction', 'tool_call']);
 
@@ -1571,7 +1574,10 @@ it('folds the answer turn into the card when the request row has no turn id', as
     resume
   ]);
   const timeline = w.document.getElementById('timeline')!;
-  const order = [...timeline.children].map((row) => row.classList.contains('ev-compaction') ? 'compaction'
+  // The spine's frontend-segment headers are structural labels on the column, not transcript
+  // rows, so they are excluded here and the fold order below is unchanged.
+  const order = [...timeline.children].filter((row) => !row.classList.contains('spine-seg'))
+    .map((row) => row.classList.contains('ev-compaction') ? 'compaction'
     : row.classList.contains('ev-tool_call') ? 'tool_call' : row.className);
   expect(order).toEqual(['compaction']);
   expect(timeline.querySelector('details.compaction')!.className).toContain('tone-good');

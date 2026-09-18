@@ -144,8 +144,12 @@
 .cat-plan { --cat: var(--accent); border: 1px solid var(--line); border-left: 2px solid var(--cat, var(--line)); background: var(--card); }
 
 /* Rows: one dense line each, so hairline separators and no surface. */
-.cat-tool { --cat: var(--green); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.cat-worker { --cat: var(--magenta); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.cat-tool { --cat: var(--green); border-top: 1px solid var(--line); }
+.cat-worker { --cat: var(--magenta); border-top: 1px solid var(--line); }
+/* The group surface owns the outer edges, so sibling member rows meet at one hairline instead of
+   two; the prototype draws .tools' edges and drops the last row's bottom border for the same
+   reason. Standalone tool rows outside a group keep both hairlines. */
+.tool-group-body > .tl-row:last-child { border-bottom: 0; }
 
 /* Recovery is one line too, but its own colour *is* the message — a live countdown — so it
    takes a single-line tint in that colour rather than a card fill. */
@@ -606,3 +610,33 @@
 .agent-chat-open:hover span { text-decoration: underline; text-underline-offset: 3px; }
 .agent-chat-open:focus-visible { outline: 2px solid var(--soft); outline-offset: 4px; }
 .agent-chat-open .ico { width: 13px; height: 13px; }
+
+/* ------------------------------------------------------------------- spine
+
+   The transcript belongs to the durable local session, not to any one ChatGPT chat. When that
+   session has run in more than one frontend (a compaction, or a worker spawned from its prime)
+   the column grows a spine: one vertical hairline down the left, in the session's accent, with a
+   labelled header opening each frontend's run and the compaction drawn as a joint on the line.
+
+   Drawn only when `frontendSegments` found real lineage, so a session that has never been
+   compacted renders exactly as it did before this existed. */
+
+#timeline.spine { position: relative; padding-left: 22px; }
+#timeline.spine::before {
+  content: ''; position: absolute; left: 5px; top: 0; bottom: 0;
+  width: 1px; background: var(--accent-edge);
+}
+
+.spine-seg { position: relative; display: flex; align-items: center; gap: 9px; margin: 14px 0 6px; }
+.spine-seg:first-child { margin-top: 2px; }
+/* The rail meets the header: a short jade stub, so a segment start reads as a point on the line. */
+.spine-seg::before {
+  content: ''; position: absolute; left: -17px; width: 8px; height: 1px; background: var(--accent);
+}
+.spine-seg-label {
+  color: var(--accent); font-family: var(--ui-font-mono);
+  font-size: calc(10px * var(--text-scale, 1)); letter-spacing: .7px; text-transform: uppercase;
+}
+.spine-seg::after {
+  content: ''; flex: 1; height: 1px; background: var(--line);
+}
