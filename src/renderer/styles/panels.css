@@ -182,7 +182,7 @@
 .terminal-tabs { display: flex; gap: 4px; min-width: 0; flex: 1; overflow-x: auto; }
 .terminal-tab { display: flex; align-items: center; border-radius: 7px; }
 .terminal-tab.is-selected { background: var(--hover); }
-.terminal-tab > .btn:first-child { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--ui-font-mono); font-size: 11px; padding: 5px 8px; }
+.terminal-tab > .btn:first-child { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); padding: 5px 8px; }
 .terminal-bar .btn-icon { width: 26px; height: 26px; padding: 5px; }
 .terminal-body { flex: 1; min-height: 0; min-width: 0; position: relative; }
 .terminal-screen { position: absolute; inset: 0; padding: 6px 12px; background: var(--page); }

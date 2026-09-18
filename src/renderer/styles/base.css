@@ -76,6 +76,9 @@
   /* Chrome type. Text and labels are monospace — the desktop's own idiom —
      while authored and assistant prose keep --ui-font. */
   --ui-font-mono: "Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+  /* Prose type. The picker rewrites --ui-font; this is what a rule reads when the user
+     leaves the picker on `system`, where the renderer removes the property entirely. */
+  --ui-font-prose: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
 }
 
 /*
@@ -138,7 +141,7 @@ body {
 body {
   background: var(--page);
   color: var(--ink);
-  font: calc(14px * var(--text-scale, 1))/1.5 var(--ui-font, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif);
+  font: calc(14px * var(--text-scale, 1))/1.5 var(--ui-font, var(--ui-font-prose));
   letter-spacing: -0.004em;
   -webkit-font-smoothing: antialiased;
 }
@@ -146,7 +149,7 @@ body {
 /* CJK uses natural character wrapping and full-height glyphs. Keep native controls
    flexible at narrow window widths and when the renderer is zoomed. */
 html:lang(zh) body { letter-spacing: 0; line-break: strict; }
-html:lang(zh-TW) body { font-family: var(--ui-font, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft JhengHei UI", "Microsoft JhengHei", "PingFang TC", "Noto Sans CJK TC", sans-serif); }
+html:lang(zh-TW) body { font-family: var(--ui-font, "Microsoft JhengHei UI", "Microsoft JhengHei", "PingFang TC", "Noto Sans CJK TC", sans-serif); }
 .language-select { min-width: 8em; max-width: 100%; }
 .setup-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px 24px; margin-bottom: 20px; }
 .setup-heading .settings-heading { margin-bottom: 0; padding: 0; }

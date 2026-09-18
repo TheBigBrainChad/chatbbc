@@ -439,10 +439,19 @@ main {
   min-height: 0;
 }
 
+/* A quiet line under a sidebar list. The chat's own empty state is not a list row:
+   `#timelineEmpty` is a first line of prose, so it keeps `--ui-font`. */
 .empty {
   padding: 4px 14px 14px;
   font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1));
   color: var(--faint);
+}
+
+/* The first line of an empty chat is prose, not a list status: it takes the prose
+   family and keeps the display size below. */
+#timelineEmpty {
+  font-family: var(--ui-font, var(--ui-font-prose));
+  font-size: clamp(22px, 2.6vw, 29px);
 }
 
 /* -------------------------------------------------------------- quiet button */

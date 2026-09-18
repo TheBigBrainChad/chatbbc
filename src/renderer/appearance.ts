@@ -28,8 +28,9 @@ export function applyAppearance(theme: AppearanceTheme, settings?: AppearanceSet
   root.style.setProperty('--text-scale', String(value.fontSize / 14));
   if (value.font === 'system') root.style.removeProperty('--ui-font');
   else root.style.setProperty('--ui-font', FONT_FAMILIES[value.font]);
-  // Chrome is always the resolved mono chain; only prose follows the picker.
-  root.style.setProperty('--ui-font-mono', value.monoFont ?? DEFAULT_MONO_CHAIN);
+  // Chrome is always the mono chain; only prose follows the picker. T4 resolves a followed
+  // desktop theme's own terminal font at the point of use, from `state.omarchy.fontFamily`.
+  root.style.setProperty('--ui-font-mono', DEFAULT_MONO_CHAIN);
   root.style.setProperty('--sidebar-color', palette.sidebar);
   // Glass is composed inside the window: a colored backdrop and translucent layer.
   // No native transparent window, desktop capture, or platform permission is needed.

@@ -347,8 +347,9 @@
 .composer-dock .dock-action { border: 0; border-radius: 5px; background: transparent; color: var(--soft); padding: 4px; display: inline-flex; align-items: center; cursor: pointer; }
 .composer-dock .dock-action:hover { color: var(--ink); background: var(--hover); }
 .composer-dock .queued-input.is-editing { align-items: center; }
-.composer-dock .queued-input.is-editing textarea { flex: 1; min-width: 0; width: auto; }
-.composer-dock textarea { width: 100%; min-height: 65px; padding: 8px; font: inherit; resize: vertical; }
+/* The dock's rows are chrome and read in mono, but an inline editor holds the user's
+   own words: it takes the prose family so editing reads like the message will. */
+.composer-dock .queued-input.is-editing textarea { flex: 1; min-width: 0; width: auto; font: inherit; font-family: var(--ui-font, var(--ui-font-prose)); }
 #taskPlanPreview { max-height: 300px; overflow-y: auto; }
 /* Status spans need a real row: inline padding does not contribute to dock height. */
 #taskPlanPreview > .muted { display: block; line-height: 20px; }
@@ -359,14 +360,16 @@
 .stage-number { flex: 0 0 18px; color: var(--faint); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); text-align: center; font-variant-numeric: tabular-nums; }
 .plan-stage-heading .dock-action { justify-content: center; width: 26px; height: 26px; }
 .plan-stage-heading .queue-label { color: var(--ink); }
-.composer-dock .plan-stage textarea { width: calc(100% - 24px); margin: 0 12px 10px; border: 1px solid var(--edge); border-radius: 7px; background: var(--page); color: var(--ink); }
+.composer-dock .plan-stage textarea { width: calc(100% - 24px); margin: 0 12px 10px; border: 1px solid var(--edge); border-radius: 7px; background: var(--page); color: var(--ink); font: inherit; font-family: var(--ui-font, var(--ui-font-prose)); }
 .send-button.is-plan-ready { background: #80654d; color: #fff9f2; }
 .stage-error { display: block; padding: 0 12px 10px; color: var(--red); font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); }
 .stage-error[hidden] { display: none; }
 
 
 #goalLifecycle .queue-label { white-space: normal; }
-.goal-live-preview { max-height: 120px; overflow: auto; white-space: pre-wrap; margin: 6px 0 0; font: inherit; color: var(--soft); }
+/* The goal row is chrome, but the generated opening inside it is assistant prose:
+   state it here instead of inheriting the row's mono. */
+.goal-live-preview { max-height: 120px; overflow: auto; white-space: pre-wrap; margin: 6px 0 0; font-family: var(--ui-font, var(--ui-font-prose)); color: var(--soft); }
 
 .context-meter { position: relative; flex: 0 0 28px; }
 #contextMeterButton { display: grid; place-items: center; width: 28px; height: 32px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--soft); cursor: pointer; }
@@ -381,7 +384,7 @@
 
 @media (prefers-reduced-motion: no-preference) { .skill-autocomplete:not([hidden]) { animation: skill-reveal 120ms ease-out; } }
 @keyframes skill-reveal { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
-.slash-menu-section-title { padding: 6px 8px; color: var(--soft); font-family: var(--ui-font-mono); font-size: 11px; }
+.slash-menu-section-title { padding: 6px 8px; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
 .slash-menu-section-title:not(:first-child) { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 10px; }
 
 .composer-skills-row { display: flex; align-items: center; }
