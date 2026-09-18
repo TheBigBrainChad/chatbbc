@@ -347,6 +347,9 @@
 .composer-dock .dock-action { border: 0; border-radius: 5px; background: transparent; color: var(--soft); padding: 4px; display: inline-flex; align-items: center; cursor: pointer; }
 .composer-dock .dock-action:hover { color: var(--ink); background: var(--hover); }
 .composer-dock .queued-input.is-editing { align-items: center; }
+/* Both of the dock's editors share this box: one padded line box the user can pull
+   taller. The family is set per editor below, because one is chrome and one is prose. */
+.composer-dock textarea { width: 100%; min-height: 65px; padding: 8px; resize: vertical; }
 /* The dock's rows are chrome and read in mono, but an inline editor holds the user's
    own words: it takes the prose family so editing reads like the message will. */
 .composer-dock .queued-input.is-editing textarea { flex: 1; min-width: 0; width: auto; font: inherit; font-family: var(--ui-font, var(--ui-font-prose)); }
