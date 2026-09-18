@@ -2081,7 +2081,11 @@ function paintDetail(followBottom = historyBefore === null): void {
   // The spine is a projection of recorded lineage: no handoff and no continuation origin means no
   // spine, and the transcript renders exactly as it did before this existed. A session that has
   // been compacted reads as one continuous column with a labelled frontend per run.
-  const spine = frontendSegments(shown, summary?.origin ?? null);
+  //
+  // It reads the session's full loaded history, not the windowed page or the filtered view: the
+  // number of frontends a session has run in is a fact about the session, so it must not change as
+  // the reader scrolls, and an agent filter must not erase a segment's joint.
+  const spine = frontendSegments(events, summary?.origin ?? null);
   const timeline = $('timeline');
   timeline.classList.toggle('spine', spine.length > 0);
   reconcileChildren(timeline, spine.length === 0

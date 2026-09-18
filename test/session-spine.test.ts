@@ -16,10 +16,23 @@ const handoff = (seq: number): SessionEvent =>
   ({ kind: 'handoff', seq, time: seq, handoffId: `h${seq}`, chars: 4100, reason: 'manual' }) as SessionEvent;
 
 describe('session spine', () => {
-  it('draws no spine when the session has no lineage', () => {
+  it('draws nothing for a session with no continuation and no handoff', () => {
     expect(frontendSegments([], null)).toEqual([]);
-    // A lone handoff with no origin is still no lineage: a frontend boundary needs a continuation.
-    expect(frontendSegments([], null)).toHaveLength(0);
+    // A handoff with no continuation origin still splits the run in two: the handoff event is
+    // recorded evidence that a frontend ended, so a segment exists either side of it.
+    expect(frontendSegments([handoff(1)], null)).toHaveLength(2);
+    expect(frontendSegments([handoff(1)], null)[0]!.label).toMatch(/frontend 1/);
+  });
+
+  it('counts frontends from the whole session, so scrolling cannot change the spine', () => {
+    // chat.ts passes the session's full loaded history rather than the windowed page: the number
+    // of frontends is a fact about the session. This pins the count against the event list shape
+    // that a page would shrink.
+    const origin: SessionOrigin = { kind: 'resume', fromSessionId: 'A', agentId: null, task: '' };
+    const all = [handoff(1), handoff(2)];
+    expect(frontendSegments(all, origin)).toHaveLength(3);
+    // A single handoff still yields exactly two segments — one joint, two runs.
+    expect(frontendSegments(all.slice(0, 1), origin)).toHaveLength(2);
   });
 
   it('numbers one segment per frontend and puts the handoff between them', () => {

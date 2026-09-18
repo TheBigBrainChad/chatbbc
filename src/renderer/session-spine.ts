@@ -34,8 +34,10 @@ export function frontendSegments(events: readonly SessionEvent[], origin: Sessio
   const continued = origin !== null && (origin.kind === 'resume' || origin.kind === 'worker');
   if (!continued && handoffs === 0) return [];
 
-  // Each handoff splits the run in two, so N handoffs across one continuation make N + 1 frontends.
-  const count = (continued ? 1 : 0) + handoffs;
+  // A handoff is a boundary: it ended one frontend and opened the next, so N handoffs across one
+  // session make N + 1 runs — the commonest case being a fresh session that compacted once, whose
+  // origin is null because nothing continued into it and whose transcript still spans two chats.
+  const count = handoffs > 0 ? handoffs + 1 : 1;
   const workerLabel = origin?.kind === 'worker' ? `worker ${origin.agentId ?? ''}`.trim() : null;
 
   return Array.from({ length: count }, (_, offset) => ({
