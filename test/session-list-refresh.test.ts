@@ -1,4 +1,11 @@
-vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTerminal: () => ({ update: vi.fn() }) }));
+vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTerminal: () => ({
+  // The real contract (workspace-terminal.ts) is element/show/hide/update, and the pane is CLOSED
+  // until something opens it: the work panel reads a pane's own `hidden` as the single statement
+  // of which tool is showing, so a mock that mounted this visible would pin the work-panel width
+  // and `has-work-panel` in suites that never opened a panel.
+  element: Object.assign(document.createElement('section'), { hidden: true }),
+  show: vi.fn(), hide: vi.fn(), update: vi.fn()
+}) }));
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';

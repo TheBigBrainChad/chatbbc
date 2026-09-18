@@ -7,7 +7,14 @@ import { prependUserPrompt } from '../src/shared/user-prompt.js';
 import type { Handoff, SessionEvent, SessionSummary } from '../src/shared/session.js';
 import type { InputArgs, InputEntry } from '../src/main/session/input.js';
 import type { LocalProject } from '../src/shared/projects.js';
-vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTerminal: () => ({ update: vi.fn() }) }));
+vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTerminal: () => ({
+  // The real contract (workspace-terminal.ts) is element/show/hide/update, and the pane is CLOSED
+  // until something opens it: the work panel reads a pane's own `hidden` as the single statement
+  // of which tool is showing, so a mock that mounted this visible would pin the work-panel width
+  // and `has-work-panel` in suites that never opened a panel.
+  element: Object.assign(document.createElement('section'), { hidden: true }),
+  show: vi.fn(), hide: vi.fn(), update: vi.fn()
+}) }));
 vi.mock('../src/renderer/pet.js', () => ({ initPet: () => () => {} }));
 import { positionOf } from '../src/shared/chronology.js';
 
@@ -1283,9 +1290,15 @@ it('folds a whole Compact & Resume into one row that says the new chat opened', 
   expect(timeline.textContent).not.toContain('[[CLF-');
   expect(timeline.querySelectorAll('.ev-turn_start, .ev-turn_end')).toHaveLength(0);
   expect(timeline.querySelectorAll('.ev-tool_call')).toHaveLength(2);
-  // The card sits where the compaction happened, between the two calls.
-  const order = [...timeline.children].map((row) => row.className);
-  expect(order).toEqual(['ev ev-tool_call', 'ev ev-compaction', 'ev ev-tool_call']);
+  // The card sits where the compaction happened, between the two calls. Asserted as the
+  // rows' semantic identity, not their class string: a row's exact classes are
+  // presentation and change with the stylesheet, the fold order is the behaviour here.
+  // The spine's frontend-segment headers are structural labels on the column, not transcript
+  // rows, so they are excluded here and the fold order below is unchanged.
+  const order = [...timeline.children].filter((row) => !row.classList.contains('spine-seg'))
+    .map((row) => row.classList.contains('ev-compaction') ? 'compaction'
+    : row.classList.contains('ev-tool_call') ? 'tool_call' : row.className);
+  expect(order).toEqual(['tool_call', 'compaction', 'tool_call']);
 
   // Everything is still there for whoever unfolds the card.
   card.toggleAttribute('open', true);
@@ -1568,8 +1581,12 @@ it('folds the answer turn into the card when the request row has no turn id', as
     resume
   ]);
   const timeline = w.document.getElementById('timeline')!;
-  const order = [...timeline.children].map((row) => row.className);
-  expect(order).toEqual(['ev ev-compaction']);
+  // The spine's frontend-segment headers are structural labels on the column, not transcript
+  // rows, so they are excluded here and the fold order below is unchanged.
+  const order = [...timeline.children].filter((row) => !row.classList.contains('spine-seg'))
+    .map((row) => row.classList.contains('ev-compaction') ? 'compaction'
+    : row.classList.contains('ev-tool_call') ? 'tool_call' : row.className);
+  expect(order).toEqual(['compaction']);
   expect(timeline.querySelector('details.compaction')!.className).toContain('tone-good');
 });
 

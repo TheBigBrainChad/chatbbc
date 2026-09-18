@@ -15,11 +15,19 @@ app.whenReady().then(async () => {
   const root = path.join(__dirname, '..');
   const code = (await require('esbuild').build({ entryPoints: [path.join(root, 'src/renderer/chat.ts')],
     bundle: true, write: false, platform: 'browser', format: 'iife', globalName: 'chat',
+    // The bundle reaches `workspace-terminal.ts`, which imports xterm's stylesheet. This fixture
+    // builds to a string rather than an output path, so esbuild has nowhere to emit CSS and
+    // refuses the import outright. Stub it: the fixture supplies the renderer's real stylesheets
+    // itself, and xterm's terminal colours are not what it measures.
+    loader: { '.css': 'empty' },
     plugins: [{ name: 'fixture-url-assets', setup(build) {
       build.onResolve({ filter: /\?url$/ }, args => ({ path: args.path, namespace: 'fixture-url' }));
       build.onLoad({ filter: /.*/, namespace: 'fixture-url' }, () => ({ contents: 'export default "";', loader: 'js' }));
     } }] })).outputFiles[0].text;
-  const css = fs.readFileSync(path.join(root, 'src/renderer/styles.css'), 'utf8');
+  // The renderer's stylesheet is split by responsibility: the modules are read in link
+  // order, which is also cascade order, so this sees the same rules the renderer applies.
+  const sheets = ['base', 'shell', 'transcript', 'composer', 'panels', 'pages', 'dialogs'];
+  const css = sheets.map(name => fs.readFileSync(path.join(root, 'src/renderer/styles', `${name}.css`), 'utf8')).join('\n');
   const html = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8')
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '').replace(/<link\b[^>]*>/g, '')
     .replace('</head>', `<style>${css}</style></head>`);

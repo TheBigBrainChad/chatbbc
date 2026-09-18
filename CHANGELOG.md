@@ -9,10 +9,15 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
-## Unreleased — renamed to ChatBBC
+## [2.1.15] — a shell that belongs to your desktop
+
+This release is also the first to ship the **ChatBBC** identity, which had been staged but never
+released. Read the identity part first: it is a hard cut, not an in-place update.
+
+### The rename (do this first)
 
 This fork is now **ChatBBC** in everything a person, installer, extension or ChatGPT connector
-reads. It is a hard identity cut, not an in-place update:
+reads:
 
 - **New app identity.** `appId` is `com.chatbbc.app`, the Linux package/executable is `chatbbc`
   and the app installs beside Chat On Steroids. User data starts empty in a new `chatbbc`
@@ -30,6 +35,26 @@ reads. It is a hard identity cut, not an in-place update:
   matches but whose protocol integer does not is refused with 426 (`incompatible_extension`)
   rather than silently dropping replies. Do not run both apps at once: they contend for the
   same local bridge ports.
+
+### The redesign
+
+- Follow the live Omarchy theme: its colours and terminal font, behind an explicit toggle with a
+  deliberate refresh. No watcher, and saved colours are never overwritten.
+- Square corners throughout, hairline structure instead of card borders, and monospace chrome with
+  prose left in your own typeface.
+- Show the durable session across replaceable ChatGPT chats: a Compact & Resume reads as a joint in
+  one continuous transcript, with a labelled header for each frontend.
+- State each message's real delivery stage in words, so queued, in the composer, accepted and
+  held-by-a-turn are never collapsed into one icon.
+- Five settings destinations in one sidebar rail; one expandable status line instead of five stacked
+  composer rows; Files, Sub-agents and Terminal share one tabbed panel.
+- Give every transcript content family its own accent, glyph and edge over one shared geometry.
+- Reduce motion to two durations and the icon set to one stroke weight.
+
+### Packaging
+
+- CI and release packaging are Linux only. The Windows and macOS targets were inherited from
+  upstream and are no longer maintained here.
 
 ## [2.1.14] — dead to openai/anthropic. JOIN THE RESISTANCE @dummerspast39 on x
 

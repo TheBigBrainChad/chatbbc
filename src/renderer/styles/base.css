@@ -1,0 +1,288 @@
+/* -------------------------------------------------------------------- base
+   Design tokens, both themes, the reset and the frame every other sheet draws
+   inside: type scale, scrollbars, the app grid, the topbar and its view menu,
+   and the native select skin. Loaded first. */
+
+/* ---------------------------------------------------------------------------
+   A quiet tonal design with a soft blue wash behind the dark sidebar.
+
+   Structure is carried by tone — the page, a card lifted a step off it, a
+   hairline, and three levels of text. The sidebar adds a muted blue atmosphere;
+   status colours still distinguish failures and live connections.
+
+   Dark is the default and the one the app was drawn for: near-black ground,
+   charcoal cards, white as the accent. Light is the same geometry inverted.
+
+   Corners are square: the desktop is Hyprland `decoration:rounding = 0`, and every
+   surface picks one of the radius names below, so nothing invents its own shape.
+
+   Type has two roles. Chrome — navigation, labels, buttons, status, file paths, code,
+   everything in the sidebar and settings — is `--ui-font-mono`, authored at the dense
+   11px base. Prose in the transcript is `--ui-font`, the user's own font setting.
+
+   The window prefers 1080x700 but can shrink to the current display and can be resized,
+   so long content scrolls inside its own panes rather than growing or clipping the page.
+   --------------------------------------------------------------------------- */
+
+
+:root {
+  --page: #f4f4f5;
+  --card: #fff;
+  --ink: #0c0c0e;
+  --soft: #56565e;
+  --faint: #8b8b94;
+  --line: #e7e7ea;
+  --hover: #f0f0f2;
+  --sunk: #f7f7f8;
+  /* Switch track, control outline, and the raised knob / selected segment. */
+  --track: #d7d7dc;
+  --edge: #dcdce1;
+  --raise: #fff;
+
+  /* The accent is ink. Kept under the old name so every rule below is one design. */
+  --blue: #0c0c0e;
+  --wash: #eeeef0;
+  --blue-line: #d9d9de;
+  --accent: #486f9d;
+  --accent-wash: #eaf1f9;
+  --accent-edge: #cad9eb;
+
+  --green: #1f7a4d;
+  --green-wash: #eef6f1;
+  --green-line: #cfe4d8;
+
+  --red: #b4262c;
+  --red-wash: #fbf0f0;
+  --red-line: #eccdcd;
+
+  /* The four content-family accents a followed desktop theme supplies through
+     `paletteTokens`. These are the values that function derives from its own defaults
+     against this light ground, so a machine with no Omarchy theme gets the same
+     identity the ledger's named themes do — and never an unresolved `var()`, which
+     would make the whole border-left-color declaration invalid and drop the rail. */
+  --cyan: #197565;
+  --magenta: #93496d;
+  --yellow: #73641b;
+  --ice: #566a68;
+
+  /* No card lift: structure is carried by tone and hairlines in both themes. */
+  --lift: none;
+  /* The switch knob has to read against its own track in both states, and the track
+     flips from grey to full ink when it is on - so the knob needs two values, not one. */
+  --knob-off: #fff;
+  --knob-on: #fff;
+  /* Focus ring, derived from the ink so it is one rule in both themes. */
+  --ring: color-mix(in srgb, var(--ink) 16%, transparent);
+
+  /* Square, because the desktop is: Hyprland decoration:rounding = 0.
+     The names stay so there is one geometry vocabulary and a theme could raise them. */
+  --r-xs: 0;
+  --r-sm: 0;
+  --r-md: 0;
+  --r-lg: 0;
+  --r-xl: 0;
+  --pill: 0;
+
+  /* Two durations, and nothing else. `--motion-state` is a control changing under the pointer
+     (hover, press, a toggle); `--motion-fade` is content appearing. Both collapse to 0 under
+     reduced motion, which the global guard below already enforces. */
+  --motion-state: 140ms;
+  --motion-fade: 120ms;
+
+  /* Chrome type. Text and labels are monospace — the desktop's own idiom —
+     while authored and assistant prose keep --ui-font. */
+  --ui-font-mono: "Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono Nerd Font", "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+  /* Prose type. The picker rewrites --ui-font; this is what a rule reads when the user
+     leaves the picker on `system`, where the renderer removes the property entirely. */
+  --ui-font-prose: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+}
+
+/*
+ * Dark is an explicit choice, stored in settings and applied by script — it is never
+ * inherited from Windows. The structure is identical; only these values change, so a
+ * colour used anywhere below is correct in both themes without a second rule.
+ */
+:root[data-theme='dark'] {
+  /* Neutral charcoal sampled from Codex; the sidebar supplies the subtle colour. */
+  --page: #181818;
+  --card: #262725;
+  --ink: #eceeeb;
+  --soft: #b5b7b3;
+  --faint: #8f9488;
+  --line: #323430;
+  --hover: #30322f;
+  --sunk: #20221f;
+  --track: #34343d;
+  --edge: #363834;
+  --raise: #292932;
+
+  --blue: #f4f4f6;
+  --wash: #1c1c22;
+  --blue-line: #34343d;
+  --accent: #b0cbed;
+  --accent-wash: #25313f;
+  --accent-edge: #3d5068;
+
+  --green: #63c795;
+  --green-wash: #10201a;
+  --green-line: #24402f;
+
+  --red: #ef8a8a;
+  --red-wash: #241416;
+  --red-line: #4a262a;
+
+  /* The same four family accents against the dark ground. Each clears 4.5:1 on this
+     theme's card, so a category label stays legible without a second rule. */
+  --cyan: #2dd5b7;
+  --magenta: #d470a1;
+  --yellow: #e5c736;
+  --ice: #acd4cf;
+
+  /* No drop shadow in the dark: the hairline is the edge, and a black shadow on a
+     black page is only mud. */
+  --lift: none;
+  --knob-off: #74747e;
+  --knob-on: #0c0c0e;
+}
+
+/* One native scrollbar treatment for the timeline, sidebar, files, editors and dialogs.
+   Width is not inherited, so apply it to every potential scroll container. */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--edge) transparent;
+}
+
+html,
+body {
+  user-select: none;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--page);
+  color: var(--ink);
+  font: calc(14px * var(--text-scale, 1))/1.5 var(--ui-font, var(--ui-font-prose));
+  letter-spacing: -0.004em;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* CJK uses natural character wrapping and full-height glyphs. Keep native controls
+   flexible at narrow window widths and when the renderer is zoomed. */
+html:lang(zh) body { letter-spacing: 0; line-break: strict; }
+html:lang(zh-TW) body { font-family: var(--ui-font, "Microsoft JhengHei UI", "Microsoft JhengHei", "PingFang TC", "Noto Sans CJK TC", sans-serif); }
+.language-select { min-width: 8em; max-width: 100%; }
+.setup-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px 24px; margin-bottom: 20px; }
+.setup-heading .settings-heading { margin-bottom: 0; padding: 0; }
+.setup-heading .settings-heading p { margin-bottom: 0; }
+.language-tabs { display: inline-flex; flex: none; padding: 3px; gap: 3px; border: 1px solid var(--line); border-radius: 0; background: var(--card); }
+.language-tabs button { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid transparent; border-radius: 0; background: transparent; color: var(--muted); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); cursor: pointer; white-space: nowrap; }
+.language-tabs button:hover { background: var(--hover); color: var(--ink); }
+.language-tabs button[aria-pressed='true'] { background: var(--hover); border-color: var(--line); color: var(--ink); }
+.language-tabs button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.language-flag { width: 24px; height: 16px; border-radius: 0; overflow: hidden; flex: none; }
+
+/* Keep authored content, chat history and settings selectable; chrome is not text content. */
+:is(input, textarea, [contenteditable='true'], .msg, #timeline,
+  #inputQueue, #handoffBox, .session-controls-menu),
+.app[data-screen='settings'] main {
+  user-select: text;
+}
+
+.sprite {
+  display: none;
+}
+
+/* Author display rules outrank the UA's [hidden], and several things here are
+   hidden by setting .hidden from script. Make the attribute win. */
+[hidden] {
+  display: none !important;
+}
+
+/* One icon set: a 1.5px stroke on the shared 24 grid, inheriting currentColor. Every inline glyph
+   and every sprite <use> resolves through this, so one glyph cannot drift to a heavier weight than
+   its neighbours — which is what the 1.7 and 1.8 outliers did. */
+.ico {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+code {
+  font-family: var(--ui-font-mono);
+  font-size: 0.92em;
+}
+
+/* Explicit tracks for the titlebar, header, stacked notices and scrolling workspace.
+   Only the workspace grows; showing a notice must not create an implicit content row. */
+.app {
+  height: 100%; display: grid;
+  grid-template-columns: min(var(--sidebar-width, var(--sidebar-default, 248px)), 50vw) minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  background: var(--page);
+}
+.app > header { grid-column: 2; grid-row: 2; }
+.app > .notices { grid-column: 2; grid-row: 3; min-width: 0; }
+.app[data-screen='settings'] #pluginRefreshReminder { display: none; }
+.app > main { grid-column: 2; grid-row: 4; min-width: 0; }
+/* One static wash behind the chat, reduced to 20% of its previous contrast. */
+:root[data-theme='dark'] .app[data-screen='chat'] {
+  background: radial-gradient(ellipse at 12% 38%,
+    color-mix(in srgb, #1c1d1e 20%, var(--page)) 0%,
+    color-mix(in srgb, #1a1b1c 20%, var(--page)) 32%, var(--page) 78%);
+}
+:root[data-theme='dark'] .app[data-screen='chat'] .card.is-session { background: transparent; }
+.app-topbar { position: relative; z-index: 130; grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; gap: 6px; height: env(titlebar-area-height, 28px); padding: 0 10px; padding-right: max(10px, calc(100vw - env(titlebar-area-width, 100vw))); background: var(--page); -webkit-app-region: drag; }
+
+.app-topbar > .btn, .view-menu { -webkit-app-region: no-drag; height: 100%; }
+.app-topbar > .btn { padding: 0 5px; }
+.app-topbar > .btn .ico { width: 14px; height: 14px; }
+.view-menu { position: relative; font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); }
+.view-menu > summary { display: flex; align-items: center; height: 100%; list-style: none; cursor: pointer; padding: 0 9px; border-radius: 0; }
+.view-menu > summary:hover, .view-menu[open] > summary { background: var(--hover); }
+.view-menu-items { position: absolute; top: calc(100% + 5px); left: 0; z-index: 100; width: 260px; padding: 6px; background: var(--card); border: 1px solid var(--edge); border-radius: 0; box-shadow: 0 8px 28px #0003; }
+.view-menu-items .btn { display: flex; width: 100%; gap: 10px; padding: 9px 10px; border-radius: 0; }
+.view-menu-items kbd { margin-left: auto; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
+.view-menu-items hr { border: 0; border-top: 1px solid var(--line); margin: 5px 0; }
+.app.is-sidebar-collapsed { grid-template-columns: 0 minmax(0, 1fr); }
+.app.is-sidebar-collapsed .sidebar { display: none; }
+
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+
+
+html[data-theme="dark"] { color-scheme: dark; }
+html[data-theme="light"] { color-scheme: light; }
+/* Keep the native select's keyboard, focus and form semantics while styling both
+   the trigger and its top-layer picker consistently across the workspace. */
+select, select::picker(select) { appearance: base-select; }
+select { min-width: 0; gap: 12px; white-space: normal; cursor: pointer; transition: border-color var(--motion-state), background var(--motion-state); }
+select:hover:not(:disabled) { border-color: var(--soft); }
+select:disabled { opacity: .5; cursor: default; }
+select::picker-icon {
+  content: ''; width: 7px; height: 7px; margin-inline: auto 3px; flex-shrink: 0;
+  border-right: 1.5px solid var(--soft); border-bottom: 1.5px solid var(--soft);
+  transform: translateY(-2px) rotate(45deg); transition: rotate var(--motion-state);
+}
+select:open::picker-icon { rotate: 180deg; }
+select::picker(select) {
+  padding: 5px; margin: 0; border: 1px solid var(--edge); border-radius: 0;
+  width: anchor-size(width); box-sizing: border-box;
+  background: var(--card); color: var(--ink); box-shadow: 0 8px 30px #0004;
+  max-width: calc(100vw - 24px); max-height: min(360px, 60vh); overflow: auto;
+}
+select option {
+  min-height: 36px; padding: 8px 10px; gap: 12px; border-radius: 0;
+  background: transparent; color: var(--ink); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); line-height: 1.4;
+  white-space: normal; overflow-wrap: anywhere;
+}
+select option:hover, select option:focus { background: var(--hover); outline: none; }
+select option:checked { background: color-mix(in srgb, var(--accent) 16%, var(--card)); }
+select option:disabled { color: var(--soft); opacity: .55; }
+select option::checkmark { order: 1; margin-inline-start: auto; color: var(--ink); }

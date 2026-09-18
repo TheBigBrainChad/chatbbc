@@ -1381,5 +1381,14 @@
   "Terminal height": "終端機高度",
   "Open a terminal in this project": "在此專案中開啟終端機",
   "Select a project to open a terminal": "選擇一個專案以開啟終端機",
-  "Terminal input is busy. Try a smaller paste.": "終端機輸入忙碌，請減少貼上的文字。"
+  "Terminal input is busy. Try a smaller paste.": "終端機輸入忙碌，請減少貼上的文字。",
+  "Automation": "自動化",
+  "Open setup guide": "開啟設定指南",
+  "Ordinary": "一般",
+  "Follow this desktop": "跟隨此桌面",
+  "Use the live Omarchy theme's own colors and terminal font. Your saved colors are kept and return when this is off. Detected:": "使用目前 Omarchy 主題自帶的色彩與終端字型。你儲存的色彩會保留，關閉此項後還原。已偵測到：",
+  "none": "無",
+  "Desktop theme": "桌面主題",
+  "The desktop theme is read when ChatBBC starts or when settings are saved. Refresh to pick up a theme you changed just now.": "桌面主題會在 ChatBBC 啟動或儲存設定時讀取。重新整理以取得你剛剛更換的主題。",
+  "Refresh from desktop": "從桌面重新整理"
 }

@@ -1,3 +1,5 @@
+import type { OmarchyTheme } from '../main/omarchy-theme.js';
+
 /** Saved appearance is presentation only. Theme remains the existing ui.theme choice. */
 export const APPEARANCE_FONTS = ['system', 'sans', 'serif', 'mono'] as const;
 export type AppearanceTheme = 'light' | 'dark';
@@ -13,6 +15,10 @@ export interface AppearanceSettings {
   font: typeof APPEARANCE_FONTS[number];
   fontSize: number;
   translucentSidebar: boolean;
+  /** Follow the live desktop theme instead of these palettes. Absent reads as off. */
+  followDesktop?: boolean;
+  /** Derived from a followed theme, never saved: the schema has no such field. */
+  status?: StatusPalette;
 }
 export function defaultAppearance(): AppearanceSettings {
   return {
@@ -36,7 +42,11 @@ export function mergeAppearance(live: AppearanceSettings | undefined, base: Appe
   });
   return { light: palette('light'), dark: palette('dark'), font: pick(current.font, before.font, wanted.font),
     fontSize: pick(current.fontSize, before.fontSize, wanted.fontSize),
-    translucentSidebar: pick(current.translucentSidebar, before.translucentSidebar, wanted.translucentSidebar) };
+    translucentSidebar: pick(current.translucentSidebar, before.translucentSidebar, wanted.translucentSidebar),
+    // Follow mode is a real preference and merges like one. `status` is derived from the live
+    // theme on every read, so merging it would only let a stale window persist a theme it
+    // was not looking at.
+    followDesktop: pick(current.followDesktop, before.followDesktop, wanted.followDesktop) };
 }
 
 function channels(hex: string): number[] {
@@ -70,11 +80,21 @@ function readableTint(color: string, background: string, ratio: number): string 
   return ink;
 }
 
+/**
+ * A followed desktop theme's own status roles. Absent roles keep the app's own colours,
+ * so a theme that names only some of them still produces a complete, readable palette.
+ */
+export interface StatusPalette {
+  green?: string; red?: string; cyan?: string; magenta?: string; yellow?: string; ice?: string;
+}
+
 /** One palette feeds existing semantic CSS tokens, including independently colored sidebars. */
-export function paletteTokens(background: string, accent: string, contrast: number): Record<string, string> {
+export function paletteTokens(background: string, accent: string, contrast: number,
+  status?: StatusPalette): Record<string, string> {
   const ink = readableInk(background), c = contrast / 100;
   const card = mixColor(background, ink, .025 + .06 * c);
   const hover = mixColor(background, ink, .055 + .07 * c);
+  const green = status?.green ?? '#258552', red = status?.red ?? '#d44545';
   return {
     '--page': background, '--ink': ink, '--card': card, '--sunk': mixColor(background, ink, .018 + .025 * c),
     '--hover': hover, '--raise': hover,
@@ -87,9 +107,89 @@ export function paletteTokens(background: string, accent: string, contrast: numb
     '--wash': mixColor(background, accent, .12), '--blue-line': mixColor(background, accent, .3),
     '--accent-wash': mixColor(background, accent, .12), '--accent-edge': mixColor(background, accent, .35),
     '--knob-off': ink, '--knob-on': readableInk(accent),
-    '--green': readableTint('#258552', card, 4.5), '--green-wash': mixColor(background, '#258552', .12),
-    '--green-line': mixColor(background, '#258552', .3),
-    '--red': readableTint('#d44545', card, 4.5), '--red-wash': mixColor(background, '#d44545', .12),
-    '--red-line': mixColor(background, '#d44545', .3)
+    '--green': readableTint(green, card, 4.5), '--green-wash': mixColor(background, green, .12),
+    '--green-line': mixColor(background, green, .3),
+    '--red': readableTint(red, card, 4.5), '--red-wash': mixColor(background, red, .12),
+    '--red-line': mixColor(background, red, .3),
+    '--cyan': readableTint(status?.cyan ?? '#2DD5B7', card, 4.5),
+    '--magenta': readableTint(status?.magenta ?? '#D2689C', card, 4.5),
+    '--yellow': readableTint(status?.yellow ?? '#E5C736', card, 4.5),
+    '--ice': readableTint(status?.ice ?? '#ACD4CF', card, 4.5)
+  };
+}
+
+/**
+ * The desktop terminal font, then the app's own mono chain. One owner for both callers.
+ * Order is spec §6: Iosevka NF Mono, Iosevka NFM, JetBrains Mono NF, JetBrains Mono,
+ * Cascadia Mono, ui-monospace, monospace.
+ */
+export const DEFAULT_MONO_CHAIN =
+  '"Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono Nerd Font", "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace';
+
+/**
+ * Chrome type prefers the desktop's own terminal font, quoted, over the built-in chain.
+ * A theme whose terminal font is already the chain's first candidate — this machine's
+ * Iosevka, or its own family — contributes nothing rather than being emitted twice.
+ */
+export function monoChain(omarchy: OmarchyTheme | null): string {
+  const family = omarchy?.fontFamily?.trim();
+  if (!family) return DEFAULT_MONO_CHAIN;
+  return DEFAULT_MONO_CHAIN.startsWith(`"${family}",`) ? DEFAULT_MONO_CHAIN : `"${family}", ${DEFAULT_MONO_CHAIN}`;
+}
+
+/**
+ * The legibility floor a ground calls for. A dark ground keeps the 60 the built-in dark
+ * palette uses and a light one the 45, so a followed theme is exactly as readable as a
+ * hand-picked one, and the contrast control keeps its existing meaning.
+ */
+export function contrastFor(background: string): number {
+  return readableInk(background) === '#000000' ? 45 : 60;
+}
+
+/**
+ * The theme actually being followed, or null when the saved settings do not follow one.
+ * The one gate: palette, mode and chrome font all resolve through it, so none of the three
+ * can drift into following the desktop while the toggle says otherwise.
+ */
+export function followedTheme(
+  ui: { appearance?: AppearanceSettings },
+  omarchy: OmarchyTheme | null
+): OmarchyTheme | null {
+  return ui.appearance?.followDesktop && omarchy ? omarchy : null;
+}
+
+/** The desktop's own light/dark answer wins in follow mode; otherwise the user's explicit choice. */
+export function effectiveTheme(
+  ui: { theme: AppearanceTheme; appearance?: AppearanceSettings },
+  omarchy: OmarchyTheme | null
+): AppearanceTheme {
+  return followedTheme(ui, omarchy)?.mode ?? ui.theme;
+}
+
+/**
+ * The one place a followed desktop theme becomes an appearance. Pure, so main and renderer
+ * cannot disagree, and the saved manual palettes are never touched: only the slot the
+ * followed theme's own `mode` selects is replaced, and turning follow off restores the
+ * saved colours because they were never written.
+ *
+ * `status` is derived here and stripped by the schema on save, so a followed theme's
+ * status colours can never become durable config.
+ */
+export function effectiveAppearance(
+  ui: { theme: AppearanceTheme; appearance?: AppearanceSettings },
+  omarchy: OmarchyTheme | null
+): AppearanceSettings {
+  const saved = ui.appearance ?? defaultAppearance(), followed = followedTheme(ui, omarchy);
+  if (!followed) return saved;
+  const mode = followed.mode;
+  return {
+    ...saved,
+    [mode]: {
+      background: followed.background,
+      sidebar: followed.sidebar,
+      accent: followed.accent,
+      contrast: contrastFor(followed.background)
+    },
+    status: { green: followed.green, red: followed.red }
   };
 }

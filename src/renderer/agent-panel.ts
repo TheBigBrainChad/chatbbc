@@ -28,9 +28,18 @@ export function createAgentPanel(options: {
     generation++; pane.hidden = true; selected = null;
     options.host.classList.remove('has-agent-panel'); options.toggle.setAttribute('aria-expanded', 'false');
   }
+  /**
+   * The one entry point that opens this pane.
+   *
+   * Every opener goes through here — the pane's own header button, the work-panel tab strip, and
+   * `open()`'s way back from a conversation. `update()` only repaints while the pane is already
+   * visible, so a caller that flipped `hidden` itself would leave the list unbuilt (or showing the
+   * previous session's rows after a switch). Building the list here keeps one path and one owner.
+   */
   function show(): void {
     options.onShow?.();
     pane.hidden = false; options.host.classList.add('has-agent-panel'); options.toggle.setAttribute('aria-expanded', 'true');
+    if (selected === null) list();
   }
   function list(): void {
     generation++; selected = null; head.hidden = true; body.replaceChildren();
@@ -69,9 +78,12 @@ export function createAgentPanel(options: {
     if (event.key !== 'Escape') return;
     event.preventDefault(); hide(); options.toggle.focus();
   });
-  options.toggle.onclick = () => { if (pane.hidden) { show(); list(); } else hide(); };
+  options.toggle.onclick = () => { if (pane.hidden) show(); else hide(); };
   return {
+    element: pane,
     hide,
+    show,
+    available: () => parent !== null,
     open,
     update(id: string | null, next: SessionSummary[]): void {
       if (parent !== id) { hide(); parent = id; }

@@ -159,12 +159,6 @@ jobs:
           npm run verify:tunnel-current
           node scripts/check-release-absent.mjs
           gh release create "$TAG" \
-            publish/ChatBBC-Setup-x64.exe \
-            publish/ChatBBC-Setup-arm64.exe \
-            publish/ChatBBC-macOS-x64.dmg \
-            publish/ChatBBC-macOS-x64.zip \
-            publish/ChatBBC-macOS-arm64.dmg \
-            publish/ChatBBC-macOS-arm64.zip \
             publish/ChatBBC-Linux-x64.AppImage \
             publish/ChatBBC-Linux-x64.deb \
             publish/ChatBBC-Linux-arm64.AppImage \

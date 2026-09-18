@@ -13,7 +13,10 @@ app.whenReady().then(async () => {
   const win = new BrowserWindow({ show: false, width: 1200, height: 800, webPreferences: { offscreen: true } });
   const html = fs.readFileSync(path.join(__dirname, '../src/renderer/index.html'), 'utf8');
   const composer = html.match(/<form class="composer"[\s\S]*?<\/form>/)[0];
-  const css = fs.readFileSync(path.join(__dirname, '../src/renderer/styles.css'), 'utf8');
+  // The renderer's stylesheet is split by responsibility: the modules are read in link
+  // order, which is also cascade order, so this sees the same rules the renderer applies.
+  const sheets = ['base', 'shell', 'transcript', 'composer', 'panels', 'pages', 'dialogs'];
+  const css = sheets.map(name => fs.readFileSync(path.join(__dirname, '../src/renderer/styles', `${name}.css`), 'utf8')).join('\n');
   await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`<style>${css}</style><div id="fixture" style="margin:250px 20px 0">${composer}</div>`));
   const results = await win.webContents.executeJavaScript(`(async () => {
     const fixture = document.getElementById('fixture');

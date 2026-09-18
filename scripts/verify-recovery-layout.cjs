@@ -13,7 +13,10 @@ app.whenReady().then(async () => {
     write: false, format: 'iife', globalName: 'recovery', platform: 'browser' });
   const win = new BrowserWindow({ show: false, width: 920, height: 380,
     webPreferences: { sandbox: true, offscreen: true, backgroundThrottling: false } });
-  const css = fs.readFileSync(path.join(root, 'src/renderer/styles.css'), 'utf8');
+  // The renderer's stylesheet is split by responsibility: the modules are read in link
+  // order, which is also cascade order, so this sees the same rules the renderer applies.
+  const sheets = ['base', 'shell', 'transcript', 'composer', 'panels', 'pages', 'dialogs'];
+  const css = sheets.map(name => fs.readFileSync(path.join(root, 'src/renderer/styles', `${name}.css`), 'utf8')).join('\n');
   const html = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8')
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<link\b[^>]*>/gi, '');
   await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html.replace('</head>', `<style>${css}</style></head>`)));
@@ -25,6 +28,10 @@ app.whenReady().then(async () => {
     document.body.replaceChildren(sprite, dock, composer);
     document.body.style.cssText = 'padding-top:70px;display:block';
     dock.hidden = false;
+    // The dock's five blocks now live behind one status line; a fixture that renders them
+    // has to open it, the same way a user would.
+    const line = document.getElementById('composerStatusLine');
+    line.hidden = false; line.open = true;
     const goal = document.getElementById('activeGoalRow'); goal.hidden = false;
     goal.innerHTML = '<svg class="ico"><use href="#i-pulse"/></svg><span class="queue-label">Loop · Continue the requested work and verify the result.</span><button class="dock-action" aria-label="Pause automation">⏻</button>';
     const plan = document.getElementById('agentPlan'); plan.hidden = false;

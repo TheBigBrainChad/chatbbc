@@ -143,30 +143,13 @@ describe('cross-platform packaging targets', () => {
     expect(installer).not.toMatch(/(?:no-sandbox|disable-gpu-sandbox)/i);
   });
 
-  it('assembles every platform artifact in the reusable release workflow', () => {
+  it('assembles every supported platform artifact in the reusable release workflow', () => {
     const workflow = readFileSync(path.join(root, '.github', 'workflows', 'release.yml'), 'utf8');
     const parsed = yamlFile('.github/workflows/release.yml');
     const matrix = parsed.jobs.package.strategy.matrix.include;
-    expect(matrix).toHaveLength(6);
+    // This fork is Linux only. The assertion states which targets ship, so adding or removing one
+    // is a deliberate edit here rather than something a workflow change can do quietly.
     expect(matrix).toEqual([
-      {
-        name: 'Windows x64', platform: 'win32', arch: 'x64', runner: 'windows-2025',
-        script: 'dist:x64', artifact: 'package-windows-x64', files: 'release/ChatBBC-Setup-x64.exe'
-      },
-      {
-        name: 'Windows arm64', platform: 'win32', arch: 'arm64', runner: 'windows-11-arm',
-        script: 'dist:arm64', artifact: 'package-windows-arm64', files: 'release/ChatBBC-Setup-arm64.exe'
-      },
-      {
-        name: 'macOS x64', platform: 'darwin', arch: 'x64', runner: 'macos-15-intel',
-        script: 'dist:mac:x64', artifact: 'package-macos-x64',
-        files: 'release/ChatBBC-macOS-x64.dmg\nrelease/ChatBBC-macOS-x64.zip\n'
-      },
-      {
-        name: 'macOS arm64', platform: 'darwin', arch: 'arm64', runner: 'macos-15',
-        script: 'dist:mac:arm64', artifact: 'package-macos-arm64',
-        files: 'release/ChatBBC-macOS-arm64.dmg\nrelease/ChatBBC-macOS-arm64.zip\n'
-      },
       {
         name: 'Linux x64', platform: 'linux', arch: 'x64', runner: 'ubuntu-24.04',
         script: 'dist:linux:x64', artifact: 'package-linux-x64',
@@ -179,46 +162,22 @@ describe('cross-platform packaging targets', () => {
       }
     ]);
     expect(parsed.jobs.package['runs-on']).toBe('${{ matrix.runner }}');
+
+    // The Windows and macOS targets are gone on purpose, and their steps with them: a leftover
+    // macOS step would never run, and a leftover installer path would fail the assembly step that
+    // requires every listed file to exist. Both would read as "macOS still ships".
+    for (const gone of ['windows-2025', 'macos-15', 'ChatBBC-Setup-x64.exe', 'ChatBBC-macOS-x64.dmg',
+      'smoke-macos-gui.mjs', 'smoke-macos-bundle.mjs', 'Verify generated macOS archives',
+      'Audit packaged macOS bundle metadata and Mach-O payloads', 'hdiutil verify']) {
+      expect(workflow, `release.yml still references ${gone}`).not.toContain(gone);
+    }
+
     expect(workflow).toContain('name: chatbbc-candidate-${{ github.run_id }}');
     expect(workflow).toContain('Install generated DEB on target distro');
     expect(workflow).toContain('Launch installed DEB normally under Xvfb');
     expect(workflow).toContain('CLF_DEBUG=1 timeout --signal=TERM --kill-after=5s 12s xvfb-run -a /usr/bin/chatbbc');
     expect(workflow).toContain('Execute generated static-runtime AppImage');
-    expect(workflow).toContain('Verify generated macOS archives');
-    expect(workflow).toContain('hdiutil verify "$dmg"');
-    expect(workflow).toContain('codesign --display --verbose=4 "$dmg" >dmg-codesign.log 2>&1');
-    expect(workflow).toContain('dmg_codesign_status=$?');
-    expect(workflow).toContain("grep -Eqi 'code object is not signed( at all)?' dmg-codesign.log");
-    expect(workflow).toContain('test -L "$mount_dir/Applications"');
-    expect(workflow).toContain('test "$(readlink "$mount_dir/Applications")" = /Applications');
-    expect(workflow).toContain('ditto -x -k "$zip" "$zip_dir"');
-    expect(workflow).toContain("node scripts/smoke-macos-bundle.mjs '${{ matrix.arch }}' \"$mount_dir/ChatBBC.app\"");
-    expect(workflow).toContain("node scripts/smoke-macos-bundle.mjs '${{ matrix.arch }}' \"$zip_dir/ChatBBC.app\"");
-    expect(workflow).toContain('Audit packaged macOS bundle metadata and Mach-O payloads');
-    expect(workflow).toContain('node scripts/smoke-macos-bundle.mjs ${{ matrix.arch }}');
-    expect(workflow).toContain('Launch packaged macOS app normally');
-    expect(workflow).toContain('node scripts/smoke-macos-gui.mjs ${{ matrix.arch }}');
     expect(workflow).toContain('architecture: ${{ matrix.arch }}');
-
-    const macGui = workflow.slice(
-      workflow.indexOf('      - name: Launch packaged macOS app normally'),
-      workflow.indexOf('      - name: Install generated DEB on target distro')
-    );
-    expect(macGui).toContain('node scripts/smoke-macos-gui.mjs ${{ matrix.arch }}');
-    expect(macGui).not.toContain('ELECTRON_RUN_AS_NODE');
-
-    const macGuiScript = readFileSync(path.join(root, 'scripts', 'smoke-macos-gui.mjs'), 'utf8');
-    expect(macGuiScript).toContain("CLF_DEBUG: '1'");
-    expect(macGuiScript).toContain("output.includes('[info] app started')");
-    expect(macGuiScript).toContain("output.includes('[info] window loaded')");
-    expect(macGuiScript).toContain("output.includes('[info] renderer state ready')");
-    expect(macGuiScript).toContain("output.includes('[error] window failed to load')");
-    expect(macGuiScript).toContain("output.includes('[error] renderer:')");
-    expect(macGuiScript).toContain('minimumSurvivalMs = 10_000');
-    expect(macGuiScript).toContain('startupDeadlineMs = 15_000');
-    expect(macGuiScript).toContain("child.kill('SIGTERM')");
-    expect(macGuiScript).toContain("child.kill('SIGKILL')");
-    expect(macGuiScript).not.toContain('ELECTRON_RUN_AS_NODE');
 
     const debGui = workflow.slice(
       workflow.indexOf('      - name: Launch installed DEB normally under Xvfb'),
@@ -324,7 +283,9 @@ describe('cross-platform packaging targets', () => {
     const main = readFileSync(path.join(root, 'src', 'main', 'index.ts'), 'utf8');
     const ready = main.indexOf('void app.whenReady().then(async () => {');
     const loadConfig = main.indexOf('await loadConfig();', ready);
-    const theme = main.indexOf('nativeTheme.themeSource = getConfig().ui.theme;', loadConfig);
+    // The mode now resolves through the live desktop theme (spec §5), so the asserted
+    // contract is still "the persisted choice is applied here", not a raw config read.
+    const theme = main.indexOf('nativeTheme.themeSource = nativeChromeTheme().theme;', loadConfig);
     const enableActivation = main.indexOf('windowActivation.enable();', theme);
     const firstWindowRequest = main.indexOf('windowActivation.request();', enableActivation);
 
@@ -336,8 +297,8 @@ describe('cross-platform packaging targets', () => {
 
     const ipc = readFileSync(path.join(root, 'src', 'main', 'ipc.ts'), 'utf8');
     const save = ipc.indexOf("handle('settings:save', async (payload) => {");
-    const liveTheme = ipc.indexOf('nativeTheme.themeSource = next.ui.theme;', save);
-    const background = ipc.indexOf('getWindow()?.setBackgroundColor(windowBackgroundForTheme(next.ui.theme, next.ui.appearance));', liveTheme);
+    const liveTheme = ipc.indexOf('nativeTheme.themeSource = chromeTheme;', save);
+    const background = ipc.indexOf('getWindow()?.setBackgroundColor(windowBackgroundForTheme(chromeTheme, effectiveAppearance(next.ui, liveTheme)));', liveTheme);
     expect(save).toBeGreaterThan(-1);
     expect(liveTheme).toBeGreaterThan(save);
     expect(background).toBeGreaterThan(liveTheme);
@@ -377,7 +338,6 @@ describe('cross-platform packaging targets', () => {
     expect(releaseWorkflow).toContain('test -x "$installed_executable"');
     expect(releaseWorkflow).toContain('dpkg-query -S "$installed_executable"');
     expect(releaseWorkflow).toContain("node scripts/smoke-packaged-runtime.mjs --platform linux --arch '${{ matrix.arch }}' --root \"$(dirname \"$installed_executable\")\"");
-    expect(releaseWorkflow).toContain('node scripts/smoke-macos-gui.mjs ${{ matrix.arch }}');
 
     const appImageSection = releaseWorkflow.slice(
       releaseWorkflow.indexOf('      - name: Execute generated static-runtime AppImage'),
@@ -644,18 +604,15 @@ Load command 11
     expect(changelog.match(/^## \[(\d+\.\d+\.\d+)\]/m)?.[1]).toBe(pkg.version);
     expect(notes).toMatch(/^## .+$/m);
 
+    // Every shipped artifact must appear in the checksum step, the candidate upload and the
+    // publish step alike — the lockstep is the subject, and Linux-only is the current set.
     const artifacts = [
-      'ChatBBC-Setup-x64.exe',
-      'ChatBBC-Setup-arm64.exe',
-      'ChatBBC-macOS-x64.dmg',
-      'ChatBBC-macOS-x64.zip',
-      'ChatBBC-macOS-arm64.dmg',
-      'ChatBBC-macOS-arm64.zip',
       'ChatBBC-Linux-x64.AppImage',
       'ChatBBC-Linux-x64.deb',
       'ChatBBC-Linux-arm64.AppImage',
       'ChatBBC-Linux-arm64.deb',
       'ChatBBC-Extension.zip',
+      'ChatBBC-Native-Sources.tar.gz',
       'SHA256SUMS.txt'
     ];
     const checksumStep = release.slice(

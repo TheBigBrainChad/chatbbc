@@ -18,24 +18,29 @@ import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { filterSettingsSections } from '../src/renderer/dom.js';
+import { readRendererStyles } from './helpers.js';
 import { sessionWorkingAt } from '../src/shared/session-activity.js';
 import { CHAT_ACTIVE_MS, type SessionSummary } from '../src/shared/session.js';
 
 let document: Document;
 let css = '';
 let chatSource = '';
+/** The session list moved out of chat.ts, so its rows are read from their own module. */
+let sessionListSource = '';
 let browserPreferencesSource = '';
 
 beforeAll(async () => {
   browserPreferencesSource = await fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'browser-preferences.ts'), 'utf8');
-  const [html, styles, chat] = await Promise.all([
+  const [html, styles, chat, sessionList] = await Promise.all([
     fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'index.html'), 'utf8'),
-    fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'styles.css'), 'utf8'),
-    fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'chat.ts'), 'utf8')
+    readRendererStyles(),
+    fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'chat.ts'), 'utf8'),
+    fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'session-list.ts'), 'utf8')
   ]);
   document = new JSDOM(html).window.document;
   css = styles;
   chatSource = chat;
+  sessionListSource = sessionList;
 });
 
 it('searches whole settings sections without empty headings, orphaned controls or lost conditional visibility', () => {
@@ -180,11 +185,11 @@ describe('a session row', () => {
     // identity, so both have to match before an old recorded session can show the current
     // swarm's `active` / `finished` badge. This pins the screenshot regression where several
     // old worker-2 rows all suddenly said `active` when one new worker-2 was active.
-    expect(chatSource).toMatch(/entry\.id === origin\.agentId[\s\S]{0,220}entry\.conversationId === summary\.conversationId/);
+    expect(sessionListSource).toMatch(/entry\.id === origin\.agentId[\s\S]{0,220}entry\.conversationId === summary\.conversationId/);
   });
 
   it('does not call an idle prime active merely because it still owns the run', () => {
-    expect(chatSource).toMatch(/else if \(agent && agent\.role !== 'prime'\)/);
+    expect(sessionListSource).toMatch(/else if \(agent && agent\.role !== 'prime'\)/);
     // Idle means idle: generic recording traffic cannot renew the exact tool clock.
     const summary = { startedAt: 100, lastToolCallAt: 200, lastAssistantFinalAt: 300,
       lastTurnEndAt: 300, updatedAt: 400, activeTurnId: 'old-open-turn', agents: ['prime'],
@@ -205,14 +210,14 @@ describe('a session row', () => {
     expect(sessionWorkingAt(summary, 101 + CHAT_ACTIVE_MS)).toBe(false);
     expect(sessionWorkingAt({ ...summary, activityExpiresAt: 100 + 10 * 60_000 }, 101 + CHAT_ACTIVE_MS)).toBe(true);
     expect(sessionWorkingAt({ ...summary, activityExpiresAt: null }, 101)).toBe(false);
-    expect(chatSource).toMatch(/else if \(!agent && workerReportedFinish\(summary\)\) badges\.push\(AGENT_BADGE\.sleeping\)/);
-    expect(chatSource).toMatch(/if \(sessionWorking\(summary\)\) badges\.push\(AGENT_BADGE\.active\)/);
+    expect(sessionListSource).toMatch(/else if \(!agent && workerReportedFinish\(summary\)\) badges\.push\(AGENT_BADGE\.sleeping\)/);
+    expect(sessionListSource).toMatch(/if \(sessionWorking\(summary\)\) badges\.push\(AGENT_BADGE\.active\)/);
     expect(chatSource).toMatch(/scheduleToolActivityExpiry/);
   });
 
   it('lets a worker finish report override its still-recent finish tool call', () => {
-    expect(chatSource).toMatch(/\['sleeping', 'finished', 'failed'\]\.includes\(agent\.state\)/);
-    expect(chatSource).toMatch(/if \(workerStopped\) badges\.push\(AGENT_BADGE\[agent\.state\]\)/);
+    expect(sessionListSource).toMatch(/\['sleeping', 'finished', 'failed'\]\.includes\(agent\.state\)/);
+    expect(sessionListSource).toMatch(/if \(workerStopped\) badges\.push\(AGENT_BADGE\[agent\.state\]\)/);
   });
 });
 
@@ -228,15 +233,15 @@ describe('the session-row chat actions', () => {
   });
 
   it('opens and blocks only recorded conversations, and never selects or deletes the adjacent row', () => {
-    expect(chatSource).toMatch(/if \(summary\.conversationId\)[\s\S]{0,2000}openSessionChat\(summary\.id\)/);
-    expect(chatSource).toMatch(/if \(summary\.conversationId\)[\s\S]{0,2000}toggleSessionBlock\(summary\.id/);
-    expect(chatSource).toMatch(/open\.addEventListener\('click',[\s\S]{0,120}event\.stopPropagation\(\)/);
-    expect(chatSource).toMatch(/block\.addEventListener\('click',[\s\S]{0,120}event\.stopPropagation\(\)/);
+    expect(sessionListSource).toMatch(/if \(summary\.conversationId\)[\s\S]{0,2000}openSessionChat\(summary\.id\)/);
+    expect(sessionListSource).toMatch(/if \(summary\.conversationId\)[\s\S]{0,2000}toggleSessionBlock\(summary\.id/);
+    expect(sessionListSource).toMatch(/open\.addEventListener\('click',[\s\S]{0,120}event\.stopPropagation\(\)/);
+    expect(sessionListSource).toMatch(/block\.addEventListener\('click',[\s\S]{0,120}event\.stopPropagation\(\)/);
   });
 
   it('keeps a block visible without hovering, because it is state and not just an action', () => {
     expect(rule('.session-status.is-failed')).toContain('background: var(--red)');
-    expect(chatSource).toContain("ui(indicator, 'aria-label', () => t(status.text))");
+    expect(sessionListSource).toContain("ui(indicator, 'aria-label', () => t(status.text))");
   });
 
   /**
@@ -246,15 +251,17 @@ describe('the session-row chat actions', () => {
    * button presses the settings checkbox rather than writing a second copy of that state.
    */
   it('blocks the Unattributed row through the one switch that can answer for it', () => {
-    expect(chatSource).toMatch(
+    expect(sessionListSource).toMatch(
       /if \(summary\.conversationId === null\)[\s\S]{0,1200}toggleUnattributedBlock\(!blocked\)/
     );
+    // The switch itself is chat.ts's: it presses the settings checkbox rather than writing a
+    // second copy of the stored setting.
     expect(chatSource).toMatch(
       /toggleUnattributedBlock[\s\S]{0,400}\$<HTMLInputElement>\('allowUnattributedCalls'\)\.checked = !blocked/
     );
-    expect(chatSource).toMatch(/unattributedBlocked\(\)[\s\S]{0,200}allowUnattributedCalls === false/);
+    expect(sessionListSource).toMatch(/unattributedBlocked\(state: AppState \| null\)[\s\S]{0,200}allowUnattributedCalls === false/);
     // Same word and same tone as a blocked chat: one state, read the same way down the list.
-    expect(chatSource).toMatch(/unattributedBlocked\(\)[\s\S]{0,120}text: 'blocked', tone: 'is-failed'/);
+    expect(sessionListSource).toMatch(/paint\.unattributedBlocked[\s\S]{0,120}text: 'blocked', tone: 'is-failed'/);
     // And the row says what it is, on its own line, because no other row needs explaining.
     expect(rule('.session-diagnostics > summary')).toContain('cursor: pointer');
   });
@@ -299,7 +306,10 @@ describe('the chat panel cards', () => {
     // Subhead, scrolling conversation, shared plan/queue dock, composer and footer.
     const layoutChildren = [...card.children].filter(child => child.id !== 'chatSettingsBtn');
     expect(layoutChildren.length).toBe(5);
-    expect(document.getElementById('composerDock')!.firstElementChild?.id).toBe('agentPlan');
+    // Task 7 replaced the dock's five stacked rows with one status line; the blocks it
+    // summarises now live inside it, so the dock's own first child is the line.
+    expect(document.getElementById('composerDock')!.firstElementChild?.id).toBe('composerStatusLine');
+    expect(document.getElementById('composerStatusBody')!.firstElementChild?.id).toBe('agentPlan');
     expect(document.getElementById('inputQueue')!.closest('#chatBody')).not.toBeNull();
     expect(card.classList.contains('is-session')).toBe(true);
     expect(tracks("[data-panel='chat'] .card.is-session")).toHaveLength(layoutChildren.length);
@@ -499,7 +509,7 @@ describe('the session timeline', () => {
 
 describe('the window as a whole', () => {
   it('keeps workspace settings in a scrollable column', () => {
-    expect(rule("[data-panel='home']")).toContain('overflow-y: auto');
+    expect(rule("[data-panel='workspace']")).toContain('overflow-y: auto');
   });
 
   /**

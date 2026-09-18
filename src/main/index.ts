@@ -65,6 +65,9 @@ import {
 import { runShutdownSequence } from './shutdown.js';
 import { applyStagedUpdate, startUpdateChecks } from './update.js';
 import { UI_BASE_ZOOM, windowLayoutForWorkArea, titleBarOverlayForTheme, windowBackgroundForTheme } from './window-layout.js';
+import { readOmarchyTheme } from './omarchy-theme.js';
+import { effectiveAppearance, effectiveTheme } from '../shared/appearance.js';
+import type { AppearanceSettings } from '../shared/appearance.js';
 import { openInPreferredBrowser } from './browser.js';
 import {
   applyLoginStartup,
@@ -101,9 +104,22 @@ if (!hasSingleInstanceLock) {
   app.quit();
 }
 
+/**
+ * The mode and palette Electron's own chrome should use right now.
+ *
+ * The renderer's explicit choice governs unless the saved settings follow the desktop, in
+ * which case the live Omarchy theme's own mode and palette do — the native frame, menus and
+ * dialogs must not disagree with the page painted beside them.
+ */
+function nativeChromeTheme(): { theme: 'light' | 'dark'; appearance: AppearanceSettings } {
+  const omarchy = readOmarchyTheme(), ui = getConfig().ui;
+  return { theme: effectiveTheme(ui, omarchy), appearance: effectiveAppearance(ui, omarchy) };
+}
+
 function createWindow(): void {
   const layout = windowLayoutForWorkArea(screen.getPrimaryDisplay().workArea);
   const icon = browserWindowIconPath(process.platform, app.isPackaged, process.resourcesPath);
+  const chrome = nativeChromeTheme();
   window = new BrowserWindow({
     ...layout,
     ...(icon ? { icon } : {}),
@@ -113,10 +129,10 @@ function createWindow(): void {
     autoHideMenuBar: true,
     ...(process.platform === 'win32' ? {
       titleBarStyle: 'hidden' as const,
-      titleBarOverlay: titleBarOverlayForTheme(getConfig().ui.theme, getConfig().ui.appearance)
+      titleBarOverlay: titleBarOverlayForTheme(chrome.theme, chrome.appearance)
     } : {}),
     // Painted before the renderer loads, so a dark window never flashes white.
-    backgroundColor: windowBackgroundForTheme(getConfig().ui.theme, getConfig().ui.appearance),
+    backgroundColor: windowBackgroundForTheme(chrome.theme, chrome.appearance),
     title: APP_TITLE,
     webPreferences: {
       zoomFactor: UI_BASE_ZOOM,
@@ -317,7 +333,8 @@ void app.whenReady().then(async () => {
   // The renderer has its own explicit light/dark palette, so native chrome must follow the same
   // user choice instead of Electron's default `system` theme. On macOS this controls the window
   // frame, application menus and OS dialogs; on Linux/Windows it covers Electron-native UI.
-  nativeTheme.themeSource = getConfig().ui.theme;
+  // A followed desktop theme supplies that answer instead of the saved manual one.
+  nativeTheme.themeSource = nativeChromeTheme().theme;
   const savedGoalObjectives = await readDurable<GoalObjectivesSnapshot>(GOAL_OBJECTIVES_STATE);
   if (windowActivation.isDisabled()) return;
   restoreGoalObjectives(savedGoalObjectives);

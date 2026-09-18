@@ -13,6 +13,15 @@ or mirrored authority. This permits a focused subsystem rewrite, not an unrelate
 overwrite somebody else's work. Read the current diff of every file you will edit. Re-read
 changed lines before applying an older patch. Document the work and its actual validation.
 
+**Platform focus: Linux.** ChatBBC is developed and tested on Linux. Windows and macOS support
+is legacy and unmaintained: it stays in the tree, but do not gate work on those platforms,
+do not add new Windows/macOS-only code paths without an explicit request, and a defect that
+reproduces only there is not a blocker. Keep the existing platform-specific tests, helpers and
+native projects; do not delete them to make a Linux change pass. The declared release targets
+in §20 remain as written until deliberately changed. The Windows/macOS sections of this map
+still describe real code — they are documentation of an unmaintained target, not a current
+commitment.
+
 **Reading order:** §§1–3 product/identities/evidence; §4 owners; §§5–18 feature contracts;
 §19 debugging/tests; §§20–22 shipping, known gaps and completion.
 
@@ -34,8 +43,9 @@ live Chrome behavior.
 
 ## 1. What the whole app is meant to do
 
-ChatBBC is a Windows/macOS/Linux Electron workspace around ChatGPT. The user can work
-from the desktop app while ChatGPT generates answers in its own browser conversation. The app
+ChatBBC is an Electron workspace around ChatGPT, developed and tested on Linux (see the
+platform focus note above; Windows and macOS are legacy). The user can work from the desktop
+app while ChatGPT generates answers in its own browser conversation. The app
 sends instructions, records the conversation, supplies local tools over MCP, and coordinates
 long-running work. The companion extension connects that browser conversation to the local
 session. ChatGPT still owns model execution and its native account/model availability.

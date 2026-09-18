@@ -23,7 +23,7 @@ const editorTheme = EditorView.theme({
   '&.cm-focused': { outline: 'none' },
   '.cm-scroller': {
     minHeight: '0',
-    fontFamily: 'var(--mono)',
+    fontFamily: 'var(--ui-font-mono)',
     lineHeight: '1.55',
     overflow: 'auto'
   },
