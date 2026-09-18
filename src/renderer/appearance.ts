@@ -1,4 +1,8 @@
-import { defaultAppearance, mixColor, paletteTokens, type AppearanceSettings, type AppearanceTheme } from '../shared/appearance.js';
+import {
+  defaultAppearance, effectiveAppearance, effectiveTheme, mixColor, monoChain, paletteTokens,
+  type AppearanceSettings, type AppearanceTheme
+} from '../shared/appearance.js';
+import type { OmarchyTheme } from '../main/omarchy-theme.js';
 import type { UiPrefs } from '../shared/types.js';
 import { $ } from './dom.js';
 
@@ -7,9 +11,6 @@ const FONT_FAMILIES = {
   serif: 'Georgia, "Times New Roman", serif', mono: '"Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace'
 };
 
-/** Resolution order for chrome type: desktop terminal font, then a real mono, then the last resort. */
-export const DEFAULT_MONO_CHAIN =
-  '"Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace';
 const appearanceListeners = new Set<() => void>();
 /** Canvas/terminal renderers must refresh after the CSS palette has been applied. */
 export function onAppearanceChanged(listener: () => void): () => void {
@@ -20,36 +21,54 @@ function tokens(element: HTMLElement, values: Record<string, string>): void {
   for (const [key, value] of Object.entries(values)) if (element.style.getPropertyValue(key) !== value) element.style.setProperty(key, value);
 }
 
-export function applyAppearance(theme: AppearanceTheme, settings?: AppearanceSettings): void {
-  const value = settings ?? defaultAppearance(), palette = value[theme], root = document.documentElement;
-  root.dataset.theme = theme;
+/**
+ * Paint one appearance. `omarchy` is the live desktop theme, and when the saved settings
+ * follow it the palette, the light/dark answer and the chrome font all come from there
+ * instead — resolved through the same pure helpers main uses, so the two cannot disagree.
+ * With follow off or no theme this is exactly the manual palette it always was.
+ */
+export function applyAppearance(theme: AppearanceTheme, settings?: AppearanceSettings,
+  omarchy?: OmarchyTheme | null): void {
+  const ui = { theme, appearance: settings ?? defaultAppearance() };
+  const value = effectiveAppearance(ui, omarchy ?? null), resolved = effectiveTheme(ui, omarchy ?? null);
+  const palette = value[resolved], root = document.documentElement;
+  root.dataset.theme = resolved;
   root.dataset.translucentSidebar = String(value.translucentSidebar);
-  tokens(root, paletteTokens(palette.background, palette.accent, palette.contrast));
+  tokens(root, paletteTokens(palette.background, palette.accent, palette.contrast, value.status));
   root.style.setProperty('--text-scale', String(value.fontSize / 14));
   if (value.font === 'system') root.style.removeProperty('--ui-font');
   else root.style.setProperty('--ui-font', FONT_FAMILIES[value.font]);
-  // Chrome is always the mono chain; only prose follows the picker. T4 resolves a followed
-  // desktop theme's own terminal font at the point of use, from `state.omarchy.fontFamily`.
-  root.style.setProperty('--ui-font-mono', DEFAULT_MONO_CHAIN);
+  // Chrome is always the mono chain; only prose follows the picker. A followed desktop
+  // theme contributes its own terminal font ahead of the built-in candidates.
+  root.style.setProperty('--ui-font-mono', monoChain(omarchy ?? null));
   root.style.setProperty('--sidebar-color', palette.sidebar);
   // Glass is composed inside the window: a colored backdrop and translucent layer.
   // No native transparent window, desktop capture, or platform permission is needed.
   const sidebarBackground = value.translucentSidebar ? mixColor(palette.sidebar, palette.background, .13) : palette.sidebar;
   for (const element of document.querySelectorAll<HTMLElement>('.sidebar, .app-topbar, .appearance-preview-sidebar, .connection-popover')) {
-    tokens(element, paletteTokens(sidebarBackground, palette.accent, palette.contrast));
+    // Same status palette as the page, or the sidebar's green/red would disagree with the
+    // conversation's beside it.
+    tokens(element, paletteTokens(sidebarBackground, palette.accent, palette.contrast, value.status));
   }
   for (const listener of appearanceListeners) listener();
 }
 
-/** Only the in-progress form edit is local; the existing Settings queue owns persistence. */
-export function initAppearance(save: (patch: { theme?: AppearanceTheme; appearance?: AppearanceSettings }) => void): { apply(ui: UiPrefs): void } {
+/**
+ * Only the in-progress form edit is local; the existing Settings queue owns persistence.
+ *
+ * The controls always edit the *saved* palettes, even while a followed desktop theme is
+ * what is drawn — so following and unfollowing never destroys a manual colour, and the
+ * panel keeps showing what turning follow off will restore.
+ */
+export function initAppearance(save: (patch: { theme?: AppearanceTheme; appearance?: AppearanceSettings }) => void): { apply(ui: UiPrefs, omarchy?: OmarchyTheme | null): void } {
   const panel = $('appearancePanel');
   let theme: AppearanceTheme = 'dark';
   let current = defaultAppearance();
+  let live: OmarchyTheme | null = null;
   let editing = false;
   const colorKeys = ['accent', 'background', 'sidebar'] as const;
   function paint(): void {
-    applyAppearance(theme, current);
+    applyAppearance(theme, current, live);
     $<HTMLSelectElement>('appearanceTheme').value = theme;
     $<HTMLSelectElement>('appearanceFont').value = current.font;
     $<HTMLInputElement>('appearanceSize').value = String(current.fontSize);
@@ -107,7 +126,8 @@ export function initAppearance(save: (patch: { theme?: AppearanceTheme; appearan
   $('appearanceReset').addEventListener('click', () => {
     editing = false; current = defaultAppearance(); paint(); save({ appearance: current });
   });
-  return { apply(ui) {
+  return { apply(ui, omarchy) {
+    live = omarchy ?? null;
     if (editing) return;
     theme = ui.theme; current = ui.appearance ?? defaultAppearance(); paint();
   } };

@@ -1,7 +1,7 @@
 import { registerWorkspaceTerminalIpc } from './workspace-terminal-ipc.js';
 import { applyLoginStartup, supportsLoginStartup } from './window-lifecycle.js';
 import { appearanceSchema } from './appearance-schema.js';
-import { mergeAppearance } from '../shared/appearance.js';
+import { mergeAppearance, effectiveAppearance, effectiveTheme } from '../shared/appearance.js';
 import { prepareSessionPrompt, prepareSkillFollowup } from './session/prompt.js';
 import { listSkills } from './skills.js';
 import { listSkillLibrary } from './skill-library.js';
@@ -16,6 +16,7 @@ import { validateInputImages } from './session/input-images.js';
 import { stageInputAttachment, type AttachmentSource } from './session/input-attachments.js';
 import { recordDeliveredInput, recordedInputImage } from './session/input-history.js';
 import { UI_BASE_ZOOM, titleBarOverlayForTheme, windowBackgroundForTheme } from './window-layout.js';
+import { readOmarchyTheme } from './omarchy-theme.js';
 import { usageOverview } from './session/usage.js';
 import { inputArgs, listInputs, editQueuedInput, reorderQueuedInputs, setInputAutomation, configureInputDelivery, pausedBrowserHelpers, cancelFinishInputs } from './session/input.js';
 import { draftOpeningMessage, onGoalChange, nativeGoalFailure } from './goal.js';
@@ -385,7 +386,10 @@ async function buildState(): Promise<AppState> {
     bundledTunnelVersion: bundledVersion(),
     bridge: await bridgeStatus(),
     update: updateStatus(),
-    desktopAccess: getMacOSDesktopAccess()
+    desktopAccess: getMacOSDesktopAccess(),
+    // Read on every state snapshot: this is how a theme change on the desktop reaches the
+    // running app, and how the renderer sees it. Bounded and never throws.
+    omarchy: readOmarchyTheme()
   };
 }
 
@@ -459,13 +463,18 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     // Renderer palette changes are immediate, so keep OS/Electron-owned chrome in lock-step too.
     // Without this, selecting Dark on macOS left the title bar, menus and file picker in the
     // system theme until restart (and startup still defaulted to system before index.ts applies it).
-    nativeTheme.themeSource = next.ui.theme;
-    if (process.platform === 'win32') getWindow()?.setTitleBarOverlay(titleBarOverlayForTheme(next.ui.theme, next.ui.appearance));
+    // A followed desktop theme resolves to its own mode and palette, so the native chrome tracks
+    // what the renderer actually paints rather than the saved manual colours.
+    const liveTheme = readOmarchyTheme(), chromeTheme = effectiveTheme(next.ui, liveTheme);
+    nativeTheme.themeSource = chromeTheme;
+    if (process.platform === 'win32') {
+      getWindow()?.setTitleBarOverlay(titleBarOverlayForTheme(chromeTheme, effectiveAppearance(next.ui, liveTheme)));
+    }
     // BrowserWindow's native backing color is fixed at construction unless updated explicitly.
     // Keep it in lock-step too: the default macOS application menu exposes Reload, and after a
     // live theme switch an old opposite background otherwise flashes behind the renderer while it
     // paints again. This is also the color Electron shows during any later renderer reload/failure.
-    getWindow()?.setBackgroundColor(windowBackgroundForTheme(next.ui.theme, next.ui.appearance));
+    getWindow()?.setBackgroundColor(windowBackgroundForTheme(chromeTheme, effectiveAppearance(next.ui, liveTheme)));
     if (
       before.goal.enabled !== next.goal.enabled ||
       // The mode is authority too: a draft started as a gate must not be typed after the user

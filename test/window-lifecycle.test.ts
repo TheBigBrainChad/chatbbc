@@ -22,7 +22,10 @@ describe('native window activation', () => {
     vm.runInNewContext(constructor, {
       BrowserWindow: function (value: Record<string, unknown>) { options = value; },
       layout: {}, icon: null, process: { platform },
-      titleBarOverlayForTheme: () => ({}), windowBackgroundForTheme: () => '#181818', getConfig: () => ({ ui: { theme: 'dark' } }),
+      // The native chrome is resolved from the live desktop theme before this call
+      // (spec §5), so the slice receives that resolved value rather than the raw config.
+      titleBarOverlayForTheme: () => ({}), windowBackgroundForTheme: () => '#181818',
+      chrome: { theme: 'dark', appearance: {} },
       UI_BASE_ZOOM: 1, path: { join: () => 'preload.js' }, __dirname: '/app', APP_TITLE
     });
     expect(options?.fullscreenable).toBe(platform === 'darwin');

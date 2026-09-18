@@ -324,7 +324,9 @@ describe('cross-platform packaging targets', () => {
     const main = readFileSync(path.join(root, 'src', 'main', 'index.ts'), 'utf8');
     const ready = main.indexOf('void app.whenReady().then(async () => {');
     const loadConfig = main.indexOf('await loadConfig();', ready);
-    const theme = main.indexOf('nativeTheme.themeSource = getConfig().ui.theme;', loadConfig);
+    // The mode now resolves through the live desktop theme (spec §5), so the asserted
+    // contract is still "the persisted choice is applied here", not a raw config read.
+    const theme = main.indexOf('nativeTheme.themeSource = nativeChromeTheme().theme;', loadConfig);
     const enableActivation = main.indexOf('windowActivation.enable();', theme);
     const firstWindowRequest = main.indexOf('windowActivation.request();', enableActivation);
 
@@ -336,8 +338,8 @@ describe('cross-platform packaging targets', () => {
 
     const ipc = readFileSync(path.join(root, 'src', 'main', 'ipc.ts'), 'utf8');
     const save = ipc.indexOf("handle('settings:save', async (payload) => {");
-    const liveTheme = ipc.indexOf('nativeTheme.themeSource = next.ui.theme;', save);
-    const background = ipc.indexOf('getWindow()?.setBackgroundColor(windowBackgroundForTheme(next.ui.theme, next.ui.appearance));', liveTheme);
+    const liveTheme = ipc.indexOf('nativeTheme.themeSource = chromeTheme;', save);
+    const background = ipc.indexOf('getWindow()?.setBackgroundColor(windowBackgroundForTheme(chromeTheme, effectiveAppearance(next.ui, liveTheme)));', liveTheme);
     expect(save).toBeGreaterThan(-1);
     expect(liveTheme).toBeGreaterThan(save);
     expect(background).toBeGreaterThan(liveTheme);

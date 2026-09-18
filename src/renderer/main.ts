@@ -979,7 +979,7 @@ function apply(next: AppState): void {
 
   // ---- theme
   const appearanceUi = requestedSettings?.ui ?? config.ui;
-  appearance.apply(appearanceUi);
+  appearance.apply(appearanceUi, next.omarchy);
 
   const headerConnect = $<HTMLButtonElement>('headerConnect');
   const wasVisible = !headerConnect.hidden;
