@@ -496,7 +496,7 @@ export async function startMcpServer(getContext: () => ToolContext): Promise<Mcp
     port: address.port,
     url: urls.core,
     urls,
-    publication: (surface, observe) => { void buildServer(stableContext(surface), surface, observe).close(); },
+    publication: (surface, observe) => { void buildServer(stableContext(surface), surface, observe).then(server => server.close()); },
     stop: (options = {}) => {
       if (!stopping) {
         // Publish the admission fence before closing any sockets or receiving late bodies.

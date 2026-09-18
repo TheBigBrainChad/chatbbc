@@ -5,8 +5,10 @@ import path from 'node:path';
 import { makeTempDir, removeTempDir } from './helpers.js';
 import { defaultConfig, initConfigPath, saveConfig } from '../src/main/config.js';
 import { initSkillsPath } from '../src/main/skills.js';
+import { buildServer } from '../src/main/mcp/tools.js';
 import { listSkillInventory, listSkillLibrary, skillLibraryInstructions } from '../src/main/skill-library.js';
 import { emptySkillState, setSkillStateForTests } from '../src/main/skill-state.js';
+import { DEFAULT_CAPABILITIES } from '../src/shared/types.js';
 
 let root: string, home: string;
 const contents = (name: string) => `---\nname: ${name}\ndescription: Use when testing ${name}.\n---\nBody for ${name}.`;
@@ -84,4 +86,43 @@ it('resolves policy for an id that names an Object.prototype member', async () =
   const library = await listSkillLibrary({});
   expect(library.skills.map(skill => skill.id)).toContain('constructor');
   expect(library.skills.find(skill => skill.id === 'constructor')!.allowImplicitInvocation).toBe(true);
+});
+
+it('omits a disabled skill from the text the MCP server hands the connector', async () => {
+  // The handshake, not a helper: this is the string the McpServer constructor receives at
+  // `initialize`. Before this, the per-message prompt was filtered while the handshake still
+  // advertised the skill the user had switched off.
+  let handshake = '';
+  const server = await buildServer(
+    { roots: [{ name: 'workspace', path: root }], caps: { ...DEFAULT_CAPABILITIES, read: true }, readOnly: false, sessionTools: false, agentTools: false },
+    'core',
+    (_name, _version, instructions) => { handshake = instructions; }
+  );
+  await server.close();
+  expect(handshake).toContain('"id":"writing-plans"');
+
+  setSkillStateForTests({ ...emptySkillState(), enabled: { 'writing-plans': false } });
+  const second = await buildServer(
+    { roots: [{ name: 'workspace', path: root }], caps: { ...DEFAULT_CAPABILITIES, read: true }, readOnly: false, sessionTools: false, agentTools: false },
+    'core',
+    (_name, _version, instructions) => { handshake = instructions; }
+  );
+  await second.close();
+  expect(handshake).not.toContain('writing-plans');
+  expect(handshake).toContain('No skills are installed.');
+});
+
+it('lists no skills and promises no proactive reading when the index admits no row', async () => {
+  const library = await listSkillLibrary({});
+  // The four fixed lines alone fit, and the sentence is what would tip it over; every row still
+  // trips the row budget, so the catalog can list nothing.
+  const cramped: typeof library = { ...library, maxContextTokens: 160 };
+  const text = skillLibraryInstructions(cramped);
+  expect(text).not.toMatch(/read its file/i);
+  expect(text).not.toContain('- {');
+  expect(text).not.toContain('Additional Skills omitted');
+  // A roomier budget lists the row and advertises reading it, so the fixture is not vacuous.
+  const roomy = skillLibraryInstructions({ ...library, maxContextTokens: 2000 });
+  expect(roomy).toMatch(/read its file/i);
+  expect(roomy).toContain('"id":"writing-plans"');
 });

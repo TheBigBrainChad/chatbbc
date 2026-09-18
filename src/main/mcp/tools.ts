@@ -27,11 +27,16 @@ import { APP_VERSION } from './../version.js';
 import { toVirtualPath } from '../sandbox.js';
 import { logWarn } from '../logger.js';
 import { withManagedSkills } from '../skill-access.js';
+import { visibleSkillCatalogInstructions } from '../skill-library.js';
 
-export function buildServer(ctx: ToolContext, surface: SurfaceId, observe?: (connectorName: string, version: string, instructions: string, tools: PluginToolSchema[]) => void, liveContext: () => ToolContext = () => ctx): McpServer {
+export async function buildServer(ctx: ToolContext, surface: SurfaceId, observe?: (connectorName: string, version: string, instructions: string, tools: PluginToolSchema[]) => void, liveContext: () => ToolContext = () => ctx): Promise<McpServer> {
   if (surface === 'core') ctx = withManagedSkills(ctx);
   const definition = surfaceDefinition(surface);
-  const instructions = serverInstructions(ctx, surface);
+  // Only the Core text quotes the Skill catalog; Desktop and Plugins say nothing about skills, so
+  // the managed-library scan behind the policy projection is not paid for on their behalf.
+  const instructions = surface === 'core'
+    ? serverInstructions(ctx, surface, process.platform, await visibleSkillCatalogInstructions({}))
+    : serverInstructions(ctx, surface);
   const server = new McpServer(
     { name: definition.serverName, version: APP_VERSION },
     { capabilities: { tools: {} }, instructions }
