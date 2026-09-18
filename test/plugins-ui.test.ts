@@ -50,11 +50,11 @@ it('routes exact plugin and tool identity for disabling a discovered tool', asyn
   const toggle = document.querySelector<HTMLInputElement>('.plugin-tool input')!;
   toggle.checked = false; toggle.dispatchEvent(new dom.window.Event('change')); await tick();
   expect(api.pluginsSetToolEnabled).toHaveBeenCalledWith('one', 'remember', false);
-  expect(document.querySelector('.toast')!.textContent).toContain('Refresh the Chat On Steroids Plugins connector in ChatGPT');
+  expect(document.querySelector('.toast')!.textContent).toContain('Refresh the ChatBBC Plugins connector in ChatGPT');
 });
 
 it('distinguishes a serving connector from evidence of ChatGPT contact', () => {
-  applyPluginsState({ config: { tunnel: { kind: 'manual' } }, status: { surfaces: [{ id: 'plugins', state: 'live', connectorName: 'Chat On Steroids Plugins', description: 'Plugins', localUrl: 'http://localhost/mcp', lastRequestAt: null }] } } as unknown as AppState);
+  applyPluginsState({ config: { tunnel: { kind: 'manual' } }, status: { surfaces: [{ id: 'plugins', state: 'live', connectorName: 'ChatBBC Plugins', description: 'Plugins', localUrl: 'http://localhost/mcp', lastRequestAt: null }] } } as unknown as AppState);
   expect(document.getElementById('pluginsConnectionStatus')!.textContent).toBe('Connector online · waiting for ChatGPT');
   expect(document.getElementById('pluginsSetup')).toBeNull();
   expect(document.querySelector('[data-panel="setup"] #pluginsTunnelId')).toBeNull();
@@ -77,13 +77,13 @@ it('keeps first-use setup and the connector-refresh instruction visible, includi
   expect(document.querySelector('.plugin-refresh-guide')!.textContent).toContain('After installing, updating or changing enabled plugins');
   applyPluginsState({ config: { tunnel: { kind: 'manual' } }, status: { surfaces: [{ id: 'plugins', state: 'live', lastRequestAt: 1 }] } } as unknown as AppState);
   expect(document.getElementById('pluginsSetupTitle')!.textContent).toBe('Your Plugins connector');
-  expect(document.querySelector('.plugin-refresh-guide')!.textContent).toContain('refresh Chat On Steroids Plugins in ChatGPT');
+  expect(document.querySelector('.plugin-refresh-guide')!.textContent).toContain('refresh ChatBBC Plugins in ChatGPT');
   document.getElementById('pluginsOpenChatGPT')!.click(); await tick();
   expect(api.openLink).toHaveBeenCalledWith('https://chatgpt.com/#settings/Plugins');
 });
 
 it('keeps plugin connection setup local, preserves a draft and saves through the existing settings authority', async () => {
-  const next = { hasApiKey: true, config: { tunnel: { kind: 'openai', tunnelId: 'core-original', pluginsTunnelId: 'plugins-original' }, ui: { theme: 'dark' } }, status: { surfaces: [{ id: 'plugins', state: 'live', tools: ['get_scene_info'], connectorName: 'Chat On Steroids Plugins', description: 'External tools', lastRequestAt: 1 }] } } as unknown as AppState;
+  const next = { hasApiKey: true, config: { tunnel: { kind: 'openai', tunnelId: 'core-original', pluginsTunnelId: 'plugins-original' }, ui: { theme: 'dark' } }, status: { surfaces: [{ id: 'plugins', state: 'live', tools: ['get_scene_info'], connectorName: 'ChatBBC Plugins', description: 'External tools', lastRequestAt: 1 }] } } as unknown as AppState;
   initPlugins(); applyPluginsState(next); await tick();
   document.getElementById('pluginsSetupLink')!.click();
   expect(document.getElementById('pluginDialogTitle')!.textContent).toBe('Plugin setup');

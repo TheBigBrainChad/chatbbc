@@ -6307,7 +6307,7 @@
       return {
         mode: 'off',
         label: 'Compact',
-        hint: 'Browser connection is disconnected in Chat On Steroids.',
+        hint: 'Browser connection is disconnected in ChatBBC.',
         action: 'none'
       };
     }

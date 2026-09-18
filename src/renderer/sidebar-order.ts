@@ -1,5 +1,5 @@
 /** Sidebar order is a local presentation preference; session/project ownership never changes. */
-const STORAGE_KEY = 'chat-on-steroids.sidebar-order';
+const STORAGE_KEY = 'chatbbc.sidebar-order';
 const MAX_IDS = 5000;
 type Entry = { id: string; scope: string };
 

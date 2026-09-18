@@ -9,7 +9,7 @@ app.setPath('userData', path.join(output, 'runtime'));
 app.whenReady().then(async () => {
   const { createServer } = await import('vite');
   const fixture = `
-    localStorage.removeItem('chat-on-steroids.sidebar-order');
+    localStorage.removeItem('chatbbc.sidebar-order');
     localStorage.removeItem('cos.ui.language');
     const config = {
       roots: [{name:'demo',path:'C:/demo'}], readOnly:true,
