@@ -86,4 +86,7 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
 // fails closed without ever reaching the integer gate. A companion that disagrees only about
 // the integer is refused with 426 `incompatible_extension`, which is why the slug and the
 // integer moved together for this rename.
-export const BRIDGE_PROTOCOL = 15;
+// 16 — bounded rich-response observations and separately journalled Chrome sender evidence.
+// A 15 app would ACK the new wire fields without understanding them; a 15 extension cannot
+// supply the paired envelope. The release/package version is deliberately unchanged here.
+export const BRIDGE_PROTOCOL = 16;

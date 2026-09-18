@@ -39,8 +39,8 @@ describe('extension release metadata', () => {
     expect(lock.version).toBe(APP_VERSION);
     expect(lock.packages?.['']?.version).toBe(APP_VERSION);
     expect(manifest.version).toBe(APP_VERSION);
-    expect(BRIDGE_PROTOCOL).toBe(15);
-    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 15;');
+    expect(BRIDGE_PROTOCOL).toBe(16);
+    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 16;');
   });
 
   /**
@@ -2445,6 +2445,195 @@ describe('extension revival delivery', () => {
 });
 
 describe('extension observation journal', () => {
+  it('refuses a protocol-15 hello without attempting an events POST or retiring the journal', async () => {
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const requests: string[] = [];
+    const worker = loadWorker({ local, session, fetch: async (input) => {
+      const path = new URL(input).pathname;
+      requests.push(path);
+      if (path === '/hello') return response(200, { app: APP_SLUG, bridge: 15, compatible: false, paired: true });
+      throw new Error(`incompatible extension attempted ${path}`);
+    } });
+    const id = '11111111-2222-3333-4444-555555555555';
+    await worker.send({ type: 'events', conversationId: id,
+      entries: [{ conversationId: id, event: { kind: 'user_message', time: Date.now(), text: 'retain' } }] });
+    const status = await worker.send({ type: 'status' });
+    expect(status).toMatchObject({ compatible: false, extensionProtocol: 16, appProtocol: 15, pending: 1 });
+    expect(requests).not.toContain('/events');
+    expect(journalOf(session)).toHaveLength(1);
+  });
+
+  it('captures Chrome sender per journal row, never forged entry fields, and retains old document across reload/rename', async () => {
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const sent: any[] = [];
+    let deliver = false;
+    const worker = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      const route = new URL(input).pathname;
+      if (route === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (route === '/events') {
+        sent.push(JSON.parse(String(init.body)));
+        return deliver ? response(200, { stored: 1 }) : response(503, { error: 'retry' });
+      }
+      return response(200, {});
+    } });
+    const id = '11111111-2222-3333-4444-555555555555';
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const projection = { version: 1, status: 'available', reason: null, conversationId: id,
+      messageId: 'logical-a', providerMessageId: provider, revision: 0, accessibleText: 'Choose', nodes: [] };
+    expect(await worker.registerTab(42, 'document-42-0')).toMatchObject({ ok: true });
+    await worker.send({ type: 'events', entries: [{ conversationId: null,
+      capture: { tab: 999, documentId: 'forged', navigationEpoch: 999, routeVerified: true },
+      event: { kind: 'assistant_message', time: Date.now(), messageId: 'logical-a',
+        providerMessageId: provider, rich: projection } }] }, 42, 'document-42-0');
+    const original = journalOf(session)[0].capture;
+    expect(original).toMatchObject({ tab: 42, documentId: 'document-42-0', navigationEpoch: 1, routeVerified: false });
+    expect(JSON.stringify(original)).not.toContain('forged');
+    await worker.navigateTab(42, 'https://chatgpt.com/');
+    expect(journalOf(session)[0].capture).toEqual(original);
+    expect(journalOf(session)[0].provisional).toBe('tab-42:document-42-1');
+    deliver = true;
+    await worker.send({ type: 'bind', conversationId: id }, 42, 'document-42-1');
+    expect(sent.at(-1)).toMatchObject({ conversationId: id,
+      sourceCaptures: [original], events: [expect.objectContaining({ messageId: 'logical-a' })] });
+    expect(journalOf(session)).toEqual([]);
+  });
+
+  it('attests a rich row route only against Chrome tab URL, not its claimed conversation or page epoch', async () => {
+    const a = '11111111-2222-3333-4444-555555555555';
+    const b = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const worker = loadWorker({ local, session,
+      tabsGet: async (id) => ({ id, url: `https://chatgpt.com/c/${a}`, status: 'complete' }) });
+    await worker.registerTab(42, 'document-42-0');
+    const rich = { version: 1, status: 'available', reason: null, conversationId: a,
+      messageId: 'logical-a', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      revision: 0, accessibleText: 'Choose', nodes: [] };
+    await worker.send({ type: 'events', conversationId: a, navigationEpoch: 700,
+      entries: [{ conversationId: a, event: { kind: 'assistant_message', time: Date.now(), rich } },
+        { conversationId: b, event: { kind: 'assistant_message', time: Date.now(), rich } }] },
+      42, 'document-42-0', `https://chatgpt.com/c/${a}`);
+    expect(journalOf(session).map(entry => entry.capture)).toEqual([
+      { tab: 42, documentId: 'document-42-0', navigationEpoch: 1, routeVerified: true, conversationId: a },
+      { tab: 42, documentId: 'document-42-0', navigationEpoch: 1, routeVerified: false, conversationId: null }
+    ]);
+    // The independently registered document generation did not become the page's `700`.
+    expect(session.data.registeredDocuments).toMatchObject({ '42': { documentId: 'document-42-0', epoch: 1 } });
+    await worker.send({ type: 'events', conversationId: a,
+      entries: [{ conversationId: a, event: { kind: 'assistant_message', time: Date.now(), rich } }] },
+      42, 'document-42-0', `https://chatgpt.com/c/${b}`);
+    expect(journalOf(session).at(-1).capture).toMatchObject({ routeVerified: false, conversationId: null });
+  });
+
+  it('sends the exact per-entry Chrome capture with both 413 halves and persisted retry', async () => {
+    const id = '11111111-2222-3333-4444-555555555555';
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const batches: any[] = [];
+    let first = true;
+    const fetch = async (input: string, init: Record<string, unknown> = {}) => {
+      if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (new URL(input).pathname !== '/events') return response(200, {});
+      const body = JSON.parse(String(init.body));
+      batches.push(body);
+      if (first) { first = false; return response(413, { error: 'body_too_large' }); }
+      return response(200, { stored: body.events.length });
+    };
+    const worker = loadWorker({ local, session, fetch });
+    expect(await worker.registerTab(42, 'document-42-0')).toMatchObject({ ok: true });
+    const rich = (messageId: string) => ({ version: 1, status: 'available', reason: null,
+      conversationId: id, messageId, providerMessageId: provider, revision: 0, accessibleText: '', nodes: [] });
+    await worker.send({ type: 'events', conversationId: id, entries: [
+      { conversationId: id, event: { kind: 'assistant_message', time: Date.now(), messageId: 'logical-a', rich: rich('logical-a') } },
+      { conversationId: id, event: { kind: 'assistant_message', time: Date.now(), messageId: 'logical-b', rich: rich('logical-b') } }
+    ] }, 42, 'document-42-0');
+    expect(batches.map(batch => batch.events.length)).toEqual([2, 1, 1]);
+    expect(batches[0].sourceCaptures).toHaveLength(2);
+    for (const batch of batches) {
+      expect(batch.sourceCaptures).toHaveLength(batch.events.length);
+      expect(batch.sourceCaptures).toEqual(batch.events.map(() => ({
+        tab: 42, documentId: 'document-42-0', navigationEpoch: 1, routeVerified: false, conversationId: null
+      })));
+    }
+    expect(journalOf(session)).toEqual([]);
+  });
+
+  it('replays the original registered document capture after a service-worker restart', async () => {
+    const id = '11111111-2222-3333-4444-555555555555';
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const rich = { version: 1, status: 'available', reason: null, conversationId: id,
+      messageId: 'logical-retry', providerMessageId: provider, revision: 0, accessibleText: '', nodes: [] };
+    const first = loadWorker({ local, session, fetch: async (input) =>
+      new URL(input).pathname === '/hello' ? response(200, { app: APP_SLUG, paired: true }) : response(503, {}) });
+    await first.registerTab(42, 'document-42-0');
+    await first.send({ type: 'events', conversationId: id,
+      entries: [{ conversationId: id, event: { kind: 'assistant_message', time: Date.now(), rich } }] }, 42);
+    const captured = journalOf(session)[0].capture;
+    expect(captured).toMatchObject({ tab: 42, documentId: 'document-42-0', navigationEpoch: 1 });
+    const posted: any[] = [];
+    const restored = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (new URL(input).pathname === '/events') posted.push(JSON.parse(String(init.body)));
+      return response(200, {});
+    } });
+    await restored.send({ type: 'status' });
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].sourceCaptures).toEqual([captured]);
+    expect(journalOf(session)).toEqual([]);
+  });
+
+  it('keeps old-chat source on delayed journal replay after a different Chrome document binds B', async () => {
+    const a = '11111111-2222-3333-4444-555555555555';
+    const b = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const posts: any[] = [];
+    let healthy = false;
+    const worker = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      const route = new URL(input).pathname;
+      if (route === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (route === '/events') {
+        posts.push(JSON.parse(String(init.body)));
+        return healthy ? response(200, {}) : response(503, {});
+      }
+      return response(200, {});
+    } });
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const rich = (conversationId: string) => ({ version: 1, status: 'available', reason: null,
+      conversationId, messageId: 'logical-shard', providerMessageId: provider, revision: 0,
+      accessibleText: 'Choose', nodes: [] });
+    await worker.registerTab(42, 'document-42-0');
+    await worker.send({ type: 'bind', conversationId: a }, 42, 'document-42-0');
+    await worker.send({ type: 'events', conversationId: a,
+      entries: [{ conversationId: a, event: { kind: 'assistant_message', time: Date.now(), rich: rich(a) } }] },
+      42, 'document-42-0', `https://chatgpt.com/c/${a}`);
+    const oldCapture = journalOf(session)[0].capture;
+    await worker.navigateTab(42, `https://chatgpt.com/c/${b}`);
+    expect(await worker.send({ type: 'events', conversationId: a,
+      entries: [{ conversationId: a, event: { kind: 'assistant_message', time: Date.now(), rich: rich(a) } }] },
+      42, 'document-42-0', `https://chatgpt.com/c/${a}`)).toMatchObject({ ok: false });
+    await worker.send({ type: 'bind', conversationId: b }, 42, 'document-42-1');
+    await worker.send({ type: 'events', conversationId: b,
+      entries: [{ conversationId: b, event: { kind: 'assistant_message', time: Date.now(), rich: rich(b) } }] },
+      42, 'document-42-1', `https://chatgpt.com/c/${b}`);
+    expect(journalOf(session)).toMatchObject([
+      { conversationId: a, capture: oldCapture },
+      { conversationId: b, capture: { documentId: 'document-42-1', navigationEpoch: 2, conversationId: null } }
+    ]);
+    healthy = true;
+    await worker.send({ type: 'status' });
+    await vi.waitFor(() => expect(journalOf(session)).toHaveLength(0));
+    expect(posts.filter(post => post.conversationId === a).at(-1).sourceCaptures).toEqual([oldCapture]);
+    expect(posts.filter(post => post.conversationId === b).at(-1).sourceCaptures).toEqual([
+      expect.objectContaining({ documentId: 'document-42-1', navigationEpoch: 2 })
+    ]);
+  });
+
   it('delivers another chat and its Goal while a slow chat holds one slot, without overlapping same-chat batches', async () => {
     const a = '11111111-2222-3333-4444-555555555555';
     const b = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';

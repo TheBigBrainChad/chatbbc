@@ -45,7 +45,7 @@ const MODEL_REQUEST_TIMEOUT_MS = 190_000;
 /** The reason a deadline aborts with, so it is a fact the caller can act on rather than prose. */
 const TIMED_OUT = 'the app took too long to answer';
 /** Bumped only when the request/response shape changes; the app compares it. */
-const BRIDGE_PROTOCOL = 15;
+const BRIDGE_PROTOCOL = 16;
 /** Browser-owned presentation preferences also exposed by the popup. */
 const RENDER_STREAM_KEY = 'renderStreamEnabled';
 const SHOW_TIMES_KEY = 'showStreamTimes';
@@ -208,6 +208,9 @@ let tabConversations = {};
 let tabDocuments = {};
 /** Highest same-document SPA navigation generation accepted for each tab. */
 let tabEpochs = {};
+/** Chrome MessageSender document registrations, independent of page-reported navigationEpoch.
+ * The numeric generation only proves registration order, NOT a same-document SPA capture. */
+let registeredDocuments = {};
 let retiredDocuments = {};
 /** Durable terminal lease; cleared only when a different browser document speaks. */
 let terminalDocuments = {};
@@ -280,6 +283,7 @@ async function loadOnce() {
     'tabConversations',
     'tabDocuments',
     'tabEpochs',
+    'registeredDocuments',
     'retiredDocuments',
     'terminalDocuments',
     'closeOutbox',
@@ -296,6 +300,8 @@ async function loadOnce() {
       : {};
   tabDocuments = live.tabDocuments && typeof live.tabDocuments === 'object' ? { ...live.tabDocuments } : {};
   tabEpochs = live.tabEpochs && typeof live.tabEpochs === 'object' ? { ...live.tabEpochs } : {};
+  registeredDocuments = live.registeredDocuments && typeof live.registeredDocuments === 'object' &&
+    !Array.isArray(live.registeredDocuments) ? { ...live.registeredDocuments } : {};
   retiredDocuments =
     live.retiredDocuments && typeof live.retiredDocuments === 'object' ? { ...live.retiredDocuments } : {};
   terminalDocuments =
@@ -339,6 +345,7 @@ function persistLive() {
         tabConversations,
         tabDocuments,
         tabEpochs,
+        registeredDocuments,
         retiredDocuments,
         terminalDocuments,
         closeOutbox: closeOutbox.slice(-200),
@@ -603,6 +610,9 @@ function enqueue(entries) {
       provisional: typeof entry.provisional === 'string' ? entry.provisional : null,
       agent: typeof entry.agent === 'string' ? entry.agent : null,
       agentCommandId: typeof entry.agentCommandId === 'string' ? entry.agentCommandId : null,
+      // This is a detached copy installed by HANDLERS.events from Chrome MessageSender;
+      // never take an origin from message.entries or the page-controlled event body.
+      capture: entry.capture ?? null,
       event: entry.event
     });
   }
@@ -711,14 +721,18 @@ function nextJournalBatch(preferredConversationId = null, excluded = []) {
 
 async function deliverJournalBatch(batch) {
   const { conversationId, mine, agent, agentCommandId } = batch;
+  // Optional protocol-16 envelope is attached ONLY to batches containing rich payloads.
+  // Every slot is positional, including null/ordinary slots, and the same helper is used
+  // for initial delivery and 413 halves. Legacy prose keeps its exact existing wire shape.
+  const payload = (entries) => ({
+    conversationId, agent, agentCommandId,
+    events: entries.map((entry) => entry.event),
+    ...(entries.some((entry) => entry.event?.kind === 'assistant_message' && entry.event.rich !== undefined)
+      ? { sourceCaptures: entries.map((entry) => entry.capture ?? null) } : {})
+  });
   const result = await call('/events', {
     method: 'POST',
-    body: JSON.stringify({
-      conversationId,
-      agent,
-      agentCommandId,
-      events: mine.map((entry) => entry.event)
-    })
+    body: JSON.stringify(payload(mine))
   });
   noteDelivery(result, mine.length, conversationId);
   if (result.status === 413 && mine.length > 1) {
@@ -726,7 +740,7 @@ async function deliverJournalBatch(batch) {
     const half = mine.slice(0, Math.floor(mine.length / 2));
     const retry = await call('/events', {
       method: 'POST',
-      body: JSON.stringify({ conversationId, agent, agentCommandId, events: half.map((entry) => entry.event) })
+      body: JSON.stringify(payload(half))
     });
     noteDelivery(retry, half.length, conversationId);
     if (!retry.ok) return false;
@@ -1626,6 +1640,17 @@ async function registerDocument(sender, message) {
   }
   if (current && current !== documentId) await adoptFreshReloadProvisional(id, documentId);
   if (current && current !== documentId) retiredDocuments[key] = [...new Set([...retired, current])].slice(-8);
+  // Only this explicit registration receives Chrome's sender documentId. Increment our own
+  // generation when its document changes; NEVER copy message.navigationEpoch into it.
+  // A legacy persisted tab without a registration has no capture epoch until it registers.
+  const registration = registeredDocuments[key];
+  if (!registration || registration.documentId !== documentId ||
+      !Number.isSafeInteger(registration.epoch) || registration.epoch < 1) {
+    const previousEpoch = Number.isSafeInteger(registration?.epoch) && registration.epoch > 0
+      ? registration.epoch : 0;
+    registeredDocuments[key] = previousEpoch < Number.MAX_SAFE_INTEGER
+      ? { documentId, epoch: previousEpoch + 1 } : null;
+  }
   tabDocuments[key] = documentId;
   tabEpochs[key] = requestedEpoch;
   delete terminalDocuments[key];
@@ -1642,6 +1667,22 @@ function ownsDocument(source) {
     !Object.prototype.hasOwnProperty.call(terminalDocuments, key) &&
     !(Array.isArray(retiredDocuments[key]) && retiredDocuments[key].includes(source.documentId))
   );
+}
+
+/** Browser-issued sender plus independently registered document incarnation, not rich authority.
+ * No same-document SPA navigation proof or DOM/Fiber join exists at this layer. In particular,
+ * provisional rename must never relabel the original document's captured conversation. */
+function capturedSender(source, conversationId = null) {
+  const registered = source && registeredDocuments[String(source.tab)];
+  const epoch = registered?.documentId === source?.documentId &&
+    Number.isSafeInteger(registered.epoch) && registered.epoch > 0 ? registered.epoch : null;
+  return {
+    tab: source.tab,
+    documentId: source.documentId,
+    navigationEpoch: epoch,
+    routeVerified: conversationId !== null,
+    conversationId
+  };
 }
 
 async function markTerminal(id) {
@@ -3141,7 +3182,7 @@ const HANDLERS = {
    * them, so the very first message of a fresh chat is durable before ChatGPT has
    * decided what to call the conversation.
    */
-  async events(message, _sender, source) {
+  async events(message, sender, source) {
     await load();
     if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
     const conversationId = cleanConversationId(message.conversationId);
@@ -3151,9 +3192,32 @@ const HANDLERS = {
     if (!ownsDocument(source) || (binding.projectBound && !await currentConversationDocument(source, conversationId)))
       return { ok: false, error: 'stale_document' };
     const key = tabKey(source);
-    const entries = (Array.isArray(message.entries) ? message.entries : []).map((entry) =>
-      entry && !entry.conversationId ? { ...entry, provisional: key } : entry
+    // The URL is checked against Chrome's tab state, not an entry or message body.
+    // This is still admission-time route evidence; it cannot certify when the page
+    // captured a DOM/Fiber rich root, so the main recorder remains fail-closed.
+    const hasRich = Array.isArray(message.entries) && message.entries.some(
+      (entry) => entry?.event?.kind === 'assistant_message' && entry.event.rich !== undefined
     );
+    // Both facts are issued by Chrome: sender.url is bound to this MessageSender and
+    // tabs.get is the current settled tab. A page/body route alone must never attest B.
+    const verifiedRoute = hasRich && conversationId &&
+      conversationFromUrl(sender?.url) === conversationId &&
+      await currentConversationDocument(source, conversationId) ? conversationId : null;
+    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
+    const entries = (Array.isArray(message.entries) ? message.entries : []).map((entry) => {
+      if (!entry || typeof entry !== 'object') return entry;
+      const claimed = cleanConversationId(entry.conversationId);
+      const capture = capturedSender(source, claimed && claimed === verifiedRoute ? claimed : null);
+      // Do not let page-provided capture aliases survive in the observation itself. The
+      // trusted source is copied separately, and remains unchanged on later binding/replay.
+      const event = entry.event && typeof entry.event === 'object' ? { ...entry.event } : entry.event;
+      if (event) {
+        delete event.capture;
+        delete event.richCapture;
+        delete event.richOrigin;
+      }
+      return { ...entry, capture, event, ...(!entry.conversationId ? { provisional: key } : {}) };
+    });
     enqueue(entries);
     let ackBound = 0;
     if (message.conversationId) {

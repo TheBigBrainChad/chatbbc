@@ -1046,12 +1046,41 @@ function parseCallEvidence(input: unknown, untooled = false): PageCallEvidence[]
  * a months-old chat is exactly when we need ChatGPT's own creation time so its messages can
  * be interleaved with already-recorded MCP calls instead of all appearing at reload time.
  */
-function parseObservations(input: unknown): ChatObservation[] {
+/** Strict wire-shape validation only. The HTTP body is NOT Chrome MessageSender authority.
+ * Task 6 must corroborate actual capture-time DOM/Fiber ownership separately before the
+ * recorder's deliberately refused rich branch can use any document/epoch information. */
+function parseWireCapture(input: unknown, conversation: string): {
+  tab: number; documentId: string; navigationEpoch: number | null;
+  routeVerified: boolean; conversationId: string | null;
+} | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const item = input as Record<string, unknown>;
+  const keys = Object.keys(item);
+  if (keys.length !== 5 || !['tab', 'documentId', 'navigationEpoch', 'routeVerified', 'conversationId']
+    .every(key => Object.hasOwn(item, key))) return null;
+  const tab = item['tab'];
+  const documentId = item['documentId'];
+  const epoch = item['navigationEpoch'];
+  const verified = item['routeVerified'];
+  const route = item['conversationId'];
+  if (!Number.isSafeInteger(tab) || (tab as number) < 0 ||
+      typeof documentId !== 'string' || !/^[a-z0-9_-]{1,128}$/i.test(documentId) ||
+      (epoch !== null && (!Number.isSafeInteger(epoch) || (epoch as number) < 1)) ||
+      typeof verified !== 'boolean' ||
+      (verified && route !== conversation) || (!verified && route !== null)) return null;
+  return { tab: tab as number, documentId, navigationEpoch: epoch as number | null,
+    routeVerified: verified, conversationId: route as string | null };
+}
+
+/** Pure parser/test seam, not an authenticated route or a grant to record rich content. */
+export function parseObservations(input: unknown, captures?: unknown, envelopeConversation?: string): ChatObservation[] {
   if (!Array.isArray(input)) return [];
   const now = Date.now();
   const earliestChatGpt = Date.UTC(2022, 10, 30);
   const out: ChatObservation[] = [];
-  for (const raw of input.slice(0, MAX_OBSERVATIONS)) {
+  const alignedCaptures = Array.isArray(captures) && captures.length === input.length &&
+    captures.length <= MAX_OBSERVATIONS ? captures : null;
+  for (const [index, raw] of input.slice(0, MAX_OBSERVATIONS).entries()) {
     if (!raw || typeof raw !== 'object') continue;
     const item = raw as Record<string, unknown>;
     const kind = typeof item['kind'] === 'string' ? item['kind'] : '';
@@ -1161,14 +1190,18 @@ function parseObservations(input: unknown): ChatObservation[] {
       if (fiberId) observation.fiberConversationId = fiberId;
     }
     if (kind === 'assistant_message' && item['rich'] !== undefined) {
-      // Parsing is structural validation, not identity authority. The current /events
-      // journal has discarded capture-time Chrome sender provenance; recorder refuses this
-      // projection until the coordinated document-bound transport exists.
+      // A field-wise validated envelope is a necessary transport shape, not proof that
+      // the page's rich DOM snapshot belonged to this source at its actual capture time.
+      // No page-supplied event.origin/documentId/navigationEpoch may stand in for it.
       if (observation.text === undefined) observation.richOnly = true;
+      const source = alignedCaptures && envelopeConversation
+        ? parseWireCapture(alignedCaptures[index], envelopeConversation) : null;
       const parsed = parseRichResponse(item['rich']);
-      if (parsed && parsed.messageId === observation.messageId && parsed.providerMessageId &&
+      if (source?.routeVerified === true && source.navigationEpoch !== null && parsed &&
+          parsed.messageId === observation.messageId && parsed.providerMessageId &&
           parsed.providerMessageId === observation.providerMessageId &&
-          parsed.conversationId === observation.fiberConversationId) observation.rich = parsed;
+          parsed.conversationId === observation.fiberConversationId &&
+          parsed.conversationId === envelopeConversation) observation.rich = parsed;
     }
     if (item['final'] === true) observation.final = true;
     if (typeof item['outcome'] === 'string' && OUTCOMES.has(item['outcome'])) {
@@ -2204,7 +2237,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     // takes back a worker this app gave up on while its tab was gone but its turn was not.
     const revived = noteAgentAlive(id, 'page');
     if (revived?.report) await recordAgentMessage(revived.report, 'sent', id);
-    const observations = parseObservations(body['events']);
+    const observations = parseObservations(body['events'], body['sourceCaptures'], id);
     // A turn beginning is the one page fact that outranks the app's own idea of this worker's
     // state. Reported here rather than inferred from `generating`, because this is the exact
     // moment the model started running and the only one that can outvote a sleep decision made

@@ -391,6 +391,82 @@ beforeEach(async () => {
 });
 
 describe('rich observations require capture-time Chrome document authority', () => {
+  it('validates the rich tree and aligned sender envelope field-wise before the recorder', async () => {
+    const { parseObservations } = await import('../src/main/bridge.js');
+    const conversationId = randomUUID();
+    const messageId = 'logical-a';
+    const providerMessageId = randomUUID();
+    const rich = { version: 1, status: 'available', reason: null, conversationId,
+      messageId, providerMessageId, revision: 7, accessibleText: 'Choose',
+      nodes: [{ id: 'text-a', kind: 'text', style: 'body', text: 'Choose' }] };
+    const raw = { kind: 'assistant_message', time: Date.now(), text: 'Choose', messageId,
+      providerMessageId, fiberConversationId: conversationId, rich };
+    const capture = { tab: 42, documentId: 'browser-registered-document', navigationEpoch: 2,
+      routeVerified: true, conversationId };
+    expect(parseObservations([raw], [capture], conversationId)).toMatchObject([
+      { kind: 'assistant_message', messageId, text: 'Choose', rich }
+    ]);
+    for (const modified of [
+      { ...raw, rich: { ...rich, script: 'alert(1)' } },
+      { ...raw, rich: { ...rich, nodes: [{ ...rich.nodes[0], onclick: 'steal()' }] } },
+      { ...raw, rich: { ...rich, conversationId: randomUUID() } },
+      { ...raw, rich: { ...rich, providerMessageId: randomUUID() } }
+    ]) {
+      const [result] = parseObservations([modified], [capture], conversationId);
+      expect(result).toMatchObject({ kind: 'assistant_message', messageId, text: 'Choose' });
+      expect(result).not.toHaveProperty('rich');
+    }
+    for (const forged of [{ ...capture, script: 'alert(1)' },
+      { ...capture, documentId: 'https://evil.test' },
+      { ...capture, navigationEpoch: -1 },
+      { ...capture, routeVerified: false },
+      { ...capture, conversationId: randomUUID() }]) {
+      expect(parseObservations([raw], [forged], conversationId)[0]).not.toHaveProperty('rich');
+    }
+    expect(parseObservations([raw], undefined, conversationId)[0]).not.toHaveProperty('rich');
+    expect(parseObservations([raw], [capture, capture], conversationId)[0]).not.toHaveProperty('rich');
+  });
+
+  it('rejects protocol-15 /events even with a valid old bearer before creating a session', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const oldHello = await request('GET', '/hello', { protocol: 15 });
+    expect(oldHello.body).toMatchObject({ bridge: 16, compatible: false });
+    const oldEvents = await request('POST', '/events', { protocol: 15, body: {
+      conversationId, events: [{ kind: 'assistant_message', time: Date.now(),
+        text: 'Old peer cannot write under protocol 16', messageId: 'logical-old' }]
+    } });
+    expect(oldEvents).toMatchObject({ status: 426, body: expect.objectContaining({ bridge: 16 }) });
+    expect(await findSessionByConversation(conversationId)).toBeNull();
+  });
+
+  it('rejects malformed/foreign rich fields without losing same-row prose or trusting an injected envelope', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const providerMessageId = randomUUID();
+    const messageId = 'assistant:one-logical-row';
+    const valid = { version: 1, status: 'available', reason: null, conversationId,
+      messageId, providerMessageId, revision: 99, accessibleText: 'Choose',
+      nodes: [{ id: 'n1', kind: 'text', style: 'body', text: 'Choose' }] };
+    const event = (rich: unknown) => ({ kind: 'assistant_message', time: Date.now(), text: 'Choose',
+      messageId, providerMessageId, fiberConversationId: conversationId, rich });
+    const forged = { tab: 1, documentId: 'forged-page-field', navigationEpoch: 999,
+      routeVerified: true, conversationId };
+    for (const rich of [{ ...valid, script: 'alert(1)' },
+      { ...valid, nodes: [{ ...valid.nodes[0], onclick: 'run()' }] },
+      { ...valid, conversationId: randomUUID() }, valid]) {
+      const reply = await request('POST', '/events', { body: { conversationId,
+        sourceCaptures: [forged], events: [event(rich)] } });
+      expect(reply.status).toBe(200);
+      const rows = await readEvents(reply.body.sessionId as string);
+      expect(rows.filter(row => row.kind === 'assistant_message')).toHaveLength(1);
+      expect(rows.find(row => row.kind === 'assistant_message')).toMatchObject({
+        messageId, message: expect.objectContaining({ text: 'Choose' })
+      });
+      expect(rows.find(row => row.kind === 'assistant_message')).not.toHaveProperty('rich');
+    }
+  });
+
   it('does not mint a session or assistant row for an unsolicited rich-only snapshot', async () => {
     await pair();
     const conversationId = randomUUID();
