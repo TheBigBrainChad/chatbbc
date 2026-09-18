@@ -1350,5 +1350,11 @@
   "Terminal input is busy. Try a smaller paste.": "La entrada del terminal está ocupada. Intenta pegar menos texto.",
   "Automation": "Automatización",
   "Open setup guide": "Abrir la guía de configuración",
-  "Ordinary": "Normal"
+  "Ordinary": "Normal",
+  "Follow this desktop": "Seguir este escritorio",
+  "Use the live Omarchy theme's own colors and terminal font. Your saved colors are kept and return when this is off. Detected:": "Usa los colores y la fuente de terminal del tema Omarchy activo. Tus colores guardados se conservan y vuelven al desactivar esto. Detectado:",
+  "none": "ninguno",
+  "Desktop theme": "Tema del escritorio",
+  "The desktop theme is read when ChatBBC starts or when settings are saved. Refresh to pick up a theme you changed just now.": "El tema del escritorio se lee al iniciar ChatBBC o al guardar los ajustes. Actualiza para tomar un tema que acabas de cambiar.",
+  "Refresh from desktop": "Actualizar desde el escritorio"
 }

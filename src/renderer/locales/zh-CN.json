@@ -1350,5 +1350,11 @@
   "Terminal input is busy. Try a smaller paste.": "终端输入繁忙，请减少粘贴的文本。",
   "Automation": "自动化",
   "Open setup guide": "打开设置指南",
-  "Ordinary": "普通"
+  "Ordinary": "普通",
+  "Follow this desktop": "跟随此桌面",
+  "Use the live Omarchy theme's own colors and terminal font. Your saved colors are kept and return when this is off. Detected:": "使用当前 Omarchy 主题自带的颜色和终端字体。你保存的颜色会保留，关闭此项后恢复。已检测到：",
+  "none": "无",
+  "Desktop theme": "桌面主题",
+  "The desktop theme is read when ChatBBC starts or when settings are saved. Refresh to pick up a theme you changed just now.": "桌面主题在 ChatBBC 启动或保存设置时读取。刷新以获取你刚刚更换的主题。",
+  "Refresh from desktop": "从桌面刷新"
 }
