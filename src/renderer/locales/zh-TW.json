@@ -1381,5 +1381,8 @@
   "Terminal height": "終端機高度",
   "Open a terminal in this project": "在此專案中開啟終端機",
   "Select a project to open a terminal": "選擇一個專案以開啟終端機",
-  "Terminal input is busy. Try a smaller paste.": "終端機輸入忙碌，請減少貼上的文字。"
+  "Terminal input is busy. Try a smaller paste.": "終端機輸入忙碌，請減少貼上的文字。",
+  "Automation": "自動化",
+  "Open setup guide": "開啟設定指南",
+  "Ordinary": "一般"
 }

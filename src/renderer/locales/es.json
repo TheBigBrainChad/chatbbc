@@ -1347,5 +1347,8 @@
   "Terminal height": "Altura del terminal",
   "Open a terminal in this project": "Abrir un terminal en este proyecto",
   "Select a project to open a terminal": "Selecciona un proyecto para abrir un terminal",
-  "Terminal input is busy. Try a smaller paste.": "La entrada del terminal está ocupada. Intenta pegar menos texto."
+  "Terminal input is busy. Try a smaller paste.": "La entrada del terminal está ocupada. Intenta pegar menos texto.",
+  "Automation": "Automatización",
+  "Open setup guide": "Abrir la guía de configuración",
+  "Ordinary": "Normal"
 }
