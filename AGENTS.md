@@ -2153,13 +2153,19 @@ of appearance controls.
 animation and autonomous-action state. `renderer/pet.ts` projects it with Pointer
 Events and one visible-window animation clock. The composer launcher and context
 menu share visibility/position in the validated renderer preference
-`cos.ui.turTurPet.v1`; it grants no backend permission. Hide, drag and viewport
+`cos.ui.turTurPet.v1`; it grants no backend permission. The machine's next frame,
+phase or autonomous-decision deadline owns each wake: stationary sprites sleep until
+that deadline, while travel and interpolated props retain display-frame updates.
+Menus, hidden documents and static reduced-motion poses park the clock, and one pending
+wake is cancelled on pause or disposal. DOM projection writes only changed values, so a
+settled pose costs nothing between authored frames. Hide, drag and viewport
 changes retire scene props synchronously. Reduced motion disables autonomous
 travel/actions while keeping static click feedback. Company targets are plain DOM
 text; bat, bin and hit effects carry no company logos. `pet-assets/animations.json`
 maps 96 local character frames with contact/release timing. Asset production and
-regeneration are documented in `docs/pet/PRODUCTION.md`; pet unit/DOM tests and
-`scripts/verify-pet-electron.cjs` cover this owner without provider conversations.
+regeneration are documented in `docs/pet/PRODUCTION.md`; pet unit/DOM tests,
+`scripts/verify-pet-performance.cjs` (idle and parked CPU against measured rAF counts)
+and `scripts/verify-pet-electron.cjs` cover this owner without provider conversations.
 
 `renderer/main.ts` owns the shell/setup/settings; `chat.ts` owns sessions, composer and timeline.
 Projects, workers, plans, model choice, usage and plugins have focused modules (§4). The renderer

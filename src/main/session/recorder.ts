@@ -30,6 +30,7 @@ import type {
   TurnOutcome
 } from '../../shared/session.js';
 import { estimateTokens, originTitle } from '../../shared/session.js';
+import { chatErrorMessageKey } from '../../shared/chat-error.js';
 import { getConfig } from '../config.js';
 import { logInfo, logWarn } from '../logger.js';
 import { redactCredentialText } from '../redaction.js';
@@ -2228,7 +2229,7 @@ async function recordChatObservationsNow(
         // Reloads lose/remint document turn ids. A recoverable notice belongs to the
         // canonical question, not that document. Keep the original notice throughout
         // recovery; a genuinely new question gives the same error a new owner.
-        const text = (item.text ?? '').replace(/\s+/g, ' ').trim();
+        const text = chatErrorMessageKey(item.text ?? '', item.recoverable === true);
         const question = item.recoverable === true ? await readLatestUserMessage(sessionId) : undefined;
         const recent = await readRecentEvents(sessionId, 32, { kinds: ['chat_error'], maxBytes: 256 * 1024 });
         if (recent.some(event => event.kind === 'chat_error' &&
@@ -2237,7 +2238,7 @@ async function recordChatObservationsNow(
               (item.reason === 'thinking_failed' && event.reason === item.reason && event.turnId === item.turnId)) &&
             (item.blocking === true || (event.turnId ?? '') === (item.turnId ?? '')) &&
             (!question || event.seq > (question.origin ?? question.seq)))) &&
-            event.message.text.replace(/\s+/g, ' ').trim() === text)) continue;
+            chatErrorMessageKey(event.message.text, event.recoverable === true) === text)) continue;
         await appendEvent(sessionId, {
           ...base,
           kind: 'chat_error',
@@ -2444,7 +2445,10 @@ export async function recordAgentMessage(
     // from an exact MCP caller must carry that conversation through instead of resolving the
     // same friendly id against whichever other prime happens to be active now.
     const conversationId = ownerConversationId ?? agentConversation(owner);
-    const sessionId = conversationId ? await sessionForConversation(conversationId) : await ensureUnattributedSession();
+    // Broker reports are history, not evidence that a closed browser page returned.
+    const sessionId = conversationId
+      ? (await findSessionByConversation(conversationId, { includeHistorical: true }))?.id ?? await sessionForConversation(conversationId)
+      : await ensureUnattributedSession();
     if (!sessionId) return;
     await appendEvent(sessionId, {
       time: delivery === 'sent' ? message.time : Date.now(),

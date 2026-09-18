@@ -437,6 +437,27 @@ export type SessionEventKind = SessionEvent['kind'];
  */
 export const CONTINUATION_MARKER = /^\s*\[\[CLF-(HANDOFF|RESUME):([A-Za-z0-9_-]{16,64})\]\](?:\s|$)/;
 
+/** Page readback may escape ASCII punctuation. Letters and digits cannot be escaped.
+ * Keep this grammar in sync with markedAs() in the unbundled extension/content.js. */
+const CONTINUATION_MARKER_ESCAPED = /^\s*(?:\\?\[){2}CLF\\?-(HANDOFF|RESUME)\\?:((?:[A-Za-z0-9]|\\?[_-]){16,64})(?:\\?\]){2}(?:\s|$)/;
+
+/**
+ * Undo one layer of ASCII-punctuation escaping in page readback only. Callers try exact
+ * text first; authored Send instructions and ordinary user-message receipts remain unchanged.
+ */
+export function unescapeMarkdown(value: string): string {
+  return value.replace(/\\([!-/:-@[-`{-~])/g, '$1');
+}
+
+/** The continuation marker at the head of `text`, as typed or as the composer escaped it. */
+export function continuationMarkerOf(text: string | null | undefined):
+  { kind: 'HANDOFF' | 'RESUME'; token: string; marker: string } | null {
+  const value = typeof text === 'string' ? text : '';
+  const match = CONTINUATION_MARKER.exec(value) ?? CONTINUATION_MARKER_ESCAPED.exec(value.slice(0, 200));
+  if (!match) return null;
+  return { kind: match[1] as 'HANDOFF' | 'RESUME', token: match[2]!.replace(/\\/g, ''), marker: match[0] };
+}
+
 /**
  * An event before the store assigns its sequence number.
  *

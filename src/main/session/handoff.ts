@@ -10,6 +10,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { Handoff } from '../../shared/session.js';
+import { continuationMarkerOf, unescapeMarkdown } from '../../shared/session.js';
 import { logInfo } from '../logger.js';
 import { getSession, readSessionPlan, saveHandoff } from './store.js';
 import { destinationContinuationMarker } from './handoff-prompt.js';
@@ -60,9 +61,18 @@ export function resumeBootstrapText(summary: string, token = ''): string {
 export function resumeBootstrapMatches(recorded: string, summary: string): boolean {
   const canonical = (value: string): string =>
     value.replace(/\u00c2\u00a0/g, ' ').replace(/\u00a0/g, ' ').replace(/\r\n?/g, '\n');
+  const strip = (value: string): string => {
+    const prompt = userPromptText(value) ?? value;
+    const marker = continuationMarkerOf(prompt);
+    const end = marker?.marker.trimEnd().length ?? 0;
+    // Decode the marker independently so a marker-only escape does not rewrite literal
+    // backslashes in the brief. Keep the original exact two-newline framing requirement.
+    return marker?.kind === 'RESUME' && prompt === prompt.trimStart() && prompt.slice(end, end + 2) === '\n\n'
+      ? prompt.slice(end + 2) : prompt;
+  };
+  const expected = canonical(resumeBootstrapText(summary));
   const normalized = canonical(recorded);
-  const withoutMarker = (userPromptText(normalized) ?? normalized).replace(/^\[\[CLF-RESUME:[A-Za-z0-9_-]{16,64}\]\]\n\n/, '');
-  return withoutMarker === canonical(resumeBootstrapText(summary));
+  return strip(normalized) === expected || strip(unescapeMarkdown(normalized)) === expected;
 }
 
 /**

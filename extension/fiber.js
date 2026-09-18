@@ -111,7 +111,7 @@
    * Exact names, never a prefix: `ChatBBC Backup` would be somebody else's
    * connector, and a prefix test would have this app vouch for its traffic.
    */
-  const OUR_APPS = ['ChatBBC Core', 'ChatBBC Desktop', 'TobisComputer'];
+  const OUR_APPS = ['ChatBBC Core', 'ChatBBC Desktop', 'ChatBBC Plugins', 'TobisComputer'];
 
   /** Whether an `invoked_resource.app_name` names one of this app's own connectors. */
   function ourApp(name) {

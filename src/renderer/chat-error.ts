@@ -1,4 +1,5 @@
 import type { SessionEvent } from '../shared/session.js';
+import { chatErrorMessageKey } from '../shared/chat-error.js';
 import { positionOf } from '../shared/chronology.js';
 import { t } from './i18n.js';
 
@@ -12,7 +13,7 @@ export function duplicateChatErrors(history: readonly SessionEvent[]): Set<numbe
   for (const event of [...history].sort((a, b) => positionOf(a) - positionOf(b))) {
     if (event.kind === 'user_message') { question = positionOf(event); notices.clear(); }
     if (event.kind !== 'chat_error' || event.recoverable !== true || question === undefined) continue;
-    const key = event.message.text.replace(/\s+/g, ' ').trim();
+    const key = chatErrorMessageKey(event.message.text, event.recoverable === true);
     if (notices.has(key)) duplicates.add(event.seq);
     else notices.set(key, event.seq);
   }
