@@ -177,12 +177,12 @@ html:lang(zh-TW) body { font-family: var(--ui-font, "Microsoft JhengHei UI", "Mi
 .setup-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px 24px; margin-bottom: 20px; }
 .setup-heading .settings-heading { margin-bottom: 0; padding: 0; }
 .setup-heading .settings-heading p { margin-bottom: 0; }
-.language-tabs { display: inline-flex; flex: none; padding: 3px; gap: 3px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
-.language-tabs button { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--muted); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); cursor: pointer; white-space: nowrap; }
+.language-tabs { display: inline-flex; flex: none; padding: 3px; gap: 3px; border: 1px solid var(--line); border-radius: 0; background: var(--card); }
+.language-tabs button { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid transparent; border-radius: 0; background: transparent; color: var(--muted); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); cursor: pointer; white-space: nowrap; }
 .language-tabs button:hover { background: var(--hover); color: var(--ink); }
 .language-tabs button[aria-pressed='true'] { background: var(--hover); border-color: var(--line); color: var(--ink); }
 .language-tabs button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
-.language-flag { width: 24px; height: 16px; border-radius: 2px; overflow: hidden; flex: none; }
+.language-flag { width: 24px; height: 16px; border-radius: 0; overflow: hidden; flex: none; }
 
 /* Keep authored content, chat history and settings selectable; chrome is not text content. */
 :is(input, textarea, [contenteditable='true'], .msg, #timeline,
@@ -245,10 +245,10 @@ code {
 .app-topbar > .btn { padding: 0 5px; }
 .app-topbar > .btn .ico { width: 14px; height: 14px; }
 .view-menu { position: relative; font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); }
-.view-menu > summary { display: flex; align-items: center; height: 100%; list-style: none; cursor: pointer; padding: 0 9px; border-radius: 6px; }
+.view-menu > summary { display: flex; align-items: center; height: 100%; list-style: none; cursor: pointer; padding: 0 9px; border-radius: 0; }
 .view-menu > summary:hover, .view-menu[open] > summary { background: var(--hover); }
-.view-menu-items { position: absolute; top: calc(100% + 5px); left: 0; z-index: 100; width: 260px; padding: 6px; background: var(--card); border: 1px solid var(--edge); border-radius: 10px; box-shadow: 0 8px 28px #0003; }
-.view-menu-items .btn { display: flex; width: 100%; gap: 10px; padding: 9px 10px; border-radius: 5px; }
+.view-menu-items { position: absolute; top: calc(100% + 5px); left: 0; z-index: 100; width: 260px; padding: 6px; background: var(--card); border: 1px solid var(--edge); border-radius: 0; box-shadow: 0 8px 28px #0003; }
+.view-menu-items .btn { display: flex; width: 100%; gap: 10px; padding: 9px 10px; border-radius: 0; }
 .view-menu-items kbd { margin-left: auto; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
 .view-menu-items hr { border: 0; border-top: 1px solid var(--line); margin: 5px 0; }
 .app.is-sidebar-collapsed { grid-template-columns: 0 minmax(0, 1fr); }
@@ -272,13 +272,13 @@ select::picker-icon {
 }
 select:open::picker-icon { rotate: 180deg; }
 select::picker(select) {
-  padding: 5px; margin: 0; border: 1px solid var(--edge); border-radius: 9px;
+  padding: 5px; margin: 0; border: 1px solid var(--edge); border-radius: 0;
   width: anchor-size(width); box-sizing: border-box;
   background: var(--card); color: var(--ink); box-shadow: 0 8px 30px #0004;
   max-width: calc(100vw - 24px); max-height: min(360px, 60vh); overflow: auto;
 }
 select option {
-  min-height: 36px; padding: 8px 10px; gap: 12px; border-radius: 7px;
+  min-height: 36px; padding: 8px 10px; gap: 12px; border-radius: 0;
   background: transparent; color: var(--ink); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); line-height: 1.4;
   white-space: normal; overflow-wrap: anywhere;
 }
