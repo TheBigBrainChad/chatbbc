@@ -79,8 +79,11 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
 // 14 — exact native generated-image metadata and bounded preview observations. A 13 app
 // would ACK the journal while silently discarding that new event kind.
 // 15 — the app renamed itself from Chat On Steroids to ChatBBC, and the `/hello` `app`
-// stamp renamed from `chat-on-steroids` to `chatbbc` with it. A 14 companion compares that
-// field to decide the reply came from this app at all, so against a 15 app it discards
-// every answer and reports nothing — the same silent drop protocol 7 was bumped for. The
-// bump turns it into the 426 the user can act on.
+// stamp renamed from `chat-on-steroids` to `chatbbc` with it. The two halves identify each
+// other twice: a companion accepts a `/hello` reply only when `app` equals its own expected
+// slug, and separately compares this integer. A 14 companion carrying the predecessor's slug
+// therefore discards every answer as not its own and reports the app as not running — it
+// fails closed without ever reaching the integer gate. A companion that disagrees only about
+// the integer is refused with 426 `incompatible_extension`, which is why the slug and the
+// integer moved together for this rename.
 export const BRIDGE_PROTOCOL = 15;

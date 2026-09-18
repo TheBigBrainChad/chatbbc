@@ -6,7 +6,7 @@
   ${EndIf}
   ${If} $0 != 0
     SetErrorLevel 2
-    Abort "Windows could not set the folder access needed to start Chat On Steroids safely."
+    Abort "Windows could not set the folder access needed to start ChatBBC safely."
   ${EndIf}
 !macroend
 
