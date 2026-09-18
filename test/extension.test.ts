@@ -2527,6 +2527,71 @@ describe('extension observation journal', () => {
     expect(journalOf(session).at(-1).capture).toMatchObject({ routeVerified: false, conversationId: null });
   });
 
+  it('does not attest a rich route while Chrome is loading with no pendingUrl, then attests it when settled', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    const session = new FakeStorageArea();
+    let status = 'loading';
+    const worker = loadWorker({
+      local: new FakeStorageArea(), session,
+      tabsGet: async (id) => ({ id, url, status })
+    });
+    await worker.registerTab(42, 'document-42-0');
+    const rich = { version: 1, status: 'available', reason: null, conversationId,
+      messageId: 'logical-a', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      revision: 0, accessibleText: 'Choose', nodes: [] };
+    const entry = { conversationId, event: { kind: 'assistant_message', time: Date.now(), rich } };
+
+    await worker.send({ type: 'events', conversationId, entries: [entry] }, 42, 'document-42-0', url);
+    expect(journalOf(session)[0].capture).toEqual({
+      tab: 42, documentId: 'document-42-0', navigationEpoch: 1,
+      routeVerified: false, conversationId: null
+    });
+
+    status = 'complete';
+    await worker.send({ type: 'events', conversationId, entries: [entry] }, 42, 'document-42-0', url);
+    expect(journalOf(session)[1].capture).toEqual({
+      tab: 42, documentId: 'document-42-0', navigationEpoch: 1,
+      routeVerified: true, conversationId
+    });
+    expect(journalOf(session)[0].capture.routeVerified).toBe(false);
+  });
+
+  it('retires registration on physical close and preserves queued rich provenance when a tab id is reused', async () => {
+    const a = '11111111-2222-3333-4444-555555555555';
+    const b = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const session = new FakeStorageArea();
+    let url = `https://chatgpt.com/c/${a}`;
+    const worker = loadWorker({
+      local: new FakeStorageArea(), session,
+      tabsGet: async (id) => ({ id, url, status: 'complete' })
+    });
+    const rich = (conversationId: string) => ({ version: 1, status: 'available', reason: null,
+      conversationId, messageId: 'logical', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      revision: 0, accessibleText: 'Choose', nodes: [] });
+    await worker.registerTab(42, 'old-document');
+    await worker.send({ type: 'events', conversationId: a,
+      entries: [{ conversationId: a, event: { kind: 'assistant_message', time: Date.now(), rich: rich(a) } }] },
+    42, 'old-document', url);
+    const oldCapture = journalOf(session)[0].capture;
+    expect(oldCapture).toMatchObject({ documentId: 'old-document', navigationEpoch: 1, routeVerified: true });
+
+    await worker.closeTab(42);
+    await vi.waitFor(() => expect(session.data.registeredDocuments).toEqual({}));
+    expect(journalOf(session)[0].capture).toEqual(oldCapture);
+
+    url = `https://chatgpt.com/c/${b}`;
+    await worker.registerTab(42, 'new-document');
+    await worker.send({ type: 'events', conversationId: b,
+      entries: [{ conversationId: b, event: { kind: 'assistant_message', time: Date.now(), rich: rich(b) } }] },
+    42, 'new-document', url);
+    expect(journalOf(session).map((entry) => entry.capture)).toEqual([
+      oldCapture,
+      { tab: 42, documentId: 'new-document', navigationEpoch: 1, routeVerified: true, conversationId: b }
+    ]);
+    expect(session.data.registeredDocuments).toMatchObject({ '42': { documentId: 'new-document', epoch: 1 } });
+  });
+
   it('sends the exact per-entry Chrome capture with both 413 halves and persisted retry', async () => {
     const id = '11111111-2222-3333-4444-555555555555';
     const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';

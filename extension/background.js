@@ -2881,10 +2881,11 @@ function serializeTab(tab, operation) {
   return tracked;
 }
 
-async function currentConversationDocument(source, conversationId) {
+async function currentConversationDocument(source, conversationId, requireSettled = false) {
   if (!conversationId || !ownsDocument(source)) return false;
   const tab = await chrome.tabs.get(source.tab).catch(() => null);
-  return Boolean(tab && !tab.pendingUrl && ownsDocument(source) && conversationFromUrl(tab.url) === conversationId);
+  return Boolean(tab && !tab.pendingUrl && (!requireSettled || tab.status === 'complete') &&
+    ownsDocument(source) && conversationFromUrl(tab.url) === conversationId);
 }
 
 /** Bind the exact accepted opening before any path can publish its first recorder evidence. */
@@ -3202,7 +3203,7 @@ const HANDLERS = {
     // tabs.get is the current settled tab. A page/body route alone must never attest B.
     const verifiedRoute = hasRich && conversationId &&
       conversationFromUrl(sender?.url) === conversationId &&
-      await currentConversationDocument(source, conversationId) ? conversationId : null;
+      await currentConversationDocument(source, conversationId, true) ? conversationId : null;
     if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
     const entries = (Array.isArray(message.entries) ? message.entries : []).map((entry) => {
       if (!entry || typeof entry !== 'object') return entry;
@@ -3773,7 +3774,14 @@ chrome.tabs.onRemoved.addListener((id) => {
   }
   void serializeTab(id, async () => {
     const documentId = await markTerminal(id);
-    return releaseTab(id, null, documentId);
+    try {
+      return await releaseTab(id, null, documentId);
+    } finally {
+      // onRemoved proves physical closure. Navigation and reload also use releaseTab,
+      // but must retain this registration until Chrome proves a replacement document.
+      delete registeredDocuments[String(id)];
+      await persistLive();
+    }
   }).catch(() => undefined);
 });
 
