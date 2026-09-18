@@ -1,5 +1,6 @@
 import { toolDeclaration } from './tool-declarations.js';
 import { registerPlanTool } from './plan-tool.js';
+import { CONNECTOR_BRAND } from './surfaces.js';
 import { goalWorkerChat } from '../bridge.js';
 import { announceSessionFinish, sessionFinishDeadline } from '../session/finish.js';
 import { getConfig } from '../config.js';
@@ -312,7 +313,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
         guard('read', async () => {
           if (!caps.read && !caps.browse && !caps.metadata) {
             return fail(
-              'TOOL_DISABLED: read is disabled by the current Chat On Steroids permissions. Ask the user to enable reading in the app.'
+              `TOOL_DISABLED: read is disabled by the current ${CONNECTOR_BRAND} permissions. Ask the user to enable reading in the app.`
             );
           }
           const targets: ReadTarget[] = [];
@@ -449,7 +450,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
         guard('view_image', async () => {
           if (!caps.read) {
             return fail(
-              'TOOL_DISABLED: view_image is disabled by the current Chat On Steroids permissions. Ask the user to enable reading in the app.'
+              `TOOL_DISABLED: view_image is disabled by the current ${CONNECTOR_BRAND} permissions. Ask the user to enable reading in the app.`
             );
           }
           const resolved = await resolveIn(ctx.roots, path);
@@ -616,7 +617,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
         guard('apply_patch', async () => {
           if (!caps.create && !caps.edit && !caps.move && !caps.deleteFile) {
             return fail(
-              'TOOL_DISABLED: apply_patch is disabled by the current Chat On Steroids permissions. Ask the user to enable changing files in the app.'
+              `TOOL_DISABLED: apply_patch is disabled by the current ${CONNECTOR_BRAND} permissions. Ask the user to enable changing files in the app.`
             );
           }
 

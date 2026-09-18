@@ -8,10 +8,11 @@ import { dispatch, fail, type ToolResult } from './kernel.js';
 import { canAddCodeMode, codeModeDeclaration, codeModeHandler } from './code-mode-tool.js';
 import { toolSchemaJson } from './tool-declarations.js';
 import { codeModeSchema } from './code-mode-runtime.js';
+import { CONNECTOR_BRAND } from './surfaces.js';
 
 /** Shared by direct and nested plugin calls; the manager remains schema/admission authority. */
 async function runPluginTool(name: string, args: unknown): Promise<ToolResult> {
-  if (getConfig().readOnly) return pluginManager.redactResult(fail('TOOL_DISABLED: external plugins are unavailable while CoS read-only mode is on.')) as ToolResult;
+  if (getConfig().readOnly) return pluginManager.redactResult(fail(`TOOL_DISABLED: external plugins are unavailable while ${CONNECTOR_BRAND} read-only mode is on.`)) as ToolResult;
   if (!args || typeof args !== 'object' || Array.isArray(args)) return fail('INVALID_ARGUMENTS: plugin arguments must be an object.');
   return await pluginManager.call(name, args as Record<string, unknown>, noteOutcome) as ToolResult;
 }

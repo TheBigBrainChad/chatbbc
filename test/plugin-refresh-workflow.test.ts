@@ -21,7 +21,7 @@ function workflow(options: { unchanged?: boolean; deny?: boolean; navigateDuring
   });
   context.ask = ask;
   vm.runInContext(`${section}\nwaitPageView = async (read, current) => current() ? read() : null; globalThis.run = refreshManagedPlugin;`, context);
-  return { click, ask, run: () => (context.run as Function)({ id, appId: 'asdk_app_synthetic', connectorName: 'Chat On Steroids Core', tools }) };
+  return { click, ask, run: () => (context.run as Function)({ id, appId: 'asdk_app_synthetic', connectorName: 'ChatBBC Core', tools }) };
 }
 it('claims before exactly one click and completes only a newly observed matching schema', async () => {
   const h = workflow();
@@ -43,7 +43,7 @@ it.each([false, true])('waits for readable tool schemas before claim (navigation
         tools: ready ? (refreshed ? tools : [{ ...tools[0], description: 'Old' }]) : null }) }
   });
   vm.runInContext(`${section}\nglobalThis.run = refreshManagedPlugin;`, context);
-  const pending = (context.run as Function)({ id, appId: null, connectorName: 'Chat On Steroids Core', tools });
+  const pending = (context.run as Function)({ id, appId: null, connectorName: 'ChatBBC Core', tools });
   expect(ask).not.toHaveBeenCalled(); expect(click).not.toHaveBeenCalled();
   ready = true;
   if (navigate) context.epoch = 2;
@@ -64,7 +64,7 @@ it('keeps a loading settings index pending and restores custody after its instal
       pluginRefreshView: () => ({ appId: 'asdk_app_synthetic' }) }
   });
   vm.runInContext(`${section}\nwaitPageView = async (read, current) => current() ? read() : null; globalThis.run = refreshManagedPlugin;`, context);
-  const run = () => (context.run as Function)({ id, appId: null, connectorName: 'Chat On Steroids Core', tools });
+  const run = () => (context.run as Function)({ id, appId: null, connectorName: 'ChatBBC Core', tools });
   expect(await run()).toBe(false);
   expect(ask).not.toHaveBeenCalled(); // no durable missing-plugin verdict while loading
   buttons = [{ click: () => { location.href = 'https://chatgpt.com/#settings/Plugins/plugin_asdk_app_synthetic'; } }];
@@ -91,7 +91,7 @@ it('stops automatic retry when a changed schema has no Refresh control', async (
   expect(h.ask.mock.calls.map(([message]) => message.action)).toEqual(['manual']);
   expect(h.ask.mock.calls[0]?.[0]).toMatchObject({
     appId: 'asdk_app_synthetic',
-    connectorName: 'Chat On Steroids Core',
+    connectorName: 'ChatBBC Core',
     tools: [{ name: 'read', description: 'Old description.' }]
   });
 });

@@ -1,11 +1,11 @@
 {
-  "name": "chat-on-steroids",
+  "name": "chatbbc",
   "version": "2.1.14",
   "description": "Local coding bridge for ChatGPT over MCP, with native desktop control and approved-folder capability limits.",
   "license": "MIT",
-  "author": "Chat On Steroids",
-  "homepage": "https://github.com/totec448-spec/chat-on-steroids",
-  "desktopName": "com.chatonsteroids.app.desktop",
+  "author": "ChatBBC",
+  "homepage": "https://github.com/TheBigBrainChad/chatbbc",
+  "desktopName": "com.chatbbc.app.desktop",
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

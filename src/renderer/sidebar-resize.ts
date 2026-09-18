@@ -5,7 +5,7 @@ export function initSidebarResize(): void {
   const handle = document.getElementById('sidebarResize')!;
   const toggle = document.getElementById('sidebarToggle')!;
   const menu = document.getElementById('viewMenu') as HTMLDetailsElement;
-  const key = 'chat-on-steroids.sidebar-width';
+  const key = 'chatbbc.sidebar-width';
   const minimum = 180;
   const maximum = () => Math.max(minimum, Math.min(480, window.innerWidth / 2));
   let preferred: number | null = null;

@@ -54,8 +54,8 @@ const {
 } = await import('../src/main/update.js');
 
 const NEXT = '99.0.0';
-const WINDOWS_ASSET = `Chat-On-Steroids-Setup-${process.arch}.exe`;
-const APPIMAGE_ASSET = `Chat-On-Steroids-Linux-${process.arch}.AppImage`;
+const WINDOWS_ASSET = `ChatBBC-Setup-${process.arch}.exe`;
+const APPIMAGE_ASSET = `ChatBBC-Linux-${process.arch}.AppImage`;
 
 const sha256 = (body: string): string => createHash('sha256').update(body).digest('hex');
 
@@ -75,10 +75,12 @@ function github(options: {
   const body = options.body ?? 'installer bytes';
   const sums = options.checksums ?? `${sha256(body)}  ${WINDOWS_ASSET}\n${sha256(body)}  ${APPIMAGE_ASSET}\n`;
   const asked: string[] = [];
+  const urls: string[] = [];
   const fetch = vi.fn(async (input: string | URL) => {
     const url = String(input);
     const name = url.split('/').pop()!;
     asked.push(name);
+    urls.push(url);
     if (url.includes('api.github.com')) {
       if (options.fail === 'release') return new Response('nope', { status: 503 });
       return new Response(JSON.stringify({ tag_name: `v${version}` }), { status: 200 });
@@ -91,7 +93,7 @@ function github(options: {
     return new Response(body, { status: 200 });
   });
   vi.stubGlobal('fetch', fetch);
-  return { asked, fetch, body };
+  return { asked, urls, fetch, body };
 }
 
 /** Runs the pass as an installation of the given shape, and puts the real one back. */
@@ -124,9 +126,9 @@ afterEach(() => {
 
 describe('which installations update themselves', () => {
   it('takes the Windows installer and the Linux AppImage, and nothing else', () => {
-    expect(stagedArtifact('win32', 'x64')).toMatchObject({ name: 'Chat-On-Steroids-Setup-x64.exe', kind: 'installer' });
+    expect(stagedArtifact('win32', 'x64')).toMatchObject({ name: 'ChatBBC-Setup-x64.exe', kind: 'installer' });
     expect(stagedArtifact('linux', 'arm64', '/opt/cos.AppImage')).toMatchObject({
-      name: 'Chat-On-Steroids-Linux-arm64.AppImage',
+      name: 'ChatBBC-Linux-arm64.AppImage',
       kind: 'appimage',
       target: '/opt/cos.AppImage'
     });
@@ -207,11 +209,14 @@ describe('finding a newer release', () => {
 
 describe('staging the new version', () => {
   it('downloads the artifact, checks it against the published SHA-256, and installs it on quit', async () => {
-    const { asked, body } = github();
+    const { asked, urls, body } = github();
     await asPlatform('win32', undefined, () => checkForUpdates());
 
     expect(updateStatus()).toMatchObject({ latest: NEXT, stage: 'ready', error: null });
     expect(asked).toEqual(['latest', 'SHA256SUMS.txt', WINDOWS_ASSET]);
+    // Every request, not just the asset: reading a tag or a checksum published on the upstream
+    // CoS release would install somebody else's build under this app's name.
+    expect(urls.every((url) => url.includes('/TheBigBrainChad/chatbbc/'))).toBe(true);
 
     const staged = path.join(userData, 'updates', NEXT, WINDOWS_ASSET);
     expect(readFileSync(staged, 'utf8')).toBe(body);
@@ -242,7 +247,7 @@ describe('staging the new version', () => {
   });
 
   it('stages nothing when the release does not publish an artifact for this installation', async () => {
-    github({ checksums: `${sha256('x')}  Chat-On-Steroids-Extension.zip\n` });
+    github({ checksums: `${sha256('x')}  ChatBBC-Extension.zip\n` });
     await asPlatform('win32', undefined, () => checkForUpdates());
     expect(updateStatus().stage).toBe('failed');
     expect(updateStatus().error).toContain(`publishes no ${WINDOWS_ASSET}`);

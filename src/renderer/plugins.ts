@@ -41,7 +41,7 @@ async function mutate(work: ReturnType<typeof window.api.pluginsSnapshot>, notif
   const own = ++epoch; const result = await run(work);
   if (!result) return false;
   if (own === epoch) { snapshot = result; renderInstalled(); }
-  if (notify) toast(t("Plugin settings saved. Refresh the Chat On Steroids Plugins connector in ChatGPT to update its tools."));
+  if (notify) toast(t("Plugin settings saved. Refresh the ChatBBC Plugins connector in ChatGPT to update its tools."));
   return true;
 }
 export async function refreshPlugins(): Promise<void> { await mutate(window.api.pluginsSnapshot(), false); }
@@ -55,7 +55,7 @@ export function applyPluginsState(next: AppState): void {
   ui($('pluginsSetupTitle'), 'textContent', () => configured ? t("Your Plugins connector") : t("Set up plugins before your first use"));
   ui($('pluginsSetupHint'), 'textContent', () => configured
     ? t("Your enabled plugins share one connector in ChatGPT. Manage its connection here.")
-    : t("Add the Chat On Steroids Plugins connector in ChatGPT once so it can use your installed plugins."));
+    : t("Add the ChatBBC Plugins connector in ChatGPT once so it can use your installed plugins."));
   ui($('pluginsSetupLink'), 'textContent', () => configured ? t("Plugin setup") : t("Set up plugins"));
   $('pluginsSetupLink').classList.toggle('btn-solid', !configured);
   ui(status, 'textContent', () => surface?.state === 'live'
@@ -89,8 +89,8 @@ function showConnection(): void {
     else key = field(body, () => t("Tunnel API key"), '', true, () => t("Use a restricted key with Tunnels: Read and Tunnels: Use. It is stored securely and shared with your other connectors."));
   }
   // Values needed for ChatGPT setup stay copyable; tool lists belong to each plugin.
-  copy(t("Connector name"), surface?.connectorName ?? 'Chat On Steroids Plugins');
-  copy(t("Description"), surface?.description ?? 'Tools from your enabled Chat On Steroids plugins.');
+  copy(t("Connector name"), surface?.connectorName ?? 'ChatBBC Plugins');
+  copy(t("Description"), surface?.description ?? 'Tools from your enabled ChatBBC plugins.');
   const url = surface?.publicUrl ?? (config.tunnel.kind === 'manual' ? surface?.localUrl : null);
   if (url) copy(t("MCP server URL"), url);
   body.append(el('p', 'hint', () => config.tunnel.kind === 'openai'
@@ -211,7 +211,7 @@ function showPlugin(plugin: PluginView): void {
 }
 function showUninstall(plugin: PluginView): void {
   const { box, body } = dialog(() => t("Uninstall {0}?", [plugin.name]));
-  body.append(el('p', '', () => t("This stops its connection and deletes the installation, its CoS-managed local data and stored credentials. Back up any plugin data you need first. External application data is not removed.")), button(() => t("Uninstall plugin"), async () => { if (await mutate(window.api.pluginsUninstall(plugin.id))) box.close(); }, true));
+  body.append(el('p', '', () => t("This stops its connection and deletes the installation, its ChatBBC-managed local data and stored credentials. Back up any plugin data you need first. External application data is not removed.")), button(() => t("Uninstall plugin"), async () => { if (await mutate(window.api.pluginsUninstall(plugin.id))) box.close(); }, true));
 }
 function showConfigure(plugin: PluginView): void {
   const { box, body } = dialog(() => t("Configure {0}", [plugin.name])); const config = new Map<string, HTMLInputElement>(); const secrets = new Map<string, HTMLInputElement>();
@@ -239,7 +239,7 @@ function showCatalog(): void {
   const grid = el('div', 'plugin-catalog'); grid.dataset.pluginCatalog = ''; renderCatalog(grid);
   body.append(grid, el('h3', '', () => t("Bring your own server"))); const custom = el('div', 'plugin-actions');
   custom.append(button(() => t("Import MCPB bundle"), async () => { const path = await run(window.api.pluginsImportBundle()); if (path) showCustom('mcpb', path); }), button(() => t("npm / Python / executable"), () => showCustom('npm')), button(() => t("Remote MCP URL"), () => showCustom('remote')), button(() => t("GitHub repository"), () => showCustom('github')));
-  body.append(custom, el('p', 'hint', () => t("Local plugins run as your OS user and do not inherit CoS approved-folder restrictions. Install only code you trust.")));
+  body.append(custom, el('p', 'hint', () => t("Local plugins run as your OS user and do not inherit ChatBBC approved-folder restrictions. Install only code you trust.")));
 }
 function showRecipe(recipe: PluginCatalogEntry): void {
   const { box, body } = dialog(() => t("Set up {0}", [recipe.name])); const header = el('div', 'plugin-card-head'); header.append(art(recipe.icon), el('p', '', () => t(recipe.description))); body.append(header);
@@ -274,7 +274,7 @@ function showCustom(kind: PluginSource['kind'], path = ''): void {
   const location = field(body, () => t("Package, executable, URL or bundle path"), path); const version = field(body, () => t("Version (npm / Python)"), '', false, () => t("Pin a published version for reproducible installation."));
   const args = field(body, () => t("Arguments (JSON array)"), '[]', false, () => t("Example: [\"--port\", \"9876\"]. Passed directly, without a shell."));
   const key = field(body, () => t("Credential name (optional)"), '', false, () => t("An environment variable for local servers, or an HTTP header such as Authorization.")); const credential = field(body, () => t("Credential value"), '', true);
-  body.append(el('p', 'hint', () => t("Remote servers must support MCP Streamable HTTP. GitHub links require a known recipe or supported manifest. Local servers run outside the CoS folder sandbox.")), button(() => t("Install and connect"), async () => {
+  body.append(el('p', 'hint', () => t("Remote servers must support MCP Streamable HTTP. GitHub links require a known recipe or supported manifest. Local servers run outside the ChatBBC folder sandbox.")), button(() => t("Install and connect"), async () => {
     const selected = select.value as PluginSource['kind']; const value = location.value.trim(); if (!value) throw new Error(t("Enter the server location first."));
     const parsed: unknown = JSON.parse(args.value); if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === 'string')) throw new Error(t("Arguments must be a JSON array of strings."));
     const source: PluginSource = { kind: selected, args: parsed };

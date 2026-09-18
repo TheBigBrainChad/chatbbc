@@ -11,6 +11,7 @@ import {
   shouldBeginAppBootstrap,
   shouldQuitOnWindowAllClosed
 } from '../src/main/window-lifecycle.js';
+import { APP_TITLE } from '../src/main/version.js';
 
 describe('native window activation', () => {
   it.each(['darwin', 'win32', 'linux'])('keeps native fullscreen available on macOS (%s)', (platform) => {
@@ -22,9 +23,10 @@ describe('native window activation', () => {
       BrowserWindow: function (value: Record<string, unknown>) { options = value; },
       layout: {}, icon: null, process: { platform },
       titleBarOverlayForTheme: () => ({}), windowBackgroundForTheme: () => '#181818', getConfig: () => ({ ui: { theme: 'dark' } }),
-      UI_BASE_ZOOM: 1, path: { join: () => 'preload.js' }, __dirname: '/app'
+      UI_BASE_ZOOM: 1, path: { join: () => 'preload.js' }, __dirname: '/app', APP_TITLE
     });
     expect(options?.fullscreenable).toBe(platform === 'darwin');
+    expect(options?.title).toBe(APP_TITLE);
     expect(options?.webPreferences).toMatchObject({ sandbox: true, contextIsolation: true, nodeIntegration: false });
   });
 
@@ -162,11 +164,11 @@ describe('native window activation', () => {
 describe('Windows login startup', () => {
   it('writes only packaged Windows login settings and supports turning the same entry off', () => {
     const app = { isPackaged: true, setLoginItemSettings: vi.fn() };
-    applyLoginStartup(app, true, 'win32', 'C:/Program Files/Chat On Steroids/app.exe');
-    applyLoginStartup(app, false, 'win32', 'C:/Program Files/Chat On Steroids/app.exe');
+    applyLoginStartup(app, true, 'win32', 'C:/Program Files/ChatBBC/app.exe');
+    applyLoginStartup(app, false, 'win32', 'C:/Program Files/ChatBBC/app.exe');
     expect(app.setLoginItemSettings.mock.calls).toEqual([
-      [{ openAtLogin: true, path: 'C:/Program Files/Chat On Steroids/app.exe', args: ['--background'] }],
-      [{ openAtLogin: false, path: 'C:/Program Files/Chat On Steroids/app.exe', args: ['--background'] }]
+      [{ openAtLogin: true, path: 'C:/Program Files/ChatBBC/app.exe', args: ['--background'] }],
+      [{ openAtLogin: false, path: 'C:/Program Files/ChatBBC/app.exe', args: ['--background'] }]
     ]);
     for (const platform of ['darwin', 'linux'] as const) applyLoginStartup(app, true, platform);
     app.isPackaged = false;

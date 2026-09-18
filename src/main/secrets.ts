@@ -13,6 +13,7 @@ import path from 'node:path';
 import { safeStorage } from 'electron';
 import type { SecureStorageInfo } from '../shared/types.js';
 import { logError, logWarn } from './logger.js';
+import { APP_TITLE } from './version.js';
 
 const FILE_NAME = 'secrets.bin';
 const LINUX_BASIC_TEXT_PREFIX = Buffer.from('v10', 'ascii');
@@ -104,7 +105,7 @@ export async function secureStorageStatus(platform: NodeJS.Platform = process.pl
         return {
           available: false,
           detail:
-            'Linux secure storage fell back to Electron’s insecure hard-coded-key provider. Start or unlock a desktop keyring/Secret Service (for example GNOME Keyring or KWallet), then restart Chat On Steroids.'
+            `Linux secure storage fell back to Electron’s insecure hard-coded-key provider. Start or unlock a desktop keyring/Secret Service (for example GNOME Keyring or KWallet), then restart ${APP_TITLE}.`
         };
       }
     }

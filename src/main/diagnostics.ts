@@ -28,6 +28,7 @@ import {
 import type { Capabilities, Check, Diagnosis, MacOSDesktopAccessStatus } from '../shared/types.js';
 import { surfaceIsUseful } from './mcp/surfaces.js';
 import { refreshMacOSDesktopAccess } from './computer/index.js';
+import { APP_TITLE } from './version.js';
 
 async function fetchJson(
   url: string,
@@ -184,7 +185,7 @@ export function describeMacOSDesktopAccess(
     checks.push(check(
       'macOS Accessibility',
       access.accessibility,
-      'macOS denied AXUIElement access to the in-process Chat On Steroids.app backend. Open Privacy & Security → Accessibility (Device Control and Data Access on newer macOS).'
+      `macOS denied AXUIElement access to the in-process ${APP_TITLE}.app backend. Open Privacy & Security → Accessibility (Device Control and Data Access on newer macOS).`
     ));
   }
   return checks;

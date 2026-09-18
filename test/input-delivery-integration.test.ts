@@ -1291,13 +1291,13 @@ describe('IPC input delivery and Goal control integration', () => {
     const { publishPluginSurface, resetPluginRefreshForTests } = await import('../src/main/plugin-refresh.js');
     resetPluginRefreshForTests();
     const tools = [{ name: 'read', description: 'Read a file', inputSchema: { type: 'object', properties: {} } }];
-    publishPluginSurface('core', 'Chat On Steroids Core', 'test', 'Synthetic instructions', tools);
+    publishPluginSurface('core', 'ChatBBC Core', 'test', 'Synthetic instructions', tools);
     const requests = (await post('/plugin-refresh', { action: 'pending' })).body.requests;
     expect(requests).toHaveLength(1);
     const identity = { id: requests[0].id, appId: 'asdk_app_synthetic' };
     expect((await post('/plugin-refresh', { ...identity, action: 'claim', connectorName: 'Wrong', tools })).body.ok).toBe(false);
-    expect((await post('/plugin-refresh', { ...identity, action: 'claim', connectorName: 'Chat On Steroids Core', tools })).body.ok).toBe(false);
-    expect((await post('/plugin-refresh', { ...identity, action: 'claim', connectorName: 'Chat On Steroids Core', tools: [{ ...tools[0], description: 'Old declaration' }] })).body.ok).toBe(true);
+    expect((await post('/plugin-refresh', { ...identity, action: 'claim', connectorName: 'ChatBBC Core', tools })).body.ok).toBe(false);
+    expect((await post('/plugin-refresh', { ...identity, action: 'claim', connectorName: 'ChatBBC Core', tools: [{ ...tools[0], description: 'Old declaration' }] })).body.ok).toBe(true);
     expect((await post('/plugin-refresh', { ...identity, action: 'complete', tools: [] })).body.ok).toBe(false);
     expect((await post('/plugin-refresh', { ...identity, action: 'complete', tools, versionId: 'asdk_app_v_synthetic' })).body.ok).toBe(true);
     resetPluginRefreshForTests();
@@ -1307,7 +1307,7 @@ describe('IPC input delivery and Goal control integration', () => {
     plugin.resetPluginRefreshForTests();
     await writeDurableNow('plugin-refresh', []);
     const tools = [{ name: 'read', description: 'Current declaration', inputSchema: { type: 'object', properties: {} } }];
-    plugin.publishPluginSurface('core', 'Chat On Steroids Core', 'test', '', tools);
+    plugin.publishPluginSurface('core', 'ChatBBC Core', 'test', '', tools);
     const saved = (await plugin.pendingPluginRefreshes())[0]!;
     expect(saved).toBeDefined();
     expect((await post('/plugin-refresh', { action: 'pending' })).body.requests).toEqual([]);
@@ -1316,7 +1316,7 @@ describe('IPC input delivery and Goal control integration', () => {
     await configure(true);
     expect((await post('/plugin-refresh', { action: 'pending' })).body.requests[0].id).toBe(saved.id);
     expect((await post('/status', { openConversations: [] })).body.pluginRefreshRequests).toHaveLength(1);
-    const claim = { action: 'claim', id: saved.id, appId: 'asdk_app_off_on_test', connectorName: 'Chat On Steroids Core', tools: [{ ...tools[0], description: 'Older declaration' }] };
+    const claim = { action: 'claim', id: saved.id, appId: 'asdk_app_off_on_test', connectorName: 'ChatBBC Core', tools: [{ ...tools[0], description: 'Older declaration' }] };
     await configure(false);
     expect((await post('/plugin-refresh', claim)).body).toMatchObject({ ok: false, error: 'automatic_refresh_disabled' });
     await configure(true);
@@ -1332,9 +1332,9 @@ describe('IPC input delivery and Goal control integration', () => {
     resetPluginRefreshForTests();
     const tools = [{ name: 'read', description: 'Read current', inputSchema: { type: 'object', properties: {} } }];
     const installed = [{ ...tools[0], description: 'Read old' }];
-    publishPluginSurface('core', 'Chat On Steroids Core', 'test', 'Synthetic instructions', tools);
+    publishPluginSurface('core', 'ChatBBC Core', 'test', 'Synthetic instructions', tools);
     const request = (await post('/plugin-refresh', { action: 'pending' })).body.requests[0];
-    const manual = await post('/plugin-refresh', { ...request, appId: 'asdk_app_synthetic', action: 'manual', connectorName: 'Chat On Steroids Core', tools: installed, error: 'Recreate or republish this custom app.' });
+    const manual = await post('/plugin-refresh', { ...request, appId: 'asdk_app_synthetic', action: 'manual', connectorName: 'ChatBBC Core', tools: installed, error: 'Recreate or republish this custom app.' });
     expect(manual.body.ok).toBe(true);
     expect((await post('/plugin-refresh', { action: 'pending' })).body.requests).toEqual([]);
     resetPluginRefreshForTests();

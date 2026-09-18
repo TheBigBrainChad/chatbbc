@@ -15,11 +15,21 @@
 export const APP_VERSION = '2.1.14';
 
 /**
+ * The app's own name, in two spellings that different peers need.
+ *
+ * `APP_TITLE` is for humans: the window, the connector, the installer. `APP_SLUG` is the
+ * machine spelling and is what the bridge stamps every `/hello` reply with, because the
+ * companion compares that field to decide whether the answer came from this app at all.
+ */
+export const APP_TITLE = 'ChatBBC';
+export const APP_SLUG = 'chatbbc';
+
+/**
  * Standalone extension recovery must stay on the app's own release. Using GitHub's moving
  * `latest` asset can pair an older installed app with a newer, incompatible bridge protocol.
  */
 export function extensionDownloadUrl(version = APP_VERSION): string {
-  return `https://github.com/totec448-spec/chat-on-steroids/releases/download/v${encodeURIComponent(version)}/Chat-On-Steroids-Extension.zip`;
+  return `https://github.com/TheBigBrainChad/chatbbc/releases/download/v${encodeURIComponent(version)}/ChatBBC-Extension.zip`;
 }
 
 /**
@@ -68,4 +78,12 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
 // draft ownership. A 12 companion would silently send text without these files.
 // 14 — exact native generated-image metadata and bounded preview observations. A 13 app
 // would ACK the journal while silently discarding that new event kind.
-export const BRIDGE_PROTOCOL = 14;
+// 15 — the app renamed itself from Chat On Steroids to ChatBBC, and the `/hello` `app`
+// stamp renamed from `chat-on-steroids` to `chatbbc` with it. The two halves identify each
+// other twice: a companion accepts a `/hello` reply only when `app` equals its own expected
+// slug, and separately compares this integer. A 14 companion carrying the predecessor's slug
+// therefore discards every answer as not its own and reports the app as not running — it
+// fails closed without ever reaching the integer gate. A companion that disagrees only about
+// the integer is refused with 426 `incompatible_extension`, which is why the slug and the
+// integer moved together for this rename.
+export const BRIDGE_PROTOCOL = 15;

@@ -629,6 +629,9 @@ describe('bounded IPC identities and OS launch results', () => {
 
     expect(reply).toEqual({ ok: true, data: true });
     expect(shell.openExternal).toHaveBeenCalledWith(extensionDownloadUrl('1.8.8'));
+    expect(extensionDownloadUrl('1.8.8')).toBe(
+      'https://github.com/TheBigBrainChad/chatbbc/releases/download/v1.8.8/ChatBBC-Extension.zip'
+    );
     expect(vi.mocked(shell.openExternal).mock.calls[0]?.[0]).not.toContain('/releases/latest/');
   });
 

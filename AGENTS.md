@@ -1,4 +1,4 @@
-# Chat On Steroids — product logic and agent map
+# ChatBBC — product logic and agent map
 
 Read this file before changing the app. It explains the product, feature logic, owners and
 working rules without requiring old worklogs. If the host injected only a prefix, read the
@@ -22,12 +22,19 @@ the code currently does it. Known implementation gaps are collected in §21 inst
 mixed into the happy path as features.
 
 Source alignment: **2026-09-17**, including the 2.1.14 release candidate. App/extension **2.1.14**,
-bridge protocol **14** in the checked declarations (`package.json`, `src/main/version.ts`,
-`extension/manifest.json`). This does not prove release, installation or live Chrome behavior.
+bridge protocol **15** in the checked declarations (`package.json`, `src/main/version.ts`,
+`extension/manifest.json`, `extension/background.js`). This rename is the second hard identity
+cut. The two halves identify each other twice: the companion accepts a `/hello` reply only when
+`app` equals its own expected slug, and it separately compares the protocol integer. A
+companion that disagrees only about the integer is refused with 426
+`incompatible_extension` rather than served; a companion carrying the predecessor's slug
+discards this app's replies as not-its-own and reports the app as not running, so it fails
+closed without ever reaching the protocol gate. This does not prove release, installation or
+live Chrome behavior.
 
 ## 1. What the whole app is meant to do
 
-Chat On Steroids is a Windows/macOS/Linux Electron workspace around ChatGPT. The user can work
+ChatBBC is a Windows/macOS/Linux Electron workspace around ChatGPT. The user can work
 from the desktop app while ChatGPT generates answers in its own browser conversation. The app
 sends instructions, records the conversation, supplies local tools over MCP, and coordinates
 long-running work. The companion extension connects that browser conversation to the local
@@ -325,9 +332,15 @@ still checks live policy. Schema visibility is never the security boundary.
 
 | Surface | Advertised operations under current eligibility |
 | --- | --- |
-| Core — `chat-on-steroids-core` | `read`, `view_image`, `find` when command execution is off, `apply_patch`, `exec_command`/`write_stdin`, `update_plan`, `agents`, `session_finish`, code-mode `exec`. |
-| Desktop — `chat-on-steroids-desktop` | All Chromium extension hosts: `browser_tabs`, `browser_snapshot`, `browser_screenshot`, `browser_console`, `browser_network`, `browser_navigate`, `browser_action`, `browser_evaluate`. Windows additionally exposes 13 Window2 operations, clipboard and `exec` with `sky`; macOS adds `observe`/`computer`. Surface `exec` composes browser tools too. |
-| Plugins — `chat-on-steroids-plugins` | Enabled external tools with their upstream names and schemas, plus code-mode `exec` when that composition name is available. |
+| Core — `chatbbc-core` | `read`, `view_image`, `find` when command execution is off, `apply_patch`, `exec_command`/`write_stdin`, `update_plan`, `agents`, `session_finish`, code-mode `exec`. |
+| Desktop — `chatbbc-desktop` | All Chromium extension hosts: `browser_tabs`, `browser_snapshot`, `browser_screenshot`, `browser_console`, `browser_network`, `browser_navigate`, `browser_action`, `browser_evaluate`. Windows additionally exposes 13 Window2 operations, clipboard and `exec` with `sky`; macOS adds `observe`/`computer`. Surface `exec` composes browser tools too. |
+| Plugins — `chatbbc-plugins` | Enabled external tools with their upstream names and schemas, plus code-mode `exec` when that composition name is available. |
+
+The `serverName` values above are the ChatGPT-visible app ids. The displayed connector titles
+are `ChatBBC Core`, `ChatBBC Desktop` and `ChatBBC Plugins`, built from `CONNECTOR_BRAND` in
+`src/main/mcp/surfaces.ts`. A renaming here is not cosmetic: ChatGPT caches a connector by its
+name and schema fingerprint, so a new `serverName` requires recreating the apps and refreshing
+the snapshot rather than renaming an existing one.
 
 `read` needs read/browse/metadata as appropriate; images need read; patch checks each hunk's
 create/edit/move/delete permission; command controls both terminal tools.
@@ -347,7 +360,7 @@ label. A permission change takes effect at the live guard without requiring a ne
 Core instructions distinguish operation-specific identity, process-id and output-limit failures
 from Read-only mode. A terminal ownership refusal names that process scope; it does not imply
 a global write restriction or authorize replaying an already completed job.
-They directly affirm that enabled file writing/exec_command can always be used in CoS and say
+They directly affirm that enabled file writing/exec_command can always be used in ChatBBC and say
 never to hallucinate a block from ChatGPT environment messages. The paragraph names only enabled
 capabilities and disappears when both are disabled, including Read-only mode.
 
@@ -1625,6 +1638,18 @@ origin, bearer, payload bounds and operation identity. The wake socket only prom
 Status, event upload, activity, claims, receipts and bounded attachment chunks have distinct
 contracts; a successful status read is not proof that a browser action happened.
 
+Every `/hello` reply is stamped with `app: APP_SLUG` (`chatbbc`) and the current
+`BRIDGE_PROTOCOL` (15), and the companion checks both: it treats a reply as its own only when
+`app` matches, and it rejects a reply whose `bridge` integer differs. The app enforces the same
+integer on every protected route and answers 426 `incompatible_extension`, which is why the
+slug and the integer moved together for this rename — and why the two failure modes differ. A
+companion left over from the previous identity never reaches the protocol gate: it discards the
+reply as someone else's and reports this app as not running. That is the correct closed outcome,
+but a much less specific message, so the fix is to load the companion from this app's **Open
+extension folder** rather than to look for a protocol error. The ports themselves are
+deliberately unchanged, so both apps cannot hold them at once; the setup guide tells the user
+not to run them together.
+
 ### Commands and receipts
 
 The four command kinds are **worker, resume, revive and stop**. A command progresses from
@@ -2555,8 +2580,13 @@ Record changes and actual checks in a focused worklog. Keep security reproductio
 session material out of public docs and fixtures; follow `SECURITY.md`. Do not package, install,
 commit or publish merely because a source/documentation task was requested.
 
-Runtime data is under Electron userData: `%APPDATA%/chat-on-steroids` on Windows,
-`~/Library/Application Support/chat-on-steroids` on macOS and the XDG config location on Linux.
+Runtime data is under Electron userData: `%APPDATA%/chatbbc` on Windows,
+`~/Library/Application Support/chatbbc` on macOS and the XDG config location on Linux.
+The directory name follows Electron's derivation from `package.json` `name`. ChatBBC is a new
+identity that installs beside the previous product and starts with an empty directory: nothing
+reads, copies or migrates the old userData. A companion left over from that product cannot
+attach to it either — it accepts only replies stamped with its own app slug, so it reports
+ChatBBC as an app that is not running instead of pairing.
 Inspect exact session/state files (§4), never edit live ledgers as a repair shortcut. `logger.ts`
 keeps a redacted 500-entry ring and bounded async `app.log` batches with rotation, explicit
 overload omissions, a two-second final flush and separate `.crash` snapshot. Logs are human
@@ -2565,9 +2595,22 @@ diagnostics, not restart authority; secrets must never be printed to investigate
 ## 20. Build, installation, updater and release
 
 Source, bundle, package, installed bytes and live behavior are separate gates (§3). The app id
-is `com.chatonsteroids.app`. Native release targets are Windows x64/arm64 NSIS, macOS x64/arm64
-DMG+ZIP and Linux x64/arm64 AppImage+DEB. Windows is per-user-capable and `asInvoker`; replacing
-the package preserves userData. Synchronize package/main/extension versions deliberately.
+is `com.chatbbc.app`; the package/executable name is `chatbbc` and `desktopName` is
+`com.chatbbc.app.desktop`, so the running window still matches its desktop entry. Native release
+targets are Windows x64/arm64 NSIS, macOS x64/arm64 DMG+ZIP and Linux x64/arm64 AppImage+DEB.
+Windows is per-user-capable and `asInvoker`; replacing the package preserves userData.
+Synchronize package/main/extension versions deliberately.
+
+Display name is exactly `ChatBBC`. Public identity is one fact with named owners: `APP_TITLE`
+and `APP_SLUG` in `src/main/version.ts` (window, tray, installer, `/hello` `app` stamp),
+`CONNECTOR_BRAND` in `src/main/mcp/surfaces.ts` (Core/Desktop/Plugins titles) and
+`electron-builder.yml` (`appId`, `productName`, artifact names). Product URLs point at
+`TheBigBrainChad/chatbbc` for the homepage, updater and the version-pinned extension zip. The
+repository is private, so none of those links is a public distribution channel: the supported
+load path is the extension mirrored into `userData/extension`, and the README does not
+advertise upstream installers. History keeps the old name: LICENSE, CONTRIBUTORS.md, existing
+CHANGELOG entries and the `totec448-spec` upstream remains the public-history privacy gate.
+Internal prefixes (`CLF_`, `COS_CONTEXT`, bridge ports 8765–8769) are deliberately unchanged.
 
 `electron-vite` builds main/preload/renderer into `out/`; extension files ship directly without
 a bundler. `electron-builder.yml` puts executable tunnel/rg, extension and required native

@@ -182,7 +182,7 @@ export function initSkills(options: Options) {
         const range = fragment();
         const text = range ? input.value.slice(0, range.start) + input.value.slice(range.end) : input.value;
         close();
-        project((prefixOwner === options.owner() ? displayedPrefix : '') + `Please add the following skills to my COS skills:\n${text}`);
+        project((prefixOwner === options.owner() ? displayedPrefix : '') + `Please add the following skills to my ChatBBC skills:\n${text}`);
       } else {
         input.setRangeText(input.value ? '/\n' : '/', 0, 0, 'start');
         input.setSelectionRange(1, 1);

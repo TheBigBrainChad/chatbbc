@@ -2,7 +2,7 @@
 
 Settings → Plugins manages external MCP integrations. Core and Desktop keep their existing
 connectors, permissions and tool registration. Plugins uses a third, separately tokenized
-endpoint and the shared **Chat On Steroids Plugins** connector.
+endpoint and the shared **ChatBBC Plugins** connector.
 
 The [responsible-use notice](../README.md#responsible-use-and-provider-rules) applies to plugins too. Each external service retains its own terms, permissions and usage limits. Installing or enabling a plugin does not authorize routing a provider-blocked action through it or bypassing an account restriction.
 
@@ -12,15 +12,15 @@ The [responsible-use notice](../README.md#responsible-use-and-provider-rules) ap
    With OpenAI Secure Tunnels, create a separate Plugins tunnel, enter its ID in
    the dialog, and choose **Save & connect**. The existing API key and tunnel executable are reused.
    Cloudflare/manual transports publish the Plugins endpoint at its separate path.
-2. Create the **Chat On Steroids Plugins** connector in ChatGPT using the displayed name,
-   description and MCP URL. Keep the CoS connection running.
+2. Create the **ChatBBC Plugins** connector in ChatGPT using the displayed name,
+   description and MCP URL. Keep the ChatBBC connection running.
 3. Open Settings → Plugins and click **+**. Choose a reviewed catalog recipe or a custom server. Review
    installation instructions and supply credentials in the secure fields.
 4. A plugin becomes **Ready** only after connection and discovery succeed. Blender also
    requires its addon to answer a read-only scene probe. Local readiness does not prove
    that ChatGPT has enrolled the connector or refreshed its tools.
 5. A persistent reminder and **Open ChatGPT plugins** action stay visible above the installed list.
-   Successful installation, configuration and tool-policy changes also display a reminder to refresh the **Chat On Steroids Plugins** connector in ChatGPT. Refresh the connector in ChatGPT after changing enabled tools, or enable CoS's existing
+   Successful installation, configuration and tool-policy changes also display a reminder to refresh the **ChatBBC Plugins** connector in ChatGPT. Refresh the connector in ChatGPT after changing enabled tools, or enable ChatBBC's existing
    automatic connector refresh. Existing conversations can retain cached declarations;
    disabled tools refuse stale calls immediately.
 
@@ -31,11 +31,11 @@ refresh manually; the Plugins endpoint itself always serves the complete current
 ## Supported sources
 
 - Pinned npm and Python recipes: Blender MCP, Knowledge Memory, Playwright Browser, Web Fetch and Unity Editor.
-  Node.js/npm or Python/uv must be installed where the recipe requires them. CoS installs
+  Node.js/npm or Python/uv must be installed where the recipe requires them. ChatBBC installs
   packages into private per-plugin directories and does not install missing system runtimes.
   On Windows, the standard per-user uv directory (`%USERPROFILE%\.local\bin`) is also
-  searched, so installing uv there does not require restarting an already-running CoS.
-  For custom runtime locations, add the directory to PATH and restart CoS.
+  searched, so installing uv there does not require restarting an already-running ChatBBC.
+  For custom runtime locations, add the directory to PATH and restart ChatBBC.
 - An executable with explicit arguments (no shell interpolation).
 - Remote Streamable HTTP MCP URLs, with HTTPS or loopback HTTP. Credentials use encrypted
   storage; do not embed them in URLs or arguments. HeyGen and Recraft use explicit browser OAuth
@@ -47,7 +47,7 @@ refresh manually; the Plugins endpoint itself always serves the complete current
 
 Blender needs the community addon installed and enabled in Blender, with its MCP server started
 from the viewport sidebar. The catalog includes the upstream addon installation steps. Blender
-is a third-party integration, not an official Blender feature supplied by CoS.
+is a third-party integration, not an official Blender feature supplied by ChatBBC.
 
 ## Authority and lifetime
 
@@ -57,7 +57,7 @@ and bounded archive extraction. The manager stores metadata through `durable.ts`
 through `secrets.ts`, and preserves upstream package license files in installation directories.
 
 External processes run with the current user's operating-system permissions. They do not inherit
-CoS's approved-folder sandbox. CoS read-only mode refuses external plugin calls because upstream
+ChatBBC's approved-folder sandbox. ChatBBC read-only mode refuses external plugin calls because upstream
 annotations cannot prove that an external process is unable to mutate. Tool annotations are
 otherwise relayed without making them more permissive.
 
@@ -77,10 +77,10 @@ Knowledge Memory retains its data across updates in a stable per-plugin data dir
 
 ## Legal notices
 
-CoS remains MIT licensed. Settings provides the bundled Third-party Notices, generated from
+ChatBBC remains MIT licensed. Settings provides the bundled Third-party Notices, generated from
 production npm dependencies by `scripts/generate-third-party-notices.mjs`. Platform binary
 notices remain alongside their binaries. See [catalog artwork attribution](plugin-licenses.md).
-External plugin licenses are shown per installation and remain separate from CoS's own license.
+External plugin licenses are shown per installation and remain separate from ChatBBC's own license.
 Reviewed labels apply only to the exact catalog distribution. Knowledge Memory's reviewed
 MIT/Apache transition supersedes its incomplete manifest label; a custom version must supply
 its own license information. `npm run verify:notices` checks installed production versions,

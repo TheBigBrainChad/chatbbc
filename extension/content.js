@@ -1129,7 +1129,7 @@
     const takeUtf8 = (value, budget) => {
       if (typeof value !== 'string') return value;
       if (utf8Bytes(value) <= budget) return value;
-      const marker = '\n\n[Chat On Steroids: browser observation truncated to fit transport.]';
+      const marker = '\n\n[ChatBBC: browser observation truncated to fit transport.]';
       const markerBytes = utf8Bytes(marker);
       let low = 0;
       let high = value.length;
@@ -5449,13 +5449,13 @@
    * `app_name` comes from the protected-resource metadata this app serves, not from what
    * the user typed into ChatGPT, so these are this app naming itself.
    *
-   * Exact names, never a prefix: `Chat On Steroids Backup` would be somebody else's
+   * Exact names, never a prefix: `ChatBBC Backup` would be somebody else's
    * connector, and a prefix test would have this app vouch for its traffic.
    */
   const OUR_CONNECTORS = [
-    'Chat On Steroids Core',
-    'Chat On Steroids Desktop',
-    'Chat On Steroids Plugins',
+    'ChatBBC Core',
+    'ChatBBC Desktop',
+    'ChatBBC Plugins',
     'TobisComputer'
   ];
 
@@ -6307,7 +6307,7 @@
       return {
         mode: 'off',
         label: 'Compact',
-        hint: 'Browser connection is disconnected in Chat On Steroids.',
+        hint: 'Browser connection is disconnected in ChatBBC.',
         action: 'none'
       };
     }
@@ -6315,7 +6315,7 @@
       return {
         mode: 'off',
         label: 'Compact',
-        hint: 'Chat On Steroids is not running on this PC.',
+        hint: 'ChatBBC is not running on this PC.',
         action: 'none'
       };
     }
@@ -6892,7 +6892,7 @@
     blocked.textContent = 'Chat blocked';
     blocked.setAttribute(
       'data-clf-tip',
-      'This chat is blocked in the Chat On Steroids app: its tool calls are refused and Goal, Loop and auto-compaction are off. To release it, open the app’s Chat tab, hover this chat in the sessions list and press its block symbol.'
+      'This chat is blocked in the ChatBBC app: its tool calls are refused and Goal, Loop and auto-compaction are off. To release it, open the app’s Chat tab, hover this chat in the sessions list and press its block symbol.'
     );
     blocked.hidden = true;
 
@@ -6984,7 +6984,7 @@
     root.className = 'clf-menu';
     root.dataset.clfMenu = '1';
     root.setAttribute('role', 'dialog');
-    root.setAttribute('aria-label', 'Chat On Steroids settings');
+    root.setAttribute('aria-label', 'ChatBBC settings');
     root.hidden = true;
     (document.body || document.documentElement).append(root);
     return root;
@@ -7721,7 +7721,7 @@
     // Never disabled any more: it opens a sheet, and a sheet that explains why compaction is
     // unavailable is exactly what somebody clicking a dead button wanted to be told.
     control.button.disabled = false;
-    control.button.setAttribute('aria-label', 'Chat On Steroids settings');
+    control.button.setAttribute('aria-label', 'ChatBBC settings');
     control.button.setAttribute('aria-haspopup', 'dialog');
     if (!control.button.hasAttribute('aria-expanded')) control.button.setAttribute('aria-expanded', 'false');
     // The meter only while the button is a button. During a run the control is saying what
@@ -9545,7 +9545,7 @@
     if (data.error === 'compaction_running') return 'Another chat is compacting right now.';
     if (data.error === 'turn_still_generating') return 'Wait for this ChatGPT turn to finish first.';
     if (data.error) return String(data.error).slice(0, 160);
-    if (reply.error === 'app_not_found') return 'Chat On Steroids is not running on this PC.';
+    if (reply.error === 'app_not_found') return 'ChatBBC is not running on this PC.';
     return reply.error ? String(reply.error).slice(0, 160) : '';
   }
 

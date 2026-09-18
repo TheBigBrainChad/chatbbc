@@ -5,6 +5,7 @@ import {
   type StoredOAuthClientInformation, type StoredOAuthTokens,
 } from '@modelcontextprotocol/client';
 import { getSecret, setSecret, clearSecret } from '../secrets.js';
+import { APP_TITLE } from '../version.js';
 
 export class PluginNeedsAuth extends Error {
   constructor() { super('Sign in to connect this plugin.'); }
@@ -92,7 +93,7 @@ export class PluginOAuth implements OAuthClientProvider {
   }
   get redirectUrl(): string { return this.interactive?.redirectUri ?? this.data.redirectUri ?? 'http://127.0.0.1:1/oauth/callback'; }
   get clientMetadata() {
-    return { client_name: 'Chat On Steroids', redirect_uris: [this.redirectUrl], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none' };
+    return { client_name: APP_TITLE, redirect_uris: [this.redirectUrl], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none' };
   }
   state(): string { this.check(); if (!this.interactive) throw new PluginNeedsAuth(); return this.interactive.state; }
   clientInformation(context?: { issuer: string }): StoredOAuthClientInformation | undefined {
@@ -176,10 +177,10 @@ export class PluginOAuth implements OAuthClientProvider {
           /^[a-f0-9]{64}$/.test(received) && timingSafeEqual(Buffer.from(received), Buffer.from(state));
         if (!valid) { response.writeHead(400).end('Invalid sign-in callback.'); return; }
         if (url.searchParams.has('error') || !url.searchParams.get('code')) {
-          response.writeHead(400).end('Sign-in was not completed. Return to Chat On Steroids.');
+          response.writeHead(400).end(`Sign-in was not completed. Return to ${APP_TITLE}.`);
           fail(new Error('Plugin sign-in was not completed.')); return;
         }
-        response.end('Authorization received. Return to Chat On Steroids.'); server.close(); settle(url.searchParams);
+        response.end(`Authorization received. Return to ${APP_TITLE}.`); server.close(); settle(url.searchParams);
       });
       this.interactive = { state, redirectUri, open };
       // A new ephemeral callback cannot reuse a DCR client's old exact redirect URI.
