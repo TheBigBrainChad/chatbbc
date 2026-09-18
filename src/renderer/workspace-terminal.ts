@@ -4,12 +4,20 @@ import '@xterm/xterm/css/xterm.css';
 import { el, icon, toast } from './dom.js';
 import { t, ui } from './i18n.js';
 import { onAppearanceChanged } from './appearance.js';
+import { attachWorkPanelResize } from './work-panel-resize.js';
 import type { LocalProject } from '../shared/projects.js';
 
 type Tab = { id: string; projectId: string; title: string; node: HTMLElement; term: Terminal; fit: FitAddon; ready: boolean; exited: boolean; queued: number; writes: Promise<void> };
 
-/** A hidden panel retains its shells; tabs keep the project captured at creation. */
-export function createWorkspaceTerminal() {
+/**
+ * A hidden panel retains its shells; tabs keep the project captured at creation.
+ *
+ * The panel is one tenant of the right-hand work panel. Given a host it is placed there and takes
+ * the slot's shared resize affordance like the other two tenants, so the column has one owner and
+ * one geometry. With no host it keeps today's bottom drawer, which is what a caller that wants only
+ * the terminal gets.
+ */
+export function createWorkspaceTerminal(options: { host?: HTMLElement } = {}) {
   const app = document.querySelector<HTMLElement>('.app')!;
   const toggle = el('button', 'btn btn-icon') as HTMLButtonElement;
   toggle.id = 'terminalToggle'; toggle.type = 'button'; toggle.append(icon('i-terminal'));
@@ -17,8 +25,6 @@ export function createWorkspaceTerminal() {
   document.getElementById('headerConnect')!.after(toggle);
   const panel = el('section', 'workspace-terminal'); panel.id = 'workspaceTerminal'; panel.hidden = true;
   ui(panel, 'aria-label', () => t('Terminal'));
-  const resize = el('div', 'terminal-resize'); resize.tabIndex = 0; resize.setAttribute('role', 'separator');
-  resize.setAttribute('aria-orientation', 'horizontal'); ui(resize, 'aria-label', () => t('Terminal height'));
   const bar = el('div', 'terminal-bar'), tabsHost = el('div', 'terminal-tabs'), body = el('div', 'terminal-body');
   const button = (glyph: string, label: string): HTMLButtonElement => {
     const node = el('button', 'btn btn-icon') as HTMLButtonElement; node.type = 'button'; node.append(icon(glyph));
@@ -27,7 +33,18 @@ export function createWorkspaceTerminal() {
   const add = button('i-plus', 'New terminal'), hide = button('i-x', 'Hide terminal');
   add.id = 'terminalNew'; hide.id = 'terminalHide';
   const empty = el('button', 'btn terminal-empty', () => t('Open a terminal in this project')) as HTMLButtonElement;
-  empty.type = 'button'; body.append(empty); bar.append(tabsHost, add, hide); panel.append(resize, bar, body); app.append(panel);
+  empty.type = 'button'; body.append(empty); bar.append(tabsHost, add, hide);
+  // One host: inside the work panel the tab strip is the only chrome above the tabs, so the bar
+  // carries them alone; standalone the panel is still a bottom drawer with its own height grip.
+  const resize = options.host ? null : el('div', 'terminal-resize');
+  if (resize) {
+    resize.tabIndex = 0; resize.setAttribute('role', 'separator');
+    resize.setAttribute('aria-orientation', 'horizontal'); ui(resize, 'aria-label', () => t('Terminal height'));
+    panel.append(resize);
+  }
+  panel.append(bar, body);
+  if (options.host) attachWorkPanelResize(options.host, panel);
+  else app.append(panel);
   const tabs = new Map<string, Tab>();
   const terminalTheme = () => {
     const colors = getComputedStyle(app);
@@ -40,6 +57,7 @@ export function createWorkspaceTerminal() {
   });
   let project: LocalProject | null = null, selected: string | null = null, open = false;
   const setHeight = (height: number): void => {
+    if (!resize) return;
     const next = Math.round(Math.max(130, Math.min(window.innerHeight * .65, height)));
     app.style.setProperty('--terminal-height', `${next}px`); resize.setAttribute('aria-valuenow', String(next));
   };
@@ -51,7 +69,8 @@ export function createWorkspaceTerminal() {
     if (tab.ready && !tab.exited) void window.api.terminalResize(tab.id, Math.min(500, tab.term.cols), Math.min(200, tab.term.rows));
   };
   const setOpen = (value: boolean): void => {
-    open = value; panel.hidden = !value; app.classList.toggle('has-terminal', value);
+    open = value; panel.hidden = !value;
+    if (resize) app.classList.toggle('has-terminal', value);
     toggle.setAttribute('aria-expanded', String(value));
     if (value) requestAnimationFrame(() => { fit(); if (selected) tabs.get(selected)?.term.focus(); });
   };
@@ -118,15 +137,22 @@ export function createWorkspaceTerminal() {
   });
   toggle.addEventListener('click', () => { setOpen(!open); if (open && !tabs.size && project) void create(); });
   add.addEventListener('click', () => void create()); empty.addEventListener('click', () => void create()); hide.addEventListener('click', () => setOpen(false));
-  let drag: { id: number; y: number; height: number } | null = null;
-  resize.addEventListener('pointerdown', event => { if (event.button !== 0) return; drag = { id: event.pointerId, y: event.clientY, height: panel.offsetHeight }; resize.setPointerCapture(event.pointerId); event.preventDefault(); });
-  resize.addEventListener('pointermove', event => { if (drag?.id === event.pointerId) setHeight(drag.height + drag.y - event.clientY); });
-  resize.addEventListener('lostpointercapture', () => { drag = null; });
-  resize.addEventListener('pointerup', event => { if (resize.hasPointerCapture(event.pointerId)) resize.releasePointerCapture(event.pointerId); });
-  resize.addEventListener('keydown', event => { if (['ArrowUp', 'ArrowDown'].includes(event.key)) { event.preventDefault(); setHeight(panel.offsetHeight + (event.key === 'ArrowUp' ? 24 : -24)); } });
+  if (resize) {
+    let drag: { id: number; y: number; height: number } | null = null;
+    resize.addEventListener('pointerdown', event => { if (event.button !== 0) return; drag = { id: event.pointerId, y: event.clientY, height: panel.offsetHeight }; resize.setPointerCapture(event.pointerId); event.preventDefault(); });
+    resize.addEventListener('pointermove', event => { if (drag?.id === event.pointerId) setHeight(drag.height + drag.y - event.clientY); });
+    resize.addEventListener('lostpointercapture', () => { drag = null; });
+    resize.addEventListener('pointerup', event => { if (resize.hasPointerCapture(event.pointerId)) resize.releasePointerCapture(event.pointerId); });
+    resize.addEventListener('keydown', event => { if (['ArrowUp', 'ArrowDown'].includes(event.key)) { event.preventDefault(); setHeight(panel.offsetHeight + (event.key === 'ArrowUp' ? 24 : -24)); } });
+  }
   const observer = new ResizeObserver(fit); observer.observe(body);
   document.addEventListener('keydown', event => { if (event.ctrlKey && event.key === '`' && !panel.contains(event.target as Node)) { event.preventDefault(); toggle.click(); } });
   window.addEventListener('beforeunload', () => { observer.disconnect(); stopEvents(); stopAppearance(); for (const tab of tabs.values()) tab.term.dispose(); }, { once: true });
   paint();
-  return { update(value: LocalProject | null): void { project = value; paint(); } };
+  return {
+    element: panel,
+    show(): void { setOpen(true); if (!tabs.size && project) void create(); },
+    hide(): void { setOpen(false); },
+    update(value: LocalProject | null): void { project = value; paint(); }
+  };
 }

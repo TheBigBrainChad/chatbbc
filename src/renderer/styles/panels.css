@@ -2,10 +2,24 @@
    The right-side work panes: the sub-agent panel and plan, the file tree,
    preview, editor and PDF viewer, and the workspace terminal. Loaded fifth. */
 
-/* Right-side work panes. Files and Sub-agents are mutually exclusive projections of the
-   current task; the ChatGPT browser remains the independent left dock. */
+/* Right-side work column. Files, Sub-agents and Terminal are one geometry with three tenants,
+   so the column is reserved by the panel that hosts them and never by a pane. */
+[data-panel='chat'].has-work-panel,
 [data-panel='chat'].has-agent-panel,
 [data-panel='chat'].has-file-panel { grid-template-columns: minmax(0, 1fr) var(--work-panel-width, minmax(340px, 42%)); }
+
+.work-panel { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--line); background: var(--page); }
+/* Three tabs share one row and shrink with an ellipsis, so the strip never scrolls sideways. */
+.work-panel-tabs { display: flex; flex: 0 0 auto; min-height: 38px; border-bottom: 1px solid var(--line); }
+.work-panel-tab { flex: 1; min-width: 0; padding: 8px 10px; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: transparent; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.work-panel-tab:first-child { border-left: 0; }
+.work-panel-tab:hover:not(:disabled):not(.is-sel) { background: var(--hover); color: var(--ink); }
+.work-panel-tab.is-sel { background: var(--hover); color: var(--ink); }
+.work-panel-tab:disabled { opacity: .35; cursor: default; }
+.work-panel-body { flex: 1; min-width: 0; min-height: 0; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
+/* One cell, three tenants: whichever is showing fills it. The column owns the left edge now, so a
+   hosted pane drops the border it carried as a top-level column. */
+.work-panel-body > :is(.file-panel, .agent-panel, .workspace-terminal) { grid-area: 1 / 1; border-left: 0; border-top: 0; }
 .agent-panel { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--page); }
 .agent-panel-header { display: flex; align-items: center; gap: 10px; padding: 16px 20px; border-bottom: 1px solid var(--line); }
 .agent-panel-header strong { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 550; }
@@ -137,17 +151,20 @@
 .file-preview-empty { margin: 0; padding: 24px 14px; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); text-align: center; }
 .file-preview-truncated { position: sticky; bottom: 0; padding: 6px 12px; border-top: 1px solid var(--line); background: var(--card); color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(10px * var(--text-scale, 1)); }
 
-.app[data-screen='settings'] :is(#agentPanelToggle, #filePanelToggle) { display: none; }
+.app[data-screen='settings'] :is(#agentPanelToggle, #filePanelToggle, #terminalToggle) { display: none; }
 @media (max-width: 850px) {
+  [data-panel='chat'].has-work-panel,
   [data-panel='chat'].has-agent-panel, [data-panel='chat'].has-file-panel { grid-template-columns: minmax(0, 1fr); }
-  .has-agent-panel > .is-session, .has-file-panel > .is-session { display: none; }
+  .has-work-panel > .is-session, .has-agent-panel > .is-session, .has-file-panel > .is-session { display: none; }
+  /* The session card is gone, so the column the panel claimed is the only one left. */
+  .has-work-panel > .work-panel { grid-column: 1; }
   .work-panel-resize { display: none; }
 }
 
-.app[data-screen='settings'] [data-panel='chat'].has-agent-panel { grid-template-columns: minmax(0, 1fr); }
-.app[data-screen='settings'] .agent-panel { display: none; }
+.app[data-screen='settings'] [data-panel='chat'].has-work-panel,
+.app[data-screen='settings'] [data-panel='chat'].has-agent-panel,
 .app[data-screen='settings'] [data-panel='chat'].has-file-panel { grid-template-columns: minmax(0, 1fr); }
-.app[data-screen='settings'] .file-panel { display: none; }
+.app[data-screen='settings'] .work-panel { display: none; }
 
 .agent-plan { min-width: 0; border-bottom: 1px solid var(--edge); color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(13px * var(--text-scale, 1)); overflow: hidden; }
 .agent-plan[hidden], .app[data-screen='settings'] .agent-plan { display: none; }

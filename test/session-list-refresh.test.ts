@@ -1,4 +1,4 @@
-vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTerminal: () => ({ update: vi.fn() }) }));
+vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTerminal: () => ({ element: document.createElement('section'), toggle: document.createElement('button'), show: vi.fn(), hide: vi.fn(), update: vi.fn() }) }));
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';

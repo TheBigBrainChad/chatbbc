@@ -8,6 +8,7 @@ import { marked, Marked } from 'marked';
 import { safeExternalLink } from '../shared/external-link.js';
 import { createAgentPanel } from './agent-panel.js';
 import { createFilePanel } from './file-panel.js';
+import { createWorkPanel } from './work-panel.js';
 import { renderAgentPlan } from './agent-plan.js';
 import { userPromptText } from '../shared/user-prompt.js';
 import { messageReaction, withoutMessageReaction } from '../shared/message-reaction.js';
@@ -147,6 +148,7 @@ function replaceComposerDraft(): void { composerDraftGeneration++; skillPicker?.
 let pendingNewInput: { id: string; generation: number } | null = null;
 let agentPanel: ReturnType<typeof createAgentPanel> | null = null;
 let filePanel: ReturnType<typeof createFilePanel> | null = null;
+let workPanel: ReturnType<typeof createWorkPanel> | null = null;
 const expandedWorkers = new Set<string>();
 const inputDrafts = new Map<string, string>();
 const newChatTasks = new Map<string, { objective: string; automation: string; loopDelivery: string }>();
@@ -3081,6 +3083,8 @@ function updatePanels(): void {
   agentPanel?.update(selectedId, sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId && selectedId !== null));
   filePanel?.update(selectedLocalProject(sessionHost));
   workspaceTerminal?.update(selectedLocalProject(sessionHost));
+  // A tool with nothing to offer is disabled rather than hidden, so the strip keeps its shape.
+  workPanel?.refresh();
 }
 
 /**
@@ -3157,8 +3161,11 @@ export function initChat(next: Deps): void {
   ui(agentToggle, 'aria-label', () => t("Toggle sub-agent side panel")); agentToggle.setAttribute('aria-expanded', 'false');
   $('headerConnect').after(fileToggle, agentToggle);
   const agentToolGroups = new Map<string, HTMLDetailsElement>();
+  const workHost = document.querySelector<HTMLElement>('[data-panel="chat"]')!;
+  // The column is created before its tenants so it owns the host from the start.
+  const work = workPanel = createWorkPanel({ host: workHost });
   agentPanel = createAgentPanel({
-    host: document.querySelector<HTMLElement>('[data-panel="chat"]')!, toggle: agentToggle,
+    host: workHost, toggle: agentToggle,
     onShow: () => filePanel?.hide(),
     load: id => run(api.getSession(id, { limit: 160 })), openMain: selectSession, working: sessionWorking,
     render: (source, id, current) => {
@@ -3333,7 +3340,7 @@ export function initChat(next: Deps): void {
     return true;
   };
   filePanel = createFilePanel({
-    host: document.querySelector<HTMLElement>('[data-panel="chat"]')!, toggle: fileToggle,
+    host: workHost, toggle: fileToggle,
     onShow: () => agentPanel?.hide(),
     captureAttachment: () => {
       const owner = composerDraftOwner();
@@ -3341,8 +3348,17 @@ export function initChat(next: Deps): void {
     }
   });
   filePanel.update(selectedLocalProject(sessionHost));
-  workspaceTerminal = createWorkspaceTerminal();
+  workspaceTerminal = createWorkspaceTerminal({ host: workHost });
   workspaceTerminal.update(selectedLocalProject(sessionHost));
+  // Three tools, one column. Registration decides the tab order and hands the slot its tenants.
+  // Each pane keeps its own header button — one control, one owner, standalone or hosted — and the
+  // strip follows those call sites instead of duplicating them.
+  work.register('files', filePanel);
+  work.register('agents', agentPanel);
+  // The terminal has no project gate of its own: with no project it publishes that fact inside the
+  // pane, so its tab stays reachable exactly as its header button always was.
+  work.register('terminal', workspaceTerminal);
+  work.refresh();
   $('attachImages').addEventListener('click', async () => {
     const owner = composerDraftOwner();
     appendImages(owner, await run(api.chooseFiles()));

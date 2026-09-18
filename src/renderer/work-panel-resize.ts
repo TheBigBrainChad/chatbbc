@@ -36,6 +36,19 @@ function setWidth(host: HTMLElement, width: number, persist = false): number {
 }
 
 /**
+ * Lends the work slot its maximum width (`End`'s width, the host minus the 360px chat column),
+ * which is the only width a terminal is readable at, and hands the reader's own width back.
+ *
+ * The returned function restores. Nothing is persisted: this is a temporary view of the same
+ * slot, so the width the reader chose is still the width their next visit starts from.
+ */
+export function widenWorkPanel(host: HTMLElement, pane: HTMLElement): () => void {
+  const previous = currentWidth(host, pane);
+  setWidth(host, maximum(host));
+  return () => setWidth(host, previous);
+}
+
+/**
  * Adds the shared horizontal resize affordance used by the right-side Files and Sub-agents panes.
  * The width belongs to the work slot, not to either pane, so switching tools preserves it.
  */

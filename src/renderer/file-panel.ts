@@ -1078,7 +1078,10 @@ export function createFilePanel(options: FilePanelOptions) {
 
   updateActions();
   return {
+    element: pane,
     hide,
+    show: () => void show(),
+    available: () => project !== null,
     visible: () => !pane.hidden,
     update(next: LocalProject | null): void {
       const changed = project?.id !== next?.id;

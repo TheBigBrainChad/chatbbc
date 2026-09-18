@@ -71,7 +71,10 @@ export function createAgentPanel(options: {
   });
   options.toggle.onclick = () => { if (pane.hidden) { show(); list(); } else hide(); };
   return {
+    element: pane,
     hide,
+    show,
+    available: () => parent !== null,
     open,
     update(id: string | null, next: SessionSummary[]): void {
       if (parent !== id) { hide(); parent = id; }
