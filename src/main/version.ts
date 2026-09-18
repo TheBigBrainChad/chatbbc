@@ -12,7 +12,7 @@
  * extension does nothing" into a diagnosable mismatch.
  */
 
-export const APP_VERSION = '2.1.14';
+export const APP_VERSION = '2.1.15';
 
 /**
  * The app's own name, in two spellings that different peers need.

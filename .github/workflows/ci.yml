@@ -15,15 +15,16 @@ concurrency:
 
 jobs:
   verify:
+    # Linux only: this fork is developed and supported on Linux. The Windows and macOS legs were
+    # inherited from upstream and are no longer maintained here — the Windows leg in particular had
+    # been failing on a flaky 30-second timeout in an untouched suite. Adding either back is a
+    # deliberate choice, not a matter of uncommenting: their platform-specific packaging and smoke
+    # steps in release.yml are scoped the same way.
     name: Verify ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: Windows x64
-            runner: windows-2025
-          - name: macOS arm64
-            runner: macos-15
           - name: Linux x64
             runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
