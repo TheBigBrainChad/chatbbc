@@ -130,6 +130,18 @@ const extensionManifest = JSON.parse(readFileSync(path.join(resourcesDir, 'exten
 if (extensionManifest.version !== expectedVersion) {
   throw new Error(`Packaged extension ${extensionManifest.version} does not match app ${expectedVersion}`);
 }
+// The bundled Skill pack ships beside the app bundle, not inside it. Verify the pack directory,
+// its provenance, and every skill directory's entry point, so an empty or accidentally-filtered
+// copy fails here rather than surfacing as a silently empty skill catalog on first launch.
+const packRoot = path.join(resourcesDir, 'skill-pack');
+required('skill-pack/LICENSE');
+required('skill-pack/PROVENANCE.md');
+const packSkillDirectories = readdirSync(packRoot, { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => entry.name)
+  .sort();
+if (!packSkillDirectories.length) throw new Error('Packaged Skill pack contains no skill directories');
+for (const id of packSkillDirectories) required(`skill-pack/${id}/SKILL.md`);
 const tunnelVersion = readFileSync(path.join(resourcesDir, 'tunnel', 'VERSION'), 'utf8').trim();
 const rgVersion = readFileSync(path.join(resourcesDir, 'rg', 'VERSION'), 'utf8').trim();
 if (tunnelVersion !== TUNNEL_CLIENT.version) throw new Error(`Packaged tunnel-client ${tunnelVersion} != ${TUNNEL_CLIENT.version}`);
