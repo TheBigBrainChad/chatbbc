@@ -13,6 +13,12 @@ export interface AppearanceSettings {
   font: typeof APPEARANCE_FONTS[number];
   fontSize: number;
   translucentSidebar: boolean;
+  /**
+   * The resolved chain chrome is drawn in, when something outside the renderer names one —
+   * a followed desktop theme's own terminal font. Presentation only, and optional: the
+   * renderer falls back to its own mono chain, and the saved appearance never depended on it.
+   */
+  monoFont?: string;
 }
 export function defaultAppearance(): AppearanceSettings {
   return {

@@ -13,9 +13,12 @@
    Dark is the default and the one the app was drawn for: near-black ground,
    charcoal cards, white as the accent. Light is the same geometry inverted.
 
-   Corners are generous and consistent — every surface picks one of five radii and
-   nothing invents its own — because a window this dense reads as calmer when the
-   shapes agree with each other.
+   Corners are square: the desktop is Hyprland `decoration:rounding = 0`, and every
+   surface picks one of the radius names below, so nothing invents its own shape.
+
+   Type has two roles. Chrome — navigation, labels, buttons, status, file paths, code,
+   everything in the sidebar and settings — is `--ui-font-mono`, authored at the dense
+   11px base. Prose in the transcript is `--ui-font`, the user's own font setting.
 
    The window prefers 1080x700 but can shrink to the current display and can be resized,
    so long content scrolls inside its own panes rather than growing or clipping the page.
@@ -52,8 +55,8 @@
   --red-wash: #fbf0f0;
   --red-line: #eccdcd;
 
-  /* Card lift. Barely there on paper, absent in the dark theme below. */
-  --lift: 0 1px 1px rgb(12 12 14 / 3%), 0 10px 26px -18px rgb(12 12 14 / 22%);
+  /* No card lift: structure is carried by tone and hairlines in both themes. */
+  --lift: none;
   /* The switch knob has to read against its own track in both states, and the track
      flips from grey to full ink when it is on - so the knob needs two values, not one. */
   --knob-off: #fff;
@@ -61,15 +64,18 @@
   /* Focus ring, derived from the ink so it is one rule in both themes. */
   --ring: color-mix(in srgb, var(--ink) 16%, transparent);
 
-  /* Five radii, and nothing else. */
-  --r-xs: 6px;
-  --r-sm: 10px;
-  --r-md: 14px;
-  --r-lg: 18px;
-  --r-xl: 24px;
-  --pill: 999px;
+  /* Square, because the desktop is: Hyprland decoration:rounding = 0.
+     The names stay so there is one geometry vocabulary and a theme could raise them. */
+  --r-xs: 0;
+  --r-sm: 0;
+  --r-md: 0;
+  --r-lg: 0;
+  --r-xl: 0;
+  --pill: 0;
 
-  --mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  /* Chrome type. Text and labels are monospace — the desktop's own idiom —
+     while authored and assistant prose keep --ui-font. */
+  --ui-font-mono: "Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
 }
 
 /*
@@ -146,7 +152,7 @@ html:lang(zh-TW) body { font-family: var(--ui-font, -apple-system, BlinkMacSyste
 .setup-heading .settings-heading { margin-bottom: 0; padding: 0; }
 .setup-heading .settings-heading p { margin-bottom: 0; }
 .language-tabs { display: inline-flex; flex: none; padding: 3px; gap: 3px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
-.language-tabs button { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--muted); font: inherit; cursor: pointer; white-space: nowrap; }
+.language-tabs button { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--muted); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); cursor: pointer; white-space: nowrap; }
 .language-tabs button:hover { background: var(--hover); color: var(--ink); }
 .language-tabs button[aria-pressed='true'] { background: var(--hover); border-color: var(--line); color: var(--ink); }
 .language-tabs button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
@@ -181,7 +187,7 @@ html:lang(zh-TW) body { font-family: var(--ui-font, -apple-system, BlinkMacSyste
 }
 
 code {
-  font-family: var(--mono);
+  font-family: var(--ui-font-mono);
   font-size: 0.92em;
 }
 
@@ -209,12 +215,12 @@ code {
 .app-topbar > .btn, .view-menu { -webkit-app-region: no-drag; height: 100%; }
 .app-topbar > .btn { padding: 0 5px; }
 .app-topbar > .btn .ico { width: 14px; height: 14px; }
-.view-menu { position: relative; font-size: calc(12px * var(--text-scale, 1)); }
+.view-menu { position: relative; font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); }
 .view-menu > summary { display: flex; align-items: center; height: 100%; list-style: none; cursor: pointer; padding: 0 9px; border-radius: 6px; }
 .view-menu > summary:hover, .view-menu[open] > summary { background: var(--hover); }
 .view-menu-items { position: absolute; top: calc(100% + 5px); left: 0; z-index: 100; width: 260px; padding: 6px; background: var(--card); border: 1px solid var(--edge); border-radius: 10px; box-shadow: 0 8px 28px #0003; }
 .view-menu-items .btn { display: flex; width: 100%; gap: 10px; padding: 9px 10px; border-radius: 5px; }
-.view-menu-items kbd { margin-left: auto; color: var(--soft); font: inherit; }
+.view-menu-items kbd { margin-left: auto; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
 .view-menu-items hr { border: 0; border-top: 1px solid var(--line); margin: 5px 0; }
 .app.is-sidebar-collapsed { grid-template-columns: 0 minmax(0, 1fr); }
 .app.is-sidebar-collapsed .sidebar { display: none; }
@@ -244,7 +250,7 @@ select::picker(select) {
 }
 select option {
   min-height: 36px; padding: 8px 10px; gap: 12px; border-radius: 7px;
-  background: transparent; color: var(--ink); font: inherit; line-height: 1.4;
+  background: transparent; color: var(--ink); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); line-height: 1.4;
   white-space: normal; overflow-wrap: anywhere;
 }
 select option:hover, select option:focus { background: var(--hover); outline: none; }

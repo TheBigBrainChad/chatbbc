@@ -1,3 +1,5 @@
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { appearanceSchema } from '../src/main/appearance-schema.js';
 import { defaultAppearance, mergeAppearance, paletteTokens, contrastRatio, readableInk } from '../src/shared/appearance.js';
@@ -46,5 +48,18 @@ describe('custom appearance', () => {
     appearance.dark.sidebar = '#ffffff'; appearance.dark.background = '#391c56'; appearance.translucentSidebar = false;
     expect(titleBarOverlayForTheme('dark', appearance)).toEqual({ height: 36, color: '#00000000', symbolColor: readableInk('#ffffff') });
     expect(windowBackgroundForTheme('dark', appearance)).toBe('#391c56');
+  });
+
+  it('keeps every radius square and publishes a mono chrome font token', async () => {
+    const css = await fs.readFile(path.resolve(__dirname, '../src/renderer/styles/base.css'), 'utf8');
+    const block = css.slice(css.indexOf(':root'), css.indexOf('}', css.indexOf(':root')));
+    // The desktop is decoration:rounding = 0; every radius name must resolve to 0.
+    for (const name of ['--r-xs', '--r-sm', '--r-md', '--r-lg', '--r-xl', '--pill']) {
+      expect(block, `${name} is not square`).toMatch(new RegExp(`${name}:\\s*0(px)?\\s*;`));
+    }
+    // Chrome reads this token, so it must exist before the renderer resolves it, and
+    // it must end in a real mono: a proportional fallback breaks every aligned column.
+    expect(block, 'no mono chrome token').toContain('--ui-font-mono:');
+    expect(block.slice(block.indexOf('--ui-font-mono:')).split(';')[0]).toMatch(/monospace\s*$/);
   });
 });

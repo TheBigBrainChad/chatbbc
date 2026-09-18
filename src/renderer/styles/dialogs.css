@@ -10,7 +10,7 @@
   align-items: center;
   gap: 8px;
   padding: 8px 18px;
-  font-size: calc(12px * var(--text-scale, 1));
+  font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1));
   color: var(--ink);
   background: var(--wash);
   border-bottom: 1px solid var(--line);
@@ -38,7 +38,7 @@
   transform: translateX(-50%);
   background: var(--ink);
   color: var(--page);
-  font-size: calc(12.5px * var(--text-scale, 1));
+  font-family: var(--ui-font-mono); font-size: calc(12.5px * var(--text-scale, 1));
   padding: 9px 16px;
   border-radius: var(--pill);
   box-shadow: 0 8px 24px -8px rgb(0 0 0 / 45%);
@@ -55,15 +55,15 @@
 .file-entry-dialog, .file-confirm-dialog { width: min(380px, calc(100vw - 32px)); margin: auto; padding: 0; border: 1px solid var(--edge); border-radius: 12px; background: var(--card); color: var(--ink); box-shadow: 0 24px 90px #0006; }
 .file-entry-dialog::backdrop, .file-confirm-dialog::backdrop { background: #0008; backdrop-filter: blur(2px); }
 .file-entry-dialog-form { display: grid; gap: 16px; padding: 20px; }
-.file-entry-dialog-form h2 { margin: 0; font-size: calc(16px * var(--text-scale, 1)); font-weight: 650; }
-.file-entry-dialog-field { display: grid; gap: 7px; color: var(--soft); font-size: calc(11px * var(--text-scale, 1)); }
-.file-entry-dialog-input { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--edge); border-radius: 8px; background: var(--page); color: var(--ink); font: inherit; }
+.file-entry-dialog-form h2 { margin: 0; font-family: var(--ui-font-mono); font-size: calc(16px * var(--text-scale, 1)); font-weight: 650; }
+.file-entry-dialog-field { display: grid; gap: 7px; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
+.file-entry-dialog-input { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--edge); border-radius: 8px; background: var(--page); color: var(--ink); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
 .file-entry-dialog-input:focus { outline: 2px solid var(--ink); outline-offset: 2px; }
 .file-entry-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .file-entry-dialog-actions .btn { padding: 8px 12px; }
 .file-confirm-dialog-body { display: grid; gap: 12px; padding: 20px; }
-.file-confirm-dialog-body h2 { margin: 0; font-size: calc(16px * var(--text-scale, 1)); font-weight: 650; }
-.file-confirm-dialog-message { margin: 0; color: var(--ink); font-size: calc(13px * var(--text-scale, 1)); line-height: 1.5; overflow-wrap: anywhere; }
-.file-confirm-dialog-detail { margin: -4px 0 4px; color: var(--soft); font-size: calc(11px * var(--text-scale, 1)); line-height: 1.5; }
+.file-confirm-dialog-body h2 { margin: 0; font-family: var(--ui-font-mono); font-size: calc(16px * var(--text-scale, 1)); font-weight: 650; }
+.file-confirm-dialog-message { margin: 0; color: var(--ink); font-family: var(--ui-font-mono); font-size: calc(13px * var(--text-scale, 1)); line-height: 1.5; overflow-wrap: anywhere; }
+.file-confirm-dialog-detail { margin: -4px 0 4px; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); line-height: 1.5; }
 .file-dialog-danger { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
 .file-dialog-danger:hover:not(:disabled) { border-color: var(--red); background: var(--red-wash); color: var(--red); }

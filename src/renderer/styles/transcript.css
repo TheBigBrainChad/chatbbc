@@ -49,7 +49,7 @@
   min-width: 0;
   flex: 0 1 auto;
   color: var(--soft);
-  font-size: calc(14px * var(--text-scale, 1));
+  font-family: var(--ui-font-mono); font-size: calc(14px * var(--text-scale, 1));
   font-weight: 500;
   white-space: nowrap;
 }
@@ -58,7 +58,7 @@
 #chatTitle {
   text-transform: none;
   letter-spacing: 0;
-  font-size: calc(14px * var(--text-scale, 1));
+  font-family: var(--ui-font-mono); font-size: calc(14px * var(--text-scale, 1));
   font-weight: 500;
   color: var(--ink);
   max-width: 44%;
@@ -92,7 +92,7 @@
 .ev > time {
   display: none;
   padding-top: 2px;
-  font-family: var(--mono);
+  font-family: var(--ui-font-mono);
   font-size: calc(10.5px * var(--text-scale, 1));
   color: var(--faint);
   font-variant-numeric: tabular-nums;
@@ -112,7 +112,7 @@
 }
 
 .meta {
-  font-size: calc(12px * var(--text-scale, 1));
+  font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1));
   color: var(--faint);
 }
 
@@ -226,7 +226,7 @@
 }
 
 .msg.rich code {
-  font-family: var(--mono);
+  font-family: var(--ui-font-mono);
   font-size: 0.94em;
   padding: 0.08em 0.28em;
   border-radius: var(--r-xs);
@@ -311,7 +311,7 @@
   gap: 8px;
   padding: 3px 0;
   border-radius: var(--r-md);
-  font-size: calc(12.5px * var(--text-scale, 1));
+  font-family: var(--ui-font-mono); font-size: calc(12.5px * var(--text-scale, 1));
   cursor: pointer;
   list-style: none;
 }
@@ -336,7 +336,7 @@
   flex: 1 1 auto;
   min-width: 0;
   font-style: normal;
-  font-size: calc(11.5px * var(--text-scale, 1));
+  font-family: var(--ui-font-mono); font-size: calc(11.5px * var(--text-scale, 1));
   color: var(--faint);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -352,7 +352,7 @@
 .metric {
   margin-left: auto;
   flex: 0 0 auto;
-  font-family: var(--mono);
+  font-family: var(--ui-font-mono);
   font-size: calc(11px * var(--text-scale, 1));
   color: var(--soft);
 }
@@ -404,7 +404,7 @@
 }
 
 .raw h4 {
-  font-size: calc(10px * var(--text-scale, 1));
+  font-family: var(--ui-font-mono); font-size: calc(10px * var(--text-scale, 1));
   font-weight: 700;
   letter-spacing: 0.07em;
   text-transform: uppercase;
@@ -412,7 +412,7 @@
 }
 
 .raw-facts {
-  font-family: var(--mono);
+  font-family: var(--ui-font-mono);
   font-size: calc(10.5px * var(--text-scale, 1));
   color: var(--faint);
 }
@@ -422,7 +422,7 @@
   padding: 0;
   display: grid;
   gap: 2px;
-  font-size: calc(11.5px * var(--text-scale, 1));
+  font-family: var(--ui-font-mono); font-size: calc(11.5px * var(--text-scale, 1));
 }
 
 .changes li {
@@ -437,7 +437,7 @@
 }
 
 .pre {
-  font-family: var(--mono);
+  font-family: var(--ui-font-mono);
   font-size: calc(11px * var(--text-scale, 1));
   color: var(--soft);
   background: var(--sunk);
@@ -470,7 +470,7 @@
   border-radius: var(--pill);
   background: var(--sunk);
   color: var(--faint);
-  font-size: calc(10px * var(--text-scale, 1));
+  font-family: var(--ui-font-mono); font-size: calc(10px * var(--text-scale, 1));
   font-weight: 600;
 }
 
@@ -491,7 +491,7 @@
 
 
 .tool-group { color: var(--faint); margin: 6px 0; }
-.tool-group > summary { display: flex; align-items: center; gap: 8px; list-style: none; cursor: pointer; font-size: calc(14px * var(--text-scale, 1)); min-height: 26px; width: fit-content; max-width: 100%; }
+.tool-group > summary { display: flex; align-items: center; gap: 8px; list-style: none; cursor: pointer; font-family: var(--ui-font-mono); font-size: calc(14px * var(--text-scale, 1)); min-height: 26px; width: fit-content; max-width: 100%; }
 .tool-group > summary::-webkit-details-marker, .agent-communication > summary::-webkit-details-marker { display: none; }
 .activity-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .activity-symbol { display: inline-flex; flex: 0 0 16px; align-items: center; justify-content: center; }
@@ -501,7 +501,7 @@
 .tool-group-body { padding: 4px 0 0 0; }
 .tool-group-body .ev { margin: 0; }
 .tool-group-body .tool > summary, .tool-group-body .agent-communication > summary { min-height: 24px; }
-.agent-avatar { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; flex: 0 0 16px; border-radius: 6px; font-size: calc(9px * var(--text-scale, 1)); line-height: 1; background: #7d6198; color: #fff; }
+.agent-avatar { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; flex: 0 0 16px; border-radius: 6px; font-family: var(--ui-font-mono); font-size: calc(9px * var(--text-scale, 1)); line-height: 1; background: #7d6198; color: #fff; }
 .agent-avatar[data-color='1'] { background: #ac793a; }
 .agent-avatar[data-color='2'] { background: #527c96; }
 .agent-avatar[data-color='3'] { background: #608a72; }
@@ -510,18 +510,18 @@
 
 
 .chat-error-notice { border: 1px solid var(--red-line); border-radius: 12px; background: var(--red-wash); padding: 14px 16px; color: var(--ink); }
-.chat-error-notice > strong { display: block; color: var(--red); font-size: calc(13px * var(--text-scale, 1)); font-weight: 500; margin-bottom: 6px; }
+.chat-error-notice > strong { display: block; color: var(--red); font-family: var(--ui-font-mono); font-size: calc(13px * var(--text-scale, 1)); font-weight: 500; margin-bottom: 6px; }
 .chat-error-notice.is-resolved { border-color: var(--green-line); background: var(--green-wash); }
 .chat-error-notice.is-resolved > strong { color: var(--green); }
 .chat-error-notice .msg { font-size: calc(14px * var(--text-scale, 1)); }
-.chat-error-next { margin: 8px 0 0; font-size: calc(13px * var(--text-scale, 1)); line-height: 1.5; color: var(--soft); }
+.chat-error-next { margin: 8px 0 0; font-family: var(--ui-font-mono); font-size: calc(13px * var(--text-scale, 1)); line-height: 1.5; color: var(--soft); }
 
 
 .message-attachments { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; max-width: 100%; }
 .message-attachments img { display: block; width: 96px; height: 96px; object-fit: contain; border: 1px solid var(--line); border-radius: 12px; }
 .user-image-slot { flex: 0 0 96px; width: 96px; height: 124px; display: grid; grid-template-rows: 96px 28px; justify-items: center; align-items: center; overflow: hidden; }
-.user-image-slot > .meta { margin: 0; padding: 6px; text-align: center; font-size: calc(11px * var(--text-scale, 1)); }
-.user-image-slot > .retained-image-notice { padding: 2px 0; color: var(--soft); font-size: calc(10px * var(--text-scale, 1)); line-height: 12px; text-align: center; }
+.user-image-slot > .meta { margin: 0; padding: 6px; text-align: center; font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
+.user-image-slot > .retained-image-notice { padding: 2px 0; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(10px * var(--text-scale, 1)); line-height: 12px; text-align: center; }
 .generated-image-gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; max-width: 34rem; margin: 12px 0; }
 .generated-image-gallery > .ev.ev-native_image { min-width: 0; margin: 0; padding: 0; }
 .generated-image-gallery .ev-body, .generated-image-gallery .said { min-width: 0; width: 100%; padding: 0; }
@@ -534,9 +534,9 @@
 @media (max-width: 480px) { .generated-image-gallery { gap: 8px; } .generated-image-frame.is-unavailable { padding: 10px 6px; } }
 
 
-.agent-communication > summary { display: flex; gap: 8px; align-items: center; min-height: 24px; cursor: pointer; color: var(--soft); font-size: calc(14px * var(--text-scale, 1)); }
+.agent-communication > summary { display: flex; gap: 8px; align-items: center; min-height: 24px; cursor: pointer; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(14px * var(--text-scale, 1)); }
 .agent-communication > .msg { margin: 12px 0 0 24px; }
-.agent-chat-open { margin: 10px 0 2px 24px; padding: 5px 0; gap: 7px; border-radius: 4px; color: var(--soft); font-size: calc(12px * var(--text-scale, 1)); font-weight: 500; }
+.agent-chat-open { margin: 10px 0 2px 24px; padding: 5px 0; gap: 7px; border-radius: 4px; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); font-weight: 500; }
 .agent-chat-open:hover:not(:disabled) { background: transparent; color: var(--ink); }
 .agent-chat-open:hover span { text-decoration: underline; text-underline-offset: 3px; }
 .agent-chat-open:focus-visible { outline: 2px solid var(--soft); outline-offset: 4px; }

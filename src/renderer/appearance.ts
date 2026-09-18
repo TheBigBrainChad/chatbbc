@@ -4,8 +4,12 @@ import { $ } from './dom.js';
 
 const FONT_FAMILIES = {
   system: '', sans: 'Arial, Helvetica, sans-serif',
-  serif: 'Georgia, "Times New Roman", serif', mono: '"Cascadia Mono", Consolas, monospace'
+  serif: 'Georgia, "Times New Roman", serif', mono: '"Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace'
 };
+
+/** Resolution order for chrome type: desktop terminal font, then a real mono, then the last resort. */
+export const DEFAULT_MONO_CHAIN =
+  '"Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace';
 const appearanceListeners = new Set<() => void>();
 /** Canvas/terminal renderers must refresh after the CSS palette has been applied. */
 export function onAppearanceChanged(listener: () => void): () => void {
@@ -24,6 +28,8 @@ export function applyAppearance(theme: AppearanceTheme, settings?: AppearanceSet
   root.style.setProperty('--text-scale', String(value.fontSize / 14));
   if (value.font === 'system') root.style.removeProperty('--ui-font');
   else root.style.setProperty('--ui-font', FONT_FAMILIES[value.font]);
+  // Chrome is always the resolved mono chain; only prose follows the picker.
+  root.style.setProperty('--ui-font-mono', value.monoFont ?? DEFAULT_MONO_CHAIN);
   root.style.setProperty('--sidebar-color', palette.sidebar);
   // Glass is composed inside the window: a colored backdrop and translucent layer.
   // No native transparent window, desktop capture, or platform permission is needed.
