@@ -1,5 +1,6 @@
 import { createWorkspaceTerminal } from './workspace-terminal.js';
 import { ui, t } from './i18n.js';
+import { initComposerStatusLine, paintComposerStatusLine } from './composer-status-line.js';
 import { initSkills } from './skills.js';
 import { imageStorageButton } from './image-storage.js';
 import { applyChatModels, applyComposerSessionModel, initChatModels, confirmedComposerModel, ensureComposerModel } from './chat-models.js';
@@ -398,7 +399,7 @@ function paintGoalProgress(): void {
   const draft = finishDraft ?? (controlledSessionId === selectedId && controlledSelection === selectionGeneration ? goalDraftView : null);
   const wait = controlledSessionId === selectedId && controlledSelection === selectionGeneration ? goalWaitView : null;
   const off = $<HTMLSelectElement>('chatAutomation').value === 'off';
-  if (off && !finishDraft) { row.hidden = true; row.replaceChildren(); row.setAttribute('aria-busy', 'false'); return; }
+  if (off && !finishDraft) { row.hidden = true; row.replaceChildren(); row.setAttribute('aria-busy', 'false'); paintComposerStatusLine(); return; }
   let phase = progress?.phase ?? '';
   let text = progress?.text ?? '', error = progress?.error;
   if (entry) { phase = entry.state; error = entry.error ?? undefined; }
@@ -414,7 +415,7 @@ function paintGoalProgress(): void {
   const mode = $<HTMLSelectElement>('chatAutomation').value === 'loop' ? t('Loop') : t('Goal');
   labels.settling = `${mode} · ${wait?.reason === 'native-busy' ? t('ChatGPT resumed work · waiting before retry') : wait?.reason === 'silence' ? t('Waiting before recovery reload') : wait?.reason === 'quiet' ? t('Waiting for tool inactivity') :
     wait?.reason === 'tools' ? t('Waiting for running tools') : wait?.reason === 'listening' ? t('Waiting for activity after recovery') : t('Answer settling')}`;
-  row.hidden = !phase; if (!phase) return;
+  row.hidden = !phase; if (!phase) { paintComposerStatusLine(); return; }
   const busy = ['settling', 'saving', 'preparing', 'generating', 'retrying', 'sending', 'answering', 'browser', 'queued', 'ready'].includes(phase) && !error;
   row.setAttribute('aria-busy', String(busy));
   const marker = el('span', busy ? 'session-status is-working' : 'session-status');
@@ -426,6 +427,8 @@ function paintGoalProgress(): void {
     const timer = el('span', 'recovery-countdown', seconds ? t('Check in {0}', [`${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`]) : t('Checking for activity…'));
     timer.setAttribute('role', 'timer'); timer.setAttribute('aria-live', 'off'); row.append(timer);
   }
+  // Last, so the line summarises what the blocks just painted rather than the paint before.
+  paintComposerStatusLine();
 }
 const cancelledStarts = new Set<string>();
 let durationTimer: number | undefined;
@@ -433,7 +436,7 @@ function paintActiveGoal(): void {
   const row = $('activeGoalRow');
   const mode = $<HTMLSelectElement>('chatAutomation').value;
   row.hidden = !selectedId || mode === 'off';
-  if (row.hidden) { row.replaceChildren(); return; }
+  if (row.hidden) { row.replaceChildren(); paintComposerStatusLine(); return; }
   const objective = $<HTMLTextAreaElement>('sessionObjective').value.trim();
   const label = el('span', 'queue-label', () => `${mode === 'loop' ? t("Loop") : t("Pursuing goal")}${objective ? ' · ' + objective : ''}`);
   label.title = objective;
@@ -445,6 +448,8 @@ function paintActiveGoal(): void {
       $<HTMLDetailsElement>('composerSettings').open = true;
       $<HTMLTextAreaElement>('sessionObjective').focus();
     }));
+  // The row is one of the blocks the line summarises, so the line follows it.
+  paintComposerStatusLine();
 }
 type TaskPlanDraft = { text: string; requestId: string | null; stages: string[] | null; sending: boolean; progress: TaskProgress | null; error: string | null };
 // Planning belongs to its draft key. Completed stages own their captured objective
@@ -478,6 +483,8 @@ function paintTaskPlan(): void {
     if (progress?.text || progress?.error) preview.append(el('pre', 'task-progress-text', progress.error ? goalErrorMessage(progress.error) : progress.text));
   }
   paintTaskActions(); paintDeliveryControls(deliveryHost);
+  // The preview is one of the blocks the line summarises, so the line follows it.
+  paintComposerStatusLine();
 }
 async function createTaskPlan(backend: 'api' | 'chatgpt'): Promise<void> {
   const input = $<HTMLTextAreaElement>('chatInput'), text = authoredComposerText().trim();
@@ -523,7 +530,7 @@ function paintPreparedPlan(): void {
   // Sending hands presentation to the outbox/queued-stage rows. Keeping the editable
   // draft visible until the async receipt arrives paints the same plan twice. Retain
   // its data so a rejected send can restore the editable preview in the existing finally.
-  if (plan.sending) { preview.replaceChildren(); return; }
+  if (plan.sending) { preview.replaceChildren(); paintComposerStatusLine(); return; }
   preview.replaceChildren(...plan.stages.map((stage, index) => {
     const row = el('div', 'plan-stage');
     const heading = el('div', 'plan-stage-heading');
@@ -548,6 +555,7 @@ function paintPreparedPlan(): void {
     ui(heading, 'title', () => selectedId ? t("Queued at Session finish; edit or delete this checkpoint independently.") : index === 0 ? t("Send includes your complete request and the full plan. Later stages are queued as verification checkpoints.") : t("Included in the first message, then queued as a checkpoint at Session finish or after a completed answer when enabled."));
     heading.append(label, text, edit, remove); row.append(heading, field, error); return row;
   }));
+  paintComposerStatusLine();
 }
 async function sendPreparedPlan(): Promise<void> {
   const key = draftKey(), plan = currentPreparedPlan();
@@ -627,6 +635,9 @@ function paintAutomationSwitch(): void {
     button.setAttribute('aria-checked', String(button.dataset.mode === select.value));
     button.disabled = select.disabled;
   }
+  // The mode is a labelled control in the toolbar, not a glyph the user has to open to read.
+  ui($('composerModeLabel'), 'textContent', () => select.value === 'loop' ? t("Loop") : select.value === 'goal' ? t("Goal") : t("Ordinary"));
+  paintComposerStatusLine();
   $<HTMLSelectElement>('sessionObjectiveMode').value = select.value === 'loop' ? 'loop' : 'goal';
   const loop = select.value === 'loop';
   ui(document.querySelector('label[for="sessionObjective"]')!, 'textContent', () => loop ? t("Loop instructions") : t("Goal"));
@@ -636,7 +647,7 @@ function paintAutomationSwitch(): void {
 async function refreshSessionControls(): Promise<void> {
   const id = selectedId, generation = ++controlsGeneration;
   const planHost = $('agentPlan');
-  if (planHost.dataset.sessionId !== (id ?? '')) renderAgentPlan(planHost, id, null);
+  if (planHost.dataset.sessionId !== (id ?? '')) { renderAgentPlan(planHost, id, null); paintComposerStatusLine(); }
   const menu = $('sessionControls');
   if (controlledSessionId !== id || controlledSelection !== selectionGeneration) {
     // Retire the previous selection's projection before awaiting the new owner's IPC.
@@ -669,6 +680,7 @@ async function refreshSessionControls(): Promise<void> {
   const controls = await run(api.getSessionControls(id));
   if (generation !== controlsGeneration || id !== selectedId) return;
   renderAgentPlan(planHost, id, controls?.plan ?? null);
+  paintComposerStatusLine();
   controlledSessionId = id;
   controlledSelection = selectionGeneration;
   controlledTurnId = controls?.activeTurnId ?? null;
@@ -2089,7 +2101,7 @@ function paintHandoff(): void {
 function paintRecoveryStatus(): boolean {
   const host = $('recoveryStatus');
   const countdowns = selectedId && controlledSessionId === selectedId && controlledSelection === selectionGeneration ? controlledRecovery : [];
-  if (renderRecoveryCountdowns(host, countdowns)) return true;
+  if (renderRecoveryCountdowns(host, countdowns)) { paintComposerStatusLine(); return true; }
   const recovery = detailFor === selectedId ? [...events].reverse().find(event => event.source === 'app' && event.kind === 'progress' && event.progressId?.startsWith('browser-repair:')) : undefined;
   const sessionId = selectedId;
   const revision = recovery?.kind === 'progress' ? JSON.stringify([recovery.progressId, recovery.time, recovery.message.text]) : '';
@@ -2104,6 +2116,7 @@ function paintRecoveryStatus(): boolean {
       }));
     host.append(row);
   }
+  paintComposerStatusLine();
   return false;
 }
 
@@ -3430,6 +3443,7 @@ export function initChat(next: Deps): void {
   });
   $('composerSettings').addEventListener('toggle', paintTaskActions);
   initContextMeter();
+  initComposerStatusLine();
   $('createPlan').addEventListener('click', () => { if (taskPlans.has(draftKey())) cancelTaskPlan(); else void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); });
   $('composer').addEventListener('submit', (event) => { event.preventDefault(); if (currentPreparedPlan()) void sendPreparedPlan(); else if (taskPlans.has(draftKey())) { if (!$('createPlan').dataset.busy) void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); } else void sendComposer(); });
 

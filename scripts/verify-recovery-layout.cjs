@@ -28,6 +28,10 @@ app.whenReady().then(async () => {
     document.body.replaceChildren(sprite, dock, composer);
     document.body.style.cssText = 'padding-top:70px;display:block';
     dock.hidden = false;
+    // The dock's five blocks now live behind one status line; a fixture that renders them
+    // has to open it, the same way a user would.
+    const line = document.getElementById('composerStatusLine');
+    line.hidden = false; line.open = true;
     const goal = document.getElementById('activeGoalRow'); goal.hidden = false;
     goal.innerHTML = '<svg class="ico"><use href="#i-pulse"/></svg><span class="queue-label">Loop · Continue the requested work and verify the result.</span><button class="dock-action" aria-label="Pause automation">⏻</button>';
     const plan = document.getElementById('agentPlan'); plan.hidden = false;

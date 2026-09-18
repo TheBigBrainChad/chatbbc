@@ -1,5 +1,7 @@
-import { $, el, icon, reconcileChildren, run, toast } from './dom.js';
+import { $, clockTime, el, icon, reconcileChildren, run, toast } from './dom.js';
 import { t, ui } from './i18n.js';
+import { lifecycleOf } from './message-lifecycle.js';
+import { paintComposerStatusLine } from './composer-status-line.js';
 import { isAstraModel } from '../shared/chat-models.js';
 import { injectableAttachments } from '../shared/input.js';
 import type { InputImage, InputAttachment } from '../shared/input.js';
@@ -266,14 +268,24 @@ let visibleInputIds = new Set<string>();
  * timeline and in the outbox.
  */
 export function inputMessageRow(host: DeliveryHost, entry: InputEntry, notice: boolean): HTMLElement {
-  const row = el('div', 'pending-message');
-  row.classList.toggle('is-delivered', !entry.error && ['sent', 'tool'].includes(entry.state));
-  row.classList.toggle('is-delivery-error', !!entry.error || entry.state === 'failed');
+  const stage = lifecycleOf(entry);
+  const row = el('div', 'pending-message msg');
+  row.classList.add(`tone-${stage.tone}`);
+  row.dataset.tone = stage.tone;
   row.dataset.inputId = entry.id;
   if (!visibleInputIds.has(entry.id)) row.classList.add('is-entering');
   visibleInputIds.add(entry.id);
   if (visibleInputIds.size > 100) visibleInputIds.delete(visibleInputIds.values().next().value!);
-  const status = () => entry.error || (entry.state === 'failed' ? t("Delivery not confirmed") : entry.state === 'decision' ? t("Preparing follow-up") : entry.state === 'browser' ? t("Delivery confirmation pending") : entry.state === 'tool' ? t("Sent to the active turn · awaiting receipt") : entry.dueAt > Date.now() ? t("Scheduled {0}", [new Date(entry.dueAt).toLocaleString()]) : entry.delivery === 'tool' ? t("Waiting for the next tool call") : t("Queued"));
+  // Where the message has got to, as text and never as a tooltip: a message in the outbox, one
+  // in the ChatGPT composer, one an active turn holds and one ChatGPT accepted are four
+  // different facts, and each keeps its own label and edge. An error the same row carries
+  // (a failed browser startup, a local chat that never materialised) outranks the generic
+  // wording, exactly as the delivery receipt it replaces did.
+  const head = el('div', 'msg-head');
+  head.append(el('span', 'msg-glyph', stage.tone === 'sent' ? '●' : stage.tone === 'failed' ? '!' : '◦'));
+  head.append(el('span', 'msg-label', () => lifecycleOf(entry).label));
+  head.append(el('span', 'msg-time', () => clockTime(entry.deliveredAt ?? entry.dueAt ?? entry.createdAt)));
+  row.append(head);
   const files = el('div', 'message-attachments');
   if (entry.attachments?.length) files.append(...entry.attachments.map(file => attachmentCard(file)));
   for (const image of entry.images ?? []) { const preview = document.createElement('img'); preview.src = image.dataUrl; preview.alt = image.name; files.append(preview); }
@@ -283,14 +295,10 @@ export function inputMessageRow(host: DeliveryHost, entry: InputEntry, notice: b
     text.setAttribute('dir', 'auto');
     row.append(text);
   }
-  const receipt = el('span', 'pending-message-status');
-  ui(receipt, 'title', status); ui(receipt, 'aria-label', status);
-  if (entry.error || entry.state === 'failed') {
-    ui(receipt, 'textContent', status);
-  }
-  else receipt.append(icon(['sent', 'tool'].includes(entry.state) ? 'i-check' : 'i-clock'));
-  receipt.hidden = !entry.error && ['sent', 'tool'].includes(entry.state) && host.hasLaterModelActivity(entry.deliveredAt ?? entry.offeredAt ?? entry.createdAt);
-  row.append(receipt);
+  row.append(el('div', 'msg-detail', () => entry.error ?? lifecycleOf(entry).detail));
+  // The actions a state allows keep their existing handlers and ids; only their container
+  // changes, so the row reads as one object with a label and its own controls.
+  const actions = el('div', 'msg-actions');
   if (notice) {
     const dismiss = dockAction(() => t("Dismiss delivery notice"), 'i-x', () => {});
     dismiss.onclick = async () => {
@@ -300,7 +308,7 @@ export function inputMessageRow(host: DeliveryHost, entry: InputEntry, notice: b
       else dismiss.disabled = false;
       void refreshInputQueue(host);
     };
-    row.append(dismiss);
+    actions.append(dismiss);
     const retry = dockAction(() => t("Retry delivery"), 'i-retry', () => {});
     retry.classList.add('delivery-retry');
     const unqueuedPlan = entry.stages !== undefined && !entry.stagesApplied;
@@ -311,7 +319,7 @@ export function inputMessageRow(host: DeliveryHost, entry: InputEntry, notice: b
       host.restoreDraftToComposer(entry);
       dismissInputNotice(host, entry.id);
     };
-    row.append(retry);
+    actions.append(retry);
   }
   if (['queued', 'browser'].includes(entry.state)) {
     const cancel = dockAction(() => t("Cancel delivery"), 'i-x', () => {});
@@ -321,14 +329,15 @@ export function inputMessageRow(host: DeliveryHost, entry: InputEntry, notice: b
       if (result) dismissInputNotice(host, entry.id);
       void refreshInputQueue(host);
     };
-    row.append(cancel);
+    actions.append(cancel);
   }
   if (entry.state === 'queued' && (entry.error?.startsWith('Message queued. Browser startup failed:') || entry.error?.startsWith('Local chat setup failed:'))) {
     const retry = dockAction(() => t("Retry browser"), 'i-retry', () => {});
     retry.classList.add('delivery-retry');
     retry.onclick = async () => { retry.setAttribute('disabled', ''); await run(window.api.retryInputBrowser(entry.id)); void refreshInputQueue(host); };
-    row.append(retry);
+    actions.append(retry);
   }
+  if (actions.childElementCount) row.append(actions);
   return row;
 }
 
@@ -437,6 +446,7 @@ export async function refreshInputQueue(host: DeliveryHost): Promise<void> {
     void refreshInputQueue(host);
   };
   const taskList = $('finishQueue'); taskList.hidden = queuedTasks.length === 0;
+  paintComposerStatusLine();
   const oldCards = new Map([...taskList.children].map(node => [(node as HTMLElement).dataset.inputId, node as HTMLElement]));
   const dragging = !!taskList.querySelector('.is-dragging');
   reconcileChildren(taskList, queuedTasks.map(entry => {

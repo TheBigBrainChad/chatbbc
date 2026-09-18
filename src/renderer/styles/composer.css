@@ -6,7 +6,10 @@
 /* One hairline for the input and every row stacked above it. */
 .card.is-session { --composer-edge: color-mix(in srgb, var(--ink) 6%, var(--card)); }
 .card.is-session:has(> .composer:focus-within, > .composer-dock:focus-within) { --composer-edge: color-mix(in srgb, var(--ink) 8%, var(--card)); }
-.composer { position: relative; display: grid; grid-template-columns: 32px minmax(0, 1fr) auto auto 36px; align-items: center; gap: 8px; width: calc(100% - 48px); max-width: 860px; margin: 14px auto 24px; border: 1px solid var(--composer-edge); border-radius: 22px; background: var(--card); padding: 14px 12px 10px; box-shadow: 0 8px 28px rgb(0 0 0 / 10%); }
+.composer { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto 36px; align-items: center; gap: 8px; width: calc(100% - 48px); max-width: 860px; margin: 14px auto 24px; border: 1px solid var(--composer-edge); border-radius: 22px; background: var(--card); padding: 14px 12px 10px; box-shadow: 0 8px 28px rgb(0 0 0 / 10%); }
+/* The toolbar is the composer's own container: how much room it has is its own width, not
+   the window's, so a narrow card drops the labels at the same point it runs out of space. */
+.composer { container-type: inline-size; container-name: composer; }
 /* Skills library and selection design adapted from igorbelchior86's #260. */
 .composer-selected-skills { grid-column: 1 / -1; grid-row: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 2px 8px; min-width: 0; }
 .composer-selected-skills[hidden] { display: none; }
@@ -201,20 +204,41 @@
 .composer-options { display: flex; flex-wrap: nowrap; align-items: center; gap: 2px; }
 .composer-options select { border: 0; background: transparent; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); max-width: 130px; padding: 5px; }
 .input-queue { width: 100%; margin: 0 auto; }
-.pending-message { position: relative; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; margin: 4px 0 26px auto; width: fit-content; max-width: 82%; text-align: start; }
+.pending-message { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 26px auto; width: fit-content; max-width: 82%; text-align: start; }
 .pending-message-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: calc(15px * var(--text-scale, 1)); line-height: 1.75; }
-.pending-message-status { position: absolute; right: 30px; top: calc(100% + 1px); height: 22px; display: inline-flex; align-items: center; justify-content: center; font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); line-height: 1.45; color: var(--soft); }
-.pending-message.is-delivery-error .pending-message-status { position: static; display: block; height: auto; margin-top: 4px; font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pending-message.is-delivery-error .pending-message-status { color: var(--red); }
-.pending-message .dock-action { position: absolute; right: 2px; top: calc(100% + 1px); display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 4px; border: 0; border-radius: 7px; background: transparent; color: var(--soft); cursor: pointer; }
-.pending-message .dock-action .ico { width: 15px; height: 15px; }
-.pending-message .dock-action:hover { color: var(--ink); background: var(--hover); }
-.pending-message-status .ico { width: 13px; height: 13px; }
-.pending-message.is-delivered .pending-message-status { right: 2px; width: 22px; }
-.pending-message .dock-action.delivery-retry { right: 28px; }
+/* The message as a lifecycle object: one card whose edge and label say where it has got to.
+   It travels in place, so the same row changes tone rather than becoming a second lookalike. */
+.pending-message.msg { border: 1px solid var(--line); border-left-width: 2px; background: var(--card); width: 100%; min-width: 0; }
+/* The transcript's prose body also answers to `.msg`; this row's head is chrome, not prose. */
+.pending-message.msg > .msg-head { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-bottom: 1px solid var(--line); font-family: var(--ui-font-mono); font-size: calc(10.5px * var(--text-scale, 1)); letter-spacing: .5px; }
+.pending-message.msg .msg-glyph { flex: none; font-size: calc(10px * var(--text-scale, 1)); }
+.pending-message.msg .msg-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.pending-message.msg .msg-time { flex: none; color: var(--faint); letter-spacing: 0; font-variant-numeric: tabular-nums; }
+.pending-message.msg > .msg-detail { padding: 7px 10px; color: var(--faint); font-family: var(--ui-font-mono); font-size: calc(10.5px * var(--text-scale, 1)); line-height: 1.5; overflow-wrap: anywhere; }
+.pending-message.msg > .pending-message-text { padding: 9px 10px; border-radius: 0; }
+.pending-message.msg > .message-attachments { padding: 9px 10px 0; }
+.pending-message.msg .attachment-chip, .pending-message.msg img { border-radius: 0; }
+.pending-message .msg-actions { display: flex; border-top: 1px solid var(--line); }
+.pending-message .msg-actions:empty { display: none; }
+.pending-message .msg-actions .dock-action { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 30px; height: 28px; padding: 6px 9px; border: 0; border-right: 1px solid var(--line); background: transparent; color: var(--soft); cursor: pointer; }
+.pending-message .msg-actions .dock-action:hover { color: var(--ink); background: var(--hover); }
+.pending-message .msg-actions .dock-action .ico { width: 14px; height: 14px; }
+/* One edge per fact. Accent rides the left rail only, never a fill. */
+.pending-message.msg.tone-queued { border-left-color: var(--faint); }
+.pending-message.msg.tone-queued :is(.msg-glyph, .msg-label) { color: var(--faint); }
+.pending-message.msg.tone-scheduled { border-left-color: var(--yellow); }
+.pending-message.msg.tone-scheduled :is(.msg-glyph, .msg-label) { color: var(--yellow); }
+.pending-message.msg.tone-composer { border-left-color: var(--cyan); }
+.pending-message.msg.tone-composer :is(.msg-glyph, .msg-label) { color: var(--cyan); }
+.pending-message.msg.tone-turn { border-left-color: var(--ice); }
+.pending-message.msg.tone-turn :is(.msg-glyph, .msg-label) { color: var(--ice); }
+.pending-message.msg.tone-sent { border-left-color: var(--green); }
+.pending-message.msg.tone-sent :is(.msg-glyph, .msg-label) { color: var(--green); }
+.pending-message.msg.tone-failed { border-left-color: var(--red); }
+.pending-message.msg.tone-failed :is(.msg-glyph, .msg-label) { color: var(--red); }
 .said.is-user.has-input-receipt { position: relative; margin-bottom: 22px; }
 .input-receipt { position: absolute; right: 2px; top: calc(100% + 1px); width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; color: var(--soft); }
-.input-receipt[hidden], .pending-message-status[hidden] { display: none; }
+.input-receipt[hidden] { display: none; }
 .input-receipt .ico { width: 13px; height: 13px; }
 
 @keyframes surface-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
@@ -261,8 +285,8 @@
 .composer-menu { position: relative; flex-shrink: 0; }
 .composer-menu > summary { display: flex; align-items: center; gap: 8px; list-style: none; cursor: pointer; border-radius: 8px; padding: 7px 8px; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); }
 .composer-menu > summary::-webkit-details-marker { display: none; }
-#attachmentMenu > summary { width: 32px; height: 36px; padding: 0; justify-content: center; }
-#attachmentMenu > summary .ico { display: block; width: 20px; height: 20px; }
+#attachmentMenu > summary { height: 36px; padding: 7px 10px; gap: 7px; justify-content: center; }
+#attachmentMenu > summary .ico { display: block; width: 17px; height: 17px; }
 .composer-menu > summary:hover, .composer-menu[open] > summary { color: var(--ink); background: var(--hover); }
 .composer-popover { position: absolute; z-index: 30; bottom: calc(100% + 12px); left: 0; width: 224px; padding: 7px; background: var(--card); border: 1px solid var(--edge); border-radius: 14px; box-shadow: 0 8px 30px #0005; }
 .model-menu .composer-popover { left: 50%; right: auto; translate: -50% 0; width: 260px; }
@@ -276,11 +300,25 @@
 .composer-popover select { width: 145px; color: var(--ink); background: var(--sunk); border: 1px solid var(--edge); padding: 6px; border-radius: 7px; }
 .composer-toolbar { gap: 6px; }
 @media (max-width: 760px) { .model-menu { width: 120px; flex-basis: 120px; } }
+/* A narrow card has no room for words beside every glyph. Measured against the real
+   composer: the labelled row needs 547px, so the labels stay at every width the app ships
+   (the default window gives 680px) and fall back to the glyph — which keeps its accessible
+   name — only when the card is too narrow to hold them. */
+@container composer (max-width: 565px) {
+  #attachmentMenu > summary span, #contextMeterLabel { display: none; }
+  #attachmentMenu > summary, #contextMeterButton { padding: 0 8px; }
+}
+@container composer (max-width: 435px) {
+  #composerModeLabel { display: none; }
+}
 
 
 .session-controls-menu { padding: 8px 0 0; margin-top: 8px; border-top: 1px solid var(--line); }
-#composerSettings > summary { width: 36px; height: 36px; padding: 8px; justify-content: center; }
-#composerSettings > summary .ico { width: 20px; height: 20px; }
+#composerSettings > summary { height: 36px; padding: 7px 9px; gap: 7px; justify-content: center; color: var(--soft); }
+#composerSettings > summary .ico { width: 16px; height: 16px; }
+.composer-mode-dot { font-size: calc(9px * var(--text-scale, 1)); color: var(--accent); }
+#composerModeLabel { font-weight: 500; color: var(--ink); }
+#attachmentMenu > summary span { font-weight: 500; color: var(--ink); }
 #composerSettings .composer-popover { width: 280px; left: 50%; right: auto; translate: -50% 0; transform-origin: bottom center; max-height: min(520px, 70vh); overflow-y: auto; }
 #composerSettings #loopDeliveryRow { flex-direction: column; align-items: stretch; gap: 7px; padding: 12px 9px 6px; }
 #loopDeliveryRow select { width: 100%; max-width: 100%; padding: 9px 11px; border-radius: 9px; line-height: 1.4; }
@@ -338,14 +376,27 @@
 .composer-dock[hidden], .app[data-screen='settings'] .composer-dock, .composer-dock:not(:has(> :not([hidden]))) { display: none; }
 .composer-dock .queued-input, #activeGoalRow, .recovery-notice { display: flex; align-items: center; gap: 10px; min-height: 38px; padding: 7px 12px; margin: 0; border: 0; border-bottom: 1px solid var(--edge); font-family: var(--ui-font-mono); font-size: calc(13px * var(--text-scale, 1)); color: var(--soft); }
 .recovery-countdown { flex-shrink: 0; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
-.composer-dock > :nth-last-child(1 of :not([hidden])) { border-bottom: 0; }
-.composer-dock > :nth-last-child(1 of :not([hidden])) > .queued-input:last-child { border-bottom: 0; }
+.composer-status-body > :nth-last-child(1 of :not([hidden])) { border-bottom: 0; }
+.composer-status-body > :nth-last-child(1 of :not([hidden])) > .queued-input:last-child { border-bottom: 0; }
 .composer-dock:not([hidden]):has(> :not([hidden])) + .composer { border-top-left-radius: 12px; border-top-right-radius: 12px; }
 .composer-dock .ico { width: 15px; height: 15px; flex-shrink: 0; }
 .composer-dock .queue-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-dock button { flex-shrink: 0; }
 .composer-dock .dock-action { border: 0; border-radius: 5px; background: transparent; color: var(--soft); padding: 4px; display: inline-flex; align-items: center; cursor: pointer; }
 .composer-dock .dock-action:hover { color: var(--ink); background: var(--hover); }
+/* One status line where five stacked blocks used to be. The line says what is live; the
+   disclosure reveals the blocks themselves, which keep their ids and their paint functions. */
+.composer-status-line { display: block; min-width: 0; }
+.composer-status-line > summary { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 5px 12px; list-style: none; cursor: pointer; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
+.composer-status-line > summary::-webkit-details-marker { display: none; }
+.composer-status-line > summary::before { content: ''; flex: none; width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform 120ms ease; }
+.composer-status-line[open] > summary::before { transform: rotate(45deg); }
+.composer-status-line > summary:hover, .composer-status-line[open] > summary { color: var(--ink); background: var(--hover); }
+.composer-status-line > summary:focus-visible { outline: 2px solid var(--ink); outline-offset: -3px; }
+.composer-status-segments { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; min-width: 0; }
+/* The separator is a real element between segments, so a wrapped line still reads as a list. */
+.composer-status-segment + .composer-status-segment::before { content: '·'; margin-right: 14px; color: var(--faint); }
+.composer-status-body { min-width: 0; }
 .composer-dock .queued-input.is-editing { align-items: center; }
 /* Both of the dock's editors share this box: one padded line box the user can pull
    taller. The family is set per editor below, because one is chrome and one is prose. */
@@ -374,10 +425,11 @@
    state it here instead of inheriting the row's mono. */
 .goal-live-preview { max-height: 120px; overflow: auto; white-space: pre-wrap; margin: 6px 0 0; font-family: var(--ui-font, var(--ui-font-prose)); color: var(--soft); }
 
-.context-meter { position: relative; flex: 0 0 28px; }
-#contextMeterButton { display: grid; place-items: center; width: 28px; height: 32px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--soft); cursor: pointer; }
+.context-meter { position: relative; flex: 0 0 auto; }
+#contextMeterButton { display: flex; align-items: center; gap: 7px; height: 32px; padding: 0 9px; border: 0; border-radius: 0; background: transparent; color: var(--soft); cursor: pointer; font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); white-space: nowrap; }
+#contextMeterLabel { color: var(--soft); font-variant-numeric: tabular-nums; }
 #contextMeterButton:hover { background: var(--hover); }
-#contextMeterButton svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; transform: rotate(-90deg); }
+#contextMeterButton svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; transform: rotate(-90deg); }
 .context-track { opacity: .35; }
 #contextMeterInfo { display: none; position: absolute; z-index: 20; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); width: max-content; max-width: min(310px, 75vw); white-space: pre-line; padding: 12px 16px; border: 1px solid var(--edge); border-radius: 12px; background: var(--card); color: var(--ink); font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); line-height: 1.6; box-shadow: 0 8px 24px #0003; text-align: center; }
 .context-meter:hover #contextMeterInfo, .context-meter:focus-within #contextMeterInfo, .context-meter.pinned #contextMeterInfo { display: block; }

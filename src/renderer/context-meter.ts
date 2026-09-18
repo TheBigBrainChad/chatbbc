@@ -7,9 +7,10 @@ import { isProModel } from '../shared/chat-models.js';
 /** Recorder estimates, never a claim about the provider's exact context window. */
 export function paintContextMeter(session: SessionSummary | null, config: Config, composer: { model: string; reasoningEffort: ReasoningEffort } | null = null): void {
   const button = document.getElementById('contextMeterButton');
+  const label = document.getElementById('contextMeterLabel');
   const panel = document.getElementById('contextMeterInfo');
   const arc = document.getElementById('contextMeterArc');
-  if (!button || !panel || !arc) return;
+  if (!button || !label || !panel || !arc) return;
   const used = Math.max(0, session?.contextTokens ?? 0);
   // The picker owns the next send choice; the recording may still describe the
   // preceding turn (or not exist yet in a new chat).
@@ -28,6 +29,8 @@ export function paintContextMeter(session: SessionSummary | null, config: Config
       : t('Auto-compaction off')].join('\n');
   ui(panel, 'textContent', description);
   ui(button, 'aria-label', () => description().replaceAll('\n', '. '));
+  // The ring is a feature, not an ornament: the estimate it draws is also stated in words.
+  ui(label, 'textContent', () => t("context {0}", [tokens]));
 }
 
 export function initContextMeter(): void {

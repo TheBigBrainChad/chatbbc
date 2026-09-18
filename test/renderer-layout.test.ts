@@ -306,7 +306,10 @@ describe('the chat panel cards', () => {
     // Subhead, scrolling conversation, shared plan/queue dock, composer and footer.
     const layoutChildren = [...card.children].filter(child => child.id !== 'chatSettingsBtn');
     expect(layoutChildren.length).toBe(5);
-    expect(document.getElementById('composerDock')!.firstElementChild?.id).toBe('agentPlan');
+    // Task 7 replaced the dock's five stacked rows with one status line; the blocks it
+    // summarises now live inside it, so the dock's own first child is the line.
+    expect(document.getElementById('composerDock')!.firstElementChild?.id).toBe('composerStatusLine');
+    expect(document.getElementById('composerStatusBody')!.firstElementChild?.id).toBe('agentPlan');
     expect(document.getElementById('inputQueue')!.closest('#chatBody')).not.toBeNull();
     expect(card.classList.contains('is-session')).toBe(true);
     expect(tracks("[data-panel='chat'] .card.is-session")).toHaveLength(layoutChildren.length);

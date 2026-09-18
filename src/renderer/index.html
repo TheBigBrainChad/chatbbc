@@ -968,7 +968,12 @@
 
               </div>
             </div>
-            <div class="composer-dock" id="composerDock"><section class="agent-plan" id="agentPlan" aria-label="Agent task plan" hidden></section><div id="recoveryStatus" role="status" hidden></div><div id="taskPlanPreview" aria-label="Plan stages" hidden></div><div id="finishQueue" aria-label="Queued tasks" hidden></div><div id="activeGoalRow" hidden></div></div>
+            <div class="composer-dock" id="composerDock">
+              <details class="composer-status-line" id="composerStatusLine" hidden>
+                <summary id="composerStatusToggle"><span class="composer-status-segments" id="composerStatusSegments"></span></summary>
+                <div class="composer-status-body" id="composerStatusBody"><section class="agent-plan" id="agentPlan" aria-label="Agent task plan" hidden></section><div id="recoveryStatus" role="status" hidden></div><div id="taskPlanPreview" aria-label="Plan stages" hidden></div><div id="finishQueue" aria-label="Queued tasks" hidden></div><div id="activeGoalRow" hidden></div></div>
+              </details>
+            </div>
             <form class="composer" id="composer">
               <div id="skillPicker" class="skill-autocomplete" aria-label="Skills" hidden></div>
               <div id="composerSelectedSkills" class="composer-selected-skills" aria-label="Selected skills" hidden></div>
@@ -976,7 +981,7 @@
               <div id="composerImages" class="composer-images" hidden></div><textarea dir="auto" id="chatInput" rows="1" placeholder="Ask anything…"></textarea>
               <div class="composer-toolbar">
                 <details class="composer-menu" id="attachmentMenu">
-                  <summary aria-label="Add attachments" title="Add attachments"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-plus" /></svg></summary>
+                  <summary aria-label="Add attachments" title="Add attachments"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-plus" /></svg><span>Attach</span></summary>
                   <div class="composer-popover">
                     <button id="attachImages" type="button"><svg class="ico" viewBox="0 0 24 24"><use href="#i-image" /></svg>Add photos &amp; files</button>
                     <button id="composerFolder" type="button"><svg class="ico" viewBox="0 0 24 24"><use href="#i-folder" /></svg>Share a folder</button>
@@ -988,10 +993,10 @@
                 </details>
                 <div class="composer-options">
                   <details class="composer-menu" id="composerSettings">
-                    <summary aria-label="Chat options" title="Chat options"><svg class="ico" viewBox="0 0 24 24"><use href="#i-gear" /></svg></summary>
+                    <summary aria-label="Chat options" title="Chat options"><span class="composer-mode-dot" aria-hidden="true">◆</span><span id="composerModeLabel">Ordinary</span><svg class="ico picker-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg></summary>
                     <div class="composer-popover">
                       <div class="automation-switch" id="automationSwitch" role="radiogroup" aria-label="Chat mode">
-                        <button type="button" role="radio" aria-checked="true" data-mode="off" data-keep-menu="true">Off</button>
+                        <button type="button" role="radio" aria-checked="true" data-mode="off" data-keep-menu="true">Ordinary</button>
                         <button type="button" role="radio" aria-checked="false" data-mode="goal" data-keep-menu="true">Goal</button>
                         <button type="button" role="radio" aria-checked="false" data-mode="loop" data-keep-menu="true">Loop</button>
                         </div><select hidden id="chatAutomation" aria-label="Chat automation"><option value="off">Off</option><option value="goal">Goal</option><option value="loop">Loop</option></select>
@@ -1014,6 +1019,7 @@
                 <div class="context-meter" id="contextMeter">
                   <button type="button" id="contextMeterButton" aria-label="Estimated session context" aria-expanded="false" aria-controls="contextMeterInfo">
                     <svg viewBox="0 0 16 16" aria-hidden="true"><circle class="context-track" cx="8" cy="8" r="6"/><circle id="contextMeterArc" cx="8" cy="8" r="6" stroke-dasharray="0 37.7"/></svg>
+                    <span id="contextMeterLabel"></span>
                   </button>
                   <div id="contextMeterInfo" role="tooltip">Session context · estimated</div>
                 </div>
