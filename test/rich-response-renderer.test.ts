@@ -66,7 +66,7 @@ it('contains wide tables and diagrams in labelled keyboard-scrollable regions wi
   const image = view.querySelector<HTMLElement>('.rich-image-slot')!;
   expect(image.style.aspectRatio).toBe('1600 / 900');
   expect(image.getAttribute('role')).toBe('img');
-  expect(image.getAttribute('aria-label')).toBe('Architecture drawing');
+  expect(image.getAttribute('aria-label')).toBe('Architecture drawing — Image preview unavailable');
   expect(image.textContent).toMatch(/preview.*(loading|unavailable)/i);
   expect(view.querySelector('img, canvas, svg')).toBeNull();
 });
@@ -95,4 +95,21 @@ it('shows a truthful unavailable card and collapsed canonical source for explici
     expect(disclosure.querySelector('pre')?.textContent).toBe(source);
     expect(view.querySelector('grid, script, img')).toBeNull();
   }
+});
+
+it('shows only a fully validated unavailable response accessible summary outside the collapsed source', () => {
+  const source = '<grid>original component source</grid>';
+  const valid: RichResponse = { ...fixture([]), status: 'unavailable', reason: 'unsupported',
+    accessibleText: 'A diagram of three linked services' };
+  const visible = renderRichResponse(valid, source);
+  expect(visible.querySelector('.rich-accessible-summary')?.textContent).toBe('A diagram of three linked services');
+  expect(visible.querySelector('details.rich-source')?.hasAttribute('open')).toBe(false);
+  expect(visible.querySelector('details.rich-source pre')?.textContent).toBe(source);
+  expect(visible.querySelector('script, grid, img')).toBeNull();
+
+  const invalid = renderRichResponse({ ...valid, accessibleText: 'UNVERIFIED CONTENT',
+    onclick: 'run()' } as unknown as RichResponse, source);
+  expect(invalid.querySelector('.rich-accessible-summary')).toBeNull();
+  expect(invalid.textContent).not.toContain('UNVERIFIED CONTENT');
+  expect(invalid.querySelector('details.rich-source pre')?.textContent).toBe(source);
 });

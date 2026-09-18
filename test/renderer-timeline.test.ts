@@ -1720,7 +1720,21 @@ it('does not infer rich UI from ordinary authored component code or hide an unav
   expect(rows[0]!.querySelector('pre code')?.textContent).toBe('<text>code example</text>\n');
   expect(rows[0]!.querySelector('.rich-unavailable')).toBeNull();
   expect(rows[1]!.hidden).toBe(false);
-  expect(rows[1]!.querySelector('details.rich-source')).not.toBeNull();
+  expect(rows[1]!.querySelector('.rich-media-unavailable')?.textContent).toContain('Image preview unavailable');
+  expect(rows[1]!.querySelector('details.rich-source')).toBeNull();
+});
+
+it('keeps authored Markdown readable beside an unsupported generated-image notice', async () => {
+  const prose: SessionEvent = { kind: 'assistant_message', seq: 1, time: T0, source: 'extension',
+    messageId: 'answer-with-image', message: text('## Key finding\n\nThe network is connected.'),
+    richMediaUnavailable: 'unsupported', final: true };
+  const { w } = await boot([prose]);
+  const row = w.document.querySelector<HTMLElement>('.ev-assistant_message')!;
+  expect(row.hidden).toBe(false);
+  expect(row.querySelector('.msg h2')?.textContent).toBe('Key finding');
+  expect(row.querySelector('.msg p')?.textContent).toBe('The network is connected.');
+  expect(row.querySelector('.rich-media-unavailable')?.textContent).toContain('Image preview unavailable');
+  expect(row.querySelector('.rich-source')).toBeNull();
 });
 
 it('charges each rich tree against the existing resident paint budget even when source text is empty', async () => {

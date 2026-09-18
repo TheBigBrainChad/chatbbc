@@ -16,7 +16,7 @@ import { messageReaction, withoutMessageReaction } from '../shared/message-react
 import { goalErrorMessage } from '../shared/goal-errors.js';
 import type { GoalModel } from '../shared/goal-reasoning.js';
 import { renderGoalReasoning } from './goal-reasoning.js';
-import { renderRichResponse, renderUnavailableRichResponse } from './rich-response.js';
+import { renderRichResponse } from './rich-response.js';
 import { RICH_LIMITS } from '../shared/rich-response.js';
 import { preserveTimelineViewport } from './timeline-scroll.js';
 import { createSidebarOrder } from './sidebar-order.js';
@@ -1270,8 +1270,10 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       const box = el('div', 'said');
       box.append(el('b', '', () => event.final ? 'ChatGPT' : t("ChatGPT (partial)")));
       box.append(event.rich ? renderRichResponse(event.rich, event.message.text)
-        : event.richMediaUnavailable ? renderUnavailableRichResponse(event.message.text)
-          : renderedMarkdown(event.message.text, event.renderedHtml));
+        : renderedMarkdown(event.message.text, event.renderedHtml));
+      if (event.richMediaUnavailable) {
+        box.append(el('p', 'meta rich-media-unavailable', () => t("Image preview unavailable — open original in ChatGPT")));
+      }
       return box;
     }
     case 'native_image': {

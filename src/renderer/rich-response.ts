@@ -1,7 +1,7 @@
 import { parseRichResponse, type RichNode, type RichResponse } from '../shared/rich-response.js';
 
 /** Canonical source is retained, but component syntax is never executed to recreate a UI. */
-export function renderUnavailableRichResponse(source: string): HTMLElement {
+function renderUnavailableRichResponse(source: string, accessibleText = ''): HTMLElement {
   const box = document.createElement('div');
   box.className = 'msg rich-response rich-unavailable';
   box.setAttribute('dir', 'auto');
@@ -17,7 +17,15 @@ export function renderUnavailableRichResponse(source: string): HTMLElement {
   raw.setAttribute('dir', 'auto');
   raw.textContent = source;
   disclosure.append(summary, raw);
-  box.append(explanation, disclosure);
+  box.append(explanation);
+  if (accessibleText.trim()) {
+    const visible = document.createElement('p');
+    visible.className = 'rich-accessible-summary';
+    visible.setAttribute('dir', 'auto');
+    visible.textContent = accessibleText;
+    box.append(visible);
+  }
+  box.append(disclosure);
   return box;
 }
 
@@ -132,7 +140,7 @@ function renderNode(node: RichNode): HTMLElement {
     slot.className = 'rich-image-slot';
     slot.dataset.richNodeId = node.id;
     slot.setAttribute('role', 'img');
-    slot.setAttribute('aria-label', node.alt || 'Image preview unavailable');
+    slot.setAttribute('aria-label', node.alt ? `${node.alt} — Image preview unavailable` : 'Image preview unavailable');
     if (node.width !== null && node.height !== null) slot.style.aspectRatio = `${node.width} / ${node.height}`;
     const label = document.createElement('span');
     label.textContent = node.alt ? `${node.alt} — Image preview unavailable` : 'Image preview unavailable';
@@ -172,7 +180,8 @@ function renderNode(node: RichNode): HTMLElement {
 /** Strictly reparse the entire stored tree; malformed/partial data gets only source fallback. */
 export function renderRichResponse(rich: RichResponse, fallback: string): HTMLElement {
   const clean = parseRichResponse(rich);
-  if (!clean || clean.status !== 'available' || clean.nodes.length === 0) return renderUnavailableRichResponse(fallback);
+  if (!clean || clean.status !== 'available' || clean.nodes.length === 0)
+    return renderUnavailableRichResponse(fallback, clean?.status === 'unavailable' ? clean.accessibleText : '');
   const box = document.createElement('div');
   box.className = 'msg rich-response';
   box.setAttribute('dir', 'auto');
