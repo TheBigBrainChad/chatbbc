@@ -7,7 +7,8 @@ import { effectiveCapabilities, getConfig } from './config.js';
 import { isContained, resolvePath } from './sandbox.js';
 import { listSkills, readSkill, readSkillTextSnapshot, skillsDirectory, type SkillDocument } from './skills.js';
 import { parseSkillConfiguration, parseSkillFrontmatter, parseSkillInterface, type SkillConfiguration } from './skill-metadata.js';
-import type { SkillLibrary, SkillMetadata, SkillScope, SkillSource } from '../shared/skills.js';
+import { currentSkillState, resolveSkillPolicy } from './skill-state.js';
+import type { LibrarySkill, SkillLibrary, SkillMetadata, SkillScope, SkillSource } from '../shared/skills.js';
 
 export interface SkillLibraryScope { projectPath?: string | null }
 type Candidate = { file: string; scope: SkillScope; source: SkillSource };
@@ -83,7 +84,14 @@ async function locations(scope: SkillLibraryScope): Promise<{ roots: Candidate[]
   return { roots, configs };
 }
 
-export async function listSkillLibrary(scope: SkillLibraryScope = {}): Promise<SkillLibrary> {
+/**
+ * Every skill that exists, each row carrying the policy resolved for it.
+ *
+ * Both catalog readers come through here, so the two can never disagree about what "off" means:
+ * `listSkillLibrary` drops the disabled rows, `listSkillInventory` keeps them so Settings can
+ * offer a way back.
+ */
+async function libraryWithPolicy(scope: SkillLibraryScope): Promise<SkillLibrary> {
   const managed = await listSkills();
   const library: SkillLibrary = { skills: [], roots: [], errors: [], includeInstructions: true };
   const root = skillsDirectory();
@@ -114,21 +122,32 @@ export async function listSkillLibrary(scope: SkillLibraryScope = {}): Promise<S
   }
   library.includeInstructions = !invalidConfiguration && (config.includeInstructions ?? true);
   if (config.maxContextTokens !== undefined) library.maxContextTokens = config.maxContextTokens;
-  const enabled = (name: string, file: string): boolean => {
-    let value = true;
+  // `undefined` means no external rule addressed this skill, which is different from a rule that
+  // says "off". Only that distinction lets an app-level choice sit above a rule, and a rule sit
+  // above the default.
+  const externalEnabled = (name: string, file: string): boolean | undefined => {
+    let value: boolean | undefined;
     for (const rule of config.rules) if (rule.name === name || (rule.path && samePath(rule.path, file))) value = rule.enabled;
     return value;
   };
+  const appState = currentSkillState();
+  const policyFor = (id: string, declaration: boolean, name: string, file: string) =>
+    resolveSkillPolicy(id, declaration, externalEnabled(name, file), appState);
   const seen = new Set<string>();
+  const bundledNames = new Set<string>();
   for (const summary of managed) {
     const directory = path.join(root, summary.id), file = path.join(directory, 'SKILL.md');
     const document = await readSkill(summary.id);
     let metadata = { name: summary.name, description: summary.description };
     try { metadata = { ...metadata, ...parseSkillFrontmatter(document.text) }; } catch { /* Existing plain Markdown remains supported. */ }
-    if (!enabled(metadata.name, file)) continue;
     const extra = await interfaceFor(directory, true, library.errors);
-    library.skills.push({ ...summary, ...metadata, ...extra, scope: 'managed', source: 'managed', managed: true });
+    const policy = policyFor(summary.id, extra.allowImplicitInvocation, metadata.name, file);
+    library.skills.push({
+      ...summary, ...metadata, ...extra, allowImplicitInvocation: policy.implicit, enabled: policy.enabled,
+      scope: 'managed', source: 'managed', managed: true
+    });
     seen.add(identity(file));
+    bundledNames.add(metadata.name.normalize('NFKC').toLowerCase());
   }
   let entries = 0, directories = 0;
   const seenDirectories = new Set<string>();
@@ -159,11 +178,16 @@ export async function listSkillLibrary(scope: SkillLibraryScope = {}): Promise<S
           if (!isContained(resolved.real, document.real)) throw new Error('Skill file leaves its discovery root');
           if (!seen.has(identity(document.real))) {
             const metadata = parseSkillFrontmatter(document.text);
-            if (enabled(metadata.name, document.real)) {
+            // A discovered skill that merely duplicates a bundled one is the unadapted twin of a
+            // curated skill. Listing both would offer the user two entries with one meaning.
+            const shadowed = bundledNames.has(metadata.name.normalize('NFKC').toLowerCase());
+            if (!shadowed) {
               const hash = createHash('sha256').update(identity(document.real)).digest('hex').slice(0, 12);
               const stem = path.basename(current.directory).normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 35) || 'skill';
               const id = `${stem}--${candidate.scope}-${hash}`;
-              library.skills.push({ id, ...metadata, path: document.virtual, ...await interfaceFor(current.directory, false, library.errors),
+              const extra = await interfaceFor(current.directory, false, library.errors);
+              const policy = policyFor(id, extra.allowImplicitInvocation, metadata.name, document.real);
+              library.skills.push({ id, ...metadata, path: document.virtual, ...extra, allowImplicitInvocation: policy.implicit, enabled: policy.enabled,
                 scope: candidate.scope, source: candidate.source, managed: false });
               seen.add(identity(document.real));
             }
@@ -181,6 +205,23 @@ export async function listSkillLibrary(scope: SkillLibraryScope = {}): Promise<S
   }
   if (scope.projectPath) await approved(scope.projectPath);
   return library;
+}
+
+/** The model-facing catalog: only the skills the user has left switched on. */
+export async function listSkillLibrary(scope: SkillLibraryScope = {}): Promise<SkillLibrary> {
+  const library = await libraryWithPolicy(scope);
+  library.skills = library.skills.filter(skill => skill.enabled !== false);
+  return library;
+}
+
+/**
+ * Every skill that exists, with its resolved policy, including ones the user switched off.
+ * Settings needs the disabled rows to offer a way back; the model must not see them. One
+ * function resolves the policy for both, so neither can disagree with the other about "off".
+ */
+export async function listSkillInventory(scope: SkillLibraryScope = {}): Promise<{ skills: LibrarySkill[]; errors: string[] }> {
+  const library = await libraryWithPolicy(scope);
+  return { skills: library.skills, errors: library.errors };
 }
 
 export async function readLibrarySkill(id: string, scope: SkillLibraryScope = {}, library?: SkillLibrary): Promise<SkillDocument> {
@@ -203,6 +244,11 @@ export function skillLibraryInstructions(library: SkillLibrary): string {
     'Use leading /<id> or /prompt <id> to select a skill. Supporting scripts, references and assets stay inert until used through existing tools and permissions. External Skills never grant filesystem access or change the project.',
     'Install or maintain requested skills with existing filesystem and command capabilities. The managed destination is /skills.'];
   if (!library.includeInstructions) return lines.join('\n') + '\nThe Skills catalog is disabled by configuration; explicit selections remain available.';
+  // Proactive reading is advertised only while some listed skill still consents to it: a skill the
+  // user has switched to named-only must not be offered for the model to open on its own.
+  if (library.skills.some(skill => skill.allowImplicitInvocation)) {
+    lines.push('When a task matches a listed skill, read its file with `read` before starting and follow it. Skills stay inert until you open them.');
+  }
   const limit = (library.maxContextTokens ?? 2000) * 4;
   let chars = lines.join('\n').length;
   if (chars > limit) return '';

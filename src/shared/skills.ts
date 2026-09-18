@@ -21,6 +21,8 @@ export interface LibrarySkill extends SkillSummary, SkillMetadata {
   scope: SkillScope;
   source: SkillSource;
   managed: boolean;
+  /** Resolved for this skill. Present on inventory reads; the model-facing catalog carries only enabled rows. */
+  enabled?: boolean;
 }
 export interface SkillLibrary {
   skills: LibrarySkill[];
