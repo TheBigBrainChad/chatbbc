@@ -11,7 +11,10 @@ app.whenReady().then(async () => {
   const win = new BrowserWindow({ show: false, width: 1000, height: 900,
     webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
-    const css = fs.readFileSync(path.join(root, 'src/renderer/styles.css'), 'utf8') +
+    // The renderer's stylesheet is split by responsibility: the modules are read in link
+    // order, which is also cascade order, so this sees the same rules the renderer applies.
+    const sheets = ['base', 'shell', 'transcript', 'composer', 'panels', 'pages', 'dialogs'];
+    const css = sheets.map(name => fs.readFileSync(path.join(root, 'src/renderer/styles', `${name}.css`), 'utf8')).join('\n') +
       (process.argv.includes('--without-containment') ? '.appearance-panel select, [data-view="settings"] select { contain: none; }' : '');
     const html = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8')
       .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<link\b[^>]*>/gi, '');

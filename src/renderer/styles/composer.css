@@ -1,7 +1,7 @@
 /* ---------------------------------------------------------------- composer
    The composer and everything that feeds it: toolbar, menus and popovers,
    skills, attachments, the queue and outbox rows, the status line, the goal
-   lifecycle, the context meter and the compaction settings pane. Loaded fourth. */
+   lifecycle, the context meter and the staged compaction UI. Loaded fourth. */
 
 /* One hairline for the input and every row stacked above it. */
 .card.is-session { --composer-edge: color-mix(in srgb, var(--ink) 6%, var(--card)); }

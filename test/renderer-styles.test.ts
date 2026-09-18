@@ -16,6 +16,17 @@ describe('renderer stylesheets', () => {
     expect(html).toContain('href="./styles/base.css"');
   });
 
+  it('links the modules in cascade order', async () => {
+    const html = await fs.readFile(path.join(renderer, 'index.html'), 'utf8');
+    // Order is load bearing: an equal-specificity tie between two modules is decided by
+    // which sheet comes second, so the links must stay in the order the modules expect.
+    const positions: number[] = sheets.map(name => html.indexOf(`href="./styles/${name}.css"`));
+    for (const [i, position] of positions.entries()) {
+      expect(position, `styles/${sheets[i]}.css is not linked`).toBeGreaterThan(-1);
+      if (i > 0) expect(position, `styles/${sheets[i]}.css must load after styles/${sheets[i - 1]}.css`).toBeGreaterThan(positions[i - 1]!);
+    }
+  });
+
   it('keeps the whole declaration set — the split loses nothing', async () => {
     const merged = (await Promise.all(sheets.map(async name =>
       await fs.readFile(path.join(renderer, 'styles', `${name}.css`), 'utf8')))).join('\n');

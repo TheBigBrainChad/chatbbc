@@ -33,6 +33,19 @@ export const DIR_LINK: 'junction' | 'dir' = process.platform === 'win32' ? 'junc
 
 export const IS_WINDOWS = process.platform === 'win32';
 
+/**
+ * The renderer's stylesheet, joined from the modules `index.html` links.
+ *
+ * The renderer reads its CSS as one cascade; a test that reads one file would see a subset
+ * of the rules. The order here is the link order in `index.html`, which is cascade order.
+ */
+export const RENDERER_SHEETS = ['base', 'shell', 'transcript', 'composer', 'panels', 'pages', 'dialogs'] as const;
+
+export async function readRendererStyles(): Promise<string> {
+  const renderer = path.join(process.cwd(), 'src', 'renderer', 'styles');
+  return (await Promise.all(RENDERER_SHEETS.map(name => fs.readFile(path.join(renderer, `${name}.css`), 'utf8')))).join('\n');
+}
+
 /** Pause an existing async boundary; entry is observable and release is idempotent. */
 export function faultGate(): { entered: Promise<void>; hold(): Promise<void>; release(): void } {
   let entered!: () => void, release!: () => void;

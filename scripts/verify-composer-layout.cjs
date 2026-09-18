@@ -7,7 +7,10 @@ const assert = require('node:assert/strict');
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ show: false, width: 1100, height: 800,
     webPreferences: { sandbox: true, backgroundThrottling: false } });
-  const css = fs.readFileSync(path.join(__dirname, '../src/renderer/styles.css'), 'utf8');
+  // The renderer's stylesheet is split by responsibility: the modules are read in link
+  // order, which is also cascade order, so this sees the same rules the renderer applies.
+  const sheets = ['base', 'shell', 'transcript', 'composer', 'panels', 'pages', 'dialogs'];
+  const css = sheets.map(name => fs.readFileSync(path.join(__dirname, '../src/renderer/styles', `${name}.css`), 'utf8')).join('\n');
   await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`<style>${css}</style>
     <section id="host" hidden><form id="composer" class="composer">
     <textarea id="chatInput" rows="1" dir="auto" placeholder="Ask anything…"></textarea>

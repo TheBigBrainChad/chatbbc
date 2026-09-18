@@ -9,7 +9,10 @@ app.setPath('userData', path.join(output, 'runtime'));
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ show: false, width: 1100, height: 800, webPreferences: { sandbox: true } });
   try {
-    const css = fs.readFileSync(path.join(root, 'src/renderer/styles.css'), 'utf8');
+    // The renderer's stylesheet is split by responsibility: the modules are read in link
+    // order, which is also cascade order, so this sees the same rules the renderer applies.
+    const sheets = ['base', 'shell', 'transcript', 'composer', 'panels', 'pages', 'dialogs'];
+    const css = sheets.map(name => fs.readFileSync(path.join(root, 'src/renderer/styles', `${name}.css`), 'utf8')).join('\n');
     const html = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8')
       .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<link\b[^>]*>/gi, '');
     const main = fs.readFileSync(path.join(root, 'src/renderer/main.ts'), 'utf8');

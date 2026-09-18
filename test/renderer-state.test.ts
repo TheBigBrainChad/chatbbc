@@ -7,6 +7,7 @@ import { JSDOM } from 'jsdom';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DEFAULT_GOAL_MODEL, DEFAULT_GOAL_SYSTEM_PROMPT } from '../src/shared/goal.js';
 import { BROWSER_READ_TOOLS, BROWSER_WRITE_TOOLS } from '../src/shared/browser-control.js';
+import { readRendererStyles } from './helpers.js';
 
 let dom: JSDOM | null = null;
 afterEach(() => {
@@ -1043,7 +1044,7 @@ it('keeps folder access discoverable after setup and navigates without granting 
   mounted.push(connected);
   const doc = mounted.window.document;
   const styles = doc.createElement('style');
-  styles.textContent = await fs.readFile(path.join(process.cwd(), 'src/renderer/styles.css'), 'utf8');
+  styles.textContent = await readRendererStyles();
   doc.head.append(styles);
   doc.querySelector<HTMLButtonElement>('[data-tab="setup"]')!.click();
 

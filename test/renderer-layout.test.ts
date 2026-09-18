@@ -18,6 +18,7 @@ import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { filterSettingsSections } from '../src/renderer/dom.js';
+import { readRendererStyles } from './helpers.js';
 import { sessionWorkingAt } from '../src/shared/session-activity.js';
 import { CHAT_ACTIVE_MS, type SessionSummary } from '../src/shared/session.js';
 
@@ -30,7 +31,7 @@ beforeAll(async () => {
   browserPreferencesSource = await fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'browser-preferences.ts'), 'utf8');
   const [html, styles, chat] = await Promise.all([
     fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'index.html'), 'utf8'),
-    fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'styles.css'), 'utf8'),
+    readRendererStyles(),
     fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'chat.ts'), 'utf8')
   ]);
   document = new JSDOM(html).window.document;
