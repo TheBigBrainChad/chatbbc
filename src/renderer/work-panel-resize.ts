@@ -22,8 +22,8 @@ function currentWidth(host: HTMLElement, pane: HTMLElement): number {
 function setWidth(host: HTMLElement, width: number, persist = false): number {
   const next = Math.round(Math.max(MIN_WIDTH, Math.min(maximum(host), width)));
   host.style.setProperty('--work-panel-width', `${next}px`);
-  // Files and Sub-agents are two projections of the same work slot. Keep both separators'
-  // accessibility state synchronized even while one pane is hidden.
+  // Files, Sub-agents and Terminal are three projections of one work slot. Keep every separator's
+  // accessibility state synchronized even while its pane is hidden.
   for (const handle of host.querySelectorAll<HTMLElement>('.work-panel-resize')) {
     handle.setAttribute('aria-valuemin', String(MIN_WIDTH));
     handle.setAttribute('aria-valuemax', String(Math.round(maximum(host))));
@@ -39,17 +39,28 @@ function setWidth(host: HTMLElement, width: number, persist = false): number {
  * Lends the work slot its maximum width (`End`'s width, the host minus the 360px chat column),
  * which is the only width a terminal is readable at, and hands the reader's own width back.
  *
- * The returned function restores. Nothing is persisted: this is a temporary view of the same
- * slot, so the width the reader chose is still the width their next visit starts from.
+ * The returned function restores — but only while the slot is still at the width this call lent
+ * it. The widen lives in the same slot the reader's own drag and arrow keys write to, and those
+ * persist; unconditionally restoring would take the screen back to the pre-widen width while
+ * storage held the reader's newer one, so the next launch would open at a width this session
+ * never showed. If the reader moved the edge while the terminal was selected, their width wins.
+ *
+ * Nothing is persisted here: this is a temporary view of the same slot, so the width the reader
+ * chose is still the width their next visit starts from.
  */
 export function widenWorkPanel(host: HTMLElement, pane: HTMLElement): () => void {
   const previous = currentWidth(host, pane);
-  setWidth(host, maximum(host));
-  return () => setWidth(host, previous);
+  const lent = setWidth(host, maximum(host));
+  return () => {
+    const live = Number.parseFloat(host.style.getPropertyValue('--work-panel-width'));
+    // A differing live width means the reader resized while this widen was in force.
+    if (Number.isFinite(live) && Math.round(live) !== lent) return;
+    setWidth(host, previous);
+  };
 }
 
 /**
- * Adds the shared horizontal resize affordance used by the right-side Files and Sub-agents panes.
+ * Adds the shared horizontal resize affordance used by every pane in the work slot.
  * The width belongs to the work slot, not to either pane, so switching tools preserves it.
  */
 export function attachWorkPanelResize(host: HTMLElement, pane: HTMLElement): HTMLElement {

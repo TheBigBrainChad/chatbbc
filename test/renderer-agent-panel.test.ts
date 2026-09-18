@@ -28,6 +28,35 @@ it('keeps Prime selection independent and rejects late results after parent navi
   expect(load).toHaveBeenCalledTimes(1);
 });
 
+it('builds the list when a caller shows the pane, not only when its own button does', () => {
+  dom = new JSDOM('<main></main><button></button>');
+  Object.assign(globalThis, { document: dom.window.document });
+  const host = document.querySelector('main')!, toggle = document.querySelector('button')!;
+  const panel = createAgentPanel({ host, toggle, load: async () => ({ events: [] }),
+    render: () => [], openMain: vi.fn(), working: () => false });
+  const first = { id: 'worker-a', title: 'Alpha worker', updatedAt: 1 } as SessionSummary;
+  // The work panel's tab strip is a caller that reveals the pane without clicking the toggle,
+  // and `update()` runs while the pane is closed (it is closed by default), so it returns early.
+  // Showing the pane itself has to be what builds the list — otherwise the tab opens empty.
+  panel.update('prime', [first]);
+  panel.show();
+  expect(host.querySelector('aside')!.hidden).toBe(false);
+  expect(host.textContent).toContain('Alpha worker');
+});
+
+it('replaces the rows on a session switch, so a tab never shows the previous session', () => {
+  dom = new JSDOM('<main></main><button></button>');
+  Object.assign(globalThis, { document: dom.window.document });
+  const host = document.querySelector('main')!, toggle = document.querySelector('button')!;
+  const panel = createAgentPanel({ host, toggle, load: async () => ({ events: [] }),
+    render: () => [], openMain: vi.fn(), working: () => false });
+  panel.update('prime-a', [{ id: 'worker-a', title: 'Alpha worker', updatedAt: 1 } as SessionSummary]);
+  panel.update('prime-b', [{ id: 'worker-b', title: 'Beta worker', updatedAt: 2 } as SessionSummary]);
+  panel.show();
+  expect(host.textContent).toContain('Beta worker');
+  expect(host.textContent).not.toContain('Alpha worker');
+});
+
 it('renders a selected worker and offers an explicit full-chat navigation', async () => {
   dom = new JSDOM('<main></main><button></button>');
   Object.assign(globalThis, { document: dom.window.document });

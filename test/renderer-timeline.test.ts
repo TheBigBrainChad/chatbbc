@@ -7,7 +7,14 @@ import { prependUserPrompt } from '../src/shared/user-prompt.js';
 import type { Handoff, SessionEvent, SessionSummary } from '../src/shared/session.js';
 import type { InputArgs, InputEntry } from '../src/main/session/input.js';
 import type { LocalProject } from '../src/shared/projects.js';
-vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTerminal: () => ({ element: document.createElement('section'), toggle: document.createElement('button'), show: vi.fn(), hide: vi.fn(), update: vi.fn() }) }));
+vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTerminal: () => ({
+  // The real contract (workspace-terminal.ts) is element/show/hide/update, and the pane is CLOSED
+  // until something opens it: the work panel reads a pane's own `hidden` as the single statement
+  // of which tool is showing, so a mock that mounted this visible would pin the work-panel width
+  // and `has-work-panel` in suites that never opened a panel.
+  element: Object.assign(document.createElement('section'), { hidden: true }),
+  show: vi.fn(), hide: vi.fn(), update: vi.fn()
+}) }));
 vi.mock('../src/renderer/pet.js', () => ({ initPet: () => () => {} }));
 import { positionOf } from '../src/shared/chronology.js';
 

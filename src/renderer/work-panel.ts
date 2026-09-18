@@ -62,9 +62,26 @@ export function createWorkPanel(options: { host: HTMLElement }): WorkPanel {
   for (const tab of TABS) {
     const button = el('button', 'work-panel-tab', LABEL[tab]) as HTMLButtonElement;
     button.type = 'button'; button.dataset.workTab = tab;
-    button.setAttribute('role', 'tab'); button.setAttribute('aria-controls', body.id);
+    button.id = `workPanelTab-${tab}`;
+    // A declared tablist has to be drivable by keyboard, so each tab owns a tabpanel and the
+    // arrow keys move between them in the usual way. Roles without that would announce a widget
+    // the reader cannot use.
+    button.setAttribute('role', 'tab');
     button.setAttribute('aria-selected', 'false');
+    button.tabIndex = -1;
     button.addEventListener('click', () => toggle(tab));
+    button.addEventListener('keydown', event => {
+      const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : event.key === 'Home' ? -Infinity : event.key === 'End' ? Infinity : 0;
+      if (step === 0) return;
+      event.preventDefault();
+      const open = TABS.filter(candidate => buttons.get(candidate)?.disabled !== true);
+      if (open.length === 0) return;
+      const at = open.indexOf(tab);
+      const next = step === -Infinity ? open[0]! : step === Infinity ? open[open.length - 1]!
+        : open[(at + step + open.length) % open.length]!;
+      buttons.get(next)!.focus();
+      show(next);
+    });
     buttons.set(tab, button); strip.append(button);
   }
 
@@ -87,7 +104,14 @@ export function createWorkPanel(options: { host: HTMLElement }): WorkPanel {
       const selected = tab === next;
       button.classList.toggle('is-sel', selected);
       button.setAttribute('aria-selected', String(selected));
+      // Roving tabindex: the strip is one stop, and the arrow keys move within it.
+      button.tabIndex = selected ? 0 : -1;
       button.disabled = tenants.get(tab)?.available?.() === false;
+      // Each pane is a tabpanel labelled by its own tab. `aria-controls` is deliberately not used:
+      // a pane keeps the id it is referenced by elsewhere, and pointing at a different one would
+      // mean either clobbering that id or naming an element that does not exist.
+      const pane = tenants.get(tab)?.element;
+      if (pane) { pane.setAttribute('role', 'tabpanel'); pane.setAttribute('aria-labelledby', button.id); }
     }
   }
 
@@ -116,7 +140,9 @@ export function createWorkPanel(options: { host: HTMLElement }): WorkPanel {
     host, panel, body,
     register(tab, tenant): void {
       tenants.set(tab, tenant);
-      // The pane's host is the chat panel; the work panel owns where it sits now.
+      // The pane's host is the chat panel; the work panel owns where it sits now. The pane keeps
+      // its OWN id (`#workspaceTerminal` and friends are referenced elsewhere), so the tab
+      // announces which component it controls by name rather than by owning its element's id.
       body.append(tenant.element);
       const Observer = host.ownerDocument.defaultView?.MutationObserver;
       if (Observer) new Observer(records => {

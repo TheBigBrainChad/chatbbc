@@ -1,12 +1,8 @@
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createWorkPanel, type WorkPanel } from '../src/renderer/work-panel.js';
 import { attachWorkPanelResize } from '../src/renderer/work-panel-resize.js';
 import { readRendererStyles } from './helpers.js';
-
-const read = (file: string): Promise<string> => fs.readFile(path.resolve(__dirname, '../src/renderer', file), 'utf8');
 
 let dom: JSDOM;
 let host: HTMLElement;
@@ -51,12 +47,43 @@ describe('the work panel', () => {
       .toEqual(['files', 'agents', 'terminal']);
   });
 
-  it('keeps each tenant owner intact', async () => {
-    expect(await read('file-panel.ts')).toContain('attachWorkPanelResize');
-    expect(await read('agent-panel.ts')).toContain('attachWorkPanelResize');
-    expect(await read('workspace-terminal.ts')).toContain('FitAddon');
-    // The terminal is a tenant of the same slot, so it takes the same one resize owner.
-    expect(await read('workspace-terminal.ts')).toContain('attachWorkPanelResize');
+  it('gives every tenant the shared resize owner, and only that one', () => {
+    const work = createWorkPanel({ host });
+    const files = tenant(work, 'files');
+    const agents = tenant(work, 'agents');
+    const terminal = tenant(work, 'terminal');
+    // Each pane's own root carries the affordance, so the width belongs to the slot and not to
+    // whichever tool is showing. Asserting the harness built it is what makes this fail if a pane
+    // stops asking for the owner — reading source text would pass on an import line alone.
+    for (const pane of [files, agents, terminal]) {
+      expect(pane.root.querySelectorAll('.work-panel-resize')).toHaveLength(1);
+    }
+    expect(host.style.getPropertyValue('--work-panel-width')).not.toBe('');
+    // One shared slot: a resize driven from one tenant's handle moves the width all of them read.
+    const handle = terminal.root.querySelector<HTMLElement>('.work-panel-resize')!;
+    const before = host.style.getPropertyValue('--work-panel-width');
+    handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'End' }));
+    expect(host.style.getPropertyValue('--work-panel-width')).not.toBe(before);
+    expect(files.root.querySelector<HTMLElement>('.work-panel-resize')!.getAttribute('aria-valuenow'))
+      .toBe(handle.getAttribute('aria-valuenow'));
+  });
+
+  /**
+   * The Sub-agents pane builds its list lazily, so a tab that only flips `hidden` would open it
+   * empty — and, because the pane's own update path repaints only while it is already visible, a
+   * session switch would leave another session's rows on screen. The tab must go through the
+   * pane's own show path, which is the one place that builds the list.
+   */
+  it('opens a tenant through its own show path rather than only revealing it', () => {
+    const work = createWorkPanel({ host });
+    const agents = tenant(work, 'agents');
+    work.show('agents');
+    expect(agents.show).toHaveBeenCalledTimes(1);
+    expect(agents.root.hidden).toBe(false);
+    // Selecting it again collapses, matching what the pane's own header button does.
+    work.toggle('agents');
+    expect(agents.hide).toHaveBeenCalledTimes(1);
+    expect(agents.root.hidden).toBe(true);
   });
 
   /**
