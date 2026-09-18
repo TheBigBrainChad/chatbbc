@@ -1,6 +1,6 @@
 import {
-  defaultAppearance, effectiveAppearance, effectiveTheme, mixColor, monoChain, paletteTokens,
-  type AppearanceSettings, type AppearanceTheme
+  DEFAULT_MONO_CHAIN, defaultAppearance, effectiveAppearance, effectiveTheme, followedTheme, mixColor,
+  monoChain, paletteTokens, type AppearanceSettings, type AppearanceTheme
 } from '../shared/appearance.js';
 import type { OmarchyTheme } from '../main/omarchy-theme.js';
 import type { UiPrefs } from '../shared/types.js';
@@ -8,7 +8,7 @@ import { $ } from './dom.js';
 
 const FONT_FAMILIES = {
   system: '', sans: 'Arial, Helvetica, sans-serif',
-  serif: 'Georgia, "Times New Roman", serif', mono: '"Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace'
+  serif: 'Georgia, "Times New Roman", serif', mono: DEFAULT_MONO_CHAIN
 };
 
 const appearanceListeners = new Set<() => void>();
@@ -30,6 +30,7 @@ function tokens(element: HTMLElement, values: Record<string, string>): void {
 export function applyAppearance(theme: AppearanceTheme, settings?: AppearanceSettings,
   omarchy?: OmarchyTheme | null): void {
   const ui = { theme, appearance: settings ?? defaultAppearance() };
+  const followed = followedTheme(ui, omarchy ?? null);
   const value = effectiveAppearance(ui, omarchy ?? null), resolved = effectiveTheme(ui, omarchy ?? null);
   const palette = value[resolved], root = document.documentElement;
   root.dataset.theme = resolved;
@@ -38,9 +39,11 @@ export function applyAppearance(theme: AppearanceTheme, settings?: AppearanceSet
   root.style.setProperty('--text-scale', String(value.fontSize / 14));
   if (value.font === 'system') root.style.removeProperty('--ui-font');
   else root.style.setProperty('--ui-font', FONT_FAMILIES[value.font]);
-  // Chrome is always the mono chain; only prose follows the picker. A followed desktop
-  // theme contributes its own terminal font ahead of the built-in candidates.
-  root.style.setProperty('--ui-font-mono', monoChain(omarchy ?? null));
+  // Chrome is always the mono chain; only prose follows the picker. The desktop's own
+  // terminal font leads it **only while the desktop is followed** — with the toggle off, a
+  // machine whose theme ships a font must still get the built-in chain, exactly as the
+  // palette is untouched.
+  root.style.setProperty('--ui-font-mono', monoChain(followed));
   root.style.setProperty('--sidebar-color', palette.sidebar);
   // Glass is composed inside the window: a colored backdrop and translucent layer.
   // No native transparent window, desktop capture, or platform permission is needed.

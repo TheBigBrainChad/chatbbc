@@ -52,12 +52,20 @@ describe('readOmarchyTheme', () => {
     expect(readOmarchyTheme(await themeDir('accent = "red"\n'))).toBeNull();
     expect(readOmarchyTheme(await themeDir('accent = "#509475"\n'))).toBeNull(); // no background
 
+    const huge = await themeDir('accent = "#509475"\n' + 'x'.repeat(80_000));
+    expect(readOmarchyTheme(huge)).toBeNull();
+  });
+
+  // Windows maps chmod onto the read-only attribute alone, so a file with no permissions is
+  // still readable there and the theme parses. POSIX is where "unreadable" is a real state.
+  it.runIf(process.platform !== 'win32')('returns null for a theme file it cannot read', async () => {
     const unreadable = await themeDir(OSAKA);
     await fs.chmod(path.join(unreadable, '.local/state/omarchy/current/theme/colors.toml'), 0o000);
     expect(readOmarchyTheme(unreadable)).toBeNull();
-
-    const huge = await themeDir('accent = "#509475"\n' + 'x'.repeat(80_000));
-    expect(readOmarchyTheme(huge)).toBeNull();
+    // The same absence when the directory itself cannot be traversed, which is how a
+    // permissions problem usually presents in a real home directory.
+    await fs.chmod(path.join(unreadable, '.local/state/omarchy/current/theme'), 0o000);
+    expect(readOmarchyTheme(unreadable)).toBeNull();
   });
 
   it('falls back per key instead of rejecting the whole theme', async () => {

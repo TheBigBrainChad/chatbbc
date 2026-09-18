@@ -118,9 +118,13 @@ export function paletteTokens(background: string, accent: string, contrast: numb
   };
 }
 
-/** The desktop terminal font, then the app's own mono chain. One owner for both callers. */
+/**
+ * The desktop terminal font, then the app's own mono chain. One owner for both callers.
+ * Order is spec §6: Iosevka NF Mono, Iosevka NFM, JetBrains Mono NF, JetBrains Mono,
+ * Cascadia Mono, ui-monospace, monospace.
+ */
 export const DEFAULT_MONO_CHAIN =
-  '"Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace';
+  '"Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono Nerd Font", "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace';
 
 /**
  * Chrome type prefers the desktop's own terminal font, quoted, over the built-in chain.
@@ -142,12 +146,24 @@ export function contrastFor(background: string): number {
   return readableInk(background) === '#000000' ? 45 : 60;
 }
 
+/**
+ * The theme actually being followed, or null when the saved settings do not follow one.
+ * The one gate: palette, mode and chrome font all resolve through it, so none of the three
+ * can drift into following the desktop while the toggle says otherwise.
+ */
+export function followedTheme(
+  ui: { appearance?: AppearanceSettings },
+  omarchy: OmarchyTheme | null
+): OmarchyTheme | null {
+  return ui.appearance?.followDesktop && omarchy ? omarchy : null;
+}
+
 /** The desktop's own light/dark answer wins in follow mode; otherwise the user's explicit choice. */
 export function effectiveTheme(
   ui: { theme: AppearanceTheme; appearance?: AppearanceSettings },
   omarchy: OmarchyTheme | null
 ): AppearanceTheme {
-  return ui.appearance?.followDesktop && omarchy ? omarchy.mode : ui.theme;
+  return followedTheme(ui, omarchy)?.mode ?? ui.theme;
 }
 
 /**
@@ -163,17 +179,17 @@ export function effectiveAppearance(
   ui: { theme: AppearanceTheme; appearance?: AppearanceSettings },
   omarchy: OmarchyTheme | null
 ): AppearanceSettings {
-  const saved = ui.appearance ?? defaultAppearance();
-  if (!saved.followDesktop || !omarchy) return saved;
-  const mode = omarchy.mode;
+  const saved = ui.appearance ?? defaultAppearance(), followed = followedTheme(ui, omarchy);
+  if (!followed) return saved;
+  const mode = followed.mode;
   return {
     ...saved,
     [mode]: {
-      background: omarchy.background,
-      sidebar: omarchy.sidebar,
-      accent: omarchy.accent,
-      contrast: contrastFor(omarchy.background)
+      background: followed.background,
+      sidebar: followed.sidebar,
+      accent: followed.accent,
+      contrast: contrastFor(followed.background)
     },
-    status: { green: omarchy.green, red: omarchy.red }
+    status: { green: followed.green, red: followed.red }
   };
 }

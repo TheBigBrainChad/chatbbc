@@ -4,7 +4,7 @@ import { JSDOM } from 'jsdom';
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { appearanceSchema } from '../src/main/appearance-schema.js';
 import {
-  DEFAULT_MONO_CHAIN, contrastFor, defaultAppearance, effectiveAppearance, effectiveTheme,
+  DEFAULT_MONO_CHAIN, contrastFor, defaultAppearance, effectiveAppearance, effectiveTheme, followedTheme,
   mergeAppearance, monoChain, paletteTokens, contrastRatio, readableInk
 } from '../src/shared/appearance.js';
 import type { OmarchyTheme } from '../src/main/omarchy-theme.js';
@@ -66,6 +66,11 @@ describe('custom appearance', () => {
     // it must end in a real mono: a proportional fallback breaks every aligned column.
     expect(block, 'no mono chrome token').toContain('--ui-font-mono:');
     expect(block.slice(block.indexOf('--ui-font-mono:')).split(';')[0]).toMatch(/monospace\s*$/);
+    // The stylesheet ships the chain so chrome is styled before the renderer runs, and the
+    // renderer overwrites it from DEFAULT_MONO_CHAIN on every paint. Two copies can drift,
+    // and a drift is invisible until the first repaint on a machine with no theme, so pin them.
+    const declared = block.slice(block.indexOf('--ui-font-mono:') + '--ui-font-mono:'.length).split(';')[0]!.trim();
+    expect(declared, 'stylesheet chain drifted from the renderer chain').toBe(DEFAULT_MONO_CHAIN);
   });
 });
 
@@ -201,6 +206,28 @@ describe('following the desktop theme', () => {
     expect(monoChain({ ...OSAKA, fontFamily: 'Fira Code' }).startsWith('"Fira Code"')).toBe(true);
   });
 
+  it('resolves the desktop only through the one follow gate', () => {
+    const on = { ...defaultAppearance(), followDesktop: true }, off = defaultAppearance();
+    expect(followedTheme({ appearance: on }, OSAKA)).toBe(OSAKA);
+    expect(followedTheme({ appearance: off }, OSAKA)).toBeNull();
+    expect(followedTheme({ appearance: on }, null)).toBeNull();
+    expect(followedTheme({}, OSAKA)).toBeNull();
+    // The palette, the mode and the font all read that gate, so the toggle cannot be
+    // honoured by two of them and ignored by the third.
+    const themed = { ...OSAKA, mode: 'light' as const, fontFamily: 'Fira Code' };
+    expect(effectiveTheme({ theme: 'dark', appearance: on }, themed)).toBe('light');
+    expect(effectiveTheme({ theme: 'dark', appearance: off }, themed)).toBe('dark');
+    expect(effectiveAppearance({ theme: 'dark', appearance: off }, themed)).toBe(off);
+    expect(monoChain(followedTheme({ appearance: off }, themed))).toBe(DEFAULT_MONO_CHAIN);
+  });
+
+  it('keeps the built-in chain in spec §6 order', () => {
+    expect(DEFAULT_MONO_CHAIN).toBe('"Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono Nerd Font", '
+      + '"JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace');
+    // The last resort must be a real mono: a proportional fallback breaks every column.
+    expect(DEFAULT_MONO_CHAIN.endsWith('monospace')).toBe(true);
+  });
+
   it('signals the followed theme to the native caption and backing colours', () => {
     const appearance = effectiveAppearance({ theme: 'dark', appearance: { ...defaultAppearance(), followDesktop: true } }, OSAKA);
     expect(windowBackgroundForTheme('dark', appearance)).toBe('#111c18');
@@ -242,10 +269,17 @@ describe('renderer applies the resolved appearance', () => {
   });
 
   it('draws the saved manual palette and the built-in chain when follow is off', async () => {
-    const { read, saved } = await paint(false, OSAKA);
+    // The theme deliberately ships a font that is NOT the chain's head: with follow off the
+    // desktop must not restyle chrome at all, so the chain has to be the built-in one. A
+    // fixture whose font was already the head would pass either way and prove nothing.
+    const { read, saved } = await paint(false, { ...OSAKA, fontFamily: 'Fira Code' });
     expect(read('--page')).toBe(saved.dark.background);
     expect(read('--accent-fill')).toBe(saved.dark.accent);
     expect(read('--ui-font-mono')).toBe(DEFAULT_MONO_CHAIN);
+    expect(read('--ui-font-mono')).not.toContain('Fira Code');
+    // Nor do its status colours reach the tokens.
+    expect(read('--green')).toBe(paletteTokens(saved.dark.background, saved.dark.accent, saved.dark.contrast)['--green']);
+    expect(read('--green-wash')).toBe(paletteTokens(saved.dark.background, saved.dark.accent, saved.dark.contrast)['--green-wash']);
   });
 
   it('puts a followed theme’s own terminal font at the head of the chrome chain', async () => {

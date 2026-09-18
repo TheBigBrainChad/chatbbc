@@ -75,7 +75,7 @@
 
   /* Chrome type. Text and labels are monospace — the desktop's own idiom —
      while authored and assistant prose keep --ui-font. */
-  --ui-font-mono: "Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+  --ui-font-mono: "Iosevka Nerd Font Mono", "Iosevka NFM", "JetBrains Mono Nerd Font", "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
   /* Prose type. The picker rewrites --ui-font; this is what a rule reads when the user
      leaves the picker on `system`, where the renderer removes the property entirely. */
   --ui-font-prose: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
