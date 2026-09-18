@@ -1283,9 +1283,12 @@ it('folds a whole Compact & Resume into one row that says the new chat opened', 
   expect(timeline.textContent).not.toContain('[[CLF-');
   expect(timeline.querySelectorAll('.ev-turn_start, .ev-turn_end')).toHaveLength(0);
   expect(timeline.querySelectorAll('.ev-tool_call')).toHaveLength(2);
-  // The card sits where the compaction happened, between the two calls.
-  const order = [...timeline.children].map((row) => row.className);
-  expect(order).toEqual(['ev ev-tool_call', 'ev ev-compaction', 'ev ev-tool_call']);
+  // The card sits where the compaction happened, between the two calls. Asserted as the
+  // rows' semantic identity, not their class string: a row's exact classes are
+  // presentation and change with the stylesheet, the fold order is the behaviour here.
+  const order = [...timeline.children].map((row) => row.classList.contains('ev-compaction') ? 'compaction'
+    : row.classList.contains('ev-tool_call') ? 'tool_call' : row.className);
+  expect(order).toEqual(['tool_call', 'compaction', 'tool_call']);
 
   // Everything is still there for whoever unfolds the card.
   card.toggleAttribute('open', true);
@@ -1568,8 +1571,9 @@ it('folds the answer turn into the card when the request row has no turn id', as
     resume
   ]);
   const timeline = w.document.getElementById('timeline')!;
-  const order = [...timeline.children].map((row) => row.className);
-  expect(order).toEqual(['ev ev-compaction']);
+  const order = [...timeline.children].map((row) => row.classList.contains('ev-compaction') ? 'compaction'
+    : row.classList.contains('ev-tool_call') ? 'tool_call' : row.className);
+  expect(order).toEqual(['compaction']);
   expect(timeline.querySelector('details.compaction')!.className).toContain('tone-good');
 });
 

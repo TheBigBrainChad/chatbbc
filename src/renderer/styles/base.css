@@ -55,6 +55,16 @@
   --red-wash: #fbf0f0;
   --red-line: #eccdcd;
 
+  /* The four content-family accents a followed desktop theme supplies through
+     `paletteTokens`. These are the values that function derives from its own defaults
+     against this light ground, so a machine with no Omarchy theme gets the same
+     identity the ledger's named themes do — and never an unresolved `var()`, which
+     would make the whole border-left-color declaration invalid and drop the rail. */
+  --cyan: #197565;
+  --magenta: #93496d;
+  --yellow: #73641b;
+  --ice: #566a68;
+
   /* No card lift: structure is carried by tone and hairlines in both themes. */
   --lift: none;
   /* The switch knob has to read against its own track in both states, and the track
@@ -114,6 +124,13 @@
   --red: #ef8a8a;
   --red-wash: #241416;
   --red-line: #4a262a;
+
+  /* The same four family accents against the dark ground. Each clears 4.5:1 on this
+     theme's card, so a category label stays legible without a second rule. */
+  --cyan: #2dd5b7;
+  --magenta: #d470a1;
+  --yellow: #e5c736;
+  --ice: #acd4cf;
 
   /* No drop shadow in the dark: the hairline is the edge, and a black shadow on a
      black page is only mud. */

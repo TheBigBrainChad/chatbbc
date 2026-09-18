@@ -111,6 +111,52 @@
   margin-top: 6px;
 }
 
+/* -------------------------------------------------- content families
+   One identity per content family, so authored work, generated work and system
+   chatter are told apart without being read.
+
+   Colour, glyph and edge vary; geometry does not. Every family draws the same card —
+   the same 1px hairline, the same 2px left rail, the same header height and header
+   type — and only the accent changes. The accent is spent on the rail, the glyph and
+   the header label and nowhere else: a fill per family would make a busy transcript
+   read as a patchwork, which is the thing this system exists to avoid. */
+
+.tl-row { border: 1px solid var(--line); background: var(--card); border-left-width: 2px; }
+.tl-row > .tl-head { display: flex; align-items: center; gap: 10px; padding: 6px 11px;
+  border-bottom: 1px solid var(--line);
+  font: calc(10.5px * var(--text-scale, 1)) var(--ui-font-mono); }
+
+/* Each family states its accent twice: once as the left rail, which the row's own
+   border reads, and once as `--cat`, which the glyph and label rules below read. The
+   glyph is a separate token because a family can carry a status colour on the rail and
+   a quieter one on its chrome — a tool row is neutral-edged with a green exit. */
+.cat-authored { border-left-color: var(--accent); --cat: var(--accent); }
+.cat-prose { border-left-color: var(--line); --cat: var(--soft); }
+.cat-code { border-left-color: var(--cyan); --cat: var(--cyan); }
+.cat-diff { border-left-color: var(--soft); --cat: var(--soft); }
+.cat-image { border-left-color: var(--line); --cat: var(--soft); }
+.cat-tool { border-left-color: var(--line); --cat: var(--green); }
+.cat-error { border-left-color: var(--red); --cat: var(--red); }
+.cat-recovery { border-left-color: var(--yellow); --cat: var(--yellow); }
+.cat-worker { border-left-color: var(--magenta); --cat: var(--magenta); }
+.cat-handoff { border-left-color: var(--ice); --cat: var(--ice); }
+.cat-plan { border-left-color: var(--accent); --cat: var(--accent); }
+.cat-note { border-left-color: var(--line); --cat: var(--faint); }
+
+/* The accent, reaching the glyph and the label of the rows that already exist. Each
+   fallback is the value the rule resolved to before this system, so a row without a
+   category class is untouched, and a family's identity is the only thing that varies. */
+.tl-row .said b { color: var(--cat, var(--faint)); }
+.cat-tool .tool-ico { color: var(--cat, var(--faint)); }
+.cat-recovery .meta.is-progress { color: var(--cat, var(--soft)); }
+.cat-worker .agent-communication > summary { color: var(--cat, var(--soft)); }
+.cat-handoff .meta.is-good { color: var(--cat, var(--green)); }
+.cat-error .chat-error-notice > strong { color: var(--cat, var(--red)); }
+
+/* The card around an answer is chrome; the answer is not. Said here rather than left to
+   inheritance, so a font set on the row above cannot quietly turn prose monospace. */
+:is(.cat-authored, .cat-prose) .msg { font-family: var(--ui-font, var(--ui-font-prose)); }
+
 .meta {
   font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1));
   color: var(--faint);

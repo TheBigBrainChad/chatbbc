@@ -15,6 +15,11 @@ app.whenReady().then(async () => {
   const root = path.join(__dirname, '..');
   const code = (await require('esbuild').build({ entryPoints: [path.join(root, 'src/renderer/chat.ts')],
     bundle: true, write: false, platform: 'browser', format: 'iife', globalName: 'chat',
+    // The bundle reaches `workspace-terminal.ts`, which imports xterm's stylesheet. This fixture
+    // builds to a string rather than an output path, so esbuild has nowhere to emit CSS and
+    // refuses the import outright. Stub it: the fixture supplies the renderer's real stylesheets
+    // itself, and xterm's terminal colours are not what it measures.
+    loader: { '.css': 'empty' },
     plugins: [{ name: 'fixture-url-assets', setup(build) {
       build.onResolve({ filter: /\?url$/ }, args => ({ path: args.path, namespace: 'fixture-url' }));
       build.onLoad({ filter: /.*/, namespace: 'fixture-url' }, () => ({ contents: 'export default "";', loader: 'js' }));

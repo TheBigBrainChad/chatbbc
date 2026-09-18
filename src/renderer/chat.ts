@@ -17,6 +17,7 @@ import { preserveTimelineViewport } from './timeline-scroll.js';
 import { createSidebarOrder } from './sidebar-order.js';
 import { toolResultText } from './tool-result.js';
 import { chatErrorPresentation, duplicateChatErrors } from './chat-error.js';
+import { categoryFor, categoryClass } from './transcript-categories.js';
 import { renderRecoveryCountdowns } from './recovery.js';
 import type { RecoveryCountdown } from '../shared/recovery.js';
 import { communicationTitle, foldAgentCommunication } from './agent-communication.js';
@@ -1372,7 +1373,10 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
 }
 
 function eventRow(event: SessionEvent): HTMLElement {
-  const row = el('div', `ev ev-${event.kind}`);
+  // One class per content family, so the stylesheet owns what a family looks like and
+  // this builder only says which family a row belongs to. `ev-<kind>` stays: it is the
+  // hook the reconciliation, grouping and fixtures already select on.
+  const row = el('div', `ev ev-${event.kind} tl-row ${categoryClass(categoryFor(event.kind))}`);
   if (event.kind === 'assistant_message' && !withoutMessageReaction(event.message.text).trim()) row.hidden = true;
   tagImageRow(row, event);
   const time = document.createElement('time');
@@ -1706,7 +1710,10 @@ function compactionRow(block: CompactionBlock, previous?: HTMLElement): HTMLElem
   const key = `compaction:${block.token}`;
   const state = compactionState(block);
 
-  const row = previous ?? el('div', 'ev ev-compaction');
+  // A Compact & Resume card is where the `handoff` family's rows went: the fold replaces the
+  // brief/request/end/handoff events with one card, so it carries that family's identity
+  // rather than inventing a kind of its own.
+  const row = previous ?? el('div', `ev ev-compaction tl-row ${categoryClass('handoff')}`);
   const box = previous?.querySelector<HTMLDetailsElement>('details.compaction') ?? document.createElement('details');
   box.className = `tool compaction tone-${state.tone}`;
   if (!previous) {
@@ -3146,7 +3153,7 @@ export function initChat(next: Deps): void {
       const rows = boundedTimeline(source).shown.flatMap(event => {
         if (!['tool_call', 'page_tool', 'agent_message'].includes(event.kind)) boundary = `event:${event.seq}`;
         if (!['user_message', 'assistant_message', 'native_image', 'tool_call', 'page_tool', 'agent_message', 'chat_error'].includes(event.kind)) return [];
-        const row = el('div', `ev ev-${event.kind}`); const body = el('div', 'ev-body');
+        const row = el('div', `ev ev-${event.kind} tl-row ${categoryClass(categoryFor(event.kind))}`); const body = el('div', 'ev-body');
         tagImageRow(row, event);
         row.dataset.timelineKey = `event:${event.seq}`; row.dataset.activityBoundary = boundary;
         body.append(eventBody(event, { id, current, history: source })); row.append(body); return [row];
