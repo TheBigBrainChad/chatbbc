@@ -4,6 +4,21 @@ import { describe, expect, it } from 'vitest';
 import { categoryFor, categoryClass, CONTENT_CATEGORIES } from '../src/renderer/transcript-categories.js';
 
 const renderer = path.resolve(__dirname, '../src/renderer');
+const transcript = path.join(renderer, 'styles', 'transcript.css');
+
+/** The families whose content is multi-line and worth a card surface. */
+const CARD_CATEGORIES = ['authored', 'prose', 'code', 'diff', 'image', 'error', 'handoff', 'plan'] as const;
+/** The families that are one dense line each, so a separator rather than a surface. */
+const ROW_CATEGORIES = ['tool', 'worker'] as const;
+
+/** The declarations of the first rule whose selector is exactly `selector`. */
+async function blockFor(selector: string): Promise<string> {
+  const css = await fs.readFile(transcript, 'utf8');
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = css.match(new RegExp(`${escaped}\\s*\\{([^{}]*)\\}`));
+  expect(match, `${selector} has no rule`).not.toBeNull();
+  return match![1]!;
+}
 
 describe('transcript categories', () => {
   it('maps every recorded SessionEvent kind to exactly one category', () => {
@@ -30,36 +45,67 @@ describe('transcript categories', () => {
    * it resolves to. A category added without one would render as exactly the same row as
    * every other family, which is the failure this lookup exists to prevent.
    */
-  it('gives every category a rule in the transcript stylesheet', async () => {
-    const css = await fs.readFile(path.join(renderer, 'styles', 'transcript.css'), 'utf8');
+  it('gives every category its own accent', async () => {
+    const css = await fs.readFile(transcript, 'utf8');
     for (const category of CONTENT_CATEGORIES) {
       // `(?![-a-z])` so `.cat-note` cannot be satisfied by a longer neighbour's rule.
       const block = css.match(new RegExp(`\.${categoryClass(category)}(?![-a-z])[^{}]*\{([^{}]*)\}`));
       expect(block, `${categoryClass(category)} has no rule`).not.toBeNull();
-      // Accent on the rail, glyph and label only. A fill here is what makes a dense
-      // transcript read as a patchwork, so no category may paint one.
-      expect(block![1], `${categoryClass(category)} paints a fill`).not.toMatch(/\bbackground\b/);
+      expect(block![1], `${categoryClass(category)} defines no accent`).toMatch(/--cat:\s*var\(/);
     }
   });
 
-  /** One geometry for every family; the accent is the only thing that varies. */
-  it('shares one row geometry across every family', async () => {
-    const css = await fs.readFile(path.join(renderer, 'styles', 'transcript.css'), 'utf8');
-    const row = css.match(/\.tl-row\s*\{([^{}]*)\}/);
-    expect(row, '.tl-row has no rule').not.toBeNull();
-    // The shared card: one hairline outer edge and the 2px left rail the accent colours.
-    expect(row![1]).toMatch(/border:\s*1px solid var\(--line\)/);
-    expect(row![1]).toMatch(/border-left-width:\s*2px/);
-    const head = css.match(/\.tl-row\s*>\s*\.tl-head\s*\{([^{}]*)\}/);
-    expect(head, '.tl-head has no rule').not.toBeNull();
-    // Chrome type, at the one header size every family shares.
-    expect(head![1]).toMatch(/var\(--ui-font-mono\)/);
-    expect(head![1]).toMatch(/calc\(10\.5px \* var\(--text-scale/);
-    // The rail is where each family spends its accent, so every family sets one.
-    for (const category of CONTENT_CATEGORIES) {
-      const block = css.match(new RegExp(`\.${categoryClass(category)}(?![-a-z])[^{}]*\{([^{}]*)\}`));
-      expect(block![1], `${categoryClass(category)} has no left rail`).toMatch(/border-left-color:\s*var\(/);
+  /**
+   * The patchwork is a shape failure, not a colour one: it comes from giving every family
+   * the same multi-line card. So the shared base must declare no surface, and only the
+   * multi-line families may take one. Asserted here, on the rule that would introduce the
+   * fill — a check on the per-category blocks alone stays green while the base repaints
+   * every row.
+   */
+  it('draws a card only for the multi-line families', async () => {
+    const base = await blockFor('.tl-row');
+    // The base is the rail and nothing else: no perimeter, no fill.
+    expect(base, 'the shared base paints a fill').not.toMatch(/\bbackground\b/);
+    expect(base, 'the shared base draws a box around every family').not.toMatch(/(?:^|[;\s])border:\s/);
+
+    for (const category of CARD_CATEGORIES) {
+      const block = await blockFor(`.cat-${category}`);
+      expect(block, `.cat-${category} is a card but has no surface`).toMatch(/background:\s*var\(--card\)/);
     }
+    for (const category of [...ROW_CATEGORIES, 'note'] as const) {
+      const block = await blockFor(`.cat-${category}`);
+      expect(block, `.cat-${category} is not a card but paints one`).not.toMatch(/background:\s*var\(--card\)/);
+    }
+    // The quietest family is not a box at all.
+    expect(await blockFor('.cat-note'), 'the note family draws an edge').toMatch(/border:\s*0/);
+  });
+
+  /**
+   * An edge is the family's identity, so every family has a rail; a card's rail sits on its
+   * card, a row's on its separator.
+   */
+  it('puts every family behind its own left rail', async () => {
+    const base = await blockFor('.tl-row');
+    expect(base).toMatch(/border-left:\s*2px solid var\(--cat/);
+    for (const category of CONTENT_CATEGORIES) {
+      const block = await blockFor(`.cat-${category}`);
+      // A card restates the rail beside its own perimeter; a row inherits the base's.
+      if ((CARD_CATEGORIES as readonly string[]).includes(category)) {
+        expect(block, `.cat-${category} lost its rail under its card`).toMatch(/border-left:\s*2px solid var\(--cat/);
+      }
+    }
+  });
+
+  /**
+   * `.tl-head` is the shared header contract, specified by §4.7 for the family cards. No
+   * builder emits one yet, so this asserts the rule as the documented contract the next
+   * consumer inherits — not as a rendered element, which nothing currently produces.
+   */
+  it('documents the shared header geometry the family cards will use', async () => {
+    const head = await blockFor('.tl-row > .tl-head');
+    // Chrome type, at the one header size every family shares.
+    expect(head).toMatch(/var\(--ui-font-mono\)/);
+    expect(head).toMatch(/calc\(10\.5px \* var\(--text-scale/);
   });
 
   /**

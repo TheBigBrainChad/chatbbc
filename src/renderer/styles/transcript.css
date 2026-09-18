@@ -115,38 +115,57 @@
    One identity per content family, so authored work, generated work and system
    chatter are told apart without being read.
 
-   Colour, glyph and edge vary; geometry does not. Every family draws the same card —
-   the same 1px hairline, the same 2px left rail, the same header height and header
-   type — and only the accent changes. The accent is spent on the rail, the glyph and
-   the header label and nowhere else: a fill per family would make a busy transcript
-   read as a patchwork, which is the thing this system exists to avoid. */
+   Identity is one 2px left rail in the family's own colour, which its glyph and label
+   also take. Colour is never a large fill, so a busy transcript does not read as a
+   patchwork.
 
-.tl-row { border: 1px solid var(--line); background: var(--card); border-left-width: 2px; }
+   Shape follows the content, not the family. A family that holds several lines of rich
+   content is a card; one that is a single dense line is a row; the quietest is not a box
+   at all. The shared base therefore declares no perimeter and no fill of its own —
+   giving every family the same multi-line card is what flattened this transcript into a
+   grid of boxes.
+
+   Each family is then written once, below: its ink and its shape in one place, so what a
+   family looks like has exactly one answer. */
+
+.tl-row { border-left: 2px solid var(--cat, var(--line)); }
 .tl-row > .tl-head { display: flex; align-items: center; gap: 10px; padding: 6px 11px;
   border-bottom: 1px solid var(--line);
   font: calc(10.5px * var(--text-scale, 1)) var(--ui-font-mono); }
 
-/* Each family states its accent twice: once as the left rail, which the row's own
-   border reads, and once as `--cat`, which the glyph and label rules below read. The
-   glyph is a separate token because a family can carry a status colour on the rail and
-   a quieter one on its chrome — a tool row is neutral-edged with a green exit. */
-.cat-authored { border-left-color: var(--accent); --cat: var(--accent); }
-.cat-prose { border-left-color: var(--line); --cat: var(--soft); }
-.cat-code { border-left-color: var(--cyan); --cat: var(--cyan); }
-.cat-diff { border-left-color: var(--soft); --cat: var(--soft); }
-.cat-image { border-left-color: var(--line); --cat: var(--soft); }
-.cat-tool { border-left-color: var(--line); --cat: var(--green); }
-.cat-error { border-left-color: var(--red); --cat: var(--red); }
-.cat-recovery { border-left-color: var(--yellow); --cat: var(--yellow); }
-.cat-worker { border-left-color: var(--magenta); --cat: var(--magenta); }
-.cat-handoff { border-left-color: var(--ice); --cat: var(--ice); }
-.cat-plan { border-left-color: var(--accent); --cat: var(--accent); }
-.cat-note { border-left-color: var(--line); --cat: var(--faint); }
+/* Cards: the multi-line families, whose content is worth a surface. */
+.cat-authored { --cat: var(--accent); border: 1px solid var(--line); border-left: 2px solid var(--cat, var(--line)); background: var(--card); }
+.cat-prose { --cat: var(--soft); border: 1px solid var(--line); border-left: 2px solid var(--cat, var(--line)); background: var(--card); }
+.cat-code { --cat: var(--cyan); border: 1px solid var(--line); border-left: 2px solid var(--cat, var(--line)); background: var(--card); }
+.cat-diff { --cat: var(--soft); border: 1px solid var(--line); border-left: 2px solid var(--cat, var(--line)); background: var(--card); }
+.cat-image { --cat: var(--soft); border: 1px solid var(--line); border-left: 2px solid var(--cat, var(--line)); background: var(--card); }
+.cat-error { --cat: var(--red); border: 1px solid var(--line); border-left: 2px solid var(--cat, var(--line)); background: var(--card); }
+.cat-handoff { --cat: var(--ice); border: 1px solid var(--line); border-left: 2px solid var(--cat, var(--line)); background: var(--card); }
+.cat-plan { --cat: var(--accent); border: 1px solid var(--line); border-left: 2px solid var(--cat, var(--line)); background: var(--card); }
 
-/* The accent, reaching the glyph and the label of the rows that already exist. Each
-   fallback is the value the rule resolved to before this system, so a row without a
-   category class is untouched, and a family's identity is the only thing that varies. */
-.tl-row .said b { color: var(--cat, var(--faint)); }
+/* Rows: one dense line each, so hairline separators and no surface. */
+.cat-tool { --cat: var(--green); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.cat-worker { --cat: var(--magenta); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+
+/* Recovery is one line too, but its own colour *is* the message — a live countdown — so it
+   takes a single-line tint in that colour rather than a card fill. */
+.cat-recovery { --cat: var(--yellow); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--yellow) 12%, transparent); }
+
+/* The quietest family is not a box at all. */
+.cat-note { --cat: var(--faint); border: 0; }
+
+/* Some families' own content already paints a surface: the authored bubble, the error notice,
+   and (below) the generated-image frame. A card behind any of them stacks into the same
+   box-in-a-box the gallery had — and the inner element is the real surface and predates this
+   system, so it wins. These families keep the rail, so they are still identifiable, and add
+   nothing behind what is already drawn. `:has` keeps the card for a row whose content has no
+   surface of its own, such as an authored message that is only attachments. */
+:is(.cat-authored, .cat-error):has(> .ev-body :is(.user-message-text, .chat-error-notice)) {
+  border: 0; border-left: 2px solid var(--cat, var(--line)); background: transparent;
+}
+
+/* An identity reaching the chrome of the rows that already exist. Each fallback is the
+   value the rule resolved to before this system, so an uncategorised row is unchanged. */
 .cat-tool .tool-ico { color: var(--cat, var(--faint)); }
 .cat-recovery .meta.is-progress { color: var(--cat, var(--soft)); }
 .cat-worker .agent-communication > summary { color: var(--cat, var(--soft)); }
@@ -569,7 +588,7 @@
 .user-image-slot > .meta { margin: 0; padding: 6px; text-align: center; font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
 .user-image-slot > .retained-image-notice { padding: 2px 0; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(10px * var(--text-scale, 1)); line-height: 12px; text-align: center; }
 .generated-image-gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; max-width: 34rem; margin: 12px 0; }
-.generated-image-gallery > .ev.ev-native_image { min-width: 0; margin: 0; padding: 0; }
+.generated-image-gallery > .ev.ev-native_image { min-width: 0; margin: 0; padding: 0; border: 0; background: transparent; }
 .generated-image-gallery .ev-body, .generated-image-gallery .said { min-width: 0; width: 100%; padding: 0; }
 .generated-image-frame { width: 100%; max-height: 17rem; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
 .generated-image-frame.is-unavailable { aspect-ratio: auto !important; min-height: 100px; padding: 14px 10px; align-content: center; gap: 8px; }
