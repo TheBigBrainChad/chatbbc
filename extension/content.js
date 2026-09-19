@@ -3191,7 +3191,9 @@
       const renderedHtml =
         typeof entry.renderedHtml === 'string' && entry.renderedHtml.length <= 120_000 ? entry.renderedHtml : '';
       if (!rawText && !renderedHtml && !attachments.length &&
-          !(entry.role === 'assistant' && entry.rawMessageId && entry.rawMessageId === raw.endMessageId)) continue;
+          !(entry.role === 'assistant' && entry.rawMessageId && entry.rawMessageId === raw.endMessageId) &&
+          !(entry.role === 'assistant' && entry.richRoot === true &&
+            /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(entry.rawMessageId || ''))) continue;
       const message = {
         messageId,
         rawMessageId: cap(entry.rawMessageId, 200),
@@ -3387,8 +3389,7 @@
         epoch !== heldEpoch || conversationId !== heldConversation ||
         !heldConversation || CLF_DOM.conversationId() !== heldConversation ||
         fiberScanToken !== scanToken || turn.conversationId !== heldConversation ||
-        ![...document.querySelectorAll('section[data-testid^="conversation-turn"]')].some(section =>
-          section.getAttribute('data-clf-fiber-turn') === `${scanToken}:${turn.index}`)) return null;
+        !document.querySelector(`section[data-testid^="conversation-turn"][data-clf-fiber-turn="${scanToken}:${turn.index}"]`)) return null;
     return { version: 1, status: 'unavailable', reason: 'ambiguous',
       conversationId: heldConversation, messageId: message.messageId,
       providerMessageId: message.rawMessageId, revision: 0, accessibleText: '', nodes: [] };
@@ -4279,6 +4280,11 @@
           ? richSnapshot(message, turn, askedConversation, askedEpoch, answer.scanToken) ||
             missingRichSnapshot(message, turn, priorMessage, askedConversation, askedEpoch, answer.scanToken)
           : null;
+        // A page-controlled Fiber reply may claim richRoot:true without any current
+        // stamped, exact DOM association. Its empty nonterminal assistant descriptor
+        // alone must never mint a canonical text row or a rich-only revision.
+        if (!message.rawText && !message.renderedHtml && !message.attachments?.length &&
+            !exactTerminal && !rich) continue;
         const richSignature = rich ? JSON.stringify(rich) : null;
         const richChanged = richSignature !== null && richSignature !== priorMessage?.richSignature;
         // Ownership may strengthen after an earlier scan saw the message before its DOM turn
@@ -4306,6 +4312,16 @@
             delete state.richSignature;
             if (--retained <= 64) break;
           }
+        }
+        // A zero-prose nonterminal DIL answer has a real native provider identity,
+        // but no authored text to create a canonical transcript row. Emit *only*
+        // presentation evidence: the bridge marks this rich-only, and the recorder
+        // refuses it until an existing owner and capture-time Chrome proof exist.
+        // No empty text, synthetic progress, activity, finality, or Goal tick.
+        if (!message.rawText && !message.renderedHtml && rich && !exactTerminal) {
+          emit({ kind: 'assistant_message', messageId: message.messageId,
+            providerMessageId: message.rawMessageId, fiberConversationId: askedConversation, rich });
+          continue;
         }
         // Hydration or native state changed, not authored prose/model work. Never emit
         // text, activity, final/Goal or a second logical message for this revision.

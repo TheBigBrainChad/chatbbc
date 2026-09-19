@@ -531,25 +531,38 @@ var CLF_DOM = (() => {
    * only candidate; content.js also compares its entire value against its current
    * Fiber frame before using it. An old stamp is never a live action lease.
    */
+  /** Count actual DOM elements incrementally; reject ambiguity or >1024 nodes before copying any list. */
+  function uniqueRichSurface(root) {
+    const walker = root.ownerDocument.createTreeWalker(root, 1);
+    let surface = null;
+    let visited = 0;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (++visited > 1024) return { surface: null, oversized: true };
+      if (!node.matches('.puik-root.not-prose.not-markdown')) continue;
+      if (surface) return { surface: null, oversized: false };
+      surface = node;
+    }
+    return { surface: surface?.parentElement === root ? surface : null, oversized: false };
+  }
+
   function richRootFor(logicalMessageId, providerMessageId) {
     return safe(() => {
       if (typeof logicalMessageId !== 'string' || !logicalMessageId || logicalMessageId.length > 190 ||
           typeof providerMessageId !== 'string' || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(providerMessageId)) return null;
       const suffix = `:${encodeURIComponent(logicalMessageId)}:${encodeURIComponent(providerMessageId)}`;
-      const roots = [...document.querySelectorAll('[data-clf-fiber-rich]')].filter(root => {
-        const stamp = root.getAttribute('data-clf-fiber-rich') || '';
-        const prefix = stamp.slice(0, -suffix.length);
-        if (!stamp.endsWith(suffix) || !/^[a-z\d-]{1,80}:\d+$/i.test(prefix)) return false;
-        const row = root.closest('[data-message-id]');
-        return root.isConnected && row?.getAttribute('data-message-id') === providerMessageId &&
-          row.getAttribute('data-message-author-role') === 'assistant' &&
-          row.contains(root) && !root.closest(OWN_SURFACES) &&
-          root.querySelectorAll('.puik-root.not-prose.not-markdown').length === 1 &&
-          root.querySelector('.puik-root.not-prose.not-markdown')?.parentElement === root;
-      });
-      const rows = [...document.querySelectorAll('[data-message-author-role="assistant"][data-message-id]')]
-        .filter(row => row.getAttribute('data-message-id') === providerMessageId);
-      return roots.length === 1 && rows.length === 1 ? roots[0] : null;
+      // Both queries are constrained by already validated identities. Never enumerate
+      // every rich stamp or every assistant row before checking uniqueness.
+      const roots = document.querySelectorAll(`[data-clf-fiber-rich$="${suffix}"]`);
+      if (roots.length !== 1) return null;
+      const root = roots[0];
+      const stamp = root.getAttribute('data-clf-fiber-rich') || '';
+      const prefix = stamp.slice(0, -suffix.length);
+      if (!stamp.endsWith(suffix) || !/^[a-z\d-]{1,80}:\d+$/i.test(prefix)) return null;
+      const rows = document.querySelectorAll(`[data-message-author-role="assistant"][data-message-id="${providerMessageId}"]`);
+      if (rows.length !== 1) return null;
+      const row = root.closest('[data-message-id]');
+      return root.isConnected && row === rows[0] && row.contains(root) && !root.closest(OWN_SURFACES) &&
+        uniqueRichSurface(root).surface ? root : null;
     }, null);
   }
 
@@ -558,13 +571,14 @@ var CLF_DOM = (() => {
   function captureRichRoot(root) {
     return safe(() => {
       if (root && typeof root === 'object') richFailure.delete(root);
-      if (!root?.isConnected || !root.hasAttribute('data-clf-fiber-rich') ||
-          root.querySelectorAll('.puik-root.not-prose.not-markdown').length !== 1) return null;
-      const surface = root.querySelector('.puik-root.not-prose.not-markdown');
-      if (surface?.parentElement !== root) return null;
+      if (!root?.isConnected || !root.hasAttribute('data-clf-fiber-rich')) return null;
       const seen = new WeakSet();
       let count = 0, controls = 0, media = 0, characters = 0;
       const overLimit = () => { richFailure.set(root, 'oversized'); return null; };
+      const unique = uniqueRichSurface(root);
+      if (unique.oversized) return overLimit();
+      const surface = unique.surface;
+      if (!surface) return null;
       const visible = element => {
         if (element.closest(`${OWN_SURFACES}, [hidden], [inert], [aria-hidden="true"]`)) return false;
         const style = getComputedStyle(element);
@@ -593,7 +607,10 @@ var CLF_DOM = (() => {
           return [{ id, kind: 'image', mediaId: `media-${id}`, alt, width, height }];
         }
         const isControl = ['button', 'input', 'select', 'a'].includes(name) || ['button', 'checkbox', 'radio'].includes(element.getAttribute('role'));
-        const rawChildren = [...element.childNodes];
+        // A NodeList can have arbitrarily many hostile siblings. Check its size
+        // against the remaining tree budget *before* iterating or materializing it.
+        const rawChildren = element.childNodes;
+        if (rawChildren.length > 1024 - count) return overLimit();
         const children = [];
         for (let index = 0; index < rawChildren.length; index++) {
           const child = rawChildren[index];
@@ -616,7 +633,21 @@ var CLF_DOM = (() => {
           const role = element.getAttribute('role');
           const control = role === 'checkbox' || role === 'radio' ? role :
             name === 'a' ? 'link' : name === 'select' ? 'select' : name === 'input' ? 'input' : 'button';
-          const label = element.getAttribute('aria-label') || element.textContent?.trim() || '';
+          // element.textContent also includes CSS-hidden/inert descendants whose
+          // nodes were deliberately excluded above. Derive only from the captured,
+          // visible subtree, or an independently length-checked aria-label.
+          const ariaLabel = element.getAttribute('aria-label');
+          if (ariaLabel !== null && ariaLabel.length > 8192) return overLimit();
+          const visibleText = [];
+          const collectText = entries => {
+            for (const entry of entries) {
+              if (entry.kind === 'text') visibleText.push(entry.text);
+              else if (entry.kind === 'control' && entry.label) visibleText.push(entry.label);
+              else if (entry.children) collectText(entry.children);
+            }
+          };
+          if (!ariaLabel?.trim()) collectText(children);
+          const label = ariaLabel?.trim() || visibleText.join(' ').trim();
           if (!label) return null;
           if (label.length > 8192) return overLimit();
           const checked = element.getAttribute('aria-checked');

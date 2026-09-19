@@ -281,6 +281,7 @@ interface TurnFixture {
   /** A visible `.markdown` block: its text, or markup when the test is about the markup. */
   rendered?: Array<string | { html: string; nativeId?: string; fiberProps?: Record<string, unknown>; fiber?: Fiber; staleMessageStamp?: string }>;
   rich?: Array<{ providerId: string; fiberMessageId?: string; fiberConversationId?: string; duplicate?: boolean }>;
+  forbidBroadRichSelectors?: boolean;
   activities?: Array<{ label: string; fiber: Fiber; staleThoughtStamp?: string }>;
   images?: Array<{ assetId: string; clones?: number }>;
   staleStamp?: string;
@@ -344,6 +345,13 @@ async function scan(
         surface.className = 'puik-root not-prose not-markdown';
         surface.innerHTML = '<div data-d-component="grid"><button data-d-component="pressable">Forest<img alt="Forest image"></button><button data-d-component="pressable">Coast<img alt="Coast image"></button><button data-d-component="button" disabled>Continue</button></div>';
         root.append(surface); row.append(root); section.append(row);
+        if (turn.forbidBroadRichSelectors) {
+          const query = row.querySelectorAll.bind(row);
+          row.querySelectorAll = ((selector: string) => {
+            if (selector === '.puik-root.not-prose.not-markdown') throw new Error('unbounded root selector');
+            return query(selector);
+          }) as typeof row.querySelectorAll;
+        }
       }
     }
     for (const entry of turn.rendered ?? []) {
@@ -391,6 +399,15 @@ async function scan(
     return row;
   });
 
+  if (turnSections.some(turn => turn.forbidBroadRichSelectors)) {
+    const query = document.querySelectorAll.bind(document);
+    document.querySelectorAll = ((selector: string) => {
+      if (selector === '[data-message-author-role="assistant"][data-message-id]') {
+        throw new Error('unbounded assistant selector');
+      }
+      return query(selector);
+    }) as typeof document.querySelectorAll;
+  }
   window.eval(source);
 
   const nonce = 'test-nonce';
@@ -777,6 +794,32 @@ describe('the calls a turn says it made', () => {
     expect(result.richStamps).toEqual(Array.from({ length: mode === 'duplicate-root' ? 2 : 1 }, () =>
       match ? `${result.scanToken}:0:${encodeURIComponent(found!.messageId)}:${provider}` : null));
     expect(result.turns[1]?.messages[0]?.richRoot).toBeUndefined();
+  });
+
+  it.each(['exact', 'missing-root'])('keeps zero-prose nonterminal assistant only with a unique exact rich root (%s)', async mode => {
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const silent = authored(provider, '', { workingTurnId: 'working', turnExchangeId: 'exchange',
+      createTime: 1789552000, status: 'in_progress', endTurn: false, channel: 'final' });
+    const ordinaryEmpty = authored('3150f756-bf2d-45fa-ac0f-45010b2239fc', '',
+      { status: 'in_progress', endTurn: false, channel: 'final' });
+    const result = await scan([], [{ id: 'zero-prose-turn', messages: [silent, ordinaryEmpty],
+      conversationProps: { conversationId: THREAD },
+      ...(mode === 'exact' ? { rich: [{ providerId: provider }] } : {}) }]);
+    expect(result.turns.flatMap(turn => turn.messages)).toEqual(mode === 'exact'
+      ? [expect.objectContaining({ messageId: 'assistant:working:exchange:1789552000000',
+        rawMessageId: provider, rawText: '', richRoot: true })] : []);
+    expect(result.richStamps).toEqual(mode === 'exact'
+      ? [`${result.scanToken}:0:assistant%3Aworking%3Aexchange%3A1789552000000:${provider}`] : []);
+  });
+
+  it('does not enumerate broad assistant/root selectors before admitting a uniquely owned DIL surface', async () => {
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const result = await scan([], [{ id: 'bounded-rich-selectors',
+      messages: [authored(provider, 'Visible', { channel: 'final' })],
+      conversationProps: { conversationId: THREAD }, rich: [{ providerId: provider }],
+      forbidBroadRichSelectors: true }]);
+    expect(result.turns[0]?.messages[0]?.richRoot).toBe(true);
+    expect(result.richStamps).toEqual([`${result.scanToken}:0:${provider}:${provider}`]);
   });
 
   it.each(['native', 'scoped', 'foreign', 'unknown', 'text-only', 'duplicate'])('stamps only exact current native message anchors (%s)', async mode => {

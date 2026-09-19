@@ -487,6 +487,66 @@ describe('exact native rich response observation (no action authority)', () => {
     expect(root.isConnected).toBe(true);
   });
 
+  it('records an exact nonterminal zero-prose rich message but does not mint an unowned empty assistant', async () => {
+    live = await harness();
+    rootFixture(live.document);
+    const exact = descriptor();
+    exact.messages[0]!.rawText = '';
+    await replyFiber([], [exact]);
+    await live.hook.flush();
+    expect(emitted(live.sent, 'assistant_message').map(entry => entry.event)).toEqual([
+      expect.objectContaining({ messageId, providerMessageId,
+        rich: expect.objectContaining({ status: 'available', messageId, providerMessageId }) })
+    ]);
+    const imageOnly = emitted(live.sent, 'assistant_message')[0]!.event;
+    for (const field of ['text', 'activeNow', 'goalEligible', 'state', 'final', 'turnId']) {
+      expect(imageOnly).not.toHaveProperty(field);
+    }
+    // The other provider's ordinary non-rich row has no matching root or prior owner.
+    const other = descriptor();
+    other.messages[0]!.rawText = '';
+    other.messages[0]!.messageId = 'assistant:unowned-empty';
+    other.messages[0]!.rawMessageId = '3150f756-bf2d-45fa-ac0f-45010b2239fc';
+    await replyFiber([], [other]);
+    await live.hook.flush();
+    expect(emitted(live.sent, 'assistant_message')).toHaveLength(1);
+  });
+
+  it('never includes CSS-hidden, hidden, inert, or aria-hidden descendant secrets in control labels', async () => {
+    live = await harness();
+    const { root, surface } = rootFixture(live.document);
+    const button = surface.querySelector('button')!;
+    button.insertAdjacentHTML('beforeend', '<span style="display:none">CSS_SECRET</span><span hidden>HIDDEN_SECRET</span><span inert>INERT_SECRET</span><span aria-hidden="true">ARIA_SECRET</span>');
+    const nodes = (live.window as any).CLF_DOM.captureRichRoot(root);
+    expect(nodes).not.toBeNull();
+    const serialized = JSON.stringify(nodes);
+    expect(serialized).toContain('Forest');
+    for (const secret of ['CSS_SECRET', 'HIDDEN_SECRET', 'INERT_SECRET', 'ARIA_SECRET']) {
+      expect(serialized).not.toContain(secret);
+    }
+    await replyFiber([], [descriptor()]);
+    await live.hook.flush();
+    const rich = emitted(live.sent, 'assistant_message').at(-1)!.event.rich;
+    expect(JSON.stringify(rich)).not.toMatch(/CSS_SECRET|HIDDEN_SECRET|INERT_SECRET|ARIA_SECRET/);
+  });
+
+  it('rejects more than 1024 hostile sibling nodes before iterating their NodeList', async () => {
+    live = await harness();
+    const { root, surface } = rootFixture(live.document);
+    const container = surface.querySelector('[data-d-component="grid"]')!;
+    for (let i = 0; i < 1025; i++) container.append(live.document.createElement('span'));
+    const childNodes = container.childNodes;
+    let iterated = false;
+    Object.defineProperty(childNodes, Symbol.iterator, { configurable: true, value: () => {
+      iterated = true;
+      throw new Error('unbounded NodeList iterator');
+    } });
+    const api = (live.window as any).CLF_DOM;
+    expect(api.captureRichRoot(root)).toBeNull();
+    expect(api.richCaptureReason(root)).toBe('oversized');
+    expect(iterated).toBe(false);
+  });
+
   it('refuses a stale or duplicated response root and leaves code literals as ordinary text', async () => {
     live = await harness();
     const { root, row, section, twin } = rootFixture(live.document);

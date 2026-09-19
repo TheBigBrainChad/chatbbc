@@ -459,7 +459,7 @@
   }
 
   /** Public assistant messages in ChatGPT's own turn model, in model order. */
-  function authoredAssistantMessages(messages, budget) {
+  function authoredAssistantMessages(messages, budget, exactRichProviders = null) {
     const out = [];
     const seen = new Set();
     const logicalIds = new Set();
@@ -482,7 +482,10 @@
       const rawText = budgetedText(authoredText(message), budget, MAX_RENDERED_TEXT);
       // A native final can be textless (for example after generated images).
       // Preserve its exact end_turn proof through the normal message pipeline.
-      if (!id || (!rawText && id !== terminalId)) continue;
+      // A nonterminal DIL-only answer can have no authored prose at all. Retain that
+      // existing public provider message only after its native root/turn/Fiber owner
+      // was corroborated below; never admit a generic empty assistant object.
+      if (!id || (!rawText && id !== terminalId && !exactRichProviders?.has(id))) continue;
       if (seen.has(id)) continue;
       seen.add(id);
       const meta = message.metadata && typeof message.metadata === 'object' ? message.metadata : null;
@@ -737,8 +740,65 @@
    * raw Markdown. Finally, the old positional fallback remains only for the fully balanced
    * case, where every remaining candidate has exactly one remaining visible block.
    */
+  function exactRichRootFor(sections, messages, providerId, conversationId) {
+    if (!/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(providerId)) return null;
+    let occurrences = 0;
+    for (const item of messages) {
+      if (item && item.id === providerId && ++occurrences > 1) return null;
+    }
+    if (occurrences !== 1) return null;
+    // Query by an already-validated UUID, not every assistant row in the page. Check
+    // cardinality on the NodeList before ever copying it into a JavaScript array.
+    const rows = document.querySelectorAll(`[data-message-author-role="assistant"][data-message-id="${providerId}"]`);
+    if (rows.length !== 1 || !sections.some(section => section.contains(rows[0]))) return null;
+    const row = rows[0];
+    if (!row.querySelector('.puik-root.not-prose.not-markdown')) return null;
+    // A hostile or hydrating row may contain thousands of sibling DIL roots. Walk
+    // incrementally and stop at the second exact surface or the 1024-element budget.
+    const walker = document.createTreeWalker(row, 1);
+    let surface = null;
+    let visited = 0;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (++visited > 1024) return null;
+      if (!node.matches('.puik-root.not-prose.not-markdown') || node.closest('[data-message-id]') !== row) continue;
+      if (surface) return null;
+      surface = node;
+    }
+    const root = surface?.parentElement;
+    if (!root || !root.isConnected || !root.querySelector('[data-d-component]') || root.closest(OWN_SURFACES)) return null;
+    const fiber = fiberOf(root);
+    const props = fiber && fiber.memoizedProps;
+    const scope = fiber && conversationEvidenceOf(fiber);
+    const nativeMessages = fiber && turnMessagesOf(fiber);
+    if (!props || props.messageId !== providerId || props.conversationId !== conversationId ||
+        !scope || scope.conflict || scope.conversationId !== conversationId ||
+        !Array.isArray(nativeMessages) || nativeMessages !== messages) return null;
+    let publicMatches = 0;
+    for (const item of nativeMessages) {
+      if (item && item.id === providerId && item.author?.role === 'assistant' &&
+          item.recipient === 'all' && !hiddenMessage(item) && !analysisMessage(item) && ++publicMatches > 1) return null;
+    }
+    return publicMatches === 1 ? root : null;
+  }
+
   function renderedMessagesOf(sections, messages, budget, exactAnchors, conversationId, exactRichRoots) {
-    const assistantCandidates = authoredAssistantMessages(messages, budget);
+    const exactRichProviders = new Map();
+    // Prove empty-answer eligibility *before* authoredAssistantMessages excludes it.
+    // This is not a generic textless transcript fallback: every admitted id must
+    // identify the same uniquely mounted, public, exact native message and root.
+    if (exactRichRoots && Array.isArray(messages) && conversationId &&
+        conversationId === (/(?:^|\/)c\/([a-f\d-]{36})(?:\/|$)/i.exec(location.pathname) || [])[1]) {
+      for (let index = 0; index < messages.length && index < 200; index++) {
+        const item = messages[index];
+        if (!item || item.author?.role !== 'assistant' || item.recipient !== 'all' ||
+            requestOf(item) || resultOf(item) || hiddenMessage(item) || analysisMessage(item)) continue;
+        const id = str(item.id);
+        if (!id || exactRichProviders.has(id)) continue;
+        const root = exactRichRootFor(sections, messages, id, conversationId);
+        if (root) exactRichProviders.set(id, root);
+      }
+    }
+    const assistantCandidates = authoredAssistantMessages(messages, budget, exactRichProviders);
     const userCandidates = authoredUserMessages(messages, budget);
     if (assistantCandidates.length === 0 && userCandidates.length === 0) return [];
 
@@ -746,31 +806,9 @@
     // Fiber props name that UUID/conversation, and the same UUID once in this turn model.
     // No text, sibling order, CSS-module hash or `only answer` fallback participates.
     // Only an exact root gets a stamp; the isolated DOM adapter reads its *rendered* DOM.
-    if (exactRichRoots && conversationId && conversationId === (/(?:^|\/)c\/([a-f\d-]{36})(?:\/|$)/i.exec(location.pathname) || [])[1]) {
-      for (const candidate of assistantCandidates) {
-        if (!/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(candidate.id) ||
-            messages.filter(item => item && item.id === candidate.id).length !== 1) continue;
-        const rows = [...document.querySelectorAll('[data-message-author-role="assistant"][data-message-id]')]
-          .filter(row => row.getAttribute('data-message-id') === candidate.id);
-        if (rows.length !== 1 || !sections.some(section => section.contains(rows[0]))) continue;
-        const row = rows[0];
-        const roots = [...row.querySelectorAll('.puik-root.not-prose.not-markdown')]
-          .filter(surface => surface.closest('[data-message-id]') === row)
-          .map(surface => surface.parentElement)
-          .filter(root => root && root.isConnected && root.querySelector('[data-d-component]') && !root.closest(OWN_SURFACES));
-        if (roots.length !== 1) continue;
-        const root = roots[0];
-        const fiber = fiberOf(root);
-        const props = fiber && fiber.memoizedProps;
-        const scope = fiber && conversationEvidenceOf(fiber);
-        const nativeMessages = fiber && turnMessagesOf(fiber);
-        if (!props || props.messageId !== candidate.id || props.conversationId !== conversationId ||
-            !scope || scope.conflict || scope.conversationId !== conversationId ||
-            !Array.isArray(nativeMessages) || nativeMessages !== messages ||
-            nativeMessages.filter(item => item && item.id === candidate.id &&
-              item.author?.role === 'assistant' && item.recipient === 'all' && !hiddenMessage(item) && !analysisMessage(item)).length !== 1) continue;
-        exactRichRoots.set(root, { messageId: candidate.messageId, providerMessageId: candidate.id });
-      }
+    if (exactRichRoots) for (const candidate of assistantCandidates) {
+      const root = exactRichProviders.get(candidate.id);
+      if (root) exactRichRoots.set(root, { messageId: candidate.messageId, providerMessageId: candidate.id });
     }
 
     const blocks = [];
