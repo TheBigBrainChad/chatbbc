@@ -30,7 +30,7 @@ commitment.
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: **2026-09-17**, including the 2.1.14 release candidate. App/extension **2.1.14**,
+Source alignment: **2026-09-19**, including the 2.1.18 release candidate. App/extension **2.1.18**,
 bridge protocol **15** in the checked declarations (`package.json`, `src/main/version.ts`,
 `extension/manifest.json`, `extension/background.js`). This rename is the second hard identity
 cut. The two halves identify each other twice: the companion accepts a `/hello` reply only when

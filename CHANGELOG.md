@@ -9,6 +9,34 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## [2.1.18] — reliable recovery and browser control
+
+### Fixed
+
+- **Response identity and chronology remain stable across page replacement.** Native finals,
+  local calls, interim prose and activity details retain their exact response and turn owner.
+- **Queued corrections and automatic Continue keep one delivery owner.** Recovery input cannot
+  be edited or reordered as authored work, supports up to ten injected images, and a deliberate
+  page close pauses silence and Goal/input pickup until that page actually returns.
+- **Browser control can inspect existing protected or foreign-owned HTTP tabs without attaching.**
+  New-tab creation reports navigation separately from debugger attachment, navigation invalidates
+  stale refs, and background screenshots wake a throttled Chromium compositor only for capture.
+- **Automatic compaction waits for native result receipts**, worker wake recovery rechecks current
+  ownership, and extension journal delivery retains a 60-second observation deadline.
+- **The pinned GVDB native-source archive uses its byte-identical GitHub mirror** after the
+  original GitLab endpoint stopped serving the archive.
+
+### Notes
+
+- Adapted from upstream PRs [#297](https://github.com/totec448-spec/chat-on-steroids/pull/297),
+  [#300](https://github.com/totec448-spec/chat-on-steroids/pull/300),
+  [#310](https://github.com/totec448-spec/chat-on-steroids/pull/310),
+  [#312](https://github.com/totec448-spec/chat-on-steroids/pull/312),
+  [#313](https://github.com/totec448-spec/chat-on-steroids/pull/313) and
+  [#316](https://github.com/totec448-spec/chat-on-steroids/pull/316), with original authorship
+  retained in `CONTRIBUTORS.md` and the integration commit trailers.
+- ChatBBC identity, bridge protocol 15, appearance and skill-pack behavior remain unchanged.
+
 ## [2.1.17] — a skill pack you can switch on and off
 
 Jesse Vincent's [obra/superpowers](https://github.com/obra/superpowers) skills, bundled with the
@@ -33,21 +61,6 @@ app and controllable per skill from Settings.
   then the skill's own declaration, then on.
 
 ### Fixed
-- **Upstream reliability catch-up** — adapted response identity, queued-editor and Continue
-  custody, ten-image injection, browser inspection/creation, native compaction receipts,
-  worker-wake recovery, a 60-second journal deadline, and the GVDB source mirror from
-  upstream PRs [#297](https://github.com/totec448-spec/chat-on-steroids/pull/297),
-  [#300](https://github.com/totec448-spec/chat-on-steroids/pull/300),
-  [#310](https://github.com/totec448-spec/chat-on-steroids/pull/310),
-  [#312](https://github.com/totec448-spec/chat-on-steroids/pull/312),
-  [#313](https://github.com/totec448-spec/chat-on-steroids/pull/313) and
-  [#316](https://github.com/totec448-spec/chat-on-steroids/pull/316). ChatBBC branding,
-  version 2.1.17, protocol 15 and local appearance/skill-pack work are preserved.
-- **Background browser screenshots no longer stall after offscreen input or layout changes.**
-  A capture-scoped compositor wake preserves hidden-tab operation without selecting the tab,
-  extending the timeout or leaving a stream running.
-
-
 - **The advertised catalog no longer lists skills you switched off.** The connector's handshake
   instructions read the unfiltered library, so a disabled skill was still offered and then failed
   when selected.
