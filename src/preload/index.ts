@@ -165,6 +165,8 @@ const api = {
 
   // Sessions, compaction and the browser bridge. Everything here is read-only or a
   // named action; there is still no channel that takes a path or a command.
+  reportUiSelection: (payload: { sessionId: string | null; rendererGeneration: number }) =>
+    call<{ sessionId: string | null; generation: number }>('sessions:uiSelection', payload),
   listSessions: (options?: { cursor?: SessionListCursor; limit?: number }) =>
     call<SessionList>('sessions:list', options ?? {}),
   listProjects: () => call<LocalProject[]>('projects:list'),

@@ -1,4 +1,5 @@
 import { registerWorkspaceTerminalIpc } from './workspace-terminal-ipc.js';
+import { registerUiSelection } from './ui-selection.js';
 import { applyLoginStartup, supportsLoginStartup } from './window-lifecycle.js';
 import { appearanceSchema } from './appearance-schema.js';
 import { mergeAppearance, effectiveAppearance, effectiveTheme } from '../shared/appearance.js';
@@ -416,6 +417,9 @@ function handle<T>(channel: string, fn: (payload: unknown) => Promise<T>): void 
 
 export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall: () => void): void {
   registerWorkspaceTerminalIpc(getWindow);
+  const uiSelection = registerUiSelection(getWindow);
+  // This channel must keep Electron's actual event: the ordinary handle() discards sender proof.
+  ipcMain.handle('sessions:uiSelection', (event, payload: unknown) => uiSelection.report(event, payload));
   let watchedWindow: BrowserWindow | null = null;
   const projectFileWatches = new ProjectFileWatchSet(event => {
     const target = getWindow();
@@ -1066,6 +1070,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
 
   handle('sessions:delete', async (payload) => {
     const { id } = sessionIdArg.parse(payload);
+    uiSelection.invalidateSession(id);
     // Detach first. The recorder maps live ChatGPT conversations to session ids, so
     // deleting the folder underneath a live one left it appending to a session that no
     // longer existed — the events went to a resurrected half-session with no summary.
@@ -1077,6 +1082,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     const summary = await getSession(id);
     if (summary?.conversationId) setChatBlocked(summary.conversationId, false);
     await deleteSession(id);
+    // A new renderer report could have resolved while deletion awaited disk. Revoke it too.
+    uiSelection.invalidateSession(id);
     logInfo(
       detached.length > 0
         ? `session ${id} deleted; ${detached.length} live conversation(s) will start a new session`

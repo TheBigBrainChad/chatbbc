@@ -23,3 +23,15 @@ it('transports pathless clipboard bytes and disk paths through one bounded image
   expect(arrayBuffer).not.toHaveBeenCalled();
   expect(invoke).not.toHaveBeenCalled();
 });
+
+it('exposes only the fixed, typed UI-selection reporting channel', async () => {
+  vi.resetModules(); // The preceding test imported the preload; its spy calls are cleared per test.
+  await import('../src/preload/index.js');
+  const api = expose.mock.calls[0]![1];
+  invoke.mockImplementationOnce(async () => ({ ok: true, data: { sessionId: '12345678', generation: 42 } as any }));
+  expect(await api.reportUiSelection({ sessionId: '12345678', rendererGeneration: 7 })).toEqual({
+    ok: true, data: { sessionId: '12345678', generation: 42 }
+  });
+  expect(invoke).toHaveBeenLastCalledWith('sessions:uiSelection', { sessionId: '12345678', rendererGeneration: 7 });
+  expect(api.invoke).toBeUndefined();
+});

@@ -192,12 +192,18 @@ async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers
     update: { current: '2.0.3', latest: null, stage: 'idle', error: null, checkedAt: null }
   };
   const ok = (data: any) => Promise.resolve({ ok: true, data });
-  const live = { events: [...events], inputs: [] as InputEntry[], sent: [] as InputArgs[], automation: 'off', controlCalls: [] as Array<{ id: string; action: string }>, compacting: false, finishHeld: true };
+  const live = { events: [...events], inputs: [] as InputEntry[], sent: [] as InputArgs[], automation: 'off', controlCalls: [] as Array<{ id: string; action: string }>, compacting: false, finishHeld: true,
+    selectionReports: [] as Array<{ sessionId: string | null; rendererGeneration: number }> };
+  let mainSelectionGeneration = 0;
   let sessionListener: () => void = () => undefined;
   let writeSessionListener: (id: string) => void = () => undefined;
   const taskProgressListeners = new Set<(progress: any) => void>();
   const api: any = new Proxy(
     {
+      reportUiSelection: vi.fn((selection: { sessionId: string | null; rendererGeneration: number }) => {
+        live.selectionReports.push(selection);
+        return ok({ sessionId: selection.sessionId, generation: ++mainSelectionGeneration });
+      }),
       getState: () => ok(state),
       getChatModels: () => ok({ state: 'ready', requestedAt: 1, observedAt: Date.now(), models: [{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', efforts: options.pro ? ['high', 'pro'] : ['none', 'high'] }] }),
       getSessionControls: (id: string) => ok({ sessionId: id, conversationId: 'chat-a', automation: live.automation, activeTurnId: 'held-turn', finishHeld: live.finishHeld, blocked: '', job: live.compacting ? { busy: true } : null }),
@@ -303,6 +309,104 @@ async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers
     }
   };
 }
+
+it('reports startup New Chat, sidebar A→B→A, same-id Write Directly and New Chat in increasing renderer epochs', async () => {
+  const first = summary([]), second = { ...first, id: '2026-09-02-test0002' };
+  const { w, live, writeSession } = await boot([], true, [], [], { sessions: [first, second] });
+  expect(live.selectionReports.slice(0, 2).map(row => row.sessionId)).toEqual([null, first.id]);
+  (w.document.querySelector(`#sessionList [data-id="${second.id}"]`) as HTMLElement).click();
+  (w.document.querySelector(`#sessionList [data-id="${first.id}"]`) as HTMLElement).click();
+  writeSession(first.id);
+  w.document.getElementById('newChat')!.click();
+  await settle();
+  expect(live.selectionReports.map(row => row.sessionId)).toEqual([null, first.id, second.id, first.id, first.id, null]);
+  expect(live.selectionReports.map(row => row.rendererGeneration)).toEqual(
+    [...live.selectionReports.map(row => row.rendererGeneration)].sort((a, b) => a - b)
+  );
+  expect(new Set(live.selectionReports.map(row => row.rendererGeneration)).size).toBe(live.selectionReports.length);
+});
+
+it('reports Settings and hidden Chat as null, then freshly witnesses the selected session on return', async () => {
+  const { w, live } = await boot([]);
+  const id = summary([]).id;
+  w.document.getElementById('chatSettingsBtn')!.click();
+  await settle();
+  expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+  w.document.getElementById('backToChat')!.click();
+  await settle();
+  expect(live.selectionReports.at(-1)?.sessionId).toBe(id);
+  w.document.getElementById('sidebarPlugins')!.click();
+  await settle();
+  expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+  w.document.getElementById('backToChat')!.click();
+  await settle();
+  expect(live.selectionReports.at(-1)?.sessionId).toBe(id);
+});
+
+it('does not infer deleted selection from a bounded first page and retires only confirmed absence', async () => {
+  const first = summary([]), other = { ...first, id: '2026-09-02-test0002' };
+  const rows = [first, other];
+  const { w, live, notifySession } = await boot([], true, [], [], { sessions: rows });
+  const api = (w as any).api;
+  const before = live.selectionReports.length;
+  api.listSessions = () => Promise.resolve({ ok: true, data: { sessions: [other], total: 61, nextCursor: { id: other.id, updatedAt: other.updatedAt }, activeId: other.id, blocked: [], pressure: [] } });
+  api.getSession = vi.fn(async (id: string) => ({ ok: true, data: { summary: id === first.id ? first : other, events: [], total: 0, nextFrom: 0 } }));
+  notifySession(); await settle(450);
+  expect(live.selectionReports).toHaveLength(before);
+  expect(w.document.getElementById('chatTitle')!.textContent).toContain(first.title);
+  api.getSession = vi.fn(async () => ({ ok: false, error: 'Temporary storage failure' }));
+  notifySession(); await settle(450);
+  expect(live.selectionReports).toHaveLength(before);
+  expect(w.document.getElementById('chatTitle')!.textContent).toContain(first.title);
+  api.getSession = vi.fn(async () => ({ ok: false, error: 'Session not found' }));
+  notifySession(); await settle(450);
+  expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+});
+
+it('revokes the exact selected session after deletion and reports a new project draft transition', async () => {
+  const project = { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', name: 'Project', path: '/project', createdAt: 1 };
+  const { w, live } = await boot([], true, [], [project]);
+  const api = (w as any).api;
+  api.deleteSession = vi.fn(async () => ({ ok: true, data: true }));
+  (w.document.querySelector(`#sessionList [data-id="${summary([]).id}"] .sess-del`) as HTMLElement).click();
+  await settle();
+  expect(api.deleteSession).toHaveBeenCalledExactlyOnceWith(summary([]).id);
+  expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+  expect(w.document.getElementById('sessionControlStatus')!.textContent).toBe('');
+  const before = live.selectionReports.length;
+  (w.document.querySelector(`[data-new-project="${project.id}"]`) as HTMLElement).click();
+  await settle();
+  expect(live.selectionReports).toHaveLength(before + 1);
+  expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+  api.removeProject = vi.fn(async () => ({ ok: true, data: { ...project, ungrouped: true } }));
+  (w.document.querySelector('.project-remove') as HTMLElement).click();
+  await settle();
+  expect(live.selectionReports).toHaveLength(before + 2);
+  expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+});
+
+it('cannot repaint B from an old A→B→A acknowledgment or failed latest witness', async () => {
+  const first = summary([]), second = { ...first, id: '2026-09-02-test0002', title: 'Selected B' };
+  const { w, writeSession } = await boot([], true, [], [], { sessions: [first, second] });
+  const api = (w as any).api;
+  const pending: Array<{ payload: { sessionId: string | null; rendererGeneration: number }; resolve: (reply: any) => void }> = [];
+  api.reportUiSelection = vi.fn((payload: { sessionId: string | null; rendererGeneration: number }) =>
+    new Promise(resolve => pending.push({ payload, resolve })));
+  (w.document.querySelector(`#sessionList [data-id="${second.id}"]`) as HTMLElement).click();
+  (w.document.querySelector(`#sessionList [data-id="${first.id}"]`) as HTMLElement).click();
+  (w.document.querySelector(`#sessionList [data-id="${second.id}"]`) as HTMLElement).click();
+  expect(pending.map(row => row.payload.sessionId)).toEqual([second.id, first.id, second.id]);
+  pending[2]!.resolve({ ok: false, error: 'Witness unavailable' });
+  pending[1]!.resolve({ ok: true, data: { sessionId: first.id, generation: 100 } });
+  pending[0]!.resolve({ ok: true, data: { sessionId: second.id, generation: 99 } });
+  await settle();
+  expect(w.document.getElementById('chatTitle')!.textContent).toContain('Selected B');
+  writeSession(second.id);
+  expect(pending[3]!.payload).toEqual({ sessionId: second.id, rendererGeneration: pending[2]!.payload.rendererGeneration + 1 });
+  pending[3]!.resolve({ ok: true, data: { sessionId: second.id, generation: 101 } });
+  await settle();
+  expect(w.document.getElementById('chatTitle')!.textContent).toContain('Selected B');
+});
 
 it('patches native reactions in place and hides streamed envelopes without changing authored messages', async () => {
   const user: SessionEvent = { kind: 'user_message', seq: 1, origin: 1, time: T0, source: 'extension', messageId: 'reaction-user', message: text('Question') };

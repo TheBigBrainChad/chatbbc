@@ -8,6 +8,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
+import { pathToFileURL } from 'node:url';
 
 type Handler = (event: unknown, payload: unknown) => Promise<unknown>;
 const handlers = new Map<string, Handler>();
@@ -84,6 +86,156 @@ const renameRoot = (payload: unknown): Promise<any> => handlers.get('roots:renam
 const removeRoot = (payload: unknown): Promise<any> => handlers.get('roots:remove')!(null, payload) as Promise<any>;
 const sessionEvents = (payload: unknown): Promise<any> => handlers.get('sessions:events')!(null, payload) as Promise<any>;
 const sessionList = (): Promise<any> => handlers.get('sessions:list')!(null, undefined) as Promise<any>;
+
+function selectionWindow() {
+  const mainFrame = { url: pathToFileURL(path.join(process.cwd(), 'src/renderer/index.html')).href };
+  const webContents = Object.assign(new EventEmitter(), {
+    send: vi.fn(), mainFrame, getURL: () => mainFrame.url, isDestroyed: () => false,
+    isLoadingMainFrame: () => true
+  });
+  const window = Object.assign(new EventEmitter(), {
+    webContents, isDestroyed: () => false, isVisible: () => true,
+    setBackgroundColor: vi.fn(), setTitleBarOverlay: vi.fn()
+  });
+  currentWindow = window as any;
+  return { window, webContents, mainFrame, event: { sender: webContents, senderFrame: mainFrame } };
+}
+
+describe('main-owned, inert UI selection witness', () => {
+  it('requires the exact current window/main frame, issues independent generations and never uses last activity', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const first = await createSession({ title: 'witness A', conversationId: 'selection-a' });
+    const second = await createSession({ title: 'witness B', conversationId: 'selection-b' });
+    const { event, webContents, mainFrame, window } = selectionWindow();
+    const report = (sessionId: string | null, rendererGeneration: number, invokeEvent: unknown = event) =>
+      handlers.get('sessions:uiSelection')!(invokeEvent, { sessionId, rendererGeneration }) as Promise<any>;
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect((await sessionList()).data.activeId).not.toEqual(currentUiSelectionFor(webContents as any)?.sessionId);
+    const a = await report(first.id, 1);
+    expect(a).toMatchObject({ ok: true, data: { sessionId: first.id, generation: expect.any(Number) } });
+    expect(currentUiSelectionFor(webContents as any)).toEqual(a.data);
+    const b = await report(second.id, 2);
+    const back = await report(first.id, 3);
+    const same = await report(first.id, 4);
+    const empty = await report(null, 5);
+    const again = await report(first.id, 6);
+    expect([a, b, back, same, empty, again].map(reply => reply.data.generation)).toEqual(
+      [...new Set([a, b, back, same, empty, again].map(reply => reply.data.generation))].sort((x, y) => x - y)
+    );
+    expect(currentUiSelectionFor(webContents as any)).toEqual(again.data);
+    expect((await report(second.id, 5)).ok).toBe(false);
+    expect((await report(first.id, 6)).ok).toBe(false);
+    expect(currentUiSelectionFor(webContents as any)).toEqual(again.data);
+    expect((await report(second.id, 7, { sender: webContents, senderFrame: {} })).ok).toBe(false);
+    expect((await report(second.id, 7, { sender: {}, senderFrame: mainFrame })).ok).toBe(false);
+    expect(currentUiSelectionFor(webContents as any)).toEqual(again.data);
+    const changedURL = mainFrame.url;
+    mainFrame.url = 'https://foreign.example/';
+    expect((await report(second.id, 7)).ok).toBe(false);
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    mainFrame.url = changedURL;
+    expect(currentUiSelectionFor(webContents as any)).toBeNull(); // A restored URL cannot resurrect the old witness.
+    const foreign = selectionWindow();
+    currentWindow = window as any;
+    expect((await report(second.id, 7, foreign.event)).ok).toBe(false);
+    expect(currentUiSelectionFor(foreign.webContents as any)).toBeNull();
+    const replaced = selectionWindow();
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect((await report(second.id, 7)).ok).toBe(false);
+    expect(currentUiSelectionFor(replaced.webContents as any)).toBeNull();
+  });
+
+  it('rejects malformed, unknown and deleted sessions, and revokes exact deletion without renderer cooperation', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const session = await createSession({ title: 'delete witness' });
+    const other = await createSession({ title: 'unrelated deletion' });
+    const { event, webContents } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: -1 })).toMatchObject({ ok: false });
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 1, action: 'grant' })).toMatchObject({ ok: false });
+    expect(await handler(event, { sessionId: 'missing00', rendererGeneration: 1 })).toMatchObject({ ok: false });
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 2 })).toMatchObject({ ok: true });
+    expect(await handler(event, { sessionId: other.id, rendererGeneration: 3, action: 'grant' })).toMatchObject({ ok: false });
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 4 })).toMatchObject({ ok: true });
+    expect(await handlers.get('sessions:delete')!(null, { id: other.id })).toMatchObject({ ok: true });
+    expect(currentUiSelectionFor(webContents as any)?.sessionId).toBe(session.id);
+    expect(await handlers.get('sessions:delete')!(null, { id: session.id })).toMatchObject({ ok: true });
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 5 })).toMatchObject({ ok: false });
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+  });
+
+  it('invalidates synchronously before lookup and rejects out-of-order A→B→A completions and failed B', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const store = await import('../src/main/session/store.js');
+    const a = await createSession({ title: 'race A' });
+    const b = await createSession({ title: 'race B' });
+    const { event, webContents } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    let release!: (value: Awaited<ReturnType<typeof store.getSession>>) => void;
+    const original = store.getSession;
+    const spy = vi.spyOn(store, 'getSession').mockImplementation(id => id === a.id && !release
+      ? new Promise(resolve => { release = resolve; }) : original(id));
+    try {
+      const old = handler(event, { sessionId: a.id, rendererGeneration: 1 });
+      expect(currentUiSelectionFor(webContents as any)).toBeNull();
+      const winner = await handler(event, { sessionId: b.id, rendererGeneration: 2 }) as any;
+      expect(winner).toMatchObject({ ok: true, data: { sessionId: b.id } });
+      const back = await handler(event, { sessionId: a.id, rendererGeneration: 3 }) as any;
+      expect(back).toMatchObject({ ok: true, data: { sessionId: a.id } });
+      expect(back.data.generation).toBeGreaterThan(winner.data.generation);
+      release(await original(a.id));
+      expect(await old).toMatchObject({ ok: false });
+      expect(currentUiSelectionFor(webContents as any)).toEqual(back.data);
+      expect(await handler(event, { sessionId: 'unknown0', rendererGeneration: 4 })).toMatchObject({ ok: false });
+      expect(currentUiSelectionFor(webContents as any)).toBeNull();
+      expect(await handler(event, { sessionId: a.id, rendererGeneration: 5 })).toMatchObject({ ok: true });
+    } finally { spy.mockRestore(); }
+  });
+
+  it('revokes a report that arrives while exact session deletion is still awaiting disk', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const store = await import('../src/main/session/store.js');
+    const session = await createSession({ title: 'delete while reporting' });
+    const { event, webContents } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 1 })).toMatchObject({ ok: true });
+    const original = store.deleteSession;
+    let finishDelete!: () => void;
+    const spy = vi.spyOn(store, 'deleteSession').mockImplementation(id => id === session.id
+      ? new Promise(resolve => { finishDelete = () => void original(id).then(resolve); }) : original(id));
+    try {
+      const pendingDelete = handlers.get('sessions:delete')!(null, { id: session.id });
+      await vi.waitFor(() => expect(finishDelete).toBeTypeOf('function'));
+      expect(currentUiSelectionFor(webContents as any)).toBeNull();
+      expect(await handler(event, { sessionId: session.id, rendererGeneration: 2 })).toMatchObject({ ok: true });
+      expect(currentUiSelectionFor(webContents as any)?.sessionId).toBe(session.id);
+      finishDelete();
+      expect(await pendingDelete).toMatchObject({ ok: true });
+      expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    } finally { spy.mockRestore(); }
+  });
+
+  it.each(['hide', 'did-start-loading', 'render-process-gone', 'destroyed', 'closed'])('revokes the original window on %s', async lifecycle => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const session = await createSession({ title: `lifecycle ${lifecycle}` });
+    const { window, webContents, event } = selectionWindow();
+    expect(await handlers.get('sessions:uiSelection')!(event, { sessionId: session.id, rendererGeneration: 1 })).toMatchObject({ ok: true });
+    if (lifecycle === 'hide' || lifecycle === 'closed') window.emit(lifecycle);
+    else webContents.emit(lifecycle);
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    if (lifecycle === 'did-start-loading') {
+      webContents.emit('did-finish-load');
+      expect(await handlers.get('sessions:uiSelection')!(event, { sessionId: session.id, rendererGeneration: 0 })).toMatchObject({ ok: true });
+    }
+    if (lifecycle === 'hide') {
+      const restored = await handlers.get('sessions:uiSelection')!(event, { sessionId: session.id, rendererGeneration: 2 });
+      expect(restored).toMatchObject({ ok: true });
+    }
+  });
+});
 
 it('keeps recording off against stale unrelated Settings saves, then accepts an explicit on choice', async () => {
   const base = getConfig();

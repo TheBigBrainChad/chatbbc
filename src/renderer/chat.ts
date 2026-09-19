@@ -140,6 +140,25 @@ let workspaceTerminal: ReturnType<typeof createWorkspaceTerminal> | null = null;
 let sidebarOrder: ReturnType<typeof createSidebarOrder> | undefined;
 function draftKey(): string { return selectedId ?? (selectedProjectId ? `project:${selectedProjectId}` : 'new'); }
 let selectionGeneration = 0;
+let selectionReportSequence = 0;
+let reportedSessionId: string | null = null;
+let acknowledgedUiSelection: { sessionId: string | null; rendererGeneration: number; generation: number } | null = null;
+let currentChatView = 'timeline';
+
+/** Presentation only. Main validates the sender, current window and session before witnessing. */
+function reportVisibleSelection(force = false): void {
+  const sessionId = visible && currentChatView === 'timeline' && !document.hidden ? selectedId : null;
+  if (!force && sessionId === reportedSessionId && acknowledgedUiSelection?.sessionId === sessionId) return;
+  reportedSessionId = sessionId;
+  acknowledgedUiSelection = null;
+  const rendererGeneration = ++selectionReportSequence;
+  void api.reportUiSelection({ sessionId, rendererGeneration }).then(result => {
+    // A→B→A and same-id reselections retire all older acknowledgments, including failures.
+    if (rendererGeneration !== selectionReportSequence || sessionId !== reportedSessionId ||
+        !result.ok || result.data.sessionId !== sessionId) return;
+    acknowledgedUiSelection = { sessionId, rendererGeneration, generation: result.data.generation };
+  }).catch(() => { /* A failed witness stays unavailable; ordinary chat remains usable. */ });
+}
 // Async file import belongs to one visible composer draft, not just to a session key.
 // Replacing that draft retires in-flight imports even when navigation returns to the
 // same key or a send failure later restores the submitted text.
@@ -239,22 +258,35 @@ async function toggleSessionBlock(id: string, blocked: boolean): Promise<void> {
   paintSessions(sessionHost);
 }
 
+/** One selection retirement path for deletion and independently confirmed disappearance. */
+function clearSelectedSession(): void {
+  retireRichImageViewer();
+  selectionGeneration++;
+  replaceComposerDraft();
+  selectedId = null;
+  newChatSelected = true;
+  pendingNewInput = null;
+  events = [];
+  totalEvents = 0;
+  detailFor = null;
+  detailCursor = null;
+  historyBefore = null;
+  handoff = null;
+  handoffFor = null;
+  detailLoadGeneration++;
+  handoffLoadGeneration++;
+  reportVisibleSelection(true);
+  void refreshSessionControls();
+}
+
 async function deleteSession(id: string): Promise<void> {
   const done = await run(api.deleteSession(id));
-  if (done === null) return;
+  if (done === null) { if (selectedId === id) reportVisibleSelection(true); return; }
   sessions = sessions.filter((entry) => entry.id !== id);
   pressure.delete(id);
   sessionTotal = Math.max(0, sessionTotal - 1);
   if (selectedId === id) {
-    selectedId = null;
-    events = [];
-    totalEvents = 0;
-    detailFor = null;
-    detailCursor = null;
-    handoff = null;
-    handoffFor = null;
-    detailLoadGeneration++;
-    handoffLoadGeneration++;
+    clearSelectedSession();
   }
   toast(t("Session deleted"));
   await loadSessions();
@@ -266,6 +298,7 @@ async function loadSessions(): Promise<void> {
   const generation = ++sessionsLoadGeneration;
   const [list, catalog] = await Promise.all([run(api.listSessions({ limit: SESSION_PAGE_SIZE })), run(api.listProjects())]);
   if (!list || generation !== sessionsLoadGeneration) return;
+  const previouslySelected = sessions.find(row => row.id === selectedId);
   if (catalog) projects = catalog;
   // Once older pages have been requested, a hot refresh only replaces/updates the newest page.
   // Throwing the older rows away here would make scrolling history vanish every 400 ms while a
@@ -295,9 +328,21 @@ async function loadSessions(): Promise<void> {
     pressure = new Map(list.pressure.map((entry) => [entry.id, entry]));
   }
   if (selectedId !== null && !sessions.some((s) => s.id === selectedId)) {
-    selectedId = null;
-    detailFor = null;
-    detailCursor = null;
+    // A bounded newest page cannot prove an older selected session was removed.
+    const wanted = selectedId, selection = selectionGeneration;
+    let resolved: SessionSummary | null | undefined;
+    try {
+      const reply = await api.getSession(wanted, { limit: 1 });
+      if (reply.ok && reply.data.summary?.id === wanted) resolved = reply.data.summary;
+      else if (!reply.ok && /session not found/i.test(reply.error)) resolved = null;
+    } catch { /* A read error is unknown, never an authoritative deletion. */ }
+    if (generation !== sessionsLoadGeneration || selection !== selectionGeneration || selectedId !== wanted) return;
+    if (resolved === null) clearSelectedSession();
+    else {
+      // Preserve the selected row and title across pagination and transient read failures.
+      const retained = resolved ?? previouslySelected;
+      if (retained) sessions = mergeSessionRows(sessions, [retained]);
+    }
   }
   paintSessions(sessionHost);
   await loadDetail();
@@ -2877,6 +2922,7 @@ export function chatApply(state: AppState, previous?: Config): void {
 export function chatVisible(next: boolean): void {
   if (visible === next) return;
   visible = next;
+  reportVisibleSelection(next && selectedId !== null);
   if (next) void refreshAll();
   else {
     window.clearTimeout(toolActivityTimer);
@@ -3036,6 +3082,10 @@ export function openChatView(name: string): void {
 }
 
 function showView(name: string): void {
+  if (currentChatView !== name) {
+    currentChatView = name;
+    reportVisibleSelection();
+  }
   $('composer').hidden = name === 'settings';
   $('composerDock').hidden = name === 'settings';
   $('inputQueue').hidden = name !== 'timeline';
@@ -3060,6 +3110,7 @@ function selectSession(id: string): void {
   selectionGeneration++; replaceComposerDraft();
   newChatSelected = false;
   selectedId = id;
+  reportVisibleSelection(true);
   const selected = sessions.find(row => row.id === id);
   applyComposerSessionModel(`${id}:${selectionGeneration}`, composerSessionSelection(selected) ?? null);
   const parent = selected?.origin?.kind === 'worker' ? selected.origin.fromSessionId : null;
@@ -3096,6 +3147,7 @@ function selectNewChat(projectId: string | null = null): void {
   retireRichImageViewer();
   rememberDraft(); selectionGeneration++; replaceComposerDraft(); pendingNewInput = null;
   newChatSelected = true; selectedId = null; selectedProjectId = projectId; detailFor = null; detailCursor = null;
+  reportVisibleSelection(true);
   if (projectId) expandedProjects.add(projectId);
   applyComposerSessionModel(null, null);
   // New Chat selects its existing draft, just like a session. Navigation is not
@@ -3258,6 +3310,7 @@ async function removeProject(id: string): Promise<void> {
       const oldKey = draftKey();
       const authoredDraft = authoredComposerText();
       selectedProjectId = null; selectionGeneration++; replaceComposerDraft();
+      reportVisibleSelection(true);
       // Keep the visible draft and its attachments while moving to unfiled.
       inputDrafts.set(draftKey(), authoredDraft); inputDrafts.delete(oldKey); newChatTasks.delete(oldKey);
       skillPicker?.restore();
@@ -3277,6 +3330,9 @@ export function initChat(next: Deps): void {
     .filter(entry => (entry.conversationId || entry.origin?.kind === 'desktop') && entry.origin?.kind !== 'worker')
     .map(entry => ({ id: entry.id, scope: projectGroup(projects, entry.projectId) ?? '' })), () => paintSessions(sessionHost));
   deps = next;
+  reportVisibleSelection(true); // Initial New Chat/null is explicit; activity never supplies selection.
+  document.addEventListener('visibilitychange', () => reportVisibleSelection(!document.hidden));
+  window.addEventListener('focus', () => reportVisibleSelection(true));
   const fileToggle = el('button', 'btn file-panel-toggle') as HTMLButtonElement;
   fileToggle.id = 'filePanelToggle'; fileToggle.type = 'button'; fileToggle.hidden = true;
   fileToggle.append(icon('i-folder'));
