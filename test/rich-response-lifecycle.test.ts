@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
-import { defaultConfig, getConfig, initConfigPath, saveConfig } from '../src/main/config.js';
+import { defaultConfig, getConfig, getRecordingRevision, initConfigPath, recordingWriteAllowed, saveConfig } from '../src/main/config.js';
 import { flushDurable, initDurableStore, readDurable, writeDurableNow } from '../src/main/durable.js';
 import { recordDeliveredInput } from '../src/main/session/input-history.js';
 import { configureInputDelivery, listInputs, resetInputForTests, type InputEntry } from '../src/main/session/input.js';
@@ -23,6 +23,12 @@ const off = async () => {
   expect(JSON.parse(await fs.readFile(path.join(directory, 'config.json'), 'utf8')).sessions.record).toBe(false);
 };
 const on = async () => saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: true } });
+/** Off must close admission before a previously started physical writer is released. */
+function beginOffBehindWriter(): { saved: Promise<void>; closing: Promise<void> } {
+  const saved = off();
+  const closing = vi.waitFor(() => expect(recordingWriteAllowed(getRecordingRevision())).toBe(false));
+  return { saved, closing };
+}
 
 beforeEach(async () => {
   directory = await fs.mkdtemp(path.join(os.tmpdir(), 'chatbbc-recording-off-'));
@@ -70,9 +76,14 @@ it('refuses a second canonical user and assistant queued before the persisted Of
     });
     void queuedUser.catch(() => undefined);
     void queuedAssistant.catch(() => undefined);
-    await off();
+    const disabling = beginOffBehindWriter();
+    await disabling.closing;
+    expect(getConfig().sessions.record).toBe(true);
+    expect(JSON.parse(await fs.readFile(path.join(directory, 'config.json'), 'utf8')).sessions.record).toBe(true);
     gate.release();
+    await disabling.saved;
     await baseline;
+    expect((await fs.stat(shard)).isFile()).toBe(true);
     await expect(queuedUser).rejects.toMatchObject({ code: 'RECORDING_DISABLED' });
     await expect(queuedAssistant).rejects.toMatchObject({ code: 'RECORDING_DISABLED' });
     expect((await readEvents(session.id)).filter(event => event.kind.endsWith('_message'))).toMatchObject([
@@ -93,8 +104,10 @@ it('refuses queued native image metadata after Off without creating its canonica
       messageId: 'native-after-off', providerAssetId: 'file_native_after_off', providerRole: 'tool',
       providerStatus: 'finished_successfully', previewStatus: 'pending' });
     void pending.catch(() => undefined);
-    await off();
+    const disabling = beginOffBehindWriter();
+    await disabling.closing;
     gate.release();
+    await disabling.saved;
     await baseline;
     await expect(pending).rejects.toMatchObject({ code: 'RECORDING_DISABLED' });
     expect((await readEvents(session.id)).filter(event => event.kind === 'native_image')).toHaveLength(0);
@@ -111,9 +124,11 @@ it('does not revive an old queued transcript write when Recording is switched Of
     await gate.reached;
     const pending = upsertMessageEvent(session.id, message('old-epoch'));
     void pending.catch(() => undefined);
-    await off();
-    await on();
+    const disabling = beginOffBehindWriter();
+    await disabling.closing;
     gate.release();
+    await disabling.saved;
+    await on();
     await baseline;
     await expect(pending).rejects.toMatchObject({ code: 'RECORDING_DISABLED' });
     expect((await readEvents(session.id)).filter(event => event.kind === 'user_message')).toHaveLength(1);
@@ -139,8 +154,10 @@ it('refuses a journal transcript row queued before Off while preserving the prec
     await reached;
     const pending = appendEvent(session.id, { source: 'extension', kind: 'turn_start', time: 101, turnId: 'after-off' });
     void pending.catch(() => undefined);
-    await off();
+    const disabling = beginOffBehindWriter();
+    await disabling.closing;
     release();
+    await disabling.saved;
     await baseline;
     await expect(pending).rejects.toMatchObject({ code: 'RECORDING_DISABLED' });
     expect((await readEvents(session.id)).filter(event => event.kind === 'turn_start').map(event => event.turnId)).toEqual(['prior']);
@@ -167,8 +184,10 @@ it('refuses a direct image asset queued before Off without modifying quota or cr
     await reached;
     const pending = writeAsset(session.id, nextBytes, 'image/png');
     void pending.catch(() => undefined);
-    await off();
+    const disabling = beginOffBehindWriter();
+    await disabling.closing;
     release();
+    await disabling.saved;
     await first;
     await expect(pending).rejects.toMatchObject({ code: 'RECORDING_DISABLED' });
     await expect(fs.stat(path.join(sessionsRoot(), session.id, 'assets', nextId))).rejects.toMatchObject({ code: 'ENOENT' });
@@ -188,8 +207,10 @@ it('acknowledges an input receipt without a fabricated anchor if its first row w
     const pending = recordDeliveredInput({ id: 'receipt-after-off', sessionId: session.id, state: 'sent',
       messageId: 'input:receipt-after-off', deliveredAt: 200, text: 'private receipt' } as InputEntry,
     seq => anchors.push(seq));
-    await off();
+    const disabling = beginOffBehindWriter();
+    await disabling.closing;
     gate.release();
+    await disabling.saved;
     await baseline;
     expect(await pending).toBe(true);
     expect(anchors).toEqual([]);
@@ -220,8 +241,10 @@ it('durably settles a sent outbox receipt suppressed at Off without an anchor or
     });
     const reconciling = listInputs();
     await invoked;
-    await off();
+    const disabling = beginOffBehindWriter();
+    await disabling.closing;
     gate.release();
+    await disabling.saved;
     await baseline;
     expect(await reconciling).toMatchObject([{ historyRecorded: true }]);
     expect((await readDurable<InputEntry[]>('session-input'))).toMatchObject([{ historyRecorded: true }]);
@@ -319,4 +342,67 @@ it('retains durable handoff control markers while transcript recording is Off', 
   expect((await readEvents(session.id)).filter(event => event.kind === 'handoff')).toMatchObject([
     { handoffId: 'handoff-privacy' }
   ]);
+});
+
+it('does not acknowledge Recording Off while an already-started asset write can still create pixels', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const pixels = await sharp({ create: { width: 3, height: 2, channels: 3, background: '#aa3355' } }).png().toBuffer();
+  const assetId = `${createHash('sha256').update(pixels).digest('hex').slice(0, 32)}.png`;
+  const target = path.join(sessionsRoot(), session.id, 'assets', assetId);
+  let entered!: () => void, release!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const originalWrite = fs.writeFile.bind(fs);
+  const spy = vi.spyOn(fs, 'writeFile').mockImplementation((async (file, ...args) => {
+    if (String(file) === target) { entered(); await gate; }
+    return (originalWrite as (...args: unknown[]) => Promise<void>)(file, ...args);
+  }) as typeof fs.writeFile);
+  let assetWrite: Promise<unknown> | null = null;
+  let offSave: Promise<unknown> | null = null;
+  try {
+    assetWrite = writeAsset(session.id, pixels, 'image/png');
+    await reached;
+    offSave = off();
+    // An independent config rename used to resolve while this physical write was held.
+    // The Off acknowledgement must now wait for the original owner to leave that write.
+    const acknowledgedBeforeRelease = await Promise.race([
+      offSave.then(() => true),
+      new Promise<false>(resolve => setTimeout(() => resolve(false), 150))
+    ]);
+    release();
+    await assetWrite;
+    await offSave;
+    expect(acknowledgedBeforeRelease).toBe(false);
+    expect((await fs.stat(target)).size).toBe(pixels.length);
+  } finally {
+    release();
+    await Promise.allSettled([assetWrite, offSave].filter((promise): promise is Promise<unknown> => promise !== null));
+    spy.mockRestore();
+  }
+});
+
+it('retains the committed On setting and reopens recording admission when the Off config rename fails', async () => {
+  const originalRename = fs.rename.bind(fs);
+  const priorRevision = getRecordingRevision();
+  let refused = false;
+  const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+    if (!refused && String(to) === path.join(directory, 'config.json')) {
+      refused = true;
+      throw Object.assign(new Error('Config rename failed'), { code: 'EIO' });
+    }
+    return originalRename(from, to);
+  }) as typeof fs.rename);
+  try {
+    await expect(off()).rejects.toThrow('Config rename failed');
+    expect(getConfig().sessions.record).toBe(true);
+    expect(getRecordingRevision()).toBe(priorRevision);
+    expect(recordingWriteAllowed(priorRevision)).toBe(true);
+    expect(JSON.parse(await fs.readFile(path.join(directory, 'config.json'), 'utf8')).sessions.record).toBe(true);
+    const session = await createSession({ conversationId: randomUUID() });
+    await upsertMessageEvent(session.id, message('recording-still-on'));
+    expect((await readEvents(session.id)).some(event => event.kind === 'user_message' &&
+      event.messageId === 'recording-still-on')).toBe(true);
+  } finally {
+    spy.mockRestore();
+  }
 });

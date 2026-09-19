@@ -48,7 +48,7 @@ import { parseRichOrigin } from './rich-response.js';
 import { chronological, positionOf } from '../../shared/chronology.js';
 import { automaticTitle, firstTitleMessage, legacyContextTitle, refreshUserTitle } from './title.js';
 import { agentPlanSchema, agentPlanUpdateSchema, MAX_AGENT_PLAN_BYTES, type AgentPlan, type AgentPlanUpdate } from '../../shared/agent-plan.js';
-import { getConfig, getRecordingRevision } from '../config.js';
+import { getConfig, getRecordingRevision, recordingWriteAllowed, registerRecordingWriteDrain } from '../config.js';
 import { logError, logInfo, logWarn } from '../logger.js';
 
 /**
@@ -218,6 +218,15 @@ const removedAssetEpoch = new Map<string, number>();
 /** An explicit session deletion must also invalidate image reads already awaiting a queue. */
 let sessionDeletionEpoch = 0;
 const deletingSessions = new Set<string>();
+
+// Config owns the Off transition. Drain only these existing writers while its
+// admission gate is closed; do not invert asset -> session cleanup lock ordering
+// or hold a session queue while awaiting an asset queue.
+registerRecordingWriteDrain(async () => {
+  await Promise.allSettled([...opening.values()]);
+  await Promise.all([...open.values()].map(entry => entry.queue));
+  await assetWriteQueue;
+});
 
 function enqueueAssetOperation<T>(operation: () => Promise<T>): Promise<T> {
   const work = assetWriteQueue.then(operation);
@@ -493,7 +502,7 @@ export function isRecordingDisabledError(error: unknown): error is RecordingDisa
 }
 
 function requireRecording(revision: number): void {
-  if (!getConfig().sessions.record || getRecordingRevision() !== revision) throw new RecordingDisabledError();
+  if (!getConfig().sessions.record || !recordingWriteAllowed(revision)) throw new RecordingDisabledError();
 }
 
 /** These are durable control markers; Off must not interrupt an accepted compaction/finish. */
@@ -1458,7 +1467,7 @@ export function upsertRichMessage(
 ): Promise<'stored' | 'unchanged' | 'refused'> {
   const revision = getRecordingRevision();
   return ensureOpen(sessionId).then(entry => enqueueSessionOperation(entry, 'rich message upsert', async () => {
-    if (!getConfig().sessions.record || getRecordingRevision() !== revision) return 'refused';
+    if (!getConfig().sessions.record || !recordingWriteAllowed(revision)) return 'refused';
     const capture = parseRichOrigin(origin);
     if (!capture) return 'refused';
     const clean = parseRichResponse(rich);
@@ -1525,7 +1534,7 @@ export function upsertRichMedia(
 ): Promise<'stored' | 'unchanged' | 'refused'> {
   const revision = getRecordingRevision();
   return ensureOpen(sessionId).then(entry => enqueueSessionOperation(entry, 'rich media upsert', async () => {
-    if (!getConfig().sessions.record || getRecordingRevision() !== revision) return 'refused';
+    if (!getConfig().sessions.record || !recordingWriteAllowed(revision)) return 'refused';
     const capture = parseRichOrigin(origin);
     const clean = parseMetadataRichMedia(media);
     if (!capture || !clean || !messageId || !Number.isSafeInteger(expectedRichRevision) ||

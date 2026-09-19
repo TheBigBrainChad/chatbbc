@@ -515,6 +515,10 @@ let configPath = '';
 let current: Config = defaultConfig();
 /** One config-owned generation for recording admission across an Off → On transition. */
 let recordingRevision = 0;
+/** Closing admission precedes waiting for already-started transcript and asset writes. */
+let recordingDisablePending = false;
+let drainRecordingWrites: (() => Promise<void>) | null = null;
+const RECORDING_DRAIN_TIMEOUT_MS = 15_000;
 // Every UI mutation ultimately lands in the same tiny JSON file. Keep those
 // read-modify-write transactions strictly ordered so two fast checkbox/root changes
 // cannot race on config.json.tmp or overwrite each other's newer state.
@@ -626,6 +630,31 @@ export function getRecordingRevision(): number {
   return recordingRevision;
 }
 
+/** The session store registers its existing writer queues without giving them settings authority. */
+export function registerRecordingWriteDrain(drain: () => Promise<void>): void {
+  drainRecordingWrites = drain;
+}
+
+/** A write admitted before an attempted Off cannot resume across that Off or a later On. */
+export function recordingWriteAllowed(revision: number): boolean {
+  return getConfig().sessions.record && !recordingDisablePending && recordingRevision === revision;
+}
+
+async function drainBeforeRecordingOff(): Promise<void> {
+  if (!drainRecordingWrites) return;
+  let deadline: NodeJS.Timeout | null = null;
+  try {
+    await Promise.race([
+      drainRecordingWrites(),
+      new Promise<never>((_, reject) => {
+        deadline = setTimeout(() => reject(new Error('Recording Off could not settle active writes')), RECORDING_DRAIN_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    if (deadline) clearTimeout(deadline);
+  }
+}
+
 /**
  * Read-only mode is enforced here as well as at the tool layer, so the effective
  * capability set can never disagree with what the UI shows.
@@ -647,14 +676,26 @@ export function effectiveCapabilities(
 async function persistConfig(next: Config): Promise<Config> {
   const parsed = configSchema.parse(next);
   const tmp = `${configPath}.tmp`;
-  await fs.mkdir(path.dirname(configPath), { recursive: true });
-  await fs.writeFile(tmp, JSON.stringify(parsed, null, 2), 'utf8');
-  await fs.rename(tmp, configPath);
-  // Only publish the new in-memory state after the durable write succeeded. A disk
-  // error must not leave the UI believing settings were saved when they were not.
-  if (current.sessions.record !== parsed.sessions.record) recordingRevision++;
-  current = parsed;
-  return current;
+  const disablingRecording = current.sessions.record && !parsed.sessions.record;
+  if (disablingRecording) recordingDisablePending = true;
+  try {
+    // Admission closes synchronously before this await. The existing session/asset
+    // queues drain in their own order; no config-owned disk operation takes either
+    // lock. Off cannot be acknowledged ahead of an already-started physical write.
+    if (disablingRecording) await drainBeforeRecordingOff();
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(tmp, JSON.stringify(parsed, null, 2), 'utf8');
+    await fs.rename(tmp, configPath);
+    // Only publish the new in-memory state after the durable write succeeded. A disk
+    // error must not leave the UI believing settings were saved when they were not.
+    if (current.sessions.record !== parsed.sessions.record) recordingRevision++;
+    current = parsed;
+    return current;
+  } finally {
+    // On failure the old committed setting remains authoritative and the UI gets
+    // an error; the attempted transition never falsely acknowledges Recording Off.
+    if (disablingRecording) recordingDisablePending = false;
+  }
 }
 
 /**
