@@ -122,6 +122,92 @@ it('offers only exact uniquely joined available local assets and keeps duplicate
   expect(renderRichResponse(duplicatedNodes, 'source', options([media])).querySelector('button')).toBeNull();
 });
 
+it('renders malformed media entries as inert placeholders while preserving the rest of the rich answer', () => {
+  const rich = fixture([
+    prose('introduction', 'Keep this answer readable'),
+    { id: 'figure', kind: 'image', mediaId: 'forest-media', alt: 'Forest', width: 320, height: 180 }
+  ]);
+  const valid: RichMediaState = {
+    mediaId: 'forest-media', nodeId: 'figure', source: { kind: 'page', nodeId: 'figure' },
+    status: 'available', previewWidth: 320, previewHeight: 180,
+    asset: { id: 'abcdef12.bin', mimeType: 'image/webp', bytes: 12 }
+  };
+  const unknownSource = { ...valid, source: {
+    kind: 'unknown', providerMessageId: rich.providerMessageId,
+    providerAssetId: 'native-asset'
+  } };
+  const badEntries: unknown[][] = [
+    [null], [undefined], [{ ...valid, source: undefined }],
+    [{ ...valid, source: null }], [unknownSource], [valid, null],
+    [{ ...valid, source: { kind: 'native', providerMessageId: rich.providerMessageId } }]
+  ];
+  const getSessionImage = vi.fn();
+  (dom.window as any).api = { getSessionImage };
+  for (const entries of badEntries) {
+    const view = renderRichResponse(rich, 'source', {
+      sessionId: '2026-09-02-test0001', media: entries as RichMediaState[], current: () => true
+    });
+    const slot = view.querySelector<HTMLElement>('.rich-image-slot')!;
+    expect(view.querySelector('.rich-body')?.textContent).toBe('Keep this answer readable');
+    expect(slot.getAttribute('role')).toBe('img');
+    expect(slot.textContent).toContain('Image preview unavailable');
+    expect(view.querySelector('button, img[src], a[href]')).toBeNull();
+  }
+  expect(getSessionImage).not.toHaveBeenCalled();
+});
+
+it('does not execute media getters or trust a proxy property read instead of its own data descriptor', () => {
+  const rich = fixture([
+    { id: 'figure', kind: 'image', mediaId: 'forest-media', alt: 'Forest', width: 320, height: 180 }
+  ]);
+  const valid: RichMediaState = {
+    mediaId: 'forest-media', nodeId: 'figure', source: { kind: 'page', nodeId: 'figure' },
+    status: 'available', previewWidth: 320, previewHeight: 180,
+    asset: { id: 'abcdef12.bin', mimeType: 'image/webp', bytes: 12 }
+  };
+  const getter = vi.fn(() => 'forest-media');
+  const withGetter = Object.defineProperty({ ...valid }, 'mediaId', { enumerable: true, get: getter });
+  const contradictorySource = new Proxy({ kind: 'unknown', providerMessageId: rich.providerMessageId,
+    providerAssetId: 'native-asset' }, {
+    get(target, name, receiver) {
+      return name === 'kind' ? 'native' : Reflect.get(target, name, receiver);
+    }
+  });
+  const throwingProxy = new Proxy(valid, { ownKeys: () => { throw Error('untrusted media proxy'); } });
+  const mediaArrays: unknown[] = [
+    [withGetter], [{ ...valid, source: contradictorySource }], [throwingProxy],
+    Object.defineProperty([valid], '0', { get: () => { throw Error('untrusted array getter'); } })
+  ];
+  for (const value of mediaArrays) {
+    const view = renderRichResponse(rich, 'source', {
+      sessionId: '2026-09-02-test0001', media: value as RichMediaState[], current: () => true
+    });
+    expect(view.querySelector('.rich-image-slot')?.getAttribute('role')).toBe('img');
+    expect(view.querySelector('.rich-image-slot')?.textContent).toContain('Image preview unavailable');
+    expect(view.querySelector('button, img[src]')).toBeNull();
+  }
+  expect(getter).not.toHaveBeenCalled();
+});
+
+it('permits an exact native provider source only when its shape and provider ownership match', () => {
+  const rich = fixture([
+    { id: 'figure', kind: 'image', mediaId: 'forest-media', alt: 'Forest', width: 320, height: 180 }
+  ]);
+  const media: RichMediaState = {
+    mediaId: 'forest-media', nodeId: 'figure',
+    source: { kind: 'native', providerMessageId: rich.providerMessageId!, providerAssetId: 'native-asset' },
+    status: 'available', previewWidth: 320, previewHeight: 180,
+    asset: { id: 'abcdef12.bin', mimeType: 'image/webp', bytes: 12 }
+  };
+  const options = (entry: RichMediaState) => ({
+    sessionId: '2026-09-02-test0001', media: [entry], current: () => true
+  });
+  expect(renderRichResponse(rich, 'source', options(media)).querySelectorAll('.rich-image-slot button')).toHaveLength(1);
+  expect(renderRichResponse(rich, 'source', options({ ...media,
+    source: { kind: 'native', providerMessageId: 'unrelated-message', providerAssetId: 'native-asset' }
+  })).querySelector('button')).toBeNull();
+});
+
 it('prints code literally and isolates bidirectional prose without executing or creating authored tags', () => {
   const source = '<text onclick="alert(1)">literal</text>';
   const view = renderRichResponse(fixture([

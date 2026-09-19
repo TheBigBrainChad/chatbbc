@@ -10,6 +10,72 @@ export type RichImageContext = {
 
 type ImageRender = RichImageContext & { rich: RichResponse; imageCounts: Map<string, number> };
 
+/** IPC metadata is still untrusted presentation data: inspect own data descriptors once. */
+function fields(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length < required.length || keys.length > required.length + optional.length ||
+      keys.some(key => typeof key !== 'string' || !required.includes(key) && !optional.includes(key))) return null;
+  const clean: Record<string, unknown> = Object.create(null);
+  for (const key of keys) {
+    if (typeof key !== 'string') return null;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !('value' in descriptor)) return null;
+    clean[key] = descriptor.value;
+  }
+  return required.every(key => Object.hasOwn(clean, key)) ? clean : null;
+}
+
+/** Refuse the entire adjunct if any entry is malformed; a partial array cannot grant a viewer. */
+function validatedMedia(value: unknown): RichMediaState[] | null {
+  try {
+    if (!Array.isArray(value)) return null;
+    const length = Object.getOwnPropertyDescriptor(value, 'length');
+    if (!length || !('value' in length) || !Number.isSafeInteger(length.value) ||
+        length.value < 0 || length.value > 64 || Reflect.ownKeys(value).length !== length.value + 1) return null;
+    const result: RichMediaState[] = [];
+    const opaque = (id: unknown): id is string => typeof id === 'string' && /^[a-z0-9:_-]{1,190}$/i.test(id);
+    for (let index = 0; index < length.value; index++) {
+      const item = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!item?.enumerable || !('value' in item)) return null;
+      const media = fields(item.value, ['mediaId', 'nodeId', 'source', 'status'],
+        ['reason', 'previewWidth', 'previewHeight', 'asset']);
+      if (!media || !opaque(media.mediaId) || !opaque(media.nodeId)) return null;
+      const source = fields(media.source, ['kind'], ['nodeId', 'providerMessageId', 'providerAssetId']);
+      if (!source) return null;
+      let cleanSource: RichMediaState['source'];
+      if (source.kind === 'page' && Object.keys(source).length === 2 && opaque(source.nodeId)) {
+        cleanSource = { kind: 'page', nodeId: source.nodeId };
+      } else if (source.kind === 'native' && Object.keys(source).length === 3 &&
+          typeof source.providerMessageId === 'string' && /^[a-z0-9-]{8,100}$/i.test(source.providerMessageId) &&
+          opaque(source.providerAssetId)) {
+        cleanSource = { kind: 'native', providerMessageId: source.providerMessageId, providerAssetId: source.providerAssetId };
+      } else return null;
+
+      const clean: RichMediaState = { mediaId: media.mediaId, nodeId: media.nodeId,
+        source: cleanSource, status: media.status as RichMediaState['status'] };
+      if (media.status === 'available') {
+        if (Object.hasOwn(media, 'reason')) return null;
+        const asset = fields(media.asset, ['id', 'mimeType', 'bytes'], ['width', 'height']);
+        if (!asset) return null;
+        clean.previewWidth = media.previewWidth as number;
+        clean.previewHeight = media.previewHeight as number;
+        clean.asset = { id: asset.id as string, mimeType: asset.mimeType as string, bytes: asset.bytes as number,
+          ...(Object.hasOwn(asset, 'width') ? { width: asset.width as number } : {}),
+          ...(Object.hasOwn(asset, 'height') ? { height: asset.height as number } : {}) };
+        if (!isViewableRichImage(clean)) return null;
+      } else if (media.status === 'pending' || media.status === 'unavailable') {
+        if (Object.hasOwn(media, 'asset') || Object.hasOwn(media, 'previewWidth') || Object.hasOwn(media, 'previewHeight')) return null;
+        if (media.status === 'pending' ? Object.hasOwn(media, 'reason') && media.reason !== 'not_loaded' :
+          !['not_loaded', 'unsupported', 'ambiguous', 'tainted', 'oversized', 'invalid', 'quota', 'removed'].includes(media.reason as string)) return null;
+        if (Object.hasOwn(media, 'reason')) clean.reason = media.reason as RichMediaState['reason'];
+      } else return null;
+      result.push(clean);
+    }
+    return result;
+  } catch { return null; }
+}
+
 function countImages(nodes: RichNode[], counts = new Map<string, number>()): Map<string, number> {
   for (const node of nodes) {
     if (node.kind === 'image') counts.set(node.mediaId, (counts.get(node.mediaId) ?? 0) + 1);
@@ -176,7 +242,8 @@ function renderNode(node: RichNode, images?: ImageRender): HTMLElement {
     const candidates = images?.media.filter(media => media.mediaId === node.mediaId) ?? [];
     const media = candidates.length === 1 && images?.imageCounts.get(node.mediaId) === 1 &&
       candidates[0]!.nodeId === node.id &&
-      (candidates[0]!.source.kind === 'page' ? candidates[0]!.source.nodeId === node.id :
+      (candidates[0]!.source.kind === 'page' && candidates[0]!.source.nodeId === node.id ||
+        candidates[0]!.source.kind === 'native' &&
         candidates[0]!.source.providerMessageId === images.rich.providerMessageId && !!images.rich.providerMessageId)
       ? candidates[0] : undefined;
     const labelText = media && isViewableRichImage(media) ? 'Saved preview' : imageLabel(media);
@@ -244,8 +311,10 @@ export function renderRichResponse(rich: RichResponse, fallback: string, media?:
   const box = document.createElement('div');
   box.className = 'msg rich-response';
   box.setAttribute('dir', 'auto');
-  const images = media && Array.isArray(media.media) && media.media.length <= 64
-    ? { ...media, rich: clean, imageCounts: countImages(clean.nodes) } : undefined;
+  const safeMedia = media ? validatedMedia(media.media) : null;
+  const images = media && safeMedia
+    ? { sessionId: media.sessionId, current: media.current, media: safeMedia, rich: clean,
+      imageCounts: countImages(clean.nodes) } : undefined;
   for (const node of clean.nodes) box.append(renderNode(node, images));
   return box;
 }
