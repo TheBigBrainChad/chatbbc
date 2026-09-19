@@ -420,6 +420,199 @@ afterEach(() => {
   live = null;
 });
 
+describe('exact native rich response observation (no action authority)', () => {
+  const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const providerMessageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+  const messageId = 'assistant:working:exchange:1789552000000';
+  const rootFixture = (document: Document) => {
+    const section = assistantTurn(document, 'rich-page-turn', []);
+    section.setAttribute('data-clf-fiber-turn', '0');
+    const row = document.createElement('div');
+    row.setAttribute('data-message-author-role', 'assistant');
+    row.setAttribute('data-message-id', providerMessageId);
+    const root = document.createElement('div');
+    root.className = 'observed_DilResponseRoot';
+    root.setAttribute('data-clf-fiber-rich', `old:0:${encodeURIComponent(messageId)}:${providerMessageId}`);
+    const surface = document.createElement('div');
+    surface.className = 'puik-root not-prose not-markdown';
+    surface.innerHTML = '<div data-d-component="grid"><button data-d-component="pressable" type="button">Forest<img alt="Forest reference"></button><button data-d-component="pressable" type="button">Coast<img alt="Coast reference"></button><button type="button" data-d-component="button" disabled aria-disabled="true">Continue</button></div>';
+    for (const [index, image] of [...surface.querySelectorAll('img')].entries()) {
+      Object.defineProperty(image, 'naturalWidth', { value: index === 0 ? 1024 : 1290 });
+      Object.defineProperty(image, 'naturalHeight', { value: index === 0 ? 1280 : 860 });
+    }
+    root.append(surface); row.append(root); section.append(row);
+    const twin = document.createElement('div');
+    twin.setAttribute('data-message-author-role', 'assistant');
+    twin.setAttribute('data-message-id', '3150f756-bf2d-45fa-ac0f-45010b2239fc');
+    twin.innerHTML = '<button type="button">Continue</button><pre><code>&lt;text&gt;Continue&lt;/text&gt;</code></pre>';
+    section.append(twin);
+    return { root, row, surface, twin, section };
+  };
+  const descriptor = () => ({ index: 0, turnId: 'rich-page-turn', conversationId, endMessageId: null,
+    calls: [], requests: [], activities: [], thoughtNotifications: [], images: [],
+    messages: [{ role: 'assistant', messageId, rawMessageId: providerMessageId, stable: true,
+      rawText: 'Which scene?', renderedHtml: '', richRoot: true }] });
+
+  it('captures the exact image-backed DIL subtree without borrowing an identical Continue or URL', async () => {
+    live = await harness();
+    const { root, twin, surface } = rootFixture(live.document);
+    await replyFiber([], [descriptor()]);
+    await live.hook.flush();
+    const first = emitted(live.sent, 'assistant_message').at(-1)?.event;
+    expect(first).toMatchObject({ messageId, providerMessageId, text: 'Which scene?',
+      rich: { status: 'available', messageId, providerMessageId, conversationId, version: 1 } });
+    const capture = first.rich;
+    const controls = JSON.stringify(capture.nodes);
+    expect(controls).toContain('Forest');
+    expect(controls).toContain('Coast');
+    expect(controls).toContain('Continue');
+    expect(controls).toContain('media-n-');
+    expect(controls).not.toContain('src');
+    expect(controls).not.toContain('href');
+    expect(controls).not.toContain('onClick');
+    expect(controls).not.toContain('3150f756');
+    expect(twin.textContent).toContain('<text>Continue</text>');
+
+    // Hydration changes the original button only: this is a presentation revision,
+    // not new text/work or a synthetic user action.
+    surface.querySelector('button[disabled]')!.removeAttribute('disabled');
+    surface.querySelector('[aria-disabled]')!.removeAttribute('aria-disabled');
+    await replyFiber([], [descriptor()]);
+    await live.hook.flush();
+    const second = emitted(live.sent, 'assistant_message').at(-1)!.event;
+    expect(second).toMatchObject({ messageId, rich: { status: 'available' } });
+    expect(second).not.toHaveProperty('text');
+    expect(second).not.toHaveProperty('activeNow');
+    expect(second).not.toHaveProperty('goalEligible');
+    expect(root.isConnected).toBe(true);
+  });
+
+  it('refuses a stale or duplicated response root and leaves code literals as ordinary text', async () => {
+    live = await harness();
+    const { root, row, section, twin } = rootFixture(live.document);
+    const api = (live.window as any).CLF_DOM;
+    expect(api.richRootFor(messageId, providerMessageId)).toBe(root);
+    const duplicate = row.cloneNode(true);
+    section.append(duplicate);
+    expect(api.richRootFor(messageId, providerMessageId)).toBeNull();
+    section.removeChild(duplicate);
+    root.setAttribute('data-clf-fiber-rich', 'previous:0:wrong');
+    await replyFiber([], [descriptor()], null, false);
+    expect(emitted(live.sent, 'assistant_message').at(-1)?.event.rich?.status).not.toBe('available');
+    expect(twin.querySelector('code')?.textContent).toBe('<text>Continue</text>');
+  });
+
+  it('refuses an oversized semantic text node without emitting a prefix or executable component source', async () => {
+    live = await harness();
+    const { surface } = rootFixture(live.document);
+    surface.querySelector('button')!.append(live.document.createTextNode('x'.repeat(8193)));
+    await replyFiber([], [descriptor()]);
+    const result = emitted(live.sent, 'assistant_message').at(-1)?.event;
+    expect(result?.rich).toMatchObject({ status: 'unavailable', reason: 'oversized', nodes: [] });
+    expect(JSON.stringify(result.rich)).not.toContain('x'.repeat(8193));
+  });
+
+  it.each(['removed', 'duplicate', 'reowned'])('retires a previously exact rich view when its same-page root is %s', async change => {
+    live = await harness();
+    const { root, row, section } = rootFixture(live.document);
+    await replyFiber([], [descriptor()]);
+    await live.hook.flush();
+    expect(emitted(live.sent, 'assistant_message').at(-1)?.event.rich?.status).toBe('available');
+    if (change === 'removed') root.remove();
+    else if (change === 'duplicate') row.append(root.cloneNode(true));
+    else root.closest('[data-message-id]')!.setAttribute('data-message-id', '3150f756-bf2d-45fa-ac0f-45010b2239fc');
+    expect(section.isConnected).toBe(true);
+    const countBefore = emitted(live.sent, 'assistant_message').length;
+    await replyFiber([], [descriptor()]);
+    await live.hook.flush();
+    const observations = emitted(live.sent, 'assistant_message');
+    expect(observations).toHaveLength(countBefore + 1);
+    expect(observations.at(-1)!.event).toMatchObject({ messageId, providerMessageId,
+      rich: { status: 'unavailable', reason: 'ambiguous', nodes: [] } });
+    expect(observations.at(-1)!.event).not.toHaveProperty('text');
+    expect(observations.at(-1)!.event).not.toHaveProperty('activeNow');
+    expect(observations.at(-1)!.event).not.toHaveProperty('goalEligible');
+  });
+
+  it('keeps pending authored prose when a rich-only revision coalesces and refuses cross-provider text adoption', async () => {
+    live = await harness();
+    const rich = (provider: string) => ({ version: 1, status: 'unavailable', reason: 'ambiguous',
+      conversationId, messageId, providerMessageId: provider, revision: 0, accessibleText: '', nodes: [] });
+    live.hook.emit({ kind: 'assistant_message', messageId, providerMessageId, text: 'Authored answer', state: 'final', final: true });
+    live.hook.emit({ kind: 'assistant_message', messageId, providerMessageId, rich: rich(providerMessageId) });
+    await live.hook.flush();
+    const sameProvider = live.sent.flatMap(row => row.type === 'events' ? row.entries || [] : [])
+      .filter((entry: any) => entry.event?.messageId === messageId);
+    expect(sameProvider).toHaveLength(1);
+    expect(sameProvider[0].event).toMatchObject({ text: 'Authored answer',
+      rich: { status: 'unavailable', providerMessageId } });
+
+    live.hook.emit({ kind: 'assistant_message', messageId, providerMessageId,
+      text: 'Another authored revision' });
+    const foreign = '3150f756-bf2d-45fa-ac0f-45010b2239fc';
+    live.hook.emit({ kind: 'assistant_message', messageId, providerMessageId: foreign, rich: rich(foreign) });
+    await live.hook.flush();
+    const entries = live.sent.flatMap(row => row.type === 'events' ? row.entries || [] : [])
+      .filter((entry: any) => entry.event?.messageId === messageId);
+    expect(entries.slice(-2).map((entry: any) => entry.event)).toEqual([
+      expect.objectContaining({ providerMessageId, text: 'Another authored revision' }),
+      expect.objectContaining({ providerMessageId: foreign, rich: expect.objectContaining({ status: 'unavailable' }) })
+    ]);
+    expect(entries.at(-1).event).not.toHaveProperty('text');
+  });
+
+  it('refuses an old rich stamp across A-to-B-to-A until the returned document earns a fresh exact scan', async () => {
+    live = await harness();
+    const { root } = rootFixture(live.document);
+    await replyFiber([], [descriptor()]);
+    await live.hook.flush();
+    expect(emitted(live.sent, 'assistant_message').at(-1)!.event.rich?.status).toBe('available');
+    const oldStamp = root.getAttribute('data-clf-fiber-rich');
+    live.dom.reconfigure({ url: 'https://chatgpt.com/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff' });
+    live.hook.observe();
+    live.dom.reconfigure({ url: `https://chatgpt.com/c/${conversationId}` });
+    live.hook.observe();
+    const before = emitted(live.sent, 'assistant_message').length;
+    await replyFiber([], [descriptor()], null, false);
+    await live.hook.flush();
+    expect(root.getAttribute('data-clf-fiber-rich')).toBe(oldStamp);
+    expect(emitted(live.sent, 'assistant_message').slice(before).every(row => row.event.rich === undefined)).toBe(true);
+    await replyFiber([], [descriptor()]);
+    await live.hook.flush();
+    expect(emitted(live.sent, 'assistant_message').at(-1)!.event.rich?.status).toBe('available');
+  });
+
+  it('reserves one 400 KiB observation envelope for authored prose and optional rich bytes', async () => {
+    live = await harness();
+    const prose = 'p'.repeat(300000);
+    live.hook.emit({ kind: 'assistant_message', messageId, providerMessageId, text: prose,
+      rich: { version: 1, status: 'available', reason: null, conversationId, messageId,
+        providerMessageId, revision: 0, accessibleText: 'r'.repeat(115000), nodes: [] } });
+    await live.hook.flush();
+    const item = emitted(live.sent, 'assistant_message').at(-1)!.event;
+    expect(item.text).toBe(prose);
+    expect(item.rich).toMatchObject({ status: 'unavailable', reason: 'oversized', nodes: [] });
+    expect(new TextEncoder().encode(JSON.stringify(item)).length).toBeLessThan(400 * 1024);
+  });
+
+  it('keeps a near-limit pending authored row separate when merging a later rich-only revision would exceed its byte envelope', async () => {
+    live = await harness();
+    const prose = 'p'.repeat(310000);
+    live.hook.emit({ kind: 'assistant_message', messageId, providerMessageId, text: prose });
+    live.hook.emit({ kind: 'assistant_message', messageId, providerMessageId,
+      rich: { version: 1, status: 'available', reason: null, conversationId, messageId,
+        providerMessageId, revision: 0, accessibleText: 'r'.repeat(110000), nodes: [] } });
+    await live.hook.flush();
+    const entries = live.sent.flatMap(row => row.type === 'events' ? row.entries || [] : [])
+      .filter((entry: any) => entry.event?.messageId === messageId);
+    expect(entries).toHaveLength(2);
+    expect(entries[0].event.text).toBe(prose);
+    expect(entries[1].event).not.toHaveProperty('text');
+    expect(entries[1].event.rich.status).toBe('available');
+    for (const entry of entries) expect(new TextEncoder().encode(JSON.stringify(entry)).length).toBeLessThan(400 * 1024);
+  });
+});
+
 describe('one synchronous page snapshot per observer turn', () => {
   it.each([true, false])('resets a completed idle conversation only through native New Chat (control=%s)', async available => {
     live = await harness(undefined, {}, (document, dom) => {
@@ -1889,12 +2082,17 @@ async function replyFiber(
       const parts = node.getAttribute('data-clf-fiber-image').split(':');
       if (parts.length >= 3) node.setAttribute('data-clf-fiber-image', `${scanToken}:${parts.at(-3)}:${parts.at(-2)}:${parts.at(-1)}`);
     }
+    for (const node of window.document.querySelectorAll('[data-clf-fiber-rich]')) {
+      if (!restamp) continue;
+      const parts = node.getAttribute('data-clf-fiber-rich').split(':');
+      if (parts.length >= 4) node.setAttribute('data-clf-fiber-rich', `${scanToken}:${parts.slice(-3).join(':')}`);
+    }
     const indexedTurns = turns.map((turn: any, index) =>
       turn && typeof turn === 'object' && Number.isInteger(turn.index) ? turn : { ...(turn as Record<string, unknown>), index }
     );
     window.dispatchEvent(
       new window.MessageEvent('message', {
-        data: { source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken, v: 12, scanOk: true, rows, turns: indexedTurns },
+        data: { source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken, v: 13, scanOk: true, rows, turns: indexedTurns },
         source: window
       })
     );
@@ -3538,7 +3736,7 @@ describe('the app-owned chronological stream', () => {
         section.querySelector(`[data-message-id="${id}"] .markdown`)?.setAttribute('data-clf-fiber-message', `${scanToken}:0:${id}`);
       }
       live!.window.dispatchEvent(new live!.window.MessageEvent('message', {
-        data: { source: 'clf-fiber-reply', nonce: scanToken, scanToken, v: 12, scanOk: true, rows: [], turns: [{
+        data: { source: 'clf-fiber-reply', nonce: scanToken, scanToken, v: 13, scanOk: true, rows: [], turns: [{
           index: 0, turnId: 'idle-history-page', conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
           calls: [{ messageId: 'idle-history-tool', requestId, tool: 'exec_command', order: 0, answered: true }],
           messages: [
@@ -3595,7 +3793,7 @@ describe('the app-owned chronological stream', () => {
       const scanToken = event.data.nonce;
       section.setAttribute('data-clf-fiber-turn', `${scanToken}:0`);
       live!.window.dispatchEvent(new live!.window.MessageEvent('message', { source: live!.window as unknown as Window, data: {
-        source: 'clf-fiber-reply', nonce: scanToken, scanToken, v: 12, scanOk: true, rows: [], turns: [{
+        source: 'clf-fiber-reply', nonce: scanToken, scanToken, v: 13, scanOk: true, rows: [], turns: [{
           index: 0, turnId: 'idle-resume-answer', conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
           calls: [], activities: [], endMessageId: 'idle-resume-final-raw', messages: [
             { role: 'user', messageId: 'idle-resume-user', rawMessageId: 'idle-resume-user-raw', stable: true,
@@ -4939,9 +5137,9 @@ describe('the app-owned chronological stream', () => {
     blocks[0]!.setAttribute('data-clf-fiber', '0');
     blocks[1]!.setAttribute('data-clf-fiber', '1');
     const rows = (secondAnswered: boolean) => [
-      { v: 12, index: 0, messageId: 'fiber-one', tool: 'read_file', path: '/ChatBBC Core/read_file',
+      { v: 13, index: 0, messageId: 'fiber-one', tool: 'read_file', path: '/ChatBBC Core/read_file',
         app: 'ChatBBC Core', answered: true, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
-      { v: 12, index: 1, messageId: 'fiber-two', tool: 'exec_command', path: '/ChatBBC Core/exec_command',
+      { v: 13, index: 1, messageId: 'fiber-two', tool: 'exec_command', path: '/ChatBBC Core/exec_command',
         app: 'ChatBBC Core', answered: secondAnswered, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }
     ];
     const turn = (secondAnswered: boolean) => ({
@@ -4981,7 +5179,7 @@ describe('the app-owned chronological stream', () => {
     userTurn(live.document, 'exact-block-owner', 'Read the exact file', { sent: false });
     const section = assistantTurn(live.document, 'exact-block-page', ['Native connector row']);
     const block = blocksOf(section)[0]!; section.setAttribute('data-clf-fiber-turn', '0'); block.setAttribute('data-clf-fiber', '0');
-    await replyFiber([{ v: 12, index: 0, messageId: 'fiber-exact-block', tool: 'read_file',
+    await replyFiber([{ v: 13, index: 0, messageId: 'fiber-exact-block', tool: 'read_file',
       path: `/${app}/read_file`, app, answered: true, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }], [{
       turnId: 'exact-block-page', calls: [{ messageId: 'fiber-exact-block', tool: 'read_file', order: 0,
         answered: true, requestId: 'wfr-exact-block' }]
@@ -5878,7 +6076,7 @@ describe('the app-owned chronological stream', () => {
     section.setAttribute('data-clf-fiber-turn', '0');
     block.setAttribute('data-clf-fiber', '0');
     const bind = async (answered: boolean) => replyFiber([{
-      v: 12, index: 0, messageId: 'fiber-moved-call', tool: 'read_file',
+      v: 13, index: 0, messageId: 'fiber-moved-call', tool: 'read_file',
       path: '/ChatBBC Core/read_file', app: 'ChatBBC Core', answered,
       conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     }], [{ turnId, calls: [{ messageId: 'fiber-moved-call', tool: 'read_file', order: 0,
@@ -7023,7 +7221,7 @@ describe('a stop button that goes missing while the turn is still running', () =
           source: 'clf-fiber-reply',
           nonce: event.data.nonce,
           scanToken: event.data.nonce,
-          v: 12,
+          v: 13,
           scanOk: true,
           rows: [],
           turns: [{
@@ -9175,7 +9373,7 @@ describe('a page leaving the screen', () => {
  */
 describe('evidence from the page context', () => {
   const GOOD = {
-    v: 12,
+    v: 13,
     index: 0,
     tool: 'agent_status',
     path: '/TobisComputer/mcp/agent_status',
@@ -10252,7 +10450,7 @@ describe('evidence from the page context', () => {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken: event.data.nonce,
-            v: 12,
+            v: 13,
             scanOk: true,
             rows: [],
             turns: [
@@ -10359,7 +10557,7 @@ describe('evidence from the page context', () => {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken: event.data.nonce,
-            v: 12,
+            v: 13,
             scanOk: true,
             rows: [{ ...GOOD, tool: 'read' }],
             turns: []
@@ -14716,7 +14914,7 @@ describe('the goal loop', () => {
       const nonce = event.data.nonce;
       live!.document.querySelector('[data-turn-id="finished-answer"]')!.setAttribute('data-clf-fiber-turn', `${nonce}:0`);
       win.dispatchEvent(new win.MessageEvent('message', { source: win, data: {
-        source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 12, scanOk: true, rows: [], turns: [{
+        source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 13, scanOk: true, rows: [], turns: [{
           index: 0, conversationId: CHAT, turnId: 'finished-answer', endMessageId: 'finished-final', calls: [], activities: [],
           messages: [{ messageId: 'finished-final', rawMessageId: 'finished-final', stable: true, rawText: 'Completed answer.' }]
         }]
@@ -16715,7 +16913,7 @@ describe('the goal loop', () => {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken,
-            v: 12,
+            v: 13,
             scanOk: true,
             rows: [],
             turns: [{
@@ -16798,7 +16996,7 @@ describe('the goal loop', () => {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken,
-            v: 12,
+            v: 13,
             scanOk: true,
             rows: [],
             turns: [{
@@ -17948,7 +18146,7 @@ describe('app Stop command uses current native turn proof', () => {
       if (event.data?.source !== 'clf-fiber-ask') return;
       section.setAttribute('data-clf-fiber-turn', `${event.data.nonce}:0`);
       window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
-        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 12, scanOk: true, rows: [],
+        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 13, scanOk: true, rows: [],
         turns: [{ ...terminal, index: 0, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', messages: [{
           messageId: 'late-final-message', stable: true, rawText: 'First words and the complete final answer.', renderedHtml: '<p>First words and the complete final answer.</p>'
         }] }]
@@ -17987,7 +18185,7 @@ describe('app Stop command uses current native turn proof', () => {
       }
       section.setAttribute('data-clf-fiber-turn', `${event.data.nonce}:0`);
       window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
-        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 12, scanOk: true, rows: [],
+        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 13, scanOk: true, rows: [],
         turns: [{ ...terminal, index: 0, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', endMessageId: next === 'retry' ? null : terminal.endMessageId }]
       } }));
     };

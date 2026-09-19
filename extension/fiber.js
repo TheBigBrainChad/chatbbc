@@ -41,7 +41,7 @@
   'use strict';
 
   /** Bumped when the descriptor shape changes, so a stale pair cannot half-understand. */
-  const VERSION = 12;
+  const VERSION = 13;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep at most one listener for this protocol version; content.js rejects older
@@ -737,10 +737,41 @@
    * raw Markdown. Finally, the old positional fallback remains only for the fully balanced
    * case, where every remaining candidate has exactly one remaining visible block.
    */
-  function renderedMessagesOf(sections, messages, budget, exactAnchors, conversationId) {
+  function renderedMessagesOf(sections, messages, budget, exactAnchors, conversationId, exactRichRoots) {
     const assistantCandidates = authoredAssistantMessages(messages, budget);
     const userCandidates = authoredUserMessages(messages, budget);
     if (assistantCandidates.length === 0 && userCandidates.length === 0) return [];
+
+    // The observed DIL answer exposes a row UUID, a separate rich renderer whose own
+    // Fiber props name that UUID/conversation, and the same UUID once in this turn model.
+    // No text, sibling order, CSS-module hash or `only answer` fallback participates.
+    // Only an exact root gets a stamp; the isolated DOM adapter reads its *rendered* DOM.
+    if (exactRichRoots && conversationId && conversationId === (/(?:^|\/)c\/([a-f\d-]{36})(?:\/|$)/i.exec(location.pathname) || [])[1]) {
+      for (const candidate of assistantCandidates) {
+        if (!/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(candidate.id) ||
+            messages.filter(item => item && item.id === candidate.id).length !== 1) continue;
+        const rows = [...document.querySelectorAll('[data-message-author-role="assistant"][data-message-id]')]
+          .filter(row => row.getAttribute('data-message-id') === candidate.id);
+        if (rows.length !== 1 || !sections.some(section => section.contains(rows[0]))) continue;
+        const row = rows[0];
+        const roots = [...row.querySelectorAll('.puik-root.not-prose.not-markdown')]
+          .filter(surface => surface.closest('[data-message-id]') === row)
+          .map(surface => surface.parentElement)
+          .filter(root => root && root.isConnected && root.querySelector('[data-d-component]') && !root.closest(OWN_SURFACES));
+        if (roots.length !== 1) continue;
+        const root = roots[0];
+        const fiber = fiberOf(root);
+        const props = fiber && fiber.memoizedProps;
+        const scope = fiber && conversationEvidenceOf(fiber);
+        const nativeMessages = fiber && turnMessagesOf(fiber);
+        if (!props || props.messageId !== candidate.id || props.conversationId !== conversationId ||
+            !scope || scope.conflict || scope.conversationId !== conversationId ||
+            !Array.isArray(nativeMessages) || nativeMessages !== messages ||
+            nativeMessages.filter(item => item && item.id === candidate.id &&
+              item.author?.role === 'assistant' && item.recipient === 'all' && !hiddenMessage(item) && !analysisMessage(item)).length !== 1) continue;
+        exactRichRoots.set(root, { messageId: candidate.messageId, providerMessageId: candidate.id });
+      }
+    }
 
     const blocks = [];
     const blockSections = [];
@@ -848,6 +879,8 @@
     // One canonical record per model message whether or not HTML could be attached.
     const out = [];
     for (let c = 0; c < assistantCandidates.length; c++) {
+      const richRoot = exactRichRoots && [...exactRichRoots.values()].some(owner =>
+        owner.messageId === assistantCandidates[c].messageId && owner.providerMessageId === assistantCandidates[c].id);
       out.push({
         messageId: assistantCandidates[c].messageId,
         rawMessageId: assistantCandidates[c].id,
@@ -856,7 +889,8 @@
         order: assistantCandidates[c].order,
         createTime: assistantCandidates[c].createTime,
         rawText: assistantCandidates[c].rawText,
-        renderedHtml: ''
+        renderedHtml: '',
+        ...(richRoot ? { richRoot: true } : {})
       });
     }
     for (let c = 0; c < userCandidates.length; c++) {
@@ -1323,6 +1357,7 @@
     const desiredMessageStamps = new Map();
     const desiredThoughtStamps = new Map();
     const desiredImageStamps = new Map();
+    const desiredRichStamps = new Map();
     const groups = [];
     for (let at = 0; at < sections.length; at++) {
       const section = sections[at];
@@ -1367,9 +1402,11 @@
         const exactAnchors = new Map();
         const exactThoughtRows = new Map();
         const exactImageNodes = new Map();
+        const exactRichRoots = new Map();
         const turnBudget = { remaining: Math.min(MAX_TURN_TEXT, responseBudget.remaining) };
         const before = turnBudget.remaining;
-        const renderedMessages = renderedMessagesOf(group.sections, messages, turnBudget, exactAnchors, conversation.conversationId);
+        const renderedMessages = renderedMessagesOf(group.sections, messages, turnBudget, exactAnchors, conversation.conversationId,
+          conversation.conflict ? null : exactRichRoots);
         responseBudget.remaining -= before - turnBudget.remaining;
         const nativeActivities = nativeActivitiesOf(group.sections, messages, exactThoughtRows);
         const generatedImages = generatedImagesOf(group.sections, messages, exactImageNodes);
@@ -1411,6 +1448,9 @@
         if (!conversation.conflict) for (const [node, image] of exactImageNodes) {
           desiredImageStamps.set(node, `${scanToken}:${index}:${encodeURIComponent(image.messageId)}:${encodeURIComponent(image.assetId)}`);
         }
+        if (!conversation.conflict) for (const [root, owner] of exactRichRoots) {
+          desiredRichStamps.set(root, `${scanToken}:${index}:${encodeURIComponent(owner.messageId)}:${encodeURIComponent(owner.providerMessageId)}`);
+        }
       } catch {
         // One unreadable turn must not cost the others their evidence.
         entry = null;
@@ -1447,6 +1487,17 @@
           if (wantedImage === undefined) {
             if (currentImage !== null) node.removeAttribute('data-clf-fiber-image');
           } else if (currentImage !== wantedImage) node.setAttribute('data-clf-fiber-image', wantedImage);
+        }
+        const richNodes = new Set(section.querySelectorAll('[data-clf-fiber-rich]'));
+        for (const surface of section.querySelectorAll('.puik-root.not-prose.not-markdown')) {
+          if (surface.parentElement) richNodes.add(surface.parentElement);
+        }
+        for (const node of richNodes) {
+          const wantedRich = desiredRichStamps.get(node);
+          const currentRich = node.getAttribute('data-clf-fiber-rich');
+          if (wantedRich === undefined) {
+            if (currentRich !== null) node.removeAttribute('data-clf-fiber-rich');
+          } else if (currentRich !== wantedRich) node.setAttribute('data-clf-fiber-rich', wantedRich);
         }
         const wanted = desiredTurnStamps.get(section);
         const current = section.getAttribute('data-clf-fiber-turn');

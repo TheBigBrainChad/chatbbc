@@ -525,6 +525,128 @@ var CLF_DOM = (() => {
   }
 
   /**
+   * This is deliberately narrower than a DOM query for "a rich-looking response".
+   * MAIN has already correlated one mounted DIL root with its own Fiber message UUID,
+   * this turn's public message and the concrete route. A scan-specific stamp is the
+   * only candidate; content.js also compares its entire value against its current
+   * Fiber frame before using it. An old stamp is never a live action lease.
+   */
+  function richRootFor(logicalMessageId, providerMessageId) {
+    return safe(() => {
+      if (typeof logicalMessageId !== 'string' || !logicalMessageId || logicalMessageId.length > 190 ||
+          typeof providerMessageId !== 'string' || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(providerMessageId)) return null;
+      const suffix = `:${encodeURIComponent(logicalMessageId)}:${encodeURIComponent(providerMessageId)}`;
+      const roots = [...document.querySelectorAll('[data-clf-fiber-rich]')].filter(root => {
+        const stamp = root.getAttribute('data-clf-fiber-rich') || '';
+        const prefix = stamp.slice(0, -suffix.length);
+        if (!stamp.endsWith(suffix) || !/^[a-z\d-]{1,80}:\d+$/i.test(prefix)) return false;
+        const row = root.closest('[data-message-id]');
+        return root.isConnected && row?.getAttribute('data-message-id') === providerMessageId &&
+          row.getAttribute('data-message-author-role') === 'assistant' &&
+          row.contains(root) && !root.closest(OWN_SURFACES) &&
+          root.querySelectorAll('.puik-root.not-prose.not-markdown').length === 1 &&
+          root.querySelector('.puik-root.not-prose.not-markdown')?.parentElement === root;
+      });
+      const rows = [...document.querySelectorAll('[data-message-author-role="assistant"][data-message-id]')]
+        .filter(row => row.getAttribute('data-message-id') === providerMessageId);
+      return roots.length === 1 && rows.length === 1 ? roots[0] : null;
+    }, null);
+  }
+
+  const richFailure = new WeakMap();
+  /** Read inert rendered semantics, never model-authored component source, URLs or callbacks. */
+  function captureRichRoot(root) {
+    return safe(() => {
+      if (root && typeof root === 'object') richFailure.delete(root);
+      if (!root?.isConnected || !root.hasAttribute('data-clf-fiber-rich') ||
+          root.querySelectorAll('.puik-root.not-prose.not-markdown').length !== 1) return null;
+      const surface = root.querySelector('.puik-root.not-prose.not-markdown');
+      if (surface?.parentElement !== root) return null;
+      const seen = new WeakSet();
+      let count = 0, controls = 0, media = 0, characters = 0;
+      const overLimit = () => { richFailure.set(root, 'oversized'); return null; };
+      const visible = element => {
+        if (element.closest(`${OWN_SURFACES}, [hidden], [inert], [aria-hidden="true"]`)) return false;
+        const style = getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse';
+      };
+      const walk = (element, path, depth) => {
+        if (depth > 24 || ++count > 1024) return overLimit();
+        if (seen.has(element)) return null;
+        seen.add(element);
+        if (!visible(element)) return [];
+        const name = element.tagName.toLowerCase();
+        if (['script', 'style', 'template', 'iframe', 'object', 'embed', 'canvas', 'video', 'audio'].includes(name)) return null;
+        if (name === 'svg') {
+          // A decorative icon has no representation; an authored diagram needs its own
+          // separately proven visual capture, not a guessed reconstruction.
+          return element.getAttribute('aria-hidden') === 'true' || !element.textContent?.trim() && !element.getAttribute('aria-label') ? [] : null;
+        }
+        const id = `n-${path.join('-')}`;
+        if (name === 'img') {
+          if (++media > 64) return overLimit();
+          const alt = element.getAttribute('alt') || '';
+          if (alt.length > 8192) return overLimit();
+          characters += alt.length;
+          const width = Number.isSafeInteger(element.naturalWidth) && element.naturalWidth > 0 && element.naturalWidth <= 100000 ? element.naturalWidth : null;
+          const height = Number.isSafeInteger(element.naturalHeight) && element.naturalHeight > 0 && element.naturalHeight <= 100000 ? element.naturalHeight : null;
+          return [{ id, kind: 'image', mediaId: `media-${id}`, alt, width, height }];
+        }
+        const isControl = ['button', 'input', 'select', 'a'].includes(name) || ['button', 'checkbox', 'radio'].includes(element.getAttribute('role'));
+        const rawChildren = [...element.childNodes];
+        const children = [];
+        for (let index = 0; index < rawChildren.length; index++) {
+          const child = rawChildren[index];
+          if (child.nodeType === 3) {
+            const value = child.nodeValue?.replace(/\u00a0/g, ' ').trim() || '';
+            if (!value) continue;
+            if (++count > 1024 || value.length > 8192) return overLimit();
+            characters += value.length;
+            children.push({ id: `${id}-t${index}`, kind: 'text', text: value,
+              style: ['pre', 'code'].includes(name) ? 'code' : /^h[1-6]$/.test(name) ? 'heading' : 'body' });
+          } else if (child.nodeType === 1) {
+            const captured = walk(child, [...path, index], depth + 1);
+            if (!captured) return null;
+            children.push(...captured);
+          }
+          if (characters > 65536) return overLimit();
+        }
+        if (isControl) {
+          if (++controls > 128) return overLimit();
+          const role = element.getAttribute('role');
+          const control = role === 'checkbox' || role === 'radio' ? role :
+            name === 'a' ? 'link' : name === 'select' ? 'select' : name === 'input' ? 'input' : 'button';
+          const label = element.getAttribute('aria-label') || element.textContent?.trim() || '';
+          if (!label) return null;
+          if (label.length > 8192) return overLimit();
+          const checked = element.getAttribute('aria-checked');
+          const pressed = element.getAttribute('aria-pressed');
+          const selected = checked === 'true' || pressed === 'true' || element.checked === true;
+          const disabled = element.disabled === true || element.getAttribute('aria-disabled') === 'true';
+          return [{ id, kind: 'control', control, label, groupId: null, value: null,
+            selected, disabled, children }];
+        }
+        if (!children.length) return [];
+        const display = getComputedStyle(element);
+        const component = element.getAttribute('data-d-component');
+        const layout = component === 'grid' || display.display.includes('grid') ? 'grid' :
+          name === 'ul' || name === 'ol' ? 'list' : name === 'table' ? 'table' :
+            display.display.includes('flex') ? display.flexDirection === 'row' ? 'row' : 'column' :
+              'column';
+        return [{ id, kind: 'group', layout, children }];
+      };
+      const nodes = walk(surface, [0], 1);
+      if (!nodes || !nodes.length) return null;
+      const encoded = JSON.stringify(nodes);
+      // If TextEncoder is unavailable (e.g. a DOM-only test harness), assume the
+      // worst-case four UTF-8 bytes per UTF-16 code unit rather than undercount.
+      const bytes = typeof TextEncoder === 'function' ? new TextEncoder().encode(encoded).byteLength : encoded.length * 4;
+      return bytes <= 131072 ? nodes : overLimit();
+    }, null);
+  }
+  const richCaptureReason = root => richFailure.get(root) || 'unsupported';
+
+  /**
    * The messages of exactly one turn.
    *
    * Split out of messages() rather than duplicated because callers that need turn-scoped
@@ -2406,6 +2528,9 @@ var CLF_DOM = (() => {
     turns,
     presentationTurns,
     messages,
+    richRootFor,
+    captureRichRoot,
+    richCaptureReason,
     messagesIn,
     sectionSignature,
     generating,

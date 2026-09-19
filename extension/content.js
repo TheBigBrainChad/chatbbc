@@ -1136,7 +1136,21 @@
     // character counts badly understate UTF-8 (emoji/CJK). Share one byte budget between
     // prose and rendered HTML; otherwise a single 413 can never be halved and blocks every
     // later observation for this conversation.
+    // Prose is canonical; optional rich structure spends the *same* bounded
+    // observation envelope, not a second 128 KiB allocation on top of it.
+    // Leave a fixed allowance for the event/route JSON fields and UTF-8 framing.
     let wireBudget = 400 * 1024;
+    if (bounded.rich) {
+      const richBytes = utf8Bytes(JSON.stringify(bounded.rich));
+      const proseBytes = typeof bounded.text === 'string' ? utf8Bytes(bounded.text) : 0;
+      if (richBytes > 131072 || richBytes + proseBytes + 4096 > wireBudget) {
+        const rich = bounded.rich;
+        bounded.rich = { version: 1, status: 'unavailable', reason: 'oversized',
+          conversationId: rich.conversationId, messageId: rich.messageId,
+          providerMessageId: rich.providerMessageId, revision: 0, accessibleText: '', nodes: [] };
+      }
+      wireBudget = Math.max(0, wireBudget - utf8Bytes(JSON.stringify(bounded.rich)) - 4096);
+    }
     const takeUtf8 = (value, budget) => {
       if (typeof value !== 'string') return value;
       if (utf8Bytes(value) <= budget) return value;
@@ -1181,7 +1195,26 @@
           entry.event?.kind === 'assistant_message' &&
           entry.event?.messageId === messageId
       );
-      if (prior >= 0) removeQueueEntry(prior);
+      if (prior >= 0) {
+        // A rich-only revision can supersede the unsent projection, but it must not
+        // erase the original authored prose from this queue before the journal sees
+        // either. Merge only the *same* raw provider owner; a reminted provider ID
+        // is not permission to transplant an older answer into the new snapshot.
+        const previous = queue[prior]?.event;
+        let preservePrevious = queued.event.rich && queued.event.text === undefined &&
+          previous?.text !== undefined && previous.providerMessageId !== queued.event.providerMessageId;
+        if (queued.event.rich && queued.event.text === undefined && previous?.text !== undefined &&
+            previous.providerMessageId === queued.event.providerMessageId) {
+          const merged = { ...previous, rich: queued.event.rich };
+          // Two individually bounded observations need not fit into one combined
+          // observation. Keep both in order rather than manufacture a 413 gap.
+          if (utf8Bytes(JSON.stringify(merged)) + 4096 <= 400 * 1024) queued.event = merged;
+          else preservePrevious = true;
+        }
+        // Do not let a newly claimed raw provider UUID erase the original unsent
+        // authored bytes. Separate entries let main reject that unresolved owner.
+        if (!preservePrevious) removeQueueEntry(prior);
+      }
     }
     queue.push(queued);
     observed.events += 1;
@@ -2975,7 +3008,8 @@
   // 11: adds exact typed thought-notification ids and ephemeral DOM stamps for selective
   //     presentation suppression. Caption text and per-call adjacency remain non-authority.
   // 12: adds exact provider-message/sediment generated-image descriptors and DOM pixel stamps.
-  const FIBER_VERSION = 12;
+  // 13: adds a boolean exact DIL root join and one ephemeral root stamp (no React props).
+  const FIBER_VERSION = 13;
   const FIBER_TIMEOUT_MS = 1500;
   const FIBER_MAX_ROWS = 400;
   /** Assistant turns whose per-call evidence is accepted from one scan. */
@@ -3162,6 +3196,9 @@
         messageId,
         rawMessageId: cap(entry.rawMessageId, 200),
         role: entry.role === 'user' ? 'user' : 'assistant',
+        ...(entry.role === 'assistant' && entry.richRoot === true &&
+          /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(entry.rawMessageId || '')
+          ? { richRoot: true } : {}),
         stable: entry.stable === true,
         order:
           Number.isInteger(entry.order) && entry.order >= 0 && entry.order < FIBER_MAX_MESSAGES * 4
@@ -3186,7 +3223,9 @@
         continue;
       }
       const prior = messages[priorAt];
-      if (prior.rawText === rawText && prior.renderedHtml === renderedHtml && JSON.stringify(prior.attachments || []) === JSON.stringify(attachments)) {
+      if (prior.rawText === rawText && prior.renderedHtml === renderedHtml && JSON.stringify(prior.attachments || []) === JSON.stringify(attachments) &&
+          (!(prior.richRoot || message.richRoot) ||
+            (prior.rawMessageId === message.rawMessageId && prior.richRoot === message.richRoot))) {
         if (message.stable) prior.stable = true;
         continue;
       }
@@ -3291,6 +3330,69 @@
   }
 
   const nativeImageKey = image => `${image.messageId}\u0000${image.assetId}`;
+
+  /**
+   * An ephemeral, *inert* semantic snapshot. MAIN proved the exact Fiber/DOM pair
+   * synchronously during this scan; before reading rendered nodes, check the original
+   * scan token, concrete route, section and raw/logical pair again. This is NOT Chrome
+   * MessageSender evidence and cannot cross the recorder's live admission fence.
+   */
+  function richSnapshot(message, turn, heldConversation, heldEpoch, scanToken) {
+    if (message.richRoot !== true || epoch !== heldEpoch || conversationId !== heldConversation ||
+        !heldConversation || CLF_DOM.conversationId() !== heldConversation || fiberScanToken !== scanToken ||
+        !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(message.rawMessageId || '')) return null;
+    const expected = `${scanToken}:${turn.index}:${encodeURIComponent(message.messageId)}:${encodeURIComponent(message.rawMessageId)}`;
+    const root = CLF_DOM.richRootFor(message.messageId, message.rawMessageId);
+    if (!root || root.getAttribute('data-clf-fiber-rich') !== expected ||
+        root.closest('section[data-testid^="conversation-turn"]')?.getAttribute('data-clf-fiber-turn') !==
+          `${scanToken}:${turn.index}`) return null;
+    const nodes = CLF_DOM.captureRichRoot(root);
+    if (epoch !== heldEpoch || conversationId !== heldConversation || CLF_DOM.conversationId() !== heldConversation ||
+        !root.isConnected || root.getAttribute('data-clf-fiber-rich') !== expected ||
+        CLF_DOM.richRootFor(message.messageId, message.rawMessageId) !== root) return null;
+    const unavailable = reason => ({ version: 1, status: 'unavailable', reason,
+      conversationId: heldConversation, messageId: message.messageId,
+      providerMessageId: message.rawMessageId, revision: 0, accessibleText: '', nodes: [] });
+    if (!nodes) return unavailable(CLF_DOM.richCaptureReason(root));
+    // Read only text already admitted into the semantic tree. Provider model source and
+    // raw root.textContent can include hidden component source or irrelevant chrome.
+    const textParts = [];
+    const collect = entries => {
+      for (const node of entries) {
+        if (node.kind === 'text' && node.text) textParts.push(node.text);
+        else if (node.kind === 'control' && node.label) textParts.push(node.label);
+        if (node.children) collect(node.children);
+      }
+    };
+    collect(nodes);
+    const accessibleText = textParts.join(' ').trim();
+    if (utf8Bytes(accessibleText) > 32768) return unavailable('oversized');
+    const rich = { version: 1, status: 'available', reason: null,
+      conversationId: heldConversation, messageId: message.messageId,
+      providerMessageId: message.rawMessageId, revision: 0, accessibleText, nodes };
+    return utf8Bytes(JSON.stringify(rich)) <= 131072 ? rich : unavailable('oversized');
+  }
+
+  /**
+   * A previously authenticated-in-this-document presentation can be retired on a
+   * subsequent exact page-model scan. Without that prior proof, an absent or forged
+   * richRoot flag must never mint a new rich view, even an unavailable one. This is
+   * only page-local display evidence; it is not authenticated Chrome sender proof.
+   */
+  function missingRichSnapshot(message, turn, prior, heldConversation, heldEpoch, scanToken) {
+    if (!prior?.richOwner || prior.richOwner.epoch !== heldEpoch ||
+        prior.richOwner.conversationId !== heldConversation ||
+        prior.richOwner.providerMessageId !== message.rawMessageId ||
+        prior.richOwner.messageId !== message.messageId ||
+        epoch !== heldEpoch || conversationId !== heldConversation ||
+        !heldConversation || CLF_DOM.conversationId() !== heldConversation ||
+        fiberScanToken !== scanToken || turn.conversationId !== heldConversation ||
+        ![...document.querySelectorAll('section[data-testid^="conversation-turn"]')].some(section =>
+          section.getAttribute('data-clf-fiber-turn') === `${scanToken}:${turn.index}`)) return null;
+    return { version: 1, status: 'unavailable', reason: 'ambiguous',
+      conversationId: heldConversation, messageId: message.messageId,
+      providerMessageId: message.rawMessageId, revision: 0, accessibleText: '', nodes: [] };
+  }
 
   function nativeImageNode(image) {
     if (!fiberPresent || !fiberScanToken) return null;
@@ -4173,6 +4275,12 @@
           priorMessage?.conflicted || (localOwner && priorMessage?.owner && priorMessage.owner !== localOwner)
         );
         let owner = ownerConflict ? '' : localOwner || (priorMessage && priorMessage.owner) || '';
+        const rich = !ownerConflict && concreteConversation(turn.conversationId) === askedConversation
+          ? richSnapshot(message, turn, askedConversation, askedEpoch, answer.scanToken) ||
+            missingRichSnapshot(message, turn, priorMessage, askedConversation, askedEpoch, answer.scanToken)
+          : null;
+        const richSignature = rich ? JSON.stringify(rich) : null;
+        const richChanged = richSignature !== null && richSignature !== priorMessage?.richSignature;
         // Ownership may strengthen after an earlier scan saw the message before its DOM turn
         // was bound. It may never weaken merely because a concurrent later scan has no local
         // claim: that was the 2026-08-31 final-without-turnId race. A contradictory positive
@@ -4180,8 +4288,32 @@
         const signature =
           `${state}\u0000${message.rawText}\u0000${message.renderedHtml}\u0000${owner}` +
           `\u0000${message.createTime || ''}\u0000${message.rawMessageId || ''}`;
-        if (priorMessage?.signature === signature) continue;
-        messagesReported.set(message.messageId, { signature, owner, conflicted: ownerConflict, text: message.rawText });
+        const sameProse = priorMessage?.signature === signature;
+        if (sameProse && !richChanged) continue;
+        // Keep only the latest 64 exact rich signatures: 64 × 128 KiB is bounded.
+        // The existing message map remains the sole owner of observations; evicted
+        // signatures may re-observe presentation, never replay an action or prose.
+        messagesReported.delete(message.messageId);
+        messagesReported.set(message.messageId, { signature, owner, conflicted: ownerConflict, text: message.rawText,
+          richSignature: richSignature ?? priorMessage?.richSignature ?? null,
+          richOwner: rich?.status === 'available' ? { epoch: askedEpoch, conversationId: askedConversation,
+            messageId: message.messageId, providerMessageId: message.rawMessageId } : priorMessage?.richOwner ?? null });
+        if (richSignature) {
+          let retained = 0;
+          for (const state of messagesReported.values()) if (state.richSignature) retained += 1;
+          if (retained > 64) for (const state of messagesReported.values()) {
+            if (!state.richSignature) continue;
+            delete state.richSignature;
+            if (--retained <= 64) break;
+          }
+        }
+        // Hydration or native state changed, not authored prose/model work. Never emit
+        // text, activity, final/Goal or a second logical message for this revision.
+        if (sameProse) {
+          emit({ kind: 'assistant_message', messageId: message.messageId,
+            providerMessageId: message.rawMessageId, fiberConversationId: askedConversation, rich });
+          continue;
+        }
         if (state === 'streaming' && owner && priorMessage?.text !== message.rawText && freshPublication) noteTurnProgress(owner);
         const liveAssistant =
           Boolean(localOwner) ||
@@ -4190,6 +4322,7 @@
           kind: 'assistant_message',
           messageId: message.messageId,
           providerMessageId: message.rawMessageId,
+          ...(rich ? { rich, fiberConversationId: askedConversation } : {}),
           turnId: localOwner || undefined,
           text: message.rawText,
           renderedHtml: message.renderedHtml,

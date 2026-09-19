@@ -258,6 +258,7 @@ interface TurnEvidence {
     createTime?: number | null;
     rawText: string;
     renderedHtml: string;
+    richRoot?: boolean;
   }>;
   activities?: Array<{ messageId: string; label: string; order: number }>;
   thoughtNotifications?: Array<{ messageId: string; kind: 'thought_notification' }>;
@@ -279,6 +280,7 @@ interface TurnFixture {
   messages: Message[];
   /** A visible `.markdown` block: its text, or markup when the test is about the markup. */
   rendered?: Array<string | { html: string; nativeId?: string; fiberProps?: Record<string, unknown>; fiber?: Fiber; staleMessageStamp?: string }>;
+  rich?: Array<{ providerId: string; fiberMessageId?: string; fiberConversationId?: string; duplicate?: boolean }>;
   activities?: Array<{ label: string; fiber: Fiber; staleThoughtStamp?: string }>;
   images?: Array<{ assetId: string; clones?: number }>;
   staleStamp?: string;
@@ -299,6 +301,7 @@ async function scan(
   messageStamps: Array<string | null>;
   thoughtStamps: Array<string | null>;
   imageStamps: Array<string | null>;
+  richStamps: Array<string | null>;
   repeatedStampMutations: number;
   turns: TurnEvidence[];
 }> {
@@ -319,10 +322,30 @@ async function scan(
       if (turn.rect === 'throw') throw new Error('unavailable geometry');
       return turn.rect as DOMRect;
     };
-    (section as unknown as Record<string, unknown>)['__reactFiber$qlrmvxwbkkq'] = turnNode(
+    const sectionFiber = turnNode(
       turn.messages,
       turn.conversationProps
     );
+    (section as unknown as Record<string, unknown>)['__reactFiber$qlrmvxwbkkq'] = sectionFiber;
+    for (const entry of turn.rich ?? []) {
+      const copies = entry.duplicate ? 2 : 1;
+      for (let copy = 0; copy < copies; copy++) {
+        const row = document.createElement('div');
+        row.setAttribute('data-message-id', entry.providerId);
+        row.setAttribute('data-message-author-role', 'assistant');
+        const root = document.createElement('div');
+        root.className = 'observed_DilResponseRoot';
+        root.setAttribute('data-clf-fiber-rich', 'old-frame:0:wrong');
+        (root as unknown as Record<string, unknown>)['__reactFiber$qlrmvxwbkkq'] = {
+          memoizedProps: { messageId: entry.fiberMessageId ?? entry.providerId,
+            conversationId: entry.fiberConversationId ?? THREAD }, return: sectionFiber
+        };
+        const surface = document.createElement('div');
+        surface.className = 'puik-root not-prose not-markdown';
+        surface.innerHTML = '<div data-d-component="grid"><button data-d-component="pressable">Forest<img alt="Forest image"></button><button data-d-component="pressable">Coast<img alt="Coast image"></button><button data-d-component="button" disabled>Continue</button></div>';
+        root.append(surface); row.append(root); section.append(row);
+      }
+    }
     for (const entry of turn.rendered ?? []) {
       const block = document.createElement('div');
       block.className = 'markdown';
@@ -403,6 +426,8 @@ async function scan(
     .map(node => node.getAttribute('data-clf-fiber-thought'));
   const imageStamps = [...document.querySelectorAll('.group\\/imagegen-image img')]
     .map(node => node.getAttribute('data-clf-fiber-image'));
+  const richStamps = [...document.querySelectorAll('.puik-root.not-prose.not-markdown')]
+    .map(node => node.parentElement?.getAttribute('data-clf-fiber-rich') ?? null);
   const turnStamps = [...document.querySelectorAll('[data-testid^="conversation-turn-"]')].map((section) =>
     section.getAttribute('data-clf-fiber-turn')
   );
@@ -416,6 +441,7 @@ async function scan(
     messageStamps,
     thoughtStamps,
     imageStamps,
+    richStamps,
     repeatedStampMutations,
     turns: (data.turns ?? []) as TurnEvidence[]
   };
@@ -459,8 +485,8 @@ describe('reading a row out of the page', () => {
 
   it('keeps the version it was built for on the reply', async () => {
     const { version, rows } = await scan([row([request('req-1', 'read_file')])]);
-    expect(version).toBe(12);
-    expect(rows[0]!.v).toBe(12);
+    expect(version).toBe(13);
+    expect(rows[0]!.v).toBe(13);
   });
   it('counts only TobisComputer requests in the complete turn, not api_tool metadata calls', async () => {
     const mine1 = request('req-1', 'read_file');
@@ -727,6 +753,30 @@ describe('the calls a turn says it made', () => {
         renderedHtml: ''
       }
     ]);
+  });
+
+  it.each(['exact', 'wrong-provider', 'wrong-conversation', 'duplicate-root', 'duplicate-model'])('stamps only one corroborated DIL response owner (%s)', async mode => {
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const other = '3150f756-bf2d-45fa-ac0f-45010b2239fc';
+    const message = authored(provider, 'Which scene?', {
+      workingTurnId: 'working', turnExchangeId: 'exchange', createTime: 1789552000,
+      status: 'finished_successfully', channel: 'final'
+    });
+    const twin = authored(other, 'Another Continue', { channel: 'final' });
+    const result = await scan([], [{ id: 'rich-turn', messages: [message, twin,
+      ...(mode === 'duplicate-model' ? [message] : [])], conversationProps: { conversationId: THREAD },
+    rich: [{ providerId: provider, ...(mode === 'wrong-provider' ? { fiberMessageId: other } : {}),
+      ...(mode === 'wrong-conversation' ? { fiberConversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' } : {}),
+      ...(mode === 'duplicate-root' ? { duplicate: true } : {}) }] },
+    { id: 'other-turn', messages: [authored('other-assistant', 'Continue')],
+      rendered: [{ html: '<pre><code>&lt;text&gt;Continue&lt;/text&gt;</code></pre>', nativeId: 'other-assistant' }] }]);
+    const match = mode === 'exact';
+    const found = result.turns[0]?.messages.find(row => row.rawMessageId === provider);
+    expect(found?.messageId).toBe('assistant:working:exchange:1789552000000');
+    expect(found?.richRoot).toBe(match ? true : undefined);
+    expect(result.richStamps).toEqual(Array.from({ length: mode === 'duplicate-root' ? 2 : 1 }, () =>
+      match ? `${result.scanToken}:0:${encodeURIComponent(found!.messageId)}:${provider}` : null));
+    expect(result.turns[1]?.messages[0]?.richRoot).toBeUndefined();
   });
 
   it.each(['native', 'scoped', 'foreign', 'unknown', 'text-only', 'duplicate'])('stamps only exact current native message anchors (%s)', async mode => {
