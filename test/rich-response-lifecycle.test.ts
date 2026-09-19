@@ -381,6 +381,120 @@ it('does not acknowledge Recording Off while an already-started asset write can 
   }
 });
 
+it('does not acknowledge Recording Off while first-sight recording creates a session outside writer queues', async () => {
+  const conversationId = randomUUID();
+  let entered!: () => void, release!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const originalWrite = fs.writeFile.bind(fs);
+  let blocked = false;
+  let firstSightWriteSettled = false;
+  const spy = vi.spyOn(fs, 'writeFile').mockImplementation((async (file, ...args) => {
+    if (!blocked && String(file).endsWith(path.join('messages.json'))) {
+      blocked = true;
+      entered();
+      await gate;
+      const result = await (originalWrite as (...args: unknown[]) => Promise<void>)(file, ...args);
+      firstSightWriteSettled = true;
+      return result;
+    }
+    return (originalWrite as (...args: unknown[]) => Promise<void>)(file, ...args);
+  }) as typeof fs.writeFile);
+  let creating: Promise<string | null> | null = null;
+  let saving: Promise<void> | null = null;
+  try {
+    creating = sessionForConversation(conversationId);
+    void creating.catch(() => undefined);
+    await reached;
+    saving = off();
+    await vi.waitFor(() => expect(recordingWriteAllowed(getRecordingRevision())).toBe(false));
+    const acknowledgedBeforeRelease = await Promise.race([
+      saving.then(() => true),
+      new Promise<false>(resolve => setTimeout(() => resolve(false), 150))
+    ]);
+    expect(acknowledgedBeforeRelease).toBe(false);
+    await expect(sessionForConversation(randomUUID())).rejects.toMatchObject({ code: 'RECORDING_DISABLED' });
+    release();
+    await saving;
+    expect(firstSightWriteSettled).toBe(true);
+    await expect(creating).rejects.toMatchObject({ code: 'RECORDING_DISABLED' });
+    const sessions = await fs.readdir(sessionsRoot());
+    expect(sessions).toHaveLength(1);
+    // Session creation began while On; its later session_start must not append after Off.
+    expect(await fs.readFile(path.join(sessionsRoot(), sessions[0]!, 'events.jsonl'), 'utf8')).toBe('');
+    expect(await readEvents(sessions[0]!)).toEqual([]);
+  } finally {
+    release();
+    await Promise.allSettled([creating, saving].filter(promise => promise !== null));
+    spy.mockRestore();
+  }
+});
+
+it('flushes a pre-Off dirty session summary before acknowledging Off and leaves no delayed metadata writer', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const meta = path.join(sessionsRoot(), session.id, 'meta.json');
+  const originalRename = fs.rename.bind(fs);
+  let acknowledged = false;
+  let lateMetaWrites = 0;
+  const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+    if (acknowledged && String(to) === meta) lateMetaWrites++;
+    return originalRename(from, to);
+  }) as typeof fs.rename);
+  try {
+    await appendEvent(session.id, { kind: 'turn_start', source: 'extension', time: 100, turnId: 'pre-off' });
+    expect(JSON.parse(await fs.readFile(meta, 'utf8')).events).toBe(0);
+    await off();
+    acknowledged = true;
+    expect(JSON.parse(await fs.readFile(meta, 'utf8')).events).toBe(1);
+    await new Promise(resolve => setTimeout(resolve, 1650));
+    expect(lateMetaWrites).toBe(0);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('keeps observations retryable when a pending Recording Off fails to save', async () => {
+  const conversationId = randomUUID();
+  const sessionId = await sessionForConversation(conversationId);
+  expect(sessionId).toBeTruthy();
+  const originalRename = fs.rename.bind(fs);
+  const target = path.join(directory, 'config.json');
+  let entered!: () => void, release!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+    if (String(to) === target) {
+      entered();
+      await gate;
+      throw Object.assign(new Error('Config rename failed'), { code: 'EIO' });
+    }
+    return originalRename(from, to);
+  }) as typeof fs.rename);
+  const observation = { kind: 'user_message' as const, time: 200, messageId: randomUUID(), text: 'must survive failed Off' };
+  let saving: Promise<void> | null = null;
+  let recording: ReturnType<typeof recordChatObservations> | null = null;
+  try {
+    saving = off();
+    void saving.catch(() => undefined);
+    await reached;
+    expect(getConfig().sessions.record).toBe(true);
+    expect(recordingWriteAllowed(getRecordingRevision())).toBe(false);
+    recording = recordChatObservations(conversationId, [observation]);
+    await expect(recording).rejects.toMatchObject({ code: 'RECORDING_DISABLED' });
+    release();
+    await expect(saving).rejects.toThrow('Config rename failed');
+    expect(getConfig().sessions.record).toBe(true);
+    expect((await recordChatObservations(conversationId, [observation])).stored).toBeGreaterThan(0);
+    expect((await readEvents(sessionId!)).filter(event => event.kind === 'user_message')).toMatchObject([
+      { messageId: observation.messageId, message: text(observation.text) }
+    ]);
+  } finally {
+    release();
+    await Promise.allSettled([recording, saving].filter(promise => promise !== null));
+    spy.mockRestore();
+  }
+});
+
 it('retains the committed On setting and reopens recording admission when the Off config rename fails', async () => {
   const originalRename = fs.rename.bind(fs);
   const priorRevision = getRecordingRevision();

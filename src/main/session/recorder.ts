@@ -32,7 +32,7 @@ import type {
 import { estimateTokens, originTitle } from '../../shared/session.js';
 import type { RichResponse } from '../../shared/rich-response.js';
 import { chatErrorMessageKey } from '../../shared/chat-error.js';
-import { getConfig, getRecordingRevision } from '../config.js';
+import { getConfig, getRecordingRevision, recordingWriteAllowed } from '../config.js';
 import { logInfo, logWarn } from '../logger.js';
 import { redactCredentialText } from '../redaction.js';
 import { currentCall, emptyEvidence, runningToolCalls, type CallEvidence } from '../mcp/call-context.js';
@@ -42,6 +42,7 @@ import {
   MAX_TOOL_RESULT_CHARS,
   MAX_USER_MESSAGE_CHARS,
   MAX_ASSET_BYTES,
+  RecordingDisabledError,
   appendEvent,
   recordProcessCall,
   completeProcessCall,
@@ -265,6 +266,7 @@ async function initializeSessionForConversation(
   title?: string
 ): Promise<string | null> {
   if (!recordingEnabled()) return null;
+  const recordingRevision = getRecordingRevision();
   if (!conversationId) return ensureUnattributedSession();
   const existing = conversations.get(conversationId);
   if (existing) {
@@ -310,7 +312,8 @@ async function initializeSessionForConversation(
       conversationId,
       title: origin && origin.kind !== 'desktop' ? await titleForOrigin(origin) : title,
       origin,
-      titleSource: 'fallback'
+      titleSource: 'fallback',
+      recordingRevision
     }));
   if (origin && !known) pendingOrigins.delete(conversationId);
   // Reopening a chat that was closed earlier makes its session live again. Appending
@@ -579,10 +582,11 @@ async function storedHistory(sessionId: string): Promise<StoredHistory> {
 
 async function ensureUnattributedSession(): Promise<string | null> {
   if (!recordingEnabled()) return null;
+  const recordingRevision = getRecordingRevision();
   if (unattributedSessionId) return unattributedSessionId;
   if (unattributedInitialization) return unattributedInitialization;
   const initializing = (async () => {
-    const summary = await createSession({ title: 'Unattributed activity' });
+    const summary = await createSession({ title: 'Unattributed activity', recordingRevision });
     await appendEvent(summary.id, {
       time: Date.now(), source: 'app', kind: 'session_start', conversationId: null, title: summary.title
     });
@@ -1765,7 +1769,10 @@ async function recordNativeImage(
   });
   // A false `changed` can mean either an idempotent same-owner replay or an explicit
   // role/agent refusal. Only the store's canonical-owner verdict may admit preview bytes.
-  if (!metadata.accepted) return 0;
+  if (!metadata.accepted) {
+    if (recordingEnabled() && !recordingWriteAllowed(recordingRevision)) throw new RecordingDisabledError();
+    return 0;
+  }
   let changed = metadata.changed ? 1 : 0;
   if (!item.previewDataUrl || metadata.event.asset) return changed;
   if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) return changed;
@@ -1804,6 +1811,9 @@ async function recordNativeImage(
   } catch (error) {
     // A committed metadata row remains history; Off during decode/storage cannot
     // create a late failure revision or provoke a replay after recording resumes.
+    // Pending Off is different: if saving the preference fails, an ACK here would
+    // permanently retire the browser's only copy while recording remains On.
+    if (isRecordingDisabledError(error) && recordingEnabled()) throw error;
     if (isRecordingDisabledError(error) || !recordingEnabled() ||
         getRecordingRevision() !== recordingRevision) return changed;
     const reason = /quota/i.test((error as Error).message) ? 'quota' : 'invalid';
@@ -1917,6 +1927,11 @@ export function recordChatObservations(
   activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; endedTurnId?: string };
   goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
 }> {
+  // A still-pending Off has closed physical admission but has not committed the
+  // user's preference. Keep the browser journal's batch for retry if saving fails.
+  if (recordingEnabled() && !recordingWriteAllowed(getRecordingRevision())) {
+    return Promise.reject(new RecordingDisabledError());
+  }
   const hasEvidence = observations.some((item) => item.kind === 'tool_evidence');
   const ownership = hasEvidence ? recordRequestEvidence(conversationId, observations) : null;
   // Observe rejection now even if an earlier transcript batch is still blocked. The queued
@@ -1930,7 +1945,7 @@ export function recordChatObservations(
     } catch (error) {
       // A browser journal is at-least-once. Off is successful suppression, not a
       // transport failure eligible for replay when recording is enabled again.
-      if (isRecordingDisabledError(error)) return {
+      if (isRecordingDisabledError(error) && !recordingEnabled()) return {
         sessionId: null, stored: 0,
         activity: { meaningful: false, working: false, terminal: false }, goalCandidates: []
       };
@@ -2048,7 +2063,7 @@ async function recordSupersededMessages(
     }
     if (written?.changed) stored++;
     } catch (error) {
-      if (isRecordingDisabledError(error)) break;
+      if (isRecordingDisabledError(error) && !recordingEnabled()) break;
       throw error;
     }
   }
@@ -2406,7 +2421,7 @@ async function recordChatObservationsNow(
     }
     stored++;
     } catch (error) {
-      if (isRecordingDisabledError(error)) break;
+      if (isRecordingDisabledError(error) && !recordingEnabled()) break;
       throw error;
     }
   }

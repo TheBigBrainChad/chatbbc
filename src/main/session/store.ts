@@ -218,13 +218,19 @@ const removedAssetEpoch = new Map<string, number>();
 /** An explicit session deletion must also invalidate image reads already awaiting a queue. */
 let sessionDeletionEpoch = 0;
 const deletingSessions = new Set<string>();
+/** First-sight recorder sessions write initial files outside the ordinary per-session queue. */
+const recordingSessionCreations = new Set<Promise<SessionSummary>>();
 
 // Config owns the Off transition. Drain only these existing writers while its
 // admission gate is closed; do not invert asset -> session cleanup lock ordering
 // or hold a session queue while awaiting an asset queue.
 registerRecordingWriteDrain(async () => {
+  await Promise.allSettled([...recordingSessionCreations]);
   await Promise.allSettled([...opening.values()]);
-  await Promise.all([...open.values()].map(entry => entry.queue));
+  // An admitted append can finish its queue and leave a delayed summary timer. Flush
+  // those summaries inside this barrier so their physical meta/backup writes cannot
+  // start after Off was acknowledged.
+  await Promise.all([...open.values()].map(entry => flushSessionEntry(entry)));
   await assetWriteQueue;
 });
 
@@ -565,14 +571,29 @@ async function flushSessionEntry(entry: OpenSession): Promise<void> {
 
 // ----------------------------------------------------------------- create
 
-export async function createSession(options: {
+export function createSession(options: {
   /** Reserved by an accepted opening outbox row; never supplied by model tools. */
   reservedId?: string;
   title?: string;
   titleSource?: SessionSummary['titleSource'];
   conversationId?: string | null;
   origin?: SessionOrigin | null;
+  /** Recorder's original admission epoch; omitted for independent outbox/control reservations. */
+  recordingRevision?: number;
 }): Promise<SessionSummary> {
+  if (options.recordingRevision !== undefined) {
+    try { requireRecording(options.recordingRevision); }
+    catch (error) { return Promise.reject(error); }
+  }
+  const creating = createSessionFiles(options);
+  if (options.recordingRevision !== undefined) {
+    recordingSessionCreations.add(creating);
+    void creating.finally(() => recordingSessionCreations.delete(creating)).catch(() => undefined);
+  }
+  return creating;
+}
+
+async function createSessionFiles(options: Parameters<typeof createSession>[0]): Promise<SessionSummary> {
   const id = options.reservedId ?? `${new Date().toISOString().slice(0, 10)}-${randomUUID().slice(0, 8)}`;
   assertSessionId(id);
   if (options.reservedId) {
@@ -589,6 +610,9 @@ export async function createSession(options: {
     const source = await getSession(options.origin.fromSessionId);
     if (source?.projectId) summary.projectId = source.projectId;
   }
+  // A prior asynchronous owner/title lookup cannot start a first recording after Off
+  // has closed admission. Once creation begins, config awaits the whole promise.
+  if (options.recordingRevision !== undefined) requireRecording(options.recordingRevision);
   // Invalidate before exposing the in-flight live entry. A cached miss must never hide a
   // session that this process has started creating, even while its first durable write awaits.
   if (summary.conversationId) missingCurrentConversations.delete(summary.conversationId);
