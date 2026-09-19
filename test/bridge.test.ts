@@ -2038,7 +2038,9 @@ describe('activity feed', () => {
         releaseConfig();
         if (offSucceeds) {
           await disabling;
-          expect(await batch).toMatchObject({ status: 200, body: { stored: 0, recordingSuppressed: true } });
+          expect(await batch).toMatchObject({ status: 200, body: {
+            sessionId, stored: 1, partialCommitted: true, remainderSuppressed: true
+          } });
           expect(getConfig().sessions.record).toBe(false);
           expect((await readEvents(sessionId)).filter(row => row.kind === 'user_message' || row.kind === 'assistant_message'))
             .toMatchObject([{ kind: 'user_message', messageId: userId }]);
@@ -2070,6 +2072,108 @@ describe('activity feed', () => {
         await Promise.allSettled([batch, disabling].filter(promise => promise !== null));
         spy.mockRestore();
         await saveConfig(suiteConfig);
+      }
+    }
+  );
+
+  it.each(['goal', 'worker'] as const)(
+    'keeps the physically committed %s final and only its custody when Off excludes the next row',
+    async (owner) => {
+      await pair();
+      // Sessions persist across cases in this file; never reuse a shared worker fixture chat.
+      const conversationId = randomUUID();
+      const turnId = `partial-${owner}-turn`;
+      const finalId = `partial-${owner}-final`;
+      const excludedId = `partial-${owner}-excluded-user`;
+      let commandId: string | undefined;
+      if (owner === 'worker') {
+        spawn({ workers: [{ task: 'finish from the committed final only' }], caller: { conversationId: PRIME_CHAT } });
+        commandId = (await redeem()).id;
+      }
+      const baseline = await request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'turn_start', turnId, time: Date.now() }
+      ] } });
+      expect(baseline.status).toBe(200);
+      const sessionId = baseline.body.sessionId as string;
+      const originalTitle = (await getSession(sessionId))?.title;
+      const originalRename = fs.rename.bind(fs);
+      const configTarget = path.join(dir, 'config.json');
+      let firstTarget: string | null = null;
+      let firstRenames = 0;
+      let firstEntered!: () => void, releaseFirst!: () => void;
+      let configEntered!: () => void, releaseConfig!: () => void;
+      const firstReached = new Promise<void>(resolve => { firstEntered = resolve; });
+      const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+      const configReached = new Promise<void>(resolve => { configEntered = resolve; });
+      const configGate = new Promise<void>(resolve => { releaseConfig = resolve; });
+      let configIntercepted = false;
+      const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+        const destination = String(to);
+        if (!firstTarget && destination.includes(`${path.sep}messages${path.sep}`) && destination.endsWith('.json')) {
+          firstTarget = destination;
+          firstRenames++;
+          await originalRename(from, to); // Actual committed first final, not a simulated recorder return.
+          firstEntered();
+          await firstGate;
+          return;
+        }
+        if (destination === firstTarget) firstRenames++;
+        if (destination === configTarget && !configIntercepted) {
+          configIntercepted = true;
+          configEntered();
+          await configGate;
+        }
+        return originalRename(from, to);
+      }) as typeof fs.rename);
+      let batch: Promise<Reply> | null = null;
+      let disabling: Promise<unknown> | null = null;
+      try {
+        const now = Date.now();
+        batch = request('POST', '/events', { body: {
+          conversationId,
+          ...(commandId ? { agent: 'worker-1', agentCommandId: commandId } : {}),
+          events: [
+            { kind: 'assistant_message', time: now, turnId, messageId: finalId,
+              text: 'First final was actually committed', state: 'final', final: true, goalEligible: true },
+            { kind: 'user_message', time: now + 1, turnId, messageId: excludedId,
+              text: 'This later request must never create a new question or revive work' }
+          ]
+        } });
+        void batch.catch(() => undefined);
+        await firstReached;
+        expect(JSON.parse(await fs.readFile(firstTarget!, 'utf8')).messageId).toBe(finalId);
+        disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+        void disabling.catch(() => undefined);
+        await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+        releaseFirst();
+        await configReached;
+        releaseConfig();
+        await disabling;
+        const response = await batch;
+        expect(response).toMatchObject({ status: 200, body: {
+          sessionId, stored: 1, partialCommitted: true, remainderSuppressed: true
+        } });
+        expect(response.body).not.toHaveProperty('recordingSuppressed', true);
+        const canonical = (await readEvents(sessionId)).filter(row =>
+          row.kind === 'assistant_message' || row.kind === 'user_message');
+        expect(canonical.map(row => row.messageId)).toEqual([finalId]);
+        if (owner === 'goal') expect((await getSession(sessionId))?.title).toBe(originalTitle);
+        else expect((await getSession(sessionId))?.title).toContain('finish from the committed final only');
+        const receipts = (await readDurable<{ replies: Array<{ conversationId: string; replyId: string; state: string }> }>(GOAL_REPLIES_STATE))?.replies
+          .filter(reply => reply.conversationId === conversationId) ?? [];
+        expect(receipts).toMatchObject([{ replyId: finalId, state: 'handled' }]); // Off never creates pending automation.
+        if (owner === 'worker') {
+          expect((await getSession(sessionId))?.origin).toMatchObject({ kind: 'worker', agentId: 'worker-1' });
+          expect(swarmStateForCaller({ conversationId: PRIME_CHAT }).agents.find(agent => agent.id === 'worker-1'))
+            .toMatchObject({ state: 'sleeping', result: 'First final was actually committed' });
+        }
+        expect(firstRenames).toBe(1);
+      } finally {
+        releaseFirst();
+        releaseConfig();
+        await Promise.allSettled([batch, disabling].filter(promise => promise !== null));
+        spy.mockRestore();
+        await updateConfig(() => suiteConfig);
       }
     }
   );

@@ -32,7 +32,7 @@ import type {
 import { estimateTokens, originTitle } from '../../shared/session.js';
 import type { RichResponse } from '../../shared/rich-response.js';
 import { chatErrorMessageKey } from '../../shared/chat-error.js';
-import { getConfig, getRecordingRevision, recordingWriteAllowed } from '../config.js';
+import { getConfig, getRecordingRevision, pendingRecordingOffDecision, recordingWriteAllowed } from '../config.js';
 import { logInfo, logWarn } from '../logger.js';
 import { redactCredentialText } from '../redaction.js';
 import { currentCall, emptyEvidence, runningToolCalls, type CallEvidence } from '../mcp/call-context.js';
@@ -434,7 +434,9 @@ async function promoteConversationTitle(sessionId: string, title?: string, conve
  * into a fresh tab — the only point at which the queued command and the conversation it
  * became are both known.
  */
-export async function noteChatOrigin(conversationId: string, origin: SessionOrigin): Promise<void> {
+export async function noteChatOrigin(
+  conversationId: string, origin: SessionOrigin, committedSessionId?: string
+): Promise<void> {
   if (!conversationId) return;
   pendingOrigins.set(conversationId, origin);
   while (pendingOrigins.size > MAX_PENDING_ORIGINS) {
@@ -442,15 +444,20 @@ export async function noteChatOrigin(conversationId: string, origin: SessionOrig
     if (oldest.done) break;
     pendingOrigins.delete(oldest.value);
   }
-  if (!recordingEnabled()) return;
+  // This exceptional caller has already committed a canonical worker row before Off.
+  // Its exact existing session still needs its origin metadata; this does not admit
+  // further observations, create a session or reopen Recording for new content.
+  if (!recordingEnabled() && !committedSessionId) return;
   const live = conversations.get(conversationId);
   const sessionId =
-    live?.sessionId ??
+    committedSessionId ?? live?.sessionId ??
     (await findSessionByConversation(conversationId))?.id ??
     null;
   // No session yet is the common case: the ack beats the page's first observation.
   // sessionForConversation picks the origin up out of pendingOrigins when it creates one.
-  if (sessionId) await applyOrigin(sessionId, conversationId);
+  if (sessionId && (!committedSessionId || (await getSession(sessionId))?.conversationId === conversationId)) {
+    await applyOrigin(sessionId, conversationId);
+  }
 }
 
 /** The name for a chat this app opened, taking a resume's name from its source. */
@@ -1917,16 +1924,21 @@ export async function recordRequestEvidence(
   return sessionId;
 }
 
-export function recordChatObservations(
-  conversationId: string,
-  observations: readonly ChatObservation[],
-  agent?: string | null
-): Promise<{
+interface RecordedObservationBatch {
   sessionId: string | null;
   stored: number;
   activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; endedTurnId?: string };
   goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
-}> {
+  /** Only these original rows may affect recovery or worker reconciliation after a partial Off. */
+  committedObservations: readonly ChatObservation[];
+  remainderSuppressed: boolean;
+}
+
+export function recordChatObservations(
+  conversationId: string,
+  observations: readonly ChatObservation[],
+  agent?: string | null
+): Promise<RecordedObservationBatch> {
   // A still-pending Off has closed physical admission but has not committed the
   // user's preference. Keep the browser journal's batch for retry if saving fails.
   if (recordingEnabled() && !recordingWriteAllowed(getRecordingRevision())) {
@@ -1947,7 +1959,8 @@ export function recordChatObservations(
       // transport failure eligible for replay when recording is enabled again.
       if (isRecordingDisabledError(error) && !recordingEnabled()) return {
         sessionId: null, stored: 0,
-        activity: { meaningful: false, working: false, terminal: false }, goalCandidates: []
+        activity: { meaningful: false, working: false, terminal: false }, goalCandidates: [],
+        committedObservations: [], remainderSuppressed: true
       };
       throw error;
     }
@@ -2075,29 +2088,25 @@ async function recordChatObservationsNow(
   conversationId: string,
   observations: readonly ChatObservation[],
   agent?: string | null
-): Promise<{
-  sessionId: string | null;
-  stored: number;
-  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; endedTurnId?: string };
-  goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
-}> {
+): Promise<RecordedObservationBatch> {
   const activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; endedTurnId?: string } = { meaningful: false, working: false, terminal: false };
-  if (!recordingEnabled()) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
+  const empty = { stored: 0, activity, goalCandidates: [], committedObservations: [], remainderSuppressed: false };
+  if (!recordingEnabled()) return { sessionId: null, ...empty };
   const recordingRevision = getRecordingRevision();
   // No canonical text/event evidence exists in a rich-only batch; reject before the normal
   // first-sight path could create an otherwise empty session for an untrusted projection.
   if (observations.length > 0 && observations.every(item => item.kind === 'assistant_message' &&
       item.text === undefined && (item.rich !== undefined || item.richOnly === true))) {
-    return { sessionId: null, stored: 0, activity, goalCandidates: [] };
+    return { sessionId: null, ...empty };
   }
   if (!conversations.has(conversationId)) {
     const lineage = await supersededLineage(conversationId);
     if (lineage) {
       const stored = await recordSupersededMessages(lineage, observations);
-      return { sessionId: lineage, stored, activity, goalCandidates: [] };
+      return { sessionId: lineage, stored, activity, goalCandidates: [],
+        committedObservations: observations, remainderSuppressed: false };
     }
   }
-  let firstUser: ChatObservation | undefined;
   let pageTitle: ChatObservation | undefined;
   const explicitEnds = new Set<string>();
   const batchTurnStarts = new Map<string, number>();
@@ -2106,7 +2115,6 @@ async function recordChatObservationsNow(
   // write loop in one pass instead of find + find + filter + map (the latter two also allocated
   // an intermediate array for every batch).
   for (const item of observations) {
-    if (!firstUser && item.kind === 'user_message') firstUser = item;
     if (item.kind === 'conversation_title') pageTitle = item;
     if (item.kind === 'turn_start' && item.turnId) batchTurnStarts.set(item.turnId, item.time);
     if (item.kind === 'turn_end' && item.turnId) {
@@ -2114,16 +2122,18 @@ async function recordChatObservationsNow(
       if (item.outcome !== 'completed' && item.outcome !== 'stopped') batchUncertainEndId = item.turnId;
     }
   }
-  const sessionId = await sessionForConversation(
-    conversationId,
-    pageTitle?.text?.trim() || observedUserTitle(firstUser?.text)
-  );
-  if (!sessionId) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
+  // A title/user appearing later in this HTTP batch has not crossed a durable
+  // admission barrier. The canonical user writer and post-loop title promotion
+  // own naming only AFTER their exact row commits; Off may discard that suffix.
+  const sessionId = await sessionForConversation(conversationId);
+  if (!sessionId) return { sessionId: null, ...empty };
   if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) {
-    return { sessionId, stored: 0, activity, goalCandidates: [] };
+    return { sessionId, ...empty, remainderSuppressed: observations.length > 0 };
   }
   const live = conversations.get(conversationId);
   let stored = 0;
+  let processed = 0;
+  const committedObservations: ChatObservation[] = [];
   let recoveredGoalSeen = false;
   const goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }> = [];
   // Reload can lose or replace the page's turn id. The canonical message store keeps
@@ -2136,6 +2146,7 @@ async function recordChatObservationsNow(
 
   for (const item of observations) {
     if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) break;
+    processed++;
     const base = {
       time: item.time,
       source: 'extension' as const,
@@ -2285,7 +2296,9 @@ async function recordChatObservationsNow(
       case 'native_image': {
         // Native media is transcript content only. It does not renew activity, close a turn,
         // create a Goal candidate, or masquerade as a locally executed tool call.
-        stored += await recordNativeImage(sessionId, item, base);
+        const written = await recordNativeImage(sessionId, item, base);
+        stored += written;
+        if (written > 0) committedObservations.push(item);
         continue;
       }
       case 'page_tool': {
@@ -2420,14 +2433,28 @@ async function recordChatObservationsNow(
       }
     }
     stored++;
+    committedObservations.push(item);
     } catch (error) {
-      if (isRecordingDisabledError(error) && !recordingEnabled()) break;
+      if (isRecordingDisabledError(error)) {
+        // A pending Off rejects the following store write BEFORE config is published.
+        // Wait for that exact decision: successful Off preserves this committed prefix;
+        // failed Off rethrows so the bridge can retry the same batch idempotently.
+        const attemptedOff = pendingRecordingOffDecision();
+        if ((attemptedOff && await attemptedOff.settled) || !recordingEnabled() ||
+            getRecordingRevision() !== recordingRevision) {
+          processed--;
+          break;
+        }
+      }
       throw error;
     }
   }
   if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) {
     notifyChanged();
-    return { sessionId, stored, activity, goalCandidates: [] };
+    // A successful Off cannot erase rows that already crossed their real durable barrier.
+    // Retain only the successfully processed prefix for subsequent Goal/worker/recovery work.
+    return { sessionId, stored, activity, goalCandidates: stored > 0 ? goalCandidates : [],
+      committedObservations, remainderSuppressed: processed < observations.length };
   }
   if (pageTitle) await promoteConversationTitle(sessionId, pageTitle.text, conversationId);
   // Completion and delivery readiness are separate: retain the exact native final
@@ -2458,7 +2485,8 @@ async function recordChatObservationsNow(
   }
   if (recoveredGoalSeen && live) live.lastTurnOutcome = 'completed';
   notifyChanged();
-  return { sessionId, stored, activity, goalCandidates };
+  return { sessionId, stored, activity, goalCandidates,
+    committedObservations: observations, remainderSuppressed: false };
 }
 
 /** Records something the app itself decided, e.g. a saved handoff. */

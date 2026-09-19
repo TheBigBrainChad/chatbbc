@@ -2283,18 +2283,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       if (!bindConversation(pendingWorkerCommand.spec.agent, id, pendingWorkerCommand.spec.runId)) return suppressed();
       return json(res, 200, { sessionId: null, stored: 0, workerCommandRecovered: true }, origin);
     }
-    // A turn beginning is the one page fact that outranks the app's own idea of this worker's
-    // state. Reported here rather than inferred from `generating`, because this is the exact
-    // moment the model started running and the only one that can outvote a sleep decision made
-    // a second earlier on missing evidence.
-    let turnStartedAt = 0;
-    for (const item of observations) {
-      if (item.kind === 'turn_start') {
-        turnStartedAt = Math.max(turnStartedAt, item.time);
-      }
-    }
     observationWritesInFlight += 1;
-    let committed: { sessionId: string | null; stored: number; wake: boolean } | undefined;
+    let committed: { sessionId: string | null; stored: number; wake: boolean; partialCommitted: boolean } | undefined;
     try {
       const agent = agentForOwnedConversation(id) ??
         (pendingWorkerCommand?.spec.type === 'worker' ? pendingWorkerCommand.spec.agent : null);
@@ -2332,19 +2322,28 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         if (eventIngressRevision !== getRecordingRevision() || recordingGenerationGrant() !== admissionGeneration) return suppressed();
         result = await recordChatObservations(id, observations, agent);
       }
-      // A partial batch may return without throwing after a successful Off; do not
-      // acknowledge it as an ordinary accepted Goal/lifecycle observation.
-      if (offDecision && await offDecision.settled) return suppressed();
-      if (eventIngressRevision !== getRecordingRevision() || recordingGenerationGrant() !== admissionGeneration)
-        return suppressed();
+      // Off may interrupt the *remainder* after a canonical prefix already crossed its
+      // physical write barrier. Never erase that committed receipt or reconcile the
+      // uncommitted suffix, which the extension retires with this successful HTTP reply.
+      const epochRetired = Boolean(offDecision && await offDecision.settled) ||
+        eventIngressRevision !== getRecordingRevision() || recordingGenerationGrant() !== admissionGeneration;
+      if (epochRetired && result.stored === 0) return suppressed();
       // Parsed rich-only presentation is intentionally refused before session
       // creation. No canonical owner was admitted, so it cannot wake a worker,
       // bind its command or install an origin as a side effect.
       if (!result.sessionId) return suppressed();
+      const committedObservations = epochRetired || result.remainderSuppressed
+        ? result.committedObservations : observations;
+      // A turn beginning is first-hand page evidence only when that exact row committed.
+      // A discarded suffix must never revive a worker or renew recovery activity.
+      let turnStartedAt = 0;
+      for (const item of committedObservations) {
+        if (item.kind === 'turn_start') turnStartedAt = Math.max(turnStartedAt, item.time);
+      }
       // A request earns its transcript verdict before any observation-derived
       // origin, worker or report mutation. Subsequent Off cannot retroactively
       // suppress the already committed row while those independent writes drain.
-      if (workerOrigin) await noteChatOrigin(id, workerOrigin);
+      if (workerOrigin) await noteChatOrigin(id, workerOrigin, epochRetired ? result.sessionId : undefined);
       if (pendingWorkerCommand?.spec.type === 'worker')
         bindConversation(pendingWorkerCommand.spec.agent, id, pendingWorkerCommand.spec.runId);
       const revived = noteAgentAlive(id, 'page');
@@ -2355,7 +2354,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         if (woke?.revived) tidyCommands();
       }
       const superseded = await conversationWasSuperseded(id);
-      if (!superseded && result.sessionId) await collectRecordedBrowserDecision(id);
+      // A committed prefix may settle old custody under Off; it must not start a NEW
+      // browser decision after Recording has been disabled.
+      if (!superseded && result.sessionId && !epochRetired) await collectRecordedBrowserDecision(id);
       // The stable assistant message, not the page-local turn id, is the exactly-once Goal
       // checkpoint. Freeze app config/key policy before 200 lets the browser retire this
       // terminal observation from its durable journal.
@@ -2380,7 +2381,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         forgetGoalWatch(id);
         compactionWatch.delete(id);
       } else {
-        await noteRecoveryObservations(id, result.sessionId, observations, result.activity);
+        await noteRecoveryObservations(id, result.sessionId, committedObservations, result.activity);
       }
       // How full this chat is, measured by the app's own session record rather than by
       // anything the model said about itself, and fed in before the finish reconciliation
@@ -2401,7 +2402,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       // reconcile against the just-written durable session rather than treating one transport
       // envelope as a lifecycle boundary.
       if (agent && agent !== PRIME_ID && result.sessionId) {
-        if (!(await reconcileWorkerFinish(id, result.sessionId, observations))) {
+        if (!(await reconcileWorkerFinish(id, result.sessionId, committedObservations))) {
           return json(res, 503, { error: 'worker_state_not_durable', retryable: true }, origin);
         }
         tidyCommands();
@@ -2410,7 +2411,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       // no input row changed: finish stages and after-turn sends can now be claimed.
       // Publish that boundary to the existing wake channel instead of waiting for
       // the extension's idle maintenance poll. Claims still recheck exact state.
-      committed = { sessionId: result.sessionId, stored: result.stored, wake: !superseded && result.activity.terminal };
+      committed = { sessionId: result.sessionId, stored: result.stored,
+        wake: !epochRetired && !superseded && result.activity.terminal,
+        partialCommitted: result.stored > 0 && result.remainderSuppressed };
     } finally {
       observationWritesInFlight -= 1;
     }
@@ -2419,7 +2422,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     // deadline into that same outbox row before acknowledging the observation.
     if (activeUntil.get(id)?.thinkingFailed) await fileSilenceInputTicket(id, Date.now());
     if (committed?.wake) wakeBrowserWork();
-    return json(res, 200, { sessionId: committed!.sessionId, stored: committed!.stored }, origin);
+    return json(res, 200, {
+      sessionId: committed!.sessionId, stored: committed!.stored,
+      ...(committed!.partialCommitted ? { partialCommitted: true, remainderSuppressed: true } : {})
+    }, origin);
   }
 
   if (route === '/closed' && req.method === 'POST') {
