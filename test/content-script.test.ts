@@ -7817,6 +7817,69 @@ describe('a stop button that goes missing while the turn is still running', () =
     expect(emitted(live.sent, 'native_image')).toHaveLength(6);
   });
 
+  it.each([
+    { name: 'captures only the smaller exact-stamped owner', includeOwned: true },
+    { name: 'refuses the larger foreign clone when the owned stamp is absent', includeOwned: false }
+  ])('ignores a larger unstamped cross-turn clone with the same generated asset ID: $name', async ({ includeOwned }) => {
+    live = await harness();
+    const ownedSection = assistantTurn(live.document, 'turn-generated-owner', []);
+    ownedSection.setAttribute('data-clf-fiber-turn', '0');
+    const foreignSection = assistantTurn(live.document, 'turn-generated-foreign', []);
+    foreignSection.setAttribute('data-clf-fiber-turn', '1');
+    const messageId = '9150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const assetId = 'file_000000005f2c823085a542762d1de785';
+    const addClone = (section: HTMLElement, stamped: boolean, width: number) => {
+      const group = live!.document.createElement('div');
+      group.className = 'group/imagegen-image';
+      const image = live!.document.createElement('img');
+      image.src = `https://chatgpt.com/backend-api/estuary/content?id=${assetId}&sig=must-stay-private`;
+      if (stamped) image.setAttribute('data-clf-fiber-image', `0:${encodeURIComponent(messageId)}:${encodeURIComponent(assetId)}`);
+      Object.defineProperties(image, {
+        complete: { configurable: true, value: true },
+        naturalWidth: { configurable: true, value: 1024 },
+        naturalHeight: { configurable: true, value: 768 }
+      });
+      image.getBoundingClientRect = () => ({ width, height: width } as DOMRect);
+      group.append(image); section.append(group);
+      return image;
+    };
+    const owned = includeOwned ? addClone(ownedSection, true, 48) : null;
+    const foreign = addClone(foreignSection, false, 800);
+    const draw = vi.fn();
+    (live.window.HTMLCanvasElement.prototype as any).getContext = () => ({ drawImage: draw });
+    const encode = vi.fn((callback: (blob: any) => void) => {
+      const bytes = new TextEncoder().encode('owned-webp');
+      callback({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
+    });
+    (live.window.HTMLCanvasElement.prototype as any).toBlob = encode;
+    const descriptor = { turnId: 'turn-generated-owner', conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      messages: [], activities: [], images: [{ messageId, assetId, providerRole: 'tool', providerChannel: 'final',
+        providerStatus: 'finished_successfully', width: 1024, height: 768, order: 0, partOrder: 0 }] };
+
+    await replyFiber([], [descriptor]); await settle(); await live.hook.flush(); await settle();
+    const events = emitted(live.sent, 'native_image').map(entry => entry.event);
+    expect(events.filter(event => event.previewStatus === 'pending')).toHaveLength(1);
+    expect(JSON.stringify(events)).not.toContain('sig=');
+    expect(foreign.hasAttribute('data-clf-fiber-image')).toBe(false);
+    if (owned) {
+      expect(draw).toHaveBeenCalledTimes(1);
+      expect(encode).toHaveBeenCalledTimes(1);
+      expect(draw.mock.calls[0]![0]).toBe(owned);
+      expect(draw.mock.calls[0]![0]).not.toBe(foreign);
+      expect(events.filter(event => event.previewStatus === 'available')).toEqual([
+        expect.objectContaining({ messageId, providerAssetId: assetId, previewWidth: 1024, previewHeight: 768 })
+      ]);
+      expect(events.filter(event => event.previewStatus === 'unavailable')).toHaveLength(0);
+    } else {
+      expect(draw).not.toHaveBeenCalled();
+      expect(encode).not.toHaveBeenCalled();
+      expect(events.filter(event => event.previewStatus === 'available')).toHaveLength(0);
+      expect(events.filter(event => event.previewStatus === 'unavailable')).toEqual([
+        expect.objectContaining({ messageId, providerAssetId: assetId, previewError: 'ambiguous' })
+      ]);
+    }
+  });
+
   it('drops a late generated-image encode after an A to B to A navigation epoch change', async () => {
     live = await harness();
     const section = assistantTurn(live.document, 'turn-stale-generated-image', []);

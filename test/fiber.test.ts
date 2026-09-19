@@ -1229,6 +1229,51 @@ describe('the calls a turn says it made', () => {
     expect(result.imageStamps[6]).toContain(encodeURIComponent('file_00000000000000000000000000000002'));
   });
 
+  it.each([
+    { name: 'public tool final', role: 'tool', channel: 'final', recipient: 'all', expected: true },
+    { name: 'public assistant final', role: 'assistant', channel: 'final', recipient: 'all', expected: true },
+    { name: 'user upload', role: 'user', channel: 'final', recipient: 'all', expected: false },
+    { name: 'private assistant analysis', role: 'assistant', channel: 'analysis', recipient: 'all', expected: false },
+    { name: 'private tool analysis', role: 'tool', channel: 'analysis', recipient: 'all', expected: false },
+    { name: 'wrong recipient', role: 'tool', channel: 'final', recipient: 'image_gen', expected: false },
+    { name: 'hidden public tool', role: 'tool', channel: 'final', recipient: 'all', hidden: true, expected: false },
+    { name: 'nonfinal commentary', role: 'tool', channel: 'commentary', recipient: 'all', expected: false }
+  ])('keeps exact generated-image ownership rules for $name', async ({ name, role, channel, recipient, hidden, expected }) => {
+    const messageId = '8150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const assetId = 'file_00000000000000000000000000000004';
+    const message: Message = {
+      id: messageId,
+      author: { role }, recipient, channel, status: 'finished_successfully',
+      content: { content_type: 'multimodal_text', parts: [
+        { content_type: 'image_asset_pointer', asset_pointer: `sediment://${assetId}`, width: 1024, height: 768 },
+        ...(role === 'user' ? ['Inspect this image.'] : [])
+      ] },
+      ...(hidden ? { metadata: { is_visually_hidden_from_conversation: true, private_field: 'secret-hidden' } } : {}),
+      ...(role === 'user' ? { metadata: { attachments: [{ id: 'original-upload', name: 'upload.png',
+        size: 123, mime_type: 'image/png', library_file_id: 'secret-library-id', source: 'secret-source' }] } } : {})
+    };
+    const result = await scan([], [{ id: `exact-image-${name}`, messages: [message], images: [{ assetId }] }]);
+    expect(result.imageStamps).toHaveLength(1);
+    if (expected) {
+      expect(result.turns[0]?.images).toEqual([expect.objectContaining({
+        messageId, assetId, providerRole: role, providerChannel: 'final', providerStatus: 'finished_successfully',
+        order: 0, partOrder: 0, width: 1024, height: 768
+      })]);
+      expect(result.imageStamps[0]).toBe(`${result.scanToken}:0:${encodeURIComponent(messageId)}:${encodeURIComponent(assetId)}`);
+      expect(result.turns[0]?.messages ?? []).toEqual([]);
+    } else {
+      expect(result.turns[0]?.images ?? []).toEqual([]);
+      expect(result.imageStamps).toEqual([null]);
+      expect(JSON.stringify(result.turns)).not.toMatch(/sediment:\/\/|secret-library-id|secret-source|secret-hidden/);
+    }
+    if (role === 'user') {
+      expect(result.turns[0]?.messages).toEqual([expect.objectContaining({
+        messageId, role: 'user', rawText: 'Inspect this image.',
+        attachments: [{ id: 'original-upload', name: 'upload.png', size: 123, mimeType: 'image/png' }]
+      })]);
+    }
+  });
+
   it('keeps generated-image metadata but refuses an ambiguous pixel node and private messages', async () => {
     const visible: Message = {
       id: '4150f756-bf2d-45fa-ac0f-45010b2239fb', author: { role: 'tool' }, recipient: 'all', channel: 'final',
