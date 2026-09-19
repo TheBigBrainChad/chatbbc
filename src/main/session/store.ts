@@ -48,7 +48,7 @@ import { parseRichOrigin } from './rich-response.js';
 import { chronological, positionOf } from '../../shared/chronology.js';
 import { automaticTitle, firstTitleMessage, legacyContextTitle, refreshUserTitle } from './title.js';
 import { agentPlanSchema, agentPlanUpdateSchema, MAX_AGENT_PLAN_BYTES, type AgentPlan, type AgentPlanUpdate } from '../../shared/agent-plan.js';
-import { getConfig } from '../config.js';
+import { getConfig, getRecordingRevision } from '../config.js';
 import { logError, logInfo, logWarn } from '../logger.js';
 
 /**
@@ -479,6 +479,26 @@ function enqueueSessionOperation<T>(entry: OpenSession, label: string, operation
     (err: Error) => logError(`session ${label} failed: ${err.message}`)
   );
   return work;
+}
+
+/** Only transcript and media admission uses this refusal. Existing history, outbox control,
+ * cleanup, handoff recovery and the completion of a previously recorded process continue. */
+export class RecordingDisabledError extends Error {
+  readonly code = 'RECORDING_DISABLED';
+  constructor() { super('Recording is disabled'); }
+}
+
+export function isRecordingDisabledError(error: unknown): error is RecordingDisabledError {
+  return error instanceof RecordingDisabledError;
+}
+
+function requireRecording(revision: number): void {
+  if (!getConfig().sessions.record || getRecordingRevision() !== revision) throw new RecordingDisabledError();
+}
+
+/** These are durable control markers; Off must not interrupt an accepted compaction/finish. */
+function isRecordingControl(event: NewSessionEvent): boolean {
+  return event.kind === 'handoff' || (event.kind === 'progress' && !!event.finishControl);
 }
 
 /**
@@ -1131,6 +1151,9 @@ export async function refuseAutomaticCompactionNow(id: string, conversationId: s
  * arrive out of order when the browser batches its observations.
  */
 export function appendEvent(sessionId: string, event: NewSessionEvent): Promise<SessionEvent> {
+  const control = isRecordingControl(event);
+  const revision = getRecordingRevision();
+  if (!control && !getConfig().sessions.record) return Promise.reject(new RecordingDisabledError());
   return ensureOpen(sessionId).then((entry) => {
     // Sequence assignment, durable append and projection update are one serial operation.
     // The previous implementation incremented nextSeq and mutated the summary *before* the
@@ -1139,6 +1162,7 @@ export function appendEvent(sessionId: string, event: NewSessionEvent): Promise<
     // Keep the append-only journal authoritative: nothing in memory advances until the line
     // is on disk.
     const write = entry.queue.then(async () => {
+      if (!control) requireRecording(revision);
       let admitted = event;
       if (event.kind === 'tool_call') {
         const denied = deniedAssetIds(sessionId, event.call.assets);
@@ -1210,8 +1234,11 @@ export function upsertMessageEvent(
 ): Promise<{ event: MessageEvent; changed: boolean; contentChanged: boolean }> {
   const directKey = messageKey(event as MessageEvent);
   if (!directKey) throw new Error('Canonical message update requires ChatGPT messageId');
+  const revision = getRecordingRevision();
+  if (!getConfig().sessions.record) return Promise.reject(new RecordingDisabledError());
   return ensureOpen(sessionId).then((entry) => {
     const write = entry.queue.then(async () => {
+      requireRecording(revision);
       // Rich is store-owned: ordinary text upserts cannot insert page-claimed structure.
       if (event.kind === 'assistant_message') {
         const { rich: _rich, richOrigin: _richOrigin, richMedia: _media, richMediaUnavailable: _unavailable,
@@ -1429,8 +1456,9 @@ export function upsertMessageEvent(
 export function upsertRichMessage(
   sessionId: string, messageId: string, rich: RichResponse, origin: RichOrigin
 ): Promise<'stored' | 'unchanged' | 'refused'> {
+  const revision = getRecordingRevision();
   return ensureOpen(sessionId).then(entry => enqueueSessionOperation(entry, 'rich message upsert', async () => {
-    if (!getConfig().sessions.record) return 'refused';
+    if (!getConfig().sessions.record || getRecordingRevision() !== revision) return 'refused';
     const capture = parseRichOrigin(origin);
     if (!capture) return 'refused';
     const clean = parseRichResponse(rich);
@@ -1495,8 +1523,9 @@ export function upsertRichMedia(
   sessionId: string, messageId: string, media: RichMediaState, origin: RichOrigin,
   expectedRichRevision: number
 ): Promise<'stored' | 'unchanged' | 'refused'> {
+  const revision = getRecordingRevision();
   return ensureOpen(sessionId).then(entry => enqueueSessionOperation(entry, 'rich media upsert', async () => {
-    if (!getConfig().sessions.record) return 'refused';
+    if (!getConfig().sessions.record || getRecordingRevision() !== revision) return 'refused';
     const capture = parseRichOrigin(origin);
     const clean = parseMetadataRichMedia(media);
     if (!capture || !clean || !messageId || !Number.isSafeInteger(expectedRichRevision) ||
@@ -1561,8 +1590,11 @@ export function upsertNativeImageEvent(
 ): Promise<{ event: NativeImageEvent; changed: boolean; accepted: boolean }> {
   const key = messageKey(event);
   if (!key) throw new Error('Canonical native image requires provider message and asset ids');
+  const revision = getRecordingRevision();
+  if (!getConfig().sessions.record) return Promise.reject(new RecordingDisabledError());
   return ensureOpen(sessionId).then((entry) => {
     const write = entry.queue.then(async () => {
+      requireRecording(revision);
       const candidate = entry.messages.get(key);
       const previous = candidate?.kind === 'native_image' ? candidate : undefined;
       if (candidate && !previous) throw new Error('Canonical native image identity collision');
@@ -1654,8 +1686,11 @@ function retainedAssets(assets: readonly AssetRef[] | undefined, retired: readon
 
 /** Canonical background launch: the call UUID owns its later process status. */
 export async function recordProcessCall(sessionId: string, event: Omit<Extract<SessionEvent, { kind: 'tool_call' }>, 'seq'>): Promise<void> {
+  const revision = getRecordingRevision();
+  requireRecording(revision);
   const entry = await ensureOpen(sessionId);
   await enqueueSessionOperation(entry, 'process call', async () => {
+    requireRecording(revision);
     const key = messageKey({ ...event, seq: 0 })!;
     if (entry.messages.has(key)) throw new Error('Process call identity already recorded');
     const denied = deniedAssetIds(sessionId, event.call.assets);
@@ -3100,6 +3135,8 @@ export async function writeAsset(
   data: Buffer,
   mimeType: string
 ): Promise<AssetRef> {
+  const revision = getRecordingRevision();
+  requireRecording(revision);
   assertSessionId(sessionId);
   if (data.length === 0 || data.length > MAX_ASSET_BYTES) throw new Error('Session asset exceeds the per-asset limit');
   const hash = createHash('sha256').update(data).digest('hex').slice(0, 32);
@@ -3117,6 +3154,7 @@ export async function writeAsset(
   // but its late reference cannot resurrect the retired file.
   const admittedAt = assetMutationEpoch;
   return enqueueAssetOperation(async () => {
+    requireRecording(revision);
     const dir = path.join(sessionDir(sessionId), 'assets');
     await fs.mkdir(dir, { recursive: true });
     const target = path.join(dir, id);

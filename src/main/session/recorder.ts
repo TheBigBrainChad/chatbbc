@@ -32,7 +32,7 @@ import type {
 import { estimateTokens, originTitle } from '../../shared/session.js';
 import type { RichResponse } from '../../shared/rich-response.js';
 import { chatErrorMessageKey } from '../../shared/chat-error.js';
-import { getConfig } from '../config.js';
+import { getConfig, getRecordingRevision } from '../config.js';
 import { logInfo, logWarn } from '../logger.js';
 import { redactCredentialText } from '../redaction.js';
 import { currentCall, emptyEvidence, runningToolCalls, type CallEvidence } from '../mcp/call-context.js';
@@ -58,6 +58,7 @@ import {
   readLatestUserMessage,
   readCompletedFinal,
   indexedSessions,
+  isRecordingDisabledError,
   renameSession,
   reopenSession,
   rewriteUnattributedToolCalls,
@@ -1747,7 +1748,8 @@ async function recordNativeImage(
   item: ChatObservation,
   base: { time: number; source: 'extension'; turnId?: string; agent?: string }
 ): Promise<number> {
-  if (!item.messageId || !item.providerAssetId || !item.providerRole) return 0;
+  if (!recordingEnabled() || !item.messageId || !item.providerAssetId || !item.providerRole) return 0;
+  const recordingRevision = getRecordingRevision();
   const metadata = await upsertNativeImageEvent(sessionId, {
     ...base,
     kind: 'native_image',
@@ -1766,6 +1768,7 @@ async function recordNativeImage(
   if (!metadata.accepted) return 0;
   let changed = metadata.changed ? 1 : 0;
   if (!item.previewDataUrl || metadata.event.asset) return changed;
+  if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) return changed;
   try {
     if (!/^data:image\/webp;base64,[A-Za-z0-9+/]+={0,2}$/.test(item.previewDataUrl) || item.previewDataUrl.length > 512_100) {
       throw new Error('invalid native image preview');
@@ -1779,7 +1782,9 @@ async function recordNativeImage(
       throw new Error('invalid native image preview');
     }
     await decoded.stats();
+    if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) return changed;
     const asset = await writeAsset(sessionId, data, 'image/webp');
+    if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) return changed;
     const enriched = await upsertNativeImageEvent(sessionId, {
       ...base,
       kind: 'native_image',
@@ -1797,6 +1802,10 @@ async function recordNativeImage(
     });
     if (enriched.changed) changed += 1;
   } catch (error) {
+    // A committed metadata row remains history; Off during decode/storage cannot
+    // create a late failure revision or provoke a replay after recording resumes.
+    if (isRecordingDisabledError(error) || !recordingEnabled() ||
+        getRecordingRevision() !== recordingRevision) return changed;
     const reason = /quota/i.test((error as Error).message) ? 'quota' : 'invalid';
     logWarn(`native generated image preview unavailable: ${(error as Error).message}`);
     const unavailable = await upsertNativeImageEvent(sessionId, {
@@ -1916,7 +1925,17 @@ export function recordChatObservations(
   const transcript = hasEvidence ? observations.filter((item) => item.kind !== 'tool_evidence') : observations;
   return serializeObservations(conversationId, async () => {
     await ownership;
-    return recordChatObservationsNow(conversationId, transcript, agent);
+    try {
+      return await recordChatObservationsNow(conversationId, transcript, agent);
+    } catch (error) {
+      // A browser journal is at-least-once. Off is successful suppression, not a
+      // transport failure eligible for replay when recording is enabled again.
+      if (isRecordingDisabledError(error)) return {
+        sessionId: null, stored: 0,
+        activity: { meaningful: false, working: false, terminal: false }, goalCandidates: []
+      };
+      throw error;
+    }
   });
 }
 
@@ -1976,7 +1995,9 @@ async function recordSupersededMessages(
   observations: readonly ChatObservation[]
 ): Promise<number> {
   let stored = 0;
+  const revision = getRecordingRevision();
   for (const item of observations) {
+    if (!recordingEnabled() || getRecordingRevision() !== revision) break;
     if (!item.messageId) continue;
     const base = {
       time: item.time,
@@ -1984,6 +2005,7 @@ async function recordSupersededMessages(
       ...(item.turnId ? { turnId: item.turnId } : {})
     };
     let written: { changed: boolean } | null = null;
+    try {
     if (item.kind === 'user_message') {
       written = await upsertMessageEvent(
         sessionId,
@@ -2025,6 +2047,10 @@ async function recordSupersededMessages(
       continue;
     }
     if (written?.changed) stored++;
+    } catch (error) {
+      if (isRecordingDisabledError(error)) break;
+      throw error;
+    }
   }
   if (stored > 0) notifyChanged();
   return stored;
@@ -2042,6 +2068,7 @@ async function recordChatObservationsNow(
 }> {
   const activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; endedTurnId?: string } = { meaningful: false, working: false, terminal: false };
   if (!recordingEnabled()) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
+  const recordingRevision = getRecordingRevision();
   // No canonical text/event evidence exists in a rich-only batch; reject before the normal
   // first-sight path could create an otherwise empty session for an untrusted projection.
   if (observations.length > 0 && observations.every(item => item.kind === 'assistant_message' &&
@@ -2077,6 +2104,9 @@ async function recordChatObservationsNow(
     pageTitle?.text?.trim() || observedUserTitle(firstUser?.text)
   );
   if (!sessionId) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
+  if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) {
+    return { sessionId, stored: 0, activity, goalCandidates: [] };
+  }
   const live = conversations.get(conversationId);
   let stored = 0;
   let recoveredGoalSeen = false;
@@ -2090,12 +2120,14 @@ async function recordChatObservationsNow(
   let recoveredFinal: { turnId: string; time: number; seq: number; origin: number; native: boolean } | undefined;
 
   for (const item of observations) {
+    if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) break;
     const base = {
       time: item.time,
       source: 'extension' as const,
       ...(item.turnId ? { turnId: item.turnId } : {}),
       ...(agent ? { agent } : {})
     };
+    try {
     switch (item.kind) {
       case 'model_selection':
         if (item.model) await observeSessionModel(sessionId, conversationId, item.model, item.time, item.reasoningEffort);
@@ -2373,6 +2405,14 @@ async function recordChatObservationsNow(
       }
     }
     stored++;
+    } catch (error) {
+      if (isRecordingDisabledError(error)) break;
+      throw error;
+    }
+  }
+  if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) {
+    notifyChanged();
+    return { sessionId, stored, activity, goalCandidates: [] };
   }
   if (pageTitle) await promoteConversationTitle(sessionId, pageTitle.text, conversationId);
   // Completion and delivery readiness are separate: retain the exact native final

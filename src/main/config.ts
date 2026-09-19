@@ -513,6 +513,8 @@ function adoptCurrentGoalPrompt(config: Config): Config {
 
 let configPath = '';
 let current: Config = defaultConfig();
+/** One config-owned generation for recording admission across an Off → On transition. */
+let recordingRevision = 0;
 // Every UI mutation ultimately lands in the same tiny JSON file. Keep those
 // read-modify-write transactions strictly ordered so two fast checkbox/root changes
 // cannot race on config.json.tmp or overwrite each other's newer state.
@@ -620,6 +622,10 @@ export function getConfig(): Config {
   return current;
 }
 
+export function getRecordingRevision(): number {
+  return recordingRevision;
+}
+
 /**
  * Read-only mode is enforced here as well as at the tool layer, so the effective
  * capability set can never disagree with what the UI shows.
@@ -646,6 +652,7 @@ async function persistConfig(next: Config): Promise<Config> {
   await fs.rename(tmp, configPath);
   // Only publish the new in-memory state after the durable write succeeded. A disk
   // error must not leave the UI believing settings were saved when they were not.
+  if (current.sessions.record !== parsed.sessions.record) recordingRevision++;
   current = parsed;
   return current;
 }
