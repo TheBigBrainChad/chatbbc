@@ -17,6 +17,7 @@ import { goalErrorMessage } from '../shared/goal-errors.js';
 import type { GoalModel } from '../shared/goal-reasoning.js';
 import { renderGoalReasoning } from './goal-reasoning.js';
 import { renderRichResponse } from './rich-response.js';
+import { retireRichImageViewer, retireRichImageViewerWithin, retireStaleRichImageViewer } from './rich-image.js';
 import { RICH_LIMITS } from '../shared/rich-response.js';
 import { preserveTimelineViewport } from './timeline-scroll.js';
 import { createSidebarOrder } from './sidebar-order.js';
@@ -1269,7 +1270,13 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
     case 'assistant_message': {
       const box = el('div', 'said');
       box.append(el('b', '', () => event.final ? 'ChatGPT' : t("ChatGPT (partial)")));
-      box.append(event.rich ? renderRichResponse(event.rich, event.message.text)
+      const id = context?.id ?? selectedId;
+      const generation = selectionGeneration;
+      box.append(event.rich ? renderRichResponse(event.rich, event.message.text, id ? {
+        sessionId: id,
+        media: event.richMedia ?? [],
+        current: () => context ? context.current() : selectedId === id && selectionGeneration === generation
+      } : undefined)
         : renderedMarkdown(event.message.text, event.renderedHtml));
       if (event.richMediaUnavailable) {
         box.append(el('p', 'meta rich-media-unavailable', () => t("Image preview unavailable — open original in ChatGPT")));
@@ -1890,7 +1897,8 @@ function itemSignature(item: TimelineItem): string {
     case 'assistant_message':
       parts.push(event.message.chars, event.renderedHtml?.chars ?? 0, event.state ?? '', event.final ? 'final' : '',
         event.rich?.revision ?? '', event.rich?.status ?? '', event.rich?.reason ?? '',
-        event.richMediaUnavailable ?? '');
+        event.richMediaUnavailable ?? '', JSON.stringify(event.richMedia ?? []),
+        JSON.stringify(event.retiredRichImageAssetIds ?? []));
       break;
     case 'native_image':
       parts.push(event.messageId, event.providerAssetId, event.providerStatus ?? '', event.previewStatus, event.asset?.id ?? '',
@@ -2102,6 +2110,7 @@ function paintDetail(followBottom = historyBefore === null): void {
       const oldDisclosure = cached.row.querySelector<HTMLDetailsElement>('details.rich-source');
       const newDisclosure = row.querySelector<HTMLDetailsElement>('details.rich-source');
       if (oldDisclosure?.open && newDisclosure) newDisclosure.open = true;
+      retireRichImageViewerWithin(cached.row);
       cached.row.replaceChildren(...row.childNodes);
       cached.row.hidden = row.hidden;
       cached.row.className = row.className;
@@ -2136,6 +2145,7 @@ function paintDetail(followBottom = historyBefore === null): void {
   reconcileChildren(timeline, spine.length === 0
     ? groupImageRows(groupToolRows(timelineRows))
     : withSpineSegments(groupImageRows(groupToolRows(timelineRows)), spine));
+  retireStaleRichImageViewer();
   paintPendingInputs(deliveryHost);
   $('timelineEmpty').hidden = selectedId !== null || timelineRows.length > 0 || $('inputQueue').childElementCount > 0;
   restoreViewport();
@@ -3045,6 +3055,7 @@ function showView(name: string): void {
 }
 
 function selectSession(id: string): void {
+  retireRichImageViewer();
   const ownerChanged = id !== selectedId;
   rememberDraft();
   selectionGeneration++; replaceComposerDraft();
@@ -3083,6 +3094,7 @@ function selectSession(id: string): void {
 }
 
 function selectNewChat(projectId: string | null = null): void {
+  retireRichImageViewer();
   rememberDraft(); selectionGeneration++; replaceComposerDraft(); pendingNewInput = null;
   newChatSelected = true; selectedId = null; selectedProjectId = projectId; detailFor = null; detailCursor = null;
   if (projectId) expandedProjects.add(projectId);

@@ -1,4 +1,37 @@
 import { parseRichResponse, type RichNode, type RichResponse } from '../shared/rich-response.js';
+import type { RichMediaState } from '../shared/session.js';
+import { isViewableRichImage, openRichImageViewer } from './rich-image.js';
+
+export type RichImageContext = {
+  sessionId: string;
+  media: readonly RichMediaState[];
+  current: () => boolean;
+};
+
+type ImageRender = RichImageContext & { rich: RichResponse; imageCounts: Map<string, number> };
+
+function countImages(nodes: RichNode[], counts = new Map<string, number>()): Map<string, number> {
+  for (const node of nodes) {
+    if (node.kind === 'image') counts.set(node.mediaId, (counts.get(node.mediaId) ?? 0) + 1);
+    else if (node.kind === 'group' || node.kind === 'control') countImages(node.children, counts);
+  }
+  return counts;
+}
+
+function imageLabel(media: RichMediaState | undefined): string {
+  if (media?.status === 'pending') return 'Image preview is loading';
+  switch (media?.reason) {
+    case 'not_loaded': return 'Image preview is loading';
+    case 'unsupported': return 'Image preview unavailable — unsupported source';
+    case 'ambiguous': return 'Image preview unavailable — ambiguous source';
+    case 'tainted': return 'Image preview unavailable — tainted pixels';
+    case 'oversized': return 'Image preview unavailable — image exceeds the recording limit';
+    case 'invalid': return 'Image preview unavailable — invalid pixels';
+    case 'quota': return 'Image preview unavailable — recording storage is full';
+    case 'removed': return 'Image removed from local storage';
+    default: return 'Image preview unavailable';
+  }
+}
 
 /** Canonical source is retained, but component syntax is never executed to recreate a UI. */
 function renderUnavailableRichResponse(source: string, accessibleText = ''): HTMLElement {
@@ -30,7 +63,7 @@ function renderUnavailableRichResponse(source: string, accessibleText = ''): HTM
 }
 
 /** Presentation only: a visually recognizable control is NOT native-action authority. */
-function renderControl(node: Extract<RichNode, { kind: 'control' }>): HTMLElement {
+function renderControl(node: Extract<RichNode, { kind: 'control' }>, images?: ImageRender): HTMLElement {
   const wrapper = document.createElement('div');
   wrapper.className = 'rich-control';
   wrapper.dataset.richNodeId = node.id;
@@ -97,12 +130,12 @@ function renderControl(node: Extract<RichNode, { kind: 'control' }>): HTMLElemen
       wrapper.append(label);
     }
   }
-  for (const child of node.children) wrapper.append(renderNode(child));
+  for (const child of node.children) wrapper.append(renderNode(child, images));
   return wrapper;
 }
 
 /** The schema carries row groups, not arbitrary HTML tables or unverified heading cells. */
-function renderTableRow(node: RichNode): HTMLElement {
+function renderTableRow(node: RichNode, images?: ImageRender): HTMLElement {
   const row = document.createElement('div');
   row.className = 'rich-table-row';
   row.setAttribute('role', 'row');
@@ -112,13 +145,13 @@ function renderTableRow(node: RichNode): HTMLElement {
     const cell = document.createElement('div');
     cell.className = 'rich-table-cell';
     cell.setAttribute('role', 'cell');
-    cell.append(renderNode(entry));
+    cell.append(renderNode(entry, images));
     row.append(cell);
   }
   return row;
 }
 
-function renderNode(node: RichNode): HTMLElement {
+function renderNode(node: RichNode, images?: ImageRender): HTMLElement {
   if (node.kind === 'text') {
     const tag = node.style === 'heading' ? 'h3' : node.style === 'code' ? 'pre' : 'p';
     const element = document.createElement(tag);
@@ -139,16 +172,42 @@ function renderNode(node: RichNode): HTMLElement {
     const slot = document.createElement('div');
     slot.className = 'rich-image-slot';
     slot.dataset.richNodeId = node.id;
-    slot.setAttribute('role', 'img');
-    slot.setAttribute('aria-label', node.alt ? `${node.alt} — Image preview unavailable` : 'Image preview unavailable');
     if (node.width !== null && node.height !== null) slot.style.aspectRatio = `${node.width} / ${node.height}`;
+    const candidates = images?.media.filter(media => media.mediaId === node.mediaId) ?? [];
+    const media = candidates.length === 1 && images?.imageCounts.get(node.mediaId) === 1 &&
+      candidates[0]!.nodeId === node.id &&
+      (candidates[0]!.source.kind === 'page' ? candidates[0]!.source.nodeId === node.id :
+        candidates[0]!.source.providerMessageId === images.rich.providerMessageId && !!images.rich.providerMessageId)
+      ? candidates[0] : undefined;
+    const labelText = media && isViewableRichImage(media) ? 'Saved preview' : imageLabel(media);
     const label = document.createElement('span');
-    label.textContent = node.alt ? `${node.alt} — Image preview unavailable` : 'Image preview unavailable';
+    label.textContent = node.alt ? `${node.alt} — ${labelText}` : labelText;
     slot.append(label);
-    // Task 9 alone may attach verified local bytes. Source URLs and invented pixels are forbidden.
+    if (media && images && isViewableRichImage(media)) {
+      slot.setAttribute('role', 'group');
+      slot.setAttribute('aria-label', node.alt || 'Saved image preview');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = 'View saved preview';
+      slot.append(button);
+      const current = () => images.current() && slot.isConnected && button.isConnected;
+      button.addEventListener('click', () => void openRichImageViewer(images.sessionId, media, node.alt, {
+        trigger: button, current,
+        unavailable: () => {
+          if (!current()) return;
+          label.textContent = node.alt ? `${node.alt} — Image preview unavailable` : 'Image preview unavailable';
+          button.remove();
+          slot.setAttribute('role', 'img');
+          slot.setAttribute('aria-label', label.textContent);
+        }
+      }));
+    } else {
+      slot.setAttribute('role', 'img');
+      slot.setAttribute('aria-label', label.textContent);
+    }
     return slot;
   }
-  if (node.kind === 'control') return renderControl(node);
+  if (node.kind === 'control') return renderControl(node, images);
 
   const tag = node.layout === 'card' ? 'article' : node.layout === 'list' ? 'ul' : 'div';
   const group = document.createElement(tag);
@@ -163,28 +222,30 @@ function renderNode(node: RichNode): HTMLElement {
     const table = document.createElement('div');
     table.className = 'rich-table-content';
     table.setAttribute('role', 'table');
-    for (const child of node.children) table.append(renderTableRow(child));
+    for (const child of node.children) table.append(renderTableRow(child, images));
     group.append(table);
     return group;
   }
   for (const child of node.children) {
     if (node.layout === 'list') {
       const item = document.createElement('li');
-      item.append(renderNode(child));
+      item.append(renderNode(child, images));
       group.append(item);
-    } else group.append(renderNode(child));
+    } else group.append(renderNode(child, images));
   }
   return group;
 }
 
 /** Strictly reparse the entire stored tree; malformed/partial data gets only source fallback. */
-export function renderRichResponse(rich: RichResponse, fallback: string): HTMLElement {
+export function renderRichResponse(rich: RichResponse, fallback: string, media?: RichImageContext): HTMLElement {
   const clean = parseRichResponse(rich);
   if (!clean || clean.status !== 'available' || clean.nodes.length === 0)
     return renderUnavailableRichResponse(fallback, clean?.status === 'unavailable' ? clean.accessibleText : '');
   const box = document.createElement('div');
   box.className = 'msg rich-response';
   box.setAttribute('dir', 'auto');
-  for (const node of clean.nodes) box.append(renderNode(node));
+  const images = media && Array.isArray(media.media) && media.media.length <= 64
+    ? { ...media, rich: clean, imageCounts: countImages(clean.nodes) } : undefined;
+  for (const node of clean.nodes) box.append(renderNode(node, images));
   return box;
 }

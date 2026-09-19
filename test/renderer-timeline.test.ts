@@ -4,7 +4,7 @@ import { JSDOM } from 'jsdom';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DEFAULT_GOAL_SYSTEM_PROMPT } from '../src/shared/goal.js';
 import { prependUserPrompt } from '../src/shared/user-prompt.js';
-import type { Handoff, SessionEvent, SessionSummary } from '../src/shared/session.js';
+import type { Handoff, RichMediaState, SessionEvent, SessionSummary } from '../src/shared/session.js';
 import type { InputArgs, InputEntry } from '../src/main/session/input.js';
 import type { LocalProject } from '../src/shared/projects.js';
 import type { RichResponse } from '../src/shared/rich-response.js';
@@ -1706,6 +1706,85 @@ it('shows an image-only rich answer and repaints same-text rich revisions withou
   expect(pane.scrollTop).toBe(140);
   expect(timeline.querySelector('.tool-group')).toBe(group);
   expect(group.open).toBe(true);
+});
+
+it('repaints exact rich image metadata in place, and a cleanup revision retires a pending local viewer', async () => {
+  const rich: RichResponse = {
+    version: 1, status: 'available', reason: null,
+    conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    messageId: 'rich-with-preview', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb', revision: 1,
+    accessibleText: 'Blue forest', nodes: [
+      { id: 'description', kind: 'text', style: 'body', text: 'Forest and coast' },
+      { id: 'figure', kind: 'image', mediaId: 'forest-media', alt: 'Forest', width: 1024, height: 768 }
+    ]
+  };
+  const pending: RichMediaState = { mediaId: 'forest-media', nodeId: 'figure',
+    source: { kind: 'page', nodeId: 'figure' }, status: 'pending' };
+  const available: RichMediaState = { ...pending, status: 'available', previewWidth: 320, previewHeight: 180,
+    asset: { id: 'abcdef12.bin', mimeType: 'image/webp', bytes: 12 } };
+  const event: Extract<SessionEvent, { kind: 'assistant_message' }> = {
+    kind: 'assistant_message', seq: 1, origin: 1, time: T0, source: 'extension',
+    messageId: rich.messageId, providerMessageId: rich.providerMessageId!,
+    message: text(''), final: true, rich, richMedia: [pending]
+  };
+  const app = await boot([event]);
+  const { w, append } = app;
+  const row = w.document.querySelector<HTMLElement>('.ev-assistant_message')!;
+  expect(row.querySelector('.rich-image-slot')?.textContent).toContain('loading');
+  expect(row.querySelector('.rich-image-slot button')).toBeNull();
+  let finish!: (result: unknown) => void;
+  const getImage = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+  (w as any).api.getSessionImage = getImage;
+  // These are synthetic canonical states: production Task9 currently cannot publish available assets.
+  await append([{ ...event, seq: 2, richMedia: [available] }]);
+  expect(w.document.querySelector('.ev-assistant_message')).toBe(row);
+  const button = row.querySelector<HTMLButtonElement>('.rich-image-slot button')!;
+  expect(button.textContent).toBe('View saved preview');
+  button.click();
+  expect(getImage).toHaveBeenCalledExactlyOnceWith(summary([]).id, 'abcdef12.bin');
+  expect(w.document.querySelector('.rich-image-viewer')).toBeNull();
+  await append([{ ...event, seq: 3, richMedia: [{ ...pending, status: 'unavailable', reason: 'removed' }],
+    retiredRichImageAssetIds: ['abcdef12.bin'] }]);
+  expect(w.document.querySelector('.ev-assistant_message')).toBe(row);
+  expect(row.querySelector('.rich-image-slot')?.textContent).toContain('removed');
+  expect(row.querySelector('.rich-image-slot button')).toBeNull();
+  finish({ ok: true, data: 'data:image/webp;base64,UklGRgAAAAA=' });
+  await settle();
+  expect(w.document.querySelector('.rich-image-viewer')).toBeNull();
+  expect(row.textContent).toContain('Forest and coast');
+  expect(row.querySelectorAll('img[src]')).toHaveLength(0);
+});
+
+it('preserves an open viewer across another image row revision, then closes it on New Chat and return', async () => {
+  const rich: RichResponse = { version: 1, status: 'available', reason: null,
+    conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    messageId: 'rich-image-switch', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+    revision: 1, accessibleText: 'Preview', nodes: [
+      { id: 'figure', kind: 'image', mediaId: 'media-one', alt: 'Coast', width: 320, height: 180 }
+    ] };
+  const media: RichMediaState = { mediaId: 'media-one', nodeId: 'figure', source: { kind: 'page', nodeId: 'figure' },
+    status: 'available', previewWidth: 320, previewHeight: 180,
+    asset: { id: 'abcdef12.bin', mimeType: 'image/webp', bytes: 12 } };
+  const event: SessionEvent = { kind: 'assistant_message', seq: 1, time: T0, source: 'extension',
+    messageId: rich.messageId, message: text(''), final: true, rich, richMedia: [media] };
+  const otherRich: RichResponse = { ...rich, messageId: 'unrelated-image', nodes: [
+    { id: 'unrelated-figure', kind: 'image', mediaId: 'unrelated-media', alt: 'Other', width: 320, height: 180 }
+  ] };
+  const other: SessionEvent = { kind: 'assistant_message', seq: 2, time: T0 + 1, source: 'extension',
+    messageId: otherRich.messageId, message: text(''), final: true, rich: otherRich };
+  const { w, append } = await boot([event, other]);
+  (w as any).api.getSessionImage = vi.fn(async () => ({ ok: true, data: 'data:image/webp;base64,UklGRgAAAAA=' }));
+  w.document.querySelector<HTMLButtonElement>('.rich-image-slot button')!.click();
+  await settle();
+  expect(w.document.querySelector('.rich-image-viewer')).not.toBeNull();
+  await append([{ ...other, seq: 3, rich: { ...otherRich, revision: 2 } }]);
+  expect(w.document.querySelector('.rich-image-viewer')).not.toBeNull();
+  w.document.getElementById('newChat')!.click();
+  await settle();
+  expect(w.document.querySelector('.rich-image-viewer')).toBeNull();
+  (w.document.querySelector('#sessionList [data-id]') as HTMLElement).click();
+  await settle();
+  expect(w.document.querySelector('.rich-image-viewer')).toBeNull();
 });
 
 it('does not infer rich UI from ordinary authored component code or hide an unavailable-rich empty text row', async () => {

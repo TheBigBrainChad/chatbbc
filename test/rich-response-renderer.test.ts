@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
 import type { RichNode, RichResponse } from '../src/shared/rich-response.js';
+import type { RichMediaState } from '../src/shared/session.js';
 import { renderRichResponse } from '../src/renderer/rich-response.js';
 
 let dom: JSDOM;
@@ -69,6 +70,56 @@ it('contains wide tables and diagrams in labelled keyboard-scrollable regions wi
   expect(image.getAttribute('aria-label')).toBe('Architecture drawing — Image preview unavailable');
   expect(image.textContent).toMatch(/preview.*(loading|unavailable)/i);
   expect(view.querySelector('img, canvas, svg')).toBeNull();
+});
+
+it('shows real pending, quota, tainted and removed reasons without a viewer or image IPC', () => {
+  const reasons = ['pending', 'quota', 'tainted', 'oversized', 'removed'] as const;
+  const getSessionImage = vi.fn();
+  (dom.window as any).api = { getSessionImage };
+  for (const reason of reasons) {
+    const media: RichMediaState = {
+      mediaId: 'figure-media', nodeId: 'figure', source: { kind: 'page', nodeId: 'figure' },
+      status: reason === 'pending' ? 'pending' : 'unavailable',
+      ...(reason === 'pending' ? {} : { reason })
+    };
+    const view = renderRichResponse(fixture([
+      { id: 'figure', kind: 'image', mediaId: 'figure-media', alt: 'Blue forest', width: 320, height: 180 }
+    ]), 'source', { sessionId: '2026-09-02-test0001', media: [media], current: () => true });
+    expect(view.textContent?.toLowerCase()).toContain(reason === 'pending' ? 'loading' :
+      reason === 'quota' ? 'storage' : reason === 'tainted' ? 'tainted' :
+        reason === 'oversized' ? 'limit' : 'removed');
+    expect(view.textContent).toContain('Blue forest');
+    expect(view.querySelector('button, img[src], a[href]')).toBeNull();
+  }
+  expect(getSessionImage).not.toHaveBeenCalled();
+});
+
+it('offers only exact uniquely joined available local assets and keeps duplicate or mismatched media inert', () => {
+  const rich = fixture([
+    { id: 'figure', kind: 'image', mediaId: 'forest-media', alt: 'Forest', width: 320, height: 180 },
+    { id: 'coast', kind: 'image', mediaId: 'coast-media', alt: 'Coast', width: 320, height: 180 }
+  ]);
+  const media: RichMediaState = {
+    mediaId: 'forest-media', nodeId: 'figure', source: { kind: 'page', nodeId: 'figure' },
+    status: 'available', previewWidth: 320, previewHeight: 180,
+    asset: { id: 'abcdef12.bin', mimeType: 'image/webp', bytes: 12 }
+  };
+  const options = (items: RichMediaState[]) => ({ sessionId: '2026-09-02-test0001', media: items, current: () => true });
+  const valid = renderRichResponse(rich, 'source', options([media]));
+  expect(valid.querySelectorAll<HTMLButtonElement>('.rich-image-slot button')).toHaveLength(1);
+  expect(valid.querySelector<HTMLButtonElement>('.rich-image-slot button')?.textContent).toBe('View saved preview');
+  expect(valid.querySelectorAll('img[src]')).toHaveLength(0);
+  expect(valid.querySelector<HTMLElement>('[data-rich-node-id="coast"]')?.textContent).toContain('unavailable');
+  for (const malformed of [[media, media], [{ ...media, nodeId: 'coast' }],
+    [{ ...media, source: { kind: 'page' as const, nodeId: 'coast' } }]]) {
+    const view = renderRichResponse(rich, 'source', options(malformed));
+    expect(view.querySelector('button, img[src]')).toBeNull();
+  }
+  const duplicatedNodes = fixture([
+    { id: 'figure', kind: 'image', mediaId: 'forest-media', alt: 'Forest', width: 320, height: 180 },
+    { id: 'second-figure', kind: 'image', mediaId: 'forest-media', alt: 'Different', width: 320, height: 180 }
+  ]);
+  expect(renderRichResponse(duplicatedNodes, 'source', options([media])).querySelector('button')).toBeNull();
 });
 
 it('prints code literally and isolates bidirectional prose without executing or creating authored tags', () => {

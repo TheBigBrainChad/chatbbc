@@ -382,6 +382,18 @@
 .rich-image-slot { display: grid; place-items: center; width: min(100%, 32rem); min-height: 6rem; max-height: 17rem;
   padding: 12px; overflow: hidden; border: 1px solid var(--line); background: var(--wash); color: var(--soft); text-align: center; }
 .rich-image-slot > span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.rich-image-slot > button { max-width: 100%; min-width: 0; padding: 7px 10px; border: 1px solid var(--edge); border-radius: var(--r-sm);
+  background: var(--card); color: var(--ink); font: inherit; cursor: pointer; }
+.rich-image-slot > button:focus-visible, .rich-image-viewer button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.rich-image-viewer { box-sizing: border-box; width: fit-content; max-width: min(96vw, 1700px); max-height: 96dvh; margin: auto; padding: 16px;
+  overflow: auto; border: 1px solid var(--edge); border-radius: var(--r-md); background: var(--card); color: var(--ink); }
+.rich-image-viewer::backdrop { background: #0009; }
+.rich-image-viewer h2 { margin: 0 0 12px; font: inherit; font-weight: 650; }
+.rich-image-viewer button { display: block; margin: 0 0 12px auto; padding: 7px 12px; border: 1px solid var(--edge); background: var(--page);
+  color: var(--ink); font: inherit; cursor: pointer; }
+.rich-image-viewer img { display: block; width: auto; height: auto; max-width: min(100%, var(--rich-preview-width));
+  max-height: min(calc(96dvh - 10rem), var(--rich-preview-height)); object-fit: contain; margin-inline: auto; }
+.rich-image-viewer p { margin: 12px 0 0; color: var(--soft); font-size: .85em; text-align: center; }
 .rich-control { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
   padding: 7px 10px; color: var(--soft); border: 1px solid var(--line); background: var(--sunk); }
 .rich-control.rich-selectable { border-color: var(--edge); color: var(--ink); }
