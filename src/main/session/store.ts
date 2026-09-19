@@ -22,9 +22,11 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { isUtf8 } from 'node:buffer';
 import { isProModel } from '../../shared/chat-models.js';
 import { constants as fsConstants, promises as fs } from 'node:fs';
 import path from 'node:path';
+import sharp from 'sharp';
 import type {
   AssetRef,
   Handoff,
@@ -130,6 +132,8 @@ export function initSessionStore(userDataDir: string): void {
   assetMutationEpoch = 0;
   assetWrittenEpoch.clear();
   removedAssetEpoch.clear();
+  sessionDeletionEpoch = 0;
+  deletingSessions.clear();
   missingCurrentConversations.clear();
   attachmentCatalog = null;
   attachmentCatalogLoading = null;
@@ -211,6 +215,9 @@ let assetWriteQueue = Promise.resolve();
 let assetMutationEpoch = 0;
 const assetWrittenEpoch = new Map<string, number>();
 const removedAssetEpoch = new Map<string, number>();
+/** An explicit session deletion must also invalidate image reads already awaiting a queue. */
+let sessionDeletionEpoch = 0;
+const deletingSessions = new Set<string>();
 
 function enqueueAssetOperation<T>(operation: () => Promise<T>): Promise<T> {
   const work = assetWriteQueue.then(operation);
@@ -3446,15 +3453,74 @@ const cleanupEventKinds = new Set<SessionEvent['kind']>([
   'session_start', 'user_message', 'assistant_message', 'native_image', 'progress', 'page_tool',
   'turn_start', 'turn_end', 'chat_error', 'tool_call', 'note', 'agent_message', 'handoff'
 ]);
-async function cleanupOwnerInventory(sessionId: string, entry: OpenSession): Promise<SessionEvent[] | null> {
+/** Streaming line slices avoid allocating an unbounded split array from a malformed journal. */
+function* imageReadJournalLines(raw: string): Generator<string> {
+  let start = 0;
+  while (start < raw.length) {
+    const end = raw.indexOf('\n', start);
+    if (end < 0) { yield raw.slice(start); return; }
+    yield raw.slice(start, end);
+    start = end + 1;
+  }
+}
+/** Image membership reads cannot trust a stat-then-readFile path that becomes a symlink or
+ * grows after stat. This does not change the existing cleanup transaction's read contract. */
+async function readBoundedOwnerSource(
+  file: string, before: Awaited<ReturnType<typeof fs.lstat>>
+): Promise<string | null> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    if (!before.isFile() || before.isSymbolicLink()) return null;
+    const parent = path.dirname(file);
+    const parentBefore = await fs.lstat(parent);
+    if (!parentBefore.isDirectory() || parentBefore.isSymbolicLink()) return null;
+    const [parentReal, fileReal] = await Promise.all([fs.realpath(parent), fs.realpath(file)]);
+    if (!sameFilesystemPath(path.dirname(fileReal), parentReal) ||
+        path.basename(fileReal) !== path.basename(file)) return null;
+    handle = await fs.open(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino || stat.size !== before.size) return null;
+    const bytes = Buffer.alloc(stat.size + 1);
+    let size = 0;
+    while (size < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, size, bytes.length - size, size);
+      if (!bytesRead) break;
+      size += bytesRead;
+    }
+    if (size !== stat.size) return null;
+    const after = await fs.lstat(file);
+    if (!after.isFile() || after.isSymbolicLink() || after.dev !== stat.dev ||
+        after.ino !== stat.ino || after.size !== stat.size) return null;
+    const parentAfter = await fs.lstat(parent);
+    if (!parentAfter.isDirectory() || parentAfter.isSymbolicLink() ||
+        parentAfter.dev !== parentBefore.dev || parentAfter.ino !== parentBefore.ino) return null;
+    const raw = bytes.subarray(0, size);
+    if (!isUtf8(raw)) return null;
+    return raw.toString('utf8');
+  } catch { return null; }
+  finally { await handle?.close().catch(() => undefined); }
+}
+async function cleanupOwnerInventory(
+  sessionId: string, entry: OpenSession,
+  imageRead?: { assetId: string; maxSourceBytes: number }
+): Promise<SessionEvent[] | null> {
   const disk = new Map<string, CanonicalEvent>();
   const base = sessionDir(sessionId);
+  // A thumbnail cannot allocate an unbounded whole-history snapshot. Cleanup retains its
+  // independent 64-MiB-per-source rules; an oversized read fails closed, never truncates.
+  let remaining = imageRead?.maxSourceBytes ?? Number.POSITIVE_INFINITY;
+  const charge = (bytes: number): boolean => {
+    if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > remaining) return false;
+    remaining -= bytes;
+    return true;
+  };
   try {
     const legacy = path.join(base, 'messages.json');
     try {
       const stat = await fs.lstat(legacy);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
-      const raw = await fs.readFile(legacy, 'utf8');
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CLEANUP_OWNER_SCAN_BYTES || !charge(stat.size)) return null;
+      const raw = imageRead ? await readBoundedOwnerSource(legacy, stat) : await fs.readFile(legacy, 'utf8');
+      if (raw === null) return null;
       if (Buffer.byteLength(raw, 'utf8') > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
       const parsed: unknown = JSON.parse(raw);
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
@@ -3469,13 +3535,26 @@ async function cleanupOwnerInventory(sessionId: string, entry: OpenSession): Pro
       const directory = path.join(base, 'messages');
       const stat = await fs.lstat(directory);
       if (!stat.isDirectory() || stat.isSymbolicLink()) return null;
-      for (const name of await fs.readdir(directory)) {
+      let names: string[];
+      if (imageRead) {
+        // Do not eagerly materialize a potentially huge directory before bounding it.
+        names = [];
+        const listing = await fs.opendir(directory);
+        try {
+          for await (const item of listing) {
+            if (names.length >= 8192) return null;
+            names.push(item.name);
+          }
+        } finally { await listing.close().catch(() => undefined); }
+      } else names = await fs.readdir(directory);
+      for (const name of names) {
         if (!name.endsWith('.json')) continue; // Temporary incomplete writes are not published.
         if (!/^[a-f0-9]{64}\.json$/.test(name)) return null;
         const file = path.join(directory, name);
         const stat = await fs.lstat(file);
-        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CANONICAL_MESSAGE_BYTES) return null;
-        const raw = await fs.readFile(file, 'utf8');
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CANONICAL_MESSAGE_BYTES || !charge(stat.size)) return null;
+        const raw = imageRead ? await readBoundedOwnerSource(file, stat) : await fs.readFile(file, 'utf8');
+        if (raw === null) return null;
         if (Buffer.byteLength(raw, 'utf8') > MAX_CANONICAL_MESSAGE_BYTES) return null;
         const candidate: CanonicalEvent = JSON.parse(raw);
         const key = messageKey(candidate);
@@ -3490,11 +3569,14 @@ async function cleanupOwnerInventory(sessionId: string, entry: OpenSession): Pro
     try {
       const journalFile = path.join(base, 'events.jsonl');
       const stat = await fs.lstat(journalFile);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
-      const journal = await fs.readFile(journalFile, 'utf8');
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CLEANUP_OWNER_SCAN_BYTES || !charge(stat.size)) return null;
+      const journal = imageRead ? await readBoundedOwnerSource(journalFile, stat) : await fs.readFile(journalFile, 'utf8');
+      if (journal === null) return null;
       if (Buffer.byteLength(journal, 'utf8') > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
-      for (const line of journal.split('\n')) {
+      let lines = 0;
+      for (const line of imageRead ? imageReadJournalLines(journal) : journal.split('\n')) {
         if (!line.trim()) continue;
+        if (imageRead && ++lines > 100_000) return null;
         const event: SessionEvent = JSON.parse(line);
         if (!event || !Number.isSafeInteger(event.seq) || !cleanupEventKinds.has(event.kind)) return null;
         const key = messageKey(event);
@@ -3505,6 +3587,16 @@ async function cleanupOwnerInventory(sessionId: string, entry: OpenSession): Pro
     // on-disk owner must veto deletion rather than exposing bytes that cleanup cannot retire.
     for (const [key, candidate] of disk) {
       if (!entry.messages.has(key) && referencedAssetIds(candidate).length) return null;
+    }
+    if (imageRead) {
+      // The normal reader tolerates old canonical projections and skipped corrupt shards.
+      // Neither can authorize bytes: any cached owner of this asset must still be identical
+      // to its committed counterpart after joining the session queue.
+      for (const [key, current] of entry.messages) {
+        if (!referencedAssetIds(current).some(asset => asset.id === imageRead.assetId)) continue;
+        const committed = disk.get(key);
+        if (!committed || JSON.stringify(committed) !== JSON.stringify(current)) return null;
+      }
     }
     for (const [key, current] of entry.messages) disk.set(key, current);
     const all = [...disk.values(), ...events];
@@ -3672,6 +3764,200 @@ function invalidateAssetUsage(sessionId: string): void {
   globalAssetUsage = null;
 }
 
+const MAX_IMAGE_READ_BYTES = 16 * 1024 * 1024;
+
+/** Read only the exact committed canonical owner. The permissive transcript reader may skip
+ * damaged shards and collapse provider aliases; neither behavior confers image permission. */
+async function committedImageOwner(sessionId: string, owner: CanonicalEvent): Promise<boolean> {
+  const key = messageKey(owner);
+  if (!key) return false;
+  const base = sessionDir(sessionId);
+  const directory = path.join(base, 'messages');
+  const name = `${createHash('sha256').update(key).digest('hex')}.json`;
+  const file = path.join(directory, name);
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    const [rootStat, sessionStat, directoryStat] = await Promise.all([
+      fs.lstat(root), fs.lstat(base), fs.lstat(directory)
+    ]);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink() ||
+        !sessionStat.isDirectory() || sessionStat.isSymbolicLink() ||
+        !directoryStat.isDirectory() || directoryStat.isSymbolicLink()) return false;
+    const [rootReal, sessionReal, directoryReal] = await Promise.all([
+      fs.realpath(root), fs.realpath(base), fs.realpath(directory)
+    ]);
+    if (!sameFilesystemPath(path.dirname(sessionReal), rootReal) ||
+        !sameFilesystemPath(path.dirname(directoryReal), sessionReal)) return false;
+    const before = await fs.lstat(file);
+    if (!before.isFile() || before.isSymbolicLink() || before.size > MAX_CANONICAL_MESSAGE_BYTES) return false;
+    const real = await fs.realpath(file);
+    if (!sameFilesystemPath(path.dirname(real), directoryReal) || path.basename(real) !== name) return false;
+    handle = await fs.open(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino ||
+        stat.size !== before.size) return false;
+    const bytes = Buffer.alloc(stat.size + 1);
+    let size = 0;
+    while (size < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, size, bytes.length - size, size);
+      if (!bytesRead) break;
+      size += bytesRead;
+    }
+    if (size !== stat.size) return false;
+    const after = await fs.lstat(file);
+    if (!after.isFile() || after.isSymbolicLink() || after.dev !== stat.dev ||
+        after.ino !== stat.ino || after.size !== stat.size) return false;
+    const stored: unknown = JSON.parse(bytes.subarray(0, size).toString('utf8'));
+    return !!stored && typeof stored === 'object' && messageKey(stored as CanonicalEvent) === key &&
+      JSON.stringify(stored) === JSON.stringify(owner);
+  } catch { return false; }
+  finally { await handle?.close().catch(() => undefined); }
+}
+
+/** A future available rich slot may only grant a LOCAL read, never publication or action.
+ * All slots on the owner must validate; an ambiguous provider alias vetoes the entire owner. */
+async function richImageReference(
+  sessionId: string, entry: OpenSession, events: SessionEvent[], assetId: string
+): Promise<{ asset: AssetRef; width: number; height: number } | null> {
+  const assistants = events.filter((row): row is Extract<SessionEvent, { kind: 'assistant_message' }> =>
+    row.kind === 'assistant_message');
+  for (const row of assistants) {
+    if (!row.richMedia?.some(media => media.asset?.id === assetId)) continue;
+    const key = messageKey(row);
+    const cached = key ? entry.messages.get(key) : null;
+    if (!cached || cached.kind !== 'assistant_message' || !await committedImageOwner(sessionId, row) ||
+        JSON.stringify(cached) !== JSON.stringify(row) || row.source !== 'extension' ||
+        !row.messageId || !row.providerMessageId) return null;
+    const rich = row.rich ? parseRichResponse(row.rich) : null;
+    const origin = row.richOrigin ? parseRichOrigin(row.richOrigin) : null;
+    const media = cleanupRichMedia(row);
+    if (!rich || rich.status !== 'available' || rich.revision < 1 || !origin || !media ||
+        origin.conversationId !== rich.conversationId || rich.conversationId !== origin.conversationId ||
+        rich.messageId !== row.messageId || rich.providerMessageId !== row.providerMessageId ||
+        origin.bindingRevision > (entry.summary.bindingRevision ?? 0) ||
+        !entry.summary.chatIds.includes(origin.conversationId) ||
+        assistants.some(other => other !== row && other.providerMessageId === row.providerMessageId)) return null;
+    const retired = row.retiredRichImageAssetIds;
+    if (retired !== undefined && (!Array.isArray(retired) || retired.length > 4096 ||
+        retired.some(id => typeof id !== 'string' || !/^[a-f0-9]{8,64}\.(?:bin|png|jpg)$/.test(id)) ||
+        new Set(retired).size !== retired.length || retired.includes(assetId))) return null;
+    const matches = media.filter(slot => slot.status === 'available' && slot.asset?.id === assetId);
+    if (!matches.length) return null;
+    const chosen = matches[0]!;
+    // The fixed image getter has only a session and an asset ID. If two slots claim the
+    // same bytes with contradictory geometry/metadata, it cannot safely choose one.
+    if (matches.some(slot => slot.previewWidth !== chosen.previewWidth ||
+        slot.previewHeight !== chosen.previewHeight ||
+        JSON.stringify(slot.asset) !== JSON.stringify(chosen.asset))) return null;
+    for (const slot of matches) {
+      if (!slot.asset || slot.reason !== undefined || !slot.previewWidth || !slot.previewHeight ||
+          slot.previewWidth * slot.previewHeight > 2_560_000 ||
+          slot.asset.bytes > MAX_ASSET_BYTES) return null;
+      const source = slot.source;
+      if (source.kind === 'native') {
+        const native = events.find((candidate): candidate is NativeImageEvent =>
+          candidate.kind === 'native_image' && candidate.messageId === source.providerMessageId &&
+          candidate.providerAssetId === source.providerAssetId);
+        if (!native || native.previewStatus !== 'available' || native.previewError !== undefined ||
+            !native.asset || JSON.stringify(native.asset) !== JSON.stringify(slot.asset) ||
+            native.previewWidth !== slot.previewWidth || native.previewHeight !== slot.previewHeight ||
+            !await committedImageOwner(sessionId, native)) return null;
+      }
+    }
+    return { asset: chosen.asset!, width: chosen.previewWidth!, height: chosen.previewHeight! };
+  }
+  return null;
+}
+
+/** Same-session, bounded inode-bound image bytes; never follow a renderer-selected path. */
+async function verifiedRecordedImageBytes(sessionId: string, asset: AssetRef): Promise<Buffer | null> {
+  if (!/^[a-f0-9]{8,64}\.(?:bin|png|jpg)$/.test(asset.id) ||
+      !['image/png', 'image/jpeg', 'image/webp'].includes(asset.mimeType) ||
+      !Number.isSafeInteger(asset.bytes) || asset.bytes < 1 || asset.bytes > MAX_IMAGE_READ_BYTES) return null;
+  const extension = asset.mimeType === 'image/png' ? '.png' : asset.mimeType === 'image/jpeg' ? '.jpg' : '.bin';
+  if (!asset.id.endsWith(extension)) return null;
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    const directory = await verifiedAssetsDirectory(sessionId);
+    if (!directory) return null;
+    const file = path.join(directory.path, asset.id);
+    const before = await fs.lstat(file);
+    if (!before.isFile() || before.isSymbolicLink() || before.size !== asset.bytes) return null;
+    const real = await fs.realpath(file);
+    if (!sameFilesystemPath(path.dirname(real), directory.realPath) || path.basename(real) !== asset.id) return null;
+    handle = await fs.open(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino || stat.size !== asset.bytes) return null;
+    const data = Buffer.alloc(stat.size + 1);
+    let size = 0;
+    while (size < data.length) {
+      const { bytesRead } = await handle.read(data, size, data.length - size, size);
+      if (!bytesRead) break;
+      size += bytesRead;
+    }
+    if (size !== stat.size) return null;
+    const after = await fs.lstat(file);
+    if (!after.isFile() || after.isSymbolicLink() || after.dev !== stat.dev || after.ino !== stat.ino ||
+        after.size !== stat.size) return null;
+    const idHash = asset.id.slice(0, asset.id.lastIndexOf('.'));
+    // writeAsset creates a 128-bit (32-hex) content key. A permissive legacy 8-hex
+    // filename is not sufficient image-read authority even if its short prefix matches.
+    if (idHash.length < 32 ||
+        createHash('sha256').update(data.subarray(0, size)).digest('hex').slice(0, idHash.length) !== idHash) return null;
+    return data.subarray(0, size);
+  } catch { return null; }
+  finally { await handle?.close().catch(() => undefined); }
+}
+
+/** Sole sessions:image data-URL authority. Asset queue MUST precede session queue: cleanup
+ * holds the asset queue while waiting for owner retirement, and a reversed wait deadlocks.
+ * This read-only compatibility seam does not accept rich assets from a publisher. */
+export async function readRecordedSessionImage(sessionId: string, assetId: string): Promise<string | null> {
+  const requestedAt = assetMutationEpoch;
+  const deletionAt = sessionDeletionEpoch;
+  if (!/^[0-9a-z-]{8,64}$/i.test(sessionId) ||
+      !/^[a-f0-9]{8,64}\.(?:bin|png|jpg)$/.test(assetId) || deletingSessions.has(sessionId)) return null;
+  try {
+    return await enqueueAssetOperation(async () => {
+      if (assetMutationEpoch !== requestedAt || deletingSessions.has(sessionId)) return null;
+      const entry = await ensureOpen(sessionId);
+      return enqueueSessionOperation(entry, 'recorded image read', async () => {
+        if (assetMutationEpoch !== requestedAt || deletingSessions.has(sessionId) ||
+            sessionDeletionEpoch !== deletionAt) return null;
+        if (!await verifiedAssetsDirectory(sessionId)) return null;
+        const events = await cleanupOwnerInventory(sessionId, entry, {
+          assetId, maxSourceBytes: MAX_RECENT_READ_BYTES
+        });
+        if (!events) return null;
+        const rich = await richImageReference(sessionId, entry, events, assetId);
+        // An independent existing user/native/tool owner may share the same content-addressed
+        // file. Never turn a malformed rich reference into permission for a different asset.
+        const legacy = events.flatMap(row => {
+          if (row.kind === 'user_message') return row.retiredImageAssetIds?.includes(assetId) ? [] : row.assets ?? [];
+          if (row.kind === 'tool_call') return row.call.retiredImageAssetIds?.includes(assetId) ? [] : row.call.assets ?? [];
+          if (row.kind === 'native_image') return row.previewStatus === 'available' &&
+            row.previewError !== 'removed' && row.asset ? [row.asset] : [];
+          return [];
+        }).find(asset => asset.id === assetId && ['image/png', 'image/jpeg', 'image/webp'].includes(asset.mimeType));
+        const asset = rich?.asset ?? legacy;
+        if (!asset) return null;
+        const data = await verifiedRecordedImageBytes(sessionId, asset);
+        if (!data) return null;
+        try {
+          const image = sharp(data, { limitInputPixels: 36_000_000 });
+          const metadata = await image.metadata();
+          if (!metadata.width || !metadata.height || `image/${metadata.format}` !== asset.mimeType ||
+              (rich && (metadata.width !== rich.width || metadata.height !== rich.height))) return null;
+          await image.stats(); // Metadata alone accepts truncated/undecodable pixels.
+          if (assetMutationEpoch !== requestedAt || deletingSessions.has(sessionId) ||
+              sessionDeletionEpoch !== deletionAt) return null;
+          return `data:${asset.mimeType};base64,${data.toString('base64')}`;
+        } catch { return null; }
+      });
+    });
+  } catch { return null; }
+}
+
 export async function readAsset(sessionId: string, assetId: string, maxBytes?: number): Promise<Buffer | null> {
   assertSessionId(sessionId);
   if (!/^[0-9a-f]{8,64}\.(png|jpg|txt|bin)$/.test(assetId)) return null;
@@ -3777,15 +4063,23 @@ export async function pruneSessions(_retainDays: number): Promise<number> {
 
 export async function deleteSession(id: string): Promise<void> {
   assertSessionId(id);
-  const entry = open.get(id);
-  if (entry) {
-    if (entry.metaTimer) clearTimeout(entry.metaTimer);
-    await entry.queue.catch(() => undefined);
-    open.delete(id);
+  // Synchronous request edge: a read already inside Sharp must not return its bytes after
+  // the user requests deletion, even while removal waits for the session queue.
+  sessionDeletionEpoch += 1;
+  deletingSessions.add(id);
+  try {
+    const entry = open.get(id);
+    if (entry) {
+      if (entry.metaTimer) clearTimeout(entry.metaTimer);
+      await entry.queue.catch(() => undefined);
+      open.delete(id);
+    }
+    await fs.rm(sessionDir(id), { recursive: true, force: true });
+    invalidateAssetUsage(id);
+    publishAttachmentRemoval(id);
+  } finally {
+    deletingSessions.delete(id);
   }
-  await fs.rm(sessionDir(id), { recursive: true, force: true });
-  invalidateAssetUsage(id);
-  publishAttachmentRemoval(id);
 }
 
 /** Test seam: forgets in-memory state without touching the files. */
@@ -3799,6 +4093,8 @@ export function resetSessionStoreForTests(): void {
   assetMutationEpoch = 0;
   assetWrittenEpoch.clear();
   removedAssetEpoch.clear();
+  sessionDeletionEpoch = 0;
+  deletingSessions.clear();
   missingCurrentConversations.clear();
   attachmentCatalog = null;
   attachmentCatalogLoading = null;
@@ -3813,6 +4109,8 @@ export function unsetSessionRootForTests(): void {
   assetMutationEpoch = 0;
   assetWrittenEpoch.clear();
   removedAssetEpoch.clear();
+  sessionDeletionEpoch = 0;
+  deletingSessions.clear();
   missingCurrentConversations.clear();
   attachmentCatalog = null;
   attachmentCatalogLoading = null;

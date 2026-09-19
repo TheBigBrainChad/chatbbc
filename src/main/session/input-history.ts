@@ -1,8 +1,7 @@
 import type { InputEntry } from './input.js';
 import { browserInputModel } from '../../shared/input.js';
-import { getSession, observeSessionModel, readAsset, readEvents, upsertMessageEvent, writeAsset } from './store.js';
+import { getSession, observeSessionModel, readRecordedSessionImage, upsertMessageEvent, writeAsset } from './store.js';
 import { validateInputImages } from './input-images.js';
-import sharp from 'sharp';
 import { positionOf } from '../../shared/chronology.js';
 
 /** Project a tool handout or proven delivery into history, never the enqueue intent. */
@@ -52,22 +51,7 @@ export async function recordDeliveredInput(entry: Readonly<InputEntry>, anchorCo
   return true;
 }
 
-/** Recorded membership, not a supplied filename, grants the renderer image access. */
+/** Existing fixed sessions:image route; the store owns serialized membership and pixel custody. */
 export async function recordedInputImage(sessionId: string, assetId: string): Promise<string | null> {
-  const events = await readEvents(sessionId, { kinds: ['user_message', 'native_image', 'tool_call'] });
-  const referenced = events.flatMap(event => event.kind === 'user_message' ? event.assets ?? [] :
-    event.kind === 'native_image' ? event.asset ? [event.asset] : [] :
-    event.kind === 'tool_call' ? event.call.assets ?? [] : [])
-    .find(asset => asset.id === assetId && ['image/png', 'image/jpeg', 'image/webp'].includes(asset.mimeType));
-  if (!referenced) return null;
-  const data = await readAsset(sessionId, assetId, 16 * 1024 * 1024);
-  if (!data) return null;
-  try {
-    const image = sharp(data, { limitInputPixels: 36000000 });
-    const metadata = await image.metadata();
-    if (!metadata.width || !metadata.height || `image/${metadata.format}` !== referenced.mimeType) return null;
-    // Decode fully before any bytes reach the renderer; metadata alone accepts broken images.
-    await image.stats();
-    return `data:${referenced.mimeType};base64,${data.toString('base64')}`;
-  } catch { return null; }
+  return readRecordedSessionImage(sessionId, assetId);
 }
