@@ -9,6 +9,7 @@
 
 import http from 'node:http';
 import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
@@ -46,7 +47,7 @@ vi.mock('electron', () => ({
 }));
 const { safeStorage } = await import('electron');
 
-const { defaultConfig, getConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
+const { defaultConfig, getConfig, initConfigPath, pendingRecordingOffDecision, saveConfig } = await import('../src/main/config.js');
 const { initSecretsPath, resetSecretsCacheForTests, setSecret } = await import('../src/main/secrets.js');
 const {
   bridgePort,
@@ -1778,6 +1779,176 @@ describe('activity feed', () => {
     } finally {
       releaseBody();
       await Promise.allSettled([pending]);
+      await saveConfig(suiteConfig);
+    }
+  });
+
+  it.each([true, false])(
+    'settles a physically committed first canonical row before %s Off and handles the second without duplicate Goal debt',
+    async (offSucceeds) => {
+      await pair();
+      const conversationId = randomUUID();
+      const turnId = 'mid-batch-recording-turn';
+      const userId = 'mid-batch-first-user';
+      const assistantId = 'mid-batch-final-assistant';
+      const baseline = await request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'turn_start', turnId, time: Date.now() }
+      ] } });
+      expect(baseline.status).toBe(200);
+      const sessionId = baseline.body.sessionId as string;
+      const payload = { conversationId, events: [
+        { kind: 'user_message', time: Date.now() + 1, turnId, messageId: userId, text: 'first row is already on disk' },
+        { kind: 'assistant_message', time: Date.now() + 2, turnId, messageId: assistantId,
+          text: 'second row must respect the Off decision', state: 'final', final: true, goalEligible: true }
+      ] };
+      const originalRename = fs.rename.bind(fs);
+      const configTarget = path.join(dir, 'config.json');
+      let firstTarget: string | null = null;
+      let firstRenames = 0;
+      let firstEntered!: () => void, releaseFirst!: () => void;
+      let configEntered!: () => void, releaseConfig!: () => void;
+      const firstReached = new Promise<void>(resolve => { firstEntered = resolve; });
+      const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+      const configReached = new Promise<void>(resolve => { configEntered = resolve; });
+      const configGate = new Promise<void>(resolve => { releaseConfig = resolve; });
+      let configIntercepted = false;
+      const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+        const destination = String(to);
+        if (!firstTarget && destination.includes(`${path.sep}messages${path.sep}`) && destination.endsWith('.json')) {
+          firstTarget = destination;
+          firstRenames++;
+          // The physical rename has completed, but the real recorder still awaits its
+          // result and cannot begin processing the second event until this gate opens.
+          await originalRename(from, to);
+          firstEntered();
+          await firstGate;
+          return;
+        }
+        if (destination === firstTarget) firstRenames++;
+        if (destination === configTarget && !configIntercepted) {
+          configIntercepted = true;
+          configEntered();
+          await configGate;
+          if (!offSucceeds) throw Object.assign(new Error('mid-batch Off EIO'), { code: 'EIO' });
+        }
+        return originalRename(from, to);
+      }) as typeof fs.rename);
+      let batch: Promise<Reply> | null = null;
+      let disabling: Promise<unknown> | null = null;
+      try {
+        batch = request('POST', '/events', { body: payload });
+        void batch.catch(() => undefined);
+        await firstReached;
+        expect(firstTarget).not.toBeNull();
+        expect(JSON.parse(await fs.readFile(firstTarget!, 'utf8')).messageId).toBe(userId);
+        disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+        void disabling.catch(() => undefined);
+        await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+        expect(getConfig().sessions.record).toBe(true);
+        releaseFirst();
+        // The store's real physical drain must finish before this configuration rename.
+        // Keep the immutable Off decision pending while the recorder meets the second row.
+        await configReached;
+        // The first shard was already read directly from disk. Do not invoke readEvents
+        // during pending Off: its normal metadata flush would add an unrelated writer.
+        expect(await Promise.race([batch.then(reply => reply.status),
+          new Promise<'waiting'>(resolve => setTimeout(() => resolve('waiting'), 150))])).toBe('waiting');
+        releaseConfig();
+        if (offSucceeds) {
+          await disabling;
+          expect(await batch).toMatchObject({ status: 200, body: { stored: 0, recordingSuppressed: true } });
+          expect(getConfig().sessions.record).toBe(false);
+          expect((await readEvents(sessionId)).filter(row => row.kind === 'user_message' || row.kind === 'assistant_message'))
+            .toMatchObject([{ kind: 'user_message', messageId: userId }]);
+          expect((await readDurable<{ replies: Array<{ conversationId: string }> }>(GOAL_REPLIES_STATE))?.replies
+            .filter(reply => reply.conversationId === conversationId) ?? []).toEqual([]);
+        } else {
+          await expect(disabling).rejects.toThrow('mid-batch Off EIO');
+          // `stored` counts accepted observations, not only new canonical shards.
+          // Prove idempotency below using exact row identities, physical rename count,
+          // and the durable Goal obligation instead of inferring it from this total.
+          expect(await batch).toMatchObject({ status: 200, body: { stored: 2 } });
+          expect(getConfig().sessions.record).toBe(true);
+          const canonical = (await readEvents(sessionId)).filter(row => row.kind === 'user_message' || row.kind === 'assistant_message');
+          expect(canonical.map(row => row.messageId)).toEqual([userId, assistantId]);
+          const beforeReplay = await readDurable<{ replies: Array<{ conversationId: string; replyId: string; eventSeq: number; acceptedAt: number }> }>(GOAL_REPLIES_STATE);
+          const accepted = beforeReplay?.replies.filter(reply => reply.conversationId === conversationId) ?? [];
+          expect(accepted).toMatchObject([{ replyId: assistantId, eventSeq: expect.any(Number), acceptedAt: expect.any(Number) }]);
+          expect((await request('POST', '/events', { body: payload })).status).toBe(200);
+          expect((await readEvents(sessionId)).filter(row => row.kind === 'user_message' || row.kind === 'assistant_message'))
+            .toEqual(canonical);
+          expect((await readDurable<{ replies: Array<{ conversationId: string; replyId: string; eventSeq: number; acceptedAt: number }> }>(GOAL_REPLIES_STATE))?.replies
+            .filter(reply => reply.conversationId === conversationId)).toEqual(accepted);
+        }
+        // Canonical idempotency is a physical property: no second write of the first shard.
+        expect(firstRenames).toBe(1);
+      } finally {
+        releaseFirst();
+        releaseConfig();
+        await Promise.allSettled([batch, disabling].filter(promise => promise !== null));
+        spy.mockRestore();
+        await saveConfig(suiteConfig);
+      }
+    }
+  );
+
+  it('drains an admitted physical writer while a second authenticated events request parks outside its queue', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const baseline = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', turnId: 'held-writer-turn', time: Date.now() }
+    ] } });
+    expect(baseline.status).toBe(200);
+    const sessionId = baseline.body.sessionId as string;
+    const originalRename = fs.rename.bind(fs);
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let physicallySettled = false;
+    let blocked = false;
+    const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (!blocked && String(to).includes(`${path.sep}messages${path.sep}`) && String(to).endsWith('.json')) {
+        blocked = true;
+        entered();
+        await held;
+        await originalRename(from, to);
+        physicallySettled = true;
+        return;
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    let first: Promise<Reply> | null = null;
+    let second: Promise<Reply> | null = null;
+    let disabling: Promise<unknown> | null = null;
+    try {
+      first = request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'user_message', time: Date.now(), messageId: 'physically-held', text: 'admitted before Off' }
+      ] } });
+      await reached;
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      void disabling.catch(() => undefined);
+      await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+      second = request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'user_message', time: Date.now() + 1, messageId: 'parked-after-off', text: 'not admitted' }
+      ] } });
+      expect(await Promise.race([second.then(reply => reply.status),
+        new Promise<'waiting'>(resolve => setTimeout(() => resolve('waiting'), 150))])).toBe('waiting');
+      expect(await Promise.race([disabling.then(() => 'ack'),
+        new Promise<'waiting'>(resolve => setTimeout(() => resolve('waiting'), 150))])).toBe('waiting');
+      expect(physicallySettled).toBe(false);
+      expect(getConfig().sessions.record).toBe(true);
+      release();
+      expect((await first).status).toBe(200);
+      await disabling;
+      expect(physicallySettled).toBe(true);
+      expect(await second).toMatchObject({ status: 200, body: { stored: 0, recordingSuppressed: true } });
+      expect(getConfig().sessions.record).toBe(false);
+      expect((await readEvents(sessionId)).filter(row => row.kind === 'user_message').map(row => row.messageId))
+        .toEqual(['physically-held']);
+    } finally {
+      release();
+      await Promise.allSettled([first, second, disabling].filter(promise => promise !== null));
+      spy.mockRestore();
       await saveConfig(suiteConfig);
     }
   });
