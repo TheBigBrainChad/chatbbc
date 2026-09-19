@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest';
 
 const { invoke, expose, getPath } = vi.hoisted(() => ({
-  invoke: vi.fn(async () => ({ ok: true, data: [] })), expose: vi.fn(), getPath: vi.fn((file: any) => file.path ?? '')
+  invoke: vi.fn(async (_channel: string, _payload?: unknown): Promise<unknown> => ({ ok: true, data: [] })), expose: vi.fn(), getPath: vi.fn((file: any) => file.path ?? '')
 }));
 vi.mock('electron', () => ({
   contextBridge: { exposeInMainWorld: expose },
@@ -34,4 +34,25 @@ it('exposes only the fixed, typed UI-selection reporting channel', async () => {
   });
   expect(invoke).toHaveBeenLastCalledWith('sessions:uiSelection', { sessionId: '12345678', rendererGeneration: 7 });
   expect(api.invoke).toBeUndefined();
+});
+
+it('exposes a read-only rich-status wrapper with only the exact two identifiers', async () => {
+  vi.resetModules();
+  invoke.mockReset().mockResolvedValue({ ok: true, data: {
+    id: '11111111-2222-4333-8444-555555555555', state: 'pending', detail: null
+  } });
+  expose.mockClear();
+  await import('../src/preload/index.js');
+  const api = expose.mock.calls[0]![1];
+  expect(await api.richActionStatus('2026-09-19-aaaaaaaa', '11111111-2222-4333-8444-555555555555'))
+    .toEqual({ ok: true, data: {
+      id: '11111111-2222-4333-8444-555555555555', state: 'pending', detail: null
+    } });
+  expect(invoke).toHaveBeenCalledOnce();
+  expect(invoke).toHaveBeenCalledWith('sessions:richActionStatus', {
+    sessionId: '2026-09-19-aaaaaaaa', actionId: '11111111-2222-4333-8444-555555555555'
+  });
+  expect(api.invoke).toBeUndefined();
+  expect(api.richAction).toBeUndefined();
+  expect(api.openRichOriginal).toBeUndefined();
 });

@@ -4,6 +4,7 @@ import type { GoalModel } from '../shared/goal-reasoning.js';
 import type { TaskProgress } from '../shared/task-progress.js';
 import type { BrowserPreferences } from '../shared/browser-preferences.js';
 import type { SessionControlsView } from '../main/bridge.js';
+import type { RichActionResult } from '../main/rich-actions.js';
 import type { InputAttachment } from '../shared/input.js';
 import type { UsageOverview } from '../shared/usage.js';
 import type { InputArgs, InputEntry } from '../main/session/input.js';
@@ -167,6 +168,8 @@ const api = {
   // named action; there is still no channel that takes a path or a command.
   reportUiSelection: (payload: { sessionId: string | null; rendererGeneration: number }) =>
     call<{ sessionId: string | null; generation: number }>('sessions:uiSelection', payload),
+  richActionStatus: (sessionId: string, actionId: string) =>
+    call<RichActionResult>('sessions:richActionStatus', { sessionId, actionId }),
   listSessions: (options?: { cursor?: SessionListCursor; limit?: number }) =>
     call<SessionList>('sessions:list', options ?? {}),
   listProjects: () => call<LocalProject[]>('projects:list'),

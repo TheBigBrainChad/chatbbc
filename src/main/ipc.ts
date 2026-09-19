@@ -1,5 +1,6 @@
 import { registerWorkspaceTerminalIpc } from './workspace-terminal-ipc.js';
-import { registerUiSelection } from './ui-selection.js';
+import { currentUiSelectionFor, registerUiSelection } from './ui-selection.js';
+import { readRichActionStatus, type RichActionResult } from './rich-actions.js';
 import { applyLoginStartup, supportsLoginStartup } from './window-lifecycle.js';
 import { appearanceSchema } from './appearance-schema.js';
 import { mergeAppearance, effectiveAppearance, effectiveTheme } from '../shared/appearance.js';
@@ -420,6 +421,46 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   const uiSelection = registerUiSelection(getWindow);
   // This channel must keep Electron's actual event: the ordinary handle() discards sender proof.
   ipcMain.handle('sessions:uiSelection', (event, payload: unknown) => uiSelection.report(event, payload));
+  const richStatusRequest = z.object({
+    sessionId: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i),
+    actionId: z.string().uuid()
+  }).strict();
+  const unavailableRichStatus = (): RichActionResult => ({
+    id: null, state: 'unavailable', detail: 'Native interaction unavailable'
+  });
+  // Status is a read, never an action authorization. Preserve the real Electron sender
+  // rather than using handle(), which discards it; the renderer cannot supply a witness.
+  ipcMain.handle('sessions:richActionStatus', async (event, payload: unknown) => {
+    const parsed = richStatusRequest.safeParse(payload);
+    if (!parsed.success) return { ok: false as const, error: 'Invalid input' };
+    const { sessionId, actionId } = parsed.data;
+    const selected = (): number | null => {
+      const window = getWindow();
+      if (!window || window.isDestroyed() || window.webContents.isDestroyed() ||
+          !event?.sender || event.sender !== window.webContents || !event.senderFrame ||
+          event.senderFrame !== window.webContents.mainFrame) return null;
+      const witness = currentUiSelectionFor(event.sender);
+      return witness?.sessionId === sessionId ? witness.generation : null;
+    };
+    const generation = selected();
+    const stillSelected = (): boolean => generation !== null && selected() === generation;
+    if (!stillSelected()) return { ok: true as const, data: unavailableRichStatus() };
+    try {
+      if (!await getSession(sessionId) || !stillSelected()) {
+        return { ok: true as const, data: unavailableRichStatus() };
+      }
+      const result = await readRichActionStatus(sessionId, actionId);
+      if (!stillSelected()) return { ok: true as const, data: unavailableRichStatus() };
+      // A session can be deleted outside sessions:delete (e.g. an abandoned opening).
+      // Recheck after the potentially slow ledger read before disclosing its receipt.
+      if (!await getSession(sessionId) || !stillSelected()) {
+        return { ok: true as const, data: unavailableRichStatus() };
+      }
+      return { ok: true as const, data: result };
+    } catch {
+      return { ok: true as const, data: unavailableRichStatus() };
+    }
+  });
   let watchedWindow: BrowserWindow | null = null;
   const projectFileWatches = new ProjectFileWatchSet(event => {
     const target = getWindow();

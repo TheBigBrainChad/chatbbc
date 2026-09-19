@@ -5,11 +5,12 @@
  * the IPC surface is thin validation over modules that have their own tests.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
+import type { RichActionRecord } from '../src/main/rich-actions.js';
 
 type Handler = (event: unknown, payload: unknown) => Promise<unknown>;
 const handlers = new Map<string, Handler>();
@@ -396,6 +397,261 @@ describe('main-owned, inert UI selection witness', () => {
       const restored = await handlers.get('sessions:uiSelection')!(event, { sessionId: session.id, rendererGeneration: 2 });
       expect(restored).toMatchObject({ ok: true });
     }
+  });
+});
+
+const RICH_PENDING = '11111111-2222-4333-8444-555555555555';
+const RICH_UNKNOWN = '22222222-3333-4444-8555-666666666666';
+const RICH_RECEIPT = '33333333-4444-4555-8666-777777777777';
+const RICH_FOREIGN = '55555555-6666-4777-8888-999999999999';
+const RICH_UNAVAILABLE = { ok: true, data: {
+  id: null, state: 'unavailable', detail: 'Native interaction unavailable'
+} };
+
+/** Synthetic existing custody only: no production action ever creates these rows. */
+async function seedStatusRows(sessionId: string): Promise<string> {
+  const { resetRichActionsForTests } = await import('../src/main/rich-actions.js');
+  const base: RichActionRecord = {
+    id: RICH_PENDING, phase: 'intent', createdAt: 1789776000000, claimOwner: null,
+    sessionId, conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', bindingRevision: 1,
+    messageId: 'assistant:turn:1', providerMessageId: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff',
+    revision: 1, nodeId: 'node-1', groupId: 'group-1', kind: 'select', value: 'Forest',
+    expectedSelected: false, expectedGroupSelection: null, tabId: null,
+    documentId: null, navigationEpoch: null, openingSpent: false, resultDetail: null
+  };
+  const dispatched: RichActionRecord = {
+    ...base, id: RICH_UNKNOWN, phase: 'may_have_dispatched', claimOwner: 'a'.repeat(64),
+    groupId: 'group-2', tabId: 42, documentId: 'doc-1', navigationEpoch: 7
+  };
+  const retired: RichActionRecord = {
+    ...dispatched, id: RICH_RECEIPT, phase: 'retired', groupId: 'group-3',
+    resultDetail: 'Synthetic receipt only'
+  };
+  await fs.mkdir(path.join(dir, 'state'), { recursive: true });
+  await writeDurableNow('rich-actions', { version: 1, actions: [base, dispatched, retired], receipts: [
+    { id: RICH_RECEIPT, state: 'observed', detail: 'Synthetic receipt only' }
+  ] });
+  resetRichActionsForTests();
+  return path.join(dir, 'state', 'rich-actions.json');
+}
+
+describe('sender-bound, strictly read-only rich action status IPC', () => {
+  const status = (event: unknown, payload: unknown): Promise<any> =>
+    handlers.get('sessions:richActionStatus')!(event, payload) as Promise<any>;
+  const request = (sessionId: string, actionId = RICH_PENDING) => ({ sessionId, actionId });
+  const select = (event: unknown, sessionId: string | null, rendererGeneration: number): Promise<any> =>
+    handlers.get('sessions:uiSelection')!(event, { sessionId, rendererGeneration }) as Promise<any>;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    (await import('../src/main/rich-actions.js')).resetRichActionsForTests();
+  });
+
+  it('registers exactly the status reader, not a generic or native-action/opener channel', () => {
+    expect(handlers.has('sessions:richActionStatus')).toBe(true);
+    expect(handlers.has('sessions:richAction')).toBe(false);
+    expect(handlers.has('sessions:richOpenOriginal')).toBe(false);
+  });
+
+  it('reads only selected, existent local-session pending/unknown and synthetic persisted receipt without rewriting custody', async () => {
+    const session = await createSession({ title: 'read-only status owner' });
+    const other = await createSession({ title: 'foreign status owner' });
+    const file = await seedStatusRows(session.id);
+    const { event, webContents } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    vi.mocked(openInPreferredBrowser).mockClear();
+    const before = await fs.readFile(file);
+    expect(await status(event, request(session.id))).toEqual({ ok: true, data: {
+      id: RICH_PENDING, state: 'pending', detail: null
+    } });
+    expect(await status(event, request(session.id, RICH_UNKNOWN))).toEqual({ ok: true, data: {
+      id: RICH_UNKNOWN, state: 'unknown', detail: 'Outcome unconfirmed; no repeat authorized'
+    } });
+    expect(await status(event, request(session.id, RICH_RECEIPT))).toEqual({ ok: true, data: {
+      id: RICH_RECEIPT, state: 'observed', detail: 'Synthetic receipt only'
+    } });
+    expect(await status(event, request(session.id, RICH_PENDING))).toMatchObject({ ok: true, data: { state: 'pending' } });
+    expect(await fs.readFile(file)).toEqual(before);
+    expect((await import('../src/main/ui-selection.js')).currentUiSelectionFor(webContents as any)?.sessionId).toBe(session.id);
+    expect(openInPreferredBrowser).not.toHaveBeenCalled();
+    // The same app-frame witness cannot use a different local session, even with a known ID.
+    expect(await status(event, request(other.id, RICH_RECEIPT))).toEqual(RICH_UNAVAILABLE);
+    expect(await status(event, request(session.id, RICH_FOREIGN))).toEqual(RICH_UNAVAILABLE);
+  });
+
+  it('rejects unknown payload keys, missing IDs and malformed UUIDs without invoking the ledger', async () => {
+    const session = await createSession({ title: 'status schema' });
+    await seedStatusRows(session.id);
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    const actions = await import('../src/main/rich-actions.js');
+    const read = vi.spyOn(actions, 'readRichActionStatus');
+    for (const payload of [null, {}, { sessionId: session.id }, request(session.id, 'not-uuid'),
+      { ...request(session.id), url: 'https://chatgpt.com' },
+      { ...request(session.id), action: 'arm' },
+      { ...request(session.id), sessionId: 'A'.repeat(65) }]) {
+      expect(await status(event, payload)).toEqual({ ok: false, error: 'Invalid input' });
+    }
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('refuses foreign sender, subframe, dead/replaced window, hidden app, null selection and unselected history preview', async () => {
+    const a = await createSession({ title: 'current status A' });
+    const b = await createSession({ title: 'history preview B' });
+    await seedStatusRows(a.id);
+    const { event, webContents, mainFrame, window } = selectionWindow();
+    expect(await status(event, request(a.id))).toEqual(RICH_UNAVAILABLE); // No witness from activeId.
+    expect(await select(event, a.id, 1)).toMatchObject({ ok: true });
+    expect(await status({ sender: {}, senderFrame: mainFrame }, request(a.id))).toEqual(RICH_UNAVAILABLE);
+    expect(await status({ sender: webContents, senderFrame: {} }, request(a.id))).toEqual(RICH_UNAVAILABLE);
+    expect(await status(null, request(a.id))).toEqual(RICH_UNAVAILABLE);
+    expect(await status(event, request(b.id))).toEqual(RICH_UNAVAILABLE);
+    (window as any).isVisible = () => false;
+    expect(await status(event, request(a.id))).toEqual(RICH_UNAVAILABLE);
+    (window as any).isVisible = () => true;
+    expect(await select(event, null, 2)).toMatchObject({ ok: true });
+    expect(await status(event, request(a.id))).toEqual(RICH_UNAVAILABLE);
+    expect(await select(event, a.id, 3)).toMatchObject({ ok: true });
+    const previous = currentWindow;
+    const replaced = selectionWindow();
+    expect(await status(event, request(a.id))).toEqual(RICH_UNAVAILABLE);
+    currentWindow = previous;
+    expect(await status(replaced.event, request(a.id))).toEqual(RICH_UNAVAILABLE);
+    (window as any).isDestroyed = () => true;
+    expect(await status(event, request(a.id))).toEqual(RICH_UNAVAILABLE);
+  });
+
+  it('revokes old status after main-frame navigation, pending selection and exact deletion', async () => {
+    const session = await createSession({ title: 'status lifecycle' });
+    await seedStatusRows(session.id);
+    const { event, webContents, mainFrame } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    webContents.emit('did-start-navigation', {
+      url: mainFrame.url, isSameDocument: true, isMainFrame: true, frame: mainFrame
+    });
+    expect(await status(event, request(session.id))).toEqual(RICH_UNAVAILABLE);
+    (webContents as any).isLoadingMainFrame = () => false;
+    webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId, mainFrame.routingId);
+    expect(await status(event, request(session.id))).toEqual(RICH_UNAVAILABLE); // Completion does not restore selection.
+    expect(await select(event, session.id, 2)).toMatchObject({ ok: true });
+    expect(await handlers.get('sessions:delete')!(null, { id: session.id })).toMatchObject({ ok: true });
+    expect(await status(event, request(session.id))).toEqual(RICH_UNAVAILABLE);
+    expect(await select(event, session.id, 3)).toMatchObject({ ok: false });
+    expect(await status(event, request(session.id))).toEqual(RICH_UNAVAILABLE);
+  });
+
+  it('rechecks real session existence even when the selection witness remains', async () => {
+    const store = await import('../src/main/session/store.js');
+    const session = await createSession({ title: 'externally removed status owner' });
+    await seedStatusRows(session.id);
+    const { event, webContents } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    await store.deleteSession(session.id); // Bypass the ordinary IPC's proactive witness revocation.
+    expect((await import('../src/main/ui-selection.js')).currentUiSelectionFor(webContents as any)?.sessionId).toBe(session.id);
+    expect(await status(event, request(session.id, RICH_RECEIPT))).toEqual(RICH_UNAVAILABLE);
+  });
+
+  it('does not disclose an unsupported or removed action ledger', async () => {
+    const session = await createSession({ title: 'unsupported status ledger' });
+    const file = await seedStatusRows(session.id);
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    const actions = await import('../src/main/rich-actions.js');
+    const original = JSON.parse(await fs.readFile(file, 'utf8'));
+    await fs.writeFile(file, JSON.stringify({ ...original, version: 2 }));
+    actions.resetRichActionsForTests();
+    expect(await status(event, request(session.id, RICH_RECEIPT))).toEqual(RICH_UNAVAILABLE);
+    expect(JSON.parse(await fs.readFile(file, 'utf8')).version).toBe(2);
+    await fs.rm(file);
+    actions.resetRichActionsForTests();
+    expect(await status(event, request(session.id, RICH_RECEIPT))).toEqual(RICH_UNAVAILABLE);
+    expect(await fs.readdir(path.dirname(file))).not.toContain('rich-actions.json');
+  });
+
+  it('discards a status lookup started at old A after A→B→A reselects the same ID with a newer main generation', async () => {
+    const store = await import('../src/main/session/store.js');
+    const a = await createSession({ title: 'stale status A' });
+    const b = await createSession({ title: 'stale status B' });
+    await seedStatusRows(a.id);
+    const { event } = selectionWindow();
+    expect(await select(event, a.id, 1)).toMatchObject({ ok: true });
+    const original = store.getSession;
+    let release!: () => void;
+    let entered!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const held = vi.spyOn(store, 'getSession').mockImplementation(id => id === a.id && !release
+      ? new Promise(resolve => { release = () => void original(id).then(resolve); entered(); }) : original(id));
+    try {
+      const stale = status(event, request(a.id));
+      await reached;
+      expect(await select(event, b.id, 2)).toMatchObject({ ok: true });
+      expect(await select(event, a.id, 3)).toMatchObject({ ok: true });
+      release();
+      expect(await stale).toEqual(RICH_UNAVAILABLE);
+      expect(await status(event, request(a.id))).toMatchObject({ ok: true, data: { id: RICH_PENDING, state: 'pending' } });
+    } finally { held.mockRestore(); }
+  });
+
+  it('discards a stale receipt after the awaited ledger read even when A→B→A ends on the same session', async () => {
+    const actions = await import('../src/main/rich-actions.js');
+    const a = await createSession({ title: 'ledger-await A' });
+    const b = await createSession({ title: 'ledger-await B' });
+    await seedStatusRows(a.id);
+    const { event } = selectionWindow();
+    expect(await select(event, a.id, 1)).toMatchObject({ ok: true });
+    const original = actions.readRichActionStatus;
+    let release!: () => void;
+    let entered!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const held = vi.spyOn(actions, 'readRichActionStatus').mockImplementation(async (...args) => {
+      const result = await original(...args);
+      await new Promise<void>(resolve => { release = resolve; entered(); });
+      return result;
+    });
+    try {
+      const stale = status(event, request(a.id, RICH_RECEIPT));
+      await reached;
+      expect(await select(event, b.id, 2)).toMatchObject({ ok: true });
+      expect(await select(event, a.id, 3)).toMatchObject({ ok: true });
+      release();
+      expect(await stale).toEqual(RICH_UNAVAILABLE);
+    } finally { held.mockRestore(); }
+  });
+
+  it('does not disclose a receipt if a store-owned deletion completed during its awaited ledger read', async () => {
+    const store = await import('../src/main/session/store.js');
+    const actions = await import('../src/main/rich-actions.js');
+    const session = await createSession({ title: 'deleted during rich read' });
+    await seedStatusRows(session.id);
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    const original = actions.readRichActionStatus;
+    let release!: () => void;
+    let entered!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const held = vi.spyOn(actions, 'readRichActionStatus').mockImplementation(async (...args) => {
+      const result = await original(...args);
+      await new Promise<void>(resolve => { release = resolve; entered(); });
+      return result;
+    });
+    try {
+      const pending = status(event, request(session.id, RICH_RECEIPT));
+      await reached;
+      await store.deleteSession(session.id); // Store also deletes empty abandoned input reservations.
+      release();
+      expect(await pending).toEqual(RICH_UNAVAILABLE);
+    } finally { held.mockRestore(); }
+  });
+
+  it('does not disclose a synthetic receipt when its session was removed or the ledger is corrupt', async () => {
+    const session = await createSession({ title: 'removed status' });
+    const file = await seedStatusRows(session.id);
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    await fs.writeFile(file, '{bad ledger');
+    (await import('../src/main/rich-actions.js')).resetRichActionsForTests();
+    expect(await status(event, request(session.id, RICH_RECEIPT))).toEqual(RICH_UNAVAILABLE);
+    expect(await fs.readFile(file, 'utf8')).toBe('{bad ledger');
   });
 });
 
