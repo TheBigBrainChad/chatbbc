@@ -2178,6 +2178,225 @@ describe('activity feed', () => {
     }
   );
 
+  it.each([true, false])('preserves a physically committed final across post-loop recovery read and %s Off', async offSucceeds => {
+    await pair();
+    const conversationId = randomUUID();
+    const turnId = `post-loop-${conversationId}`;
+    const finalId = `post-loop-final-${conversationId}`;
+    const initial = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: Date.now(), turnId },
+      { kind: 'user_message', time: Date.now() + 1, turnId, messageId: `question-${conversationId}`, text: 'Finish the task' }
+    ] } });
+    const sessionId = initial.body.sessionId as string;
+    expect(sessionId).toBeTruthy();
+    const initialEnds = (await readEvents(sessionId)).filter(row => row.kind === 'turn_end').length;
+    const originalRename = fs.rename.bind(fs);
+    const originalOpen = fs.open.bind(fs);
+    const configTarget = path.join(dir, 'config.json');
+    let finalPath: string | null = null;
+    let finalRenames = 0;
+    let firstEntered!: () => void, releaseFirst!: () => void;
+    let readEntered!: () => void, releaseRead!: () => void;
+    let configEntered!: () => void, releaseConfig!: () => void;
+    const firstReached = new Promise<void>(resolve => { firstEntered = resolve; });
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const readReached = new Promise<void>(resolve => { readEntered = resolve; });
+    const readGate = new Promise<void>(resolve => { releaseRead = resolve; });
+    const configReached = new Promise<void>(resolve => { configEntered = resolve; });
+    const configGate = new Promise<void>(resolve => { releaseConfig = resolve; });
+    let readHeld = false;
+    let failedConfig = false;
+    let configHeld = false;
+    const renameSpy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      const target = String(to);
+      if (target.includes(`${path.sep}messages${path.sep}`) && target.endsWith('.json')) {
+        if (!finalPath) {
+          finalPath = target;
+          finalRenames++;
+          await originalRename(from, to);
+          firstEntered();
+          await firstGate;
+          return;
+        }
+        if (target === finalPath) finalRenames++;
+      }
+      if (!configHeld && target === configTarget) {
+        configHeld = true;
+        configEntered();
+        await configGate;
+        if (!offSucceeds && !failedConfig) {
+          failedConfig = true;
+          throw Object.assign(new Error('post-loop Off EIO'), { code: 'EIO' });
+        }
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation((async (file, flags, mode) => {
+      if (finalPath && !readHeld && String(file).endsWith(`${path.sep}events.jsonl`) && flags === 'r') {
+        readHeld = true;
+        readEntered();
+        await readGate;
+      }
+      return originalOpen(file, flags, mode);
+    }) as typeof fs.open);
+    let batch: Promise<Reply> | null = null;
+    let disabling: Promise<unknown> | null = null;
+    try {
+      batch = request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'assistant_message', time: Date.now() + 2, turnId, messageId: finalId,
+          text: 'Fully committed before recovery read', state: 'final', final: true, goalEligible: true }
+      ] } });
+      void batch.catch(() => undefined);
+      await firstReached;
+      expect(JSON.parse(await fs.readFile(finalPath!, 'utf8')).messageId).toBe(finalId);
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      void disabling.catch(() => undefined);
+      await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+      releaseFirst();
+      // The drain finishes before the read takes its queue snapshot. Only the config
+      // rename is held while readCompletedFinal independently opens the event journal.
+      await configReached;
+      await readReached;
+      releaseConfig();
+      if (offSucceeds) await disabling;
+      else await expect(disabling).rejects.toThrow('post-loop Off EIO');
+      releaseRead();
+      const reply = await batch;
+      expect(reply).toMatchObject({ status: 200, body: { sessionId, stored: offSucceeds ? 1 : 2 } });
+      expect(reply.body).not.toHaveProperty('recordingSuppressed', true);
+      const rows = await readEvents(sessionId);
+      expect(rows.filter(row => row.kind === 'assistant_message').map(row => row.messageId)).toEqual([finalId]);
+      expect(rows.filter(row => row.kind === 'turn_end').length).toBe(initialEnds + (offSucceeds ? 0 : 1));
+      expect(finalRenames).toBe(1);
+      expect((await readDurable<{ replies: Array<{ conversationId: string; replyId: string; state: string }> }>(GOAL_REPLIES_STATE))?.replies
+        .filter(reply => reply.conversationId === conversationId)).toMatchObject([
+          { replyId: finalId, state: offSucceeds ? 'handled' : expect.any(String) }
+        ]);
+    } finally {
+      releaseFirst();
+      releaseConfig();
+      releaseRead();
+      await Promise.allSettled([batch, disabling].filter(promise => promise !== null));
+      openSpy.mockRestore();
+      renameSpy.mockRestore();
+      await updateConfig(() => suiteConfig);
+    }
+  });
+
+  it('does not derive a committed anonymous final Goal verdict from a later suppressed failed end', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const turnId = `suffix-end-${conversationId}`;
+    const finalId = `suffix-final-${conversationId}`;
+    const initial = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: Date.now(), turnId },
+      { kind: 'user_message', time: Date.now() + 1, turnId, messageId: `question-${conversationId}`, text: 'Complete' }
+    ] } });
+    const sessionId = initial.body.sessionId as string;
+    const originalRename = fs.rename.bind(fs);
+    let firstPath: string | null = null;
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (!firstPath && String(to).includes(`${path.sep}messages${path.sep}`) && String(to).endsWith('.json')) {
+        firstPath = String(to);
+        await originalRename(from, to);
+        entered();
+        await gate;
+        return;
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    let batch: Promise<Reply> | null = null;
+    let disabling: Promise<unknown> | null = null;
+    try {
+      batch = request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'assistant_message', time: Date.now() + 2, messageId: finalId,
+          text: 'Final without page turn id', state: 'final', final: true },
+        { kind: 'turn_end', time: Date.now() + 3, turnId, outcome: 'failed', reason: 'thinking_failed' }
+      ] } });
+      void batch.catch(() => undefined);
+      await reached;
+      expect(JSON.parse(await fs.readFile(firstPath!, 'utf8')).messageId).toBe(finalId);
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      void disabling.catch(() => undefined);
+      await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+      release();
+      await disabling;
+      expect(await batch).toMatchObject({ status: 200, body: {
+        sessionId, stored: 1, partialCommitted: true, remainderSuppressed: true
+      } });
+      const rows = await readEvents(sessionId);
+      expect(rows.filter(row => row.kind === 'turn_end')).toHaveLength(0);
+      const final = rows.find(row => row.kind === 'assistant_message' && row.messageId === finalId);
+      expect(final).toBeTruthy();
+      expect(final).not.toHaveProperty('goalEligible', true);
+      expect((await readDurable<{ replies: Array<{ conversationId: string }> }>(GOAL_REPLIES_STATE))?.replies
+        .filter(reply => reply.conversationId === conversationId) ?? []).toEqual([]);
+    } finally {
+      release();
+      await Promise.allSettled([batch, disabling].filter(promise => promise !== null));
+      spy.mockRestore();
+      await updateConfig(() => suiteConfig);
+    }
+  });
+
+  it('does not name a first-sight session from uncommitted title or user after tool evidence', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const finalId = `evidence-final-${conversationId}`;
+    const originalRename = fs.rename.bind(fs);
+    let firstPath: string | null = null;
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (!firstPath && String(to).includes(`${path.sep}messages${path.sep}`) && String(to).endsWith('.json')) {
+        firstPath = String(to);
+        await originalRename(from, to);
+        entered();
+        await gate;
+        return;
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    let batch: Promise<Reply> | null = null;
+    let disabling: Promise<unknown> | null = null;
+    try {
+      batch = request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'tool_evidence', time: Date.now(), calls: [{ messageId: 'evidence-call',
+          tool: 'read', order: 0, answered: false, requestId: randomUUID() }] },
+        { kind: 'assistant_message', time: Date.now() + 1, messageId: finalId,
+          text: 'Actual committed content', state: 'final', final: true },
+        { kind: 'user_message', time: Date.now() + 2, messageId: 'uncommitted-evidence-user',
+          text: 'Uncommitted User Title' },
+        { kind: 'conversation_title', time: Date.now() + 3, text: 'Uncommitted Provider Title' }
+      ] } });
+      void batch.catch(() => undefined);
+      await reached;
+      expect(JSON.parse(await fs.readFile(firstPath!, 'utf8')).messageId).toBe(finalId);
+      const sessionId = (await findSessionByConversation(conversationId))!.id;
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      void disabling.catch(() => undefined);
+      await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+      release();
+      await disabling;
+      expect(await batch).toMatchObject({ status: 200, body: {
+        sessionId, stored: 1, partialCommitted: true, remainderSuppressed: true
+      } });
+      expect((await getSession(sessionId))?.title).toBe('ChatGPT session');
+      const rows = await readEvents(sessionId);
+      expect(rows.filter(row => row.kind === 'assistant_message').map(row => row.messageId)).toEqual([finalId]);
+      expect(rows.filter(row => row.kind === 'user_message')).toEqual([]);
+    } finally {
+      release();
+      await Promise.allSettled([batch, disabling].filter(promise => promise !== null));
+      spy.mockRestore();
+      await updateConfig(() => suiteConfig);
+    }
+  });
+
   it('drains an admitted physical writer while a second authenticated events request parks outside its queue', async () => {
     await pair();
     const conversationId = randomUUID();

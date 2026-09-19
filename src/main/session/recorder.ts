@@ -15,7 +15,6 @@
 
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
-import { userTitle } from './title.js';
 import type {
   ActivitySummary,
   AgentMessage,
@@ -1893,16 +1892,6 @@ async function recordPageTool(
 
 const observationChains = new Map<string, Promise<void>>();
 
-function observedUserTitle(first?: string): string | undefined {
-  return first ? userTitle(first) || undefined : undefined;
-}
-
-function observationTitle(observations: readonly ChatObservation[]): string | undefined {
-  const title = observations.find((item) => item.kind === 'conversation_title')?.text?.trim();
-  const first = observations.find((item) => item.kind === 'user_message')?.text;
-  return title || observedUserTitle(first);
-}
-
 /** The one ownership ingress used by both /correlations and transcript batches.
  * Exact proof needs a committed session/lineage, but must never wait behind that chat's
  * streamed text, HTML or image writes. Session initialization already has its own owner. */
@@ -1912,7 +1901,9 @@ export async function recordRequestEvidence(
 ): Promise<string | null> {
   if (!recordingEnabled()) return null;
   const lineage = !conversations.has(conversationId) ? await supersededLineage(conversationId) : null;
-  const sessionId = lineage ?? await sessionForConversation(conversationId, observationTitle(observations));
+  // Request proof does not authorize publishing a title/user from the same envelope:
+  // a later transcript row may be excluded by a successful Recording Off.
+  const sessionId = lineage ?? await sessionForConversation(conversationId);
   if (!sessionId) return null;
   // Proof identifies even a retired caller; kernel/recorder attachment checks then refuse it
   // as superseded. Never turn an exact historical owner into anonymous executable authority.
@@ -2111,17 +2102,8 @@ async function recordChatObservationsNow(
   const explicitEnds = new Set<string>();
   const batchTurnStarts = new Map<string, number>();
   let batchUncertainEndId: string | null = null;
-  // This batch is hot while ChatGPT is streaming. Collect the three facts needed before the
-  // write loop in one pass instead of find + find + filter + map (the latter two also allocated
-  // an intermediate array for every batch).
-  for (const item of observations) {
-    if (item.kind === 'conversation_title') pageTitle = item;
-    if (item.kind === 'turn_start' && item.turnId) batchTurnStarts.set(item.turnId, item.time);
-    if (item.kind === 'turn_end' && item.turnId) {
-      explicitEnds.add(item.turnId);
-      if (item.outcome !== 'completed' && item.outcome !== 'stopped') batchUncertainEndId = item.turnId;
-    }
-  }
+  // Lifecycle premises are accumulated only after their rows pass the durable barrier.
+  // A later end in this envelope cannot authorize an earlier final if Off excludes it.
   // A title/user appearing later in this HTTP batch has not crossed a durable
   // admission barrier. The canonical user writer and post-loop title promotion
   // own naming only AFTER their exact row commits; Off may discard that suffix.
@@ -2160,6 +2142,7 @@ async function recordChatObservationsNow(
         break;
       case 'conversation_title':
         // Apply after canonical messages so legacy preview proof exists in either batch order.
+        pageTitle = item;
         break;
       case 'user_message': {
         // A message with no ChatGPT identity cannot participate in the canonical transcript.
@@ -2361,6 +2344,7 @@ async function recordChatObservationsNow(
         await appendEvent(sessionId, { ...base, kind: 'turn_start' });
         // Commit before publishing the lifecycle projection. If append rejects, the same
         // browser event remains eligible for its normal at-least-once retry.
+        batchTurnStarts.set(item.turnId, item.time);
         if (live) {
           live.knownTurnStarts.add(item.turnId);
           // Turn lifecycle is presentation/recovery state only in 1.8. It is never consulted
@@ -2404,6 +2388,8 @@ async function recordChatObservationsNow(
           ...(item.detail ? { detail: item.detail } : {})
         });
         // As above, durable journal state owns idempotency; in-memory state follows it.
+        explicitEnds.add(item.turnId);
+        if (item.outcome !== 'completed' && item.outcome !== 'stopped') batchUncertainEndId = item.turnId;
         if (live) {
           const endedStartedAt = live.turnId === item.turnId ? live.turnStartedAt : null;
           if (live.turnId === item.turnId || stopOverride) activity.endedTurnId = item.turnId;
@@ -2449,39 +2435,55 @@ async function recordChatObservationsNow(
       throw error;
     }
   }
-  if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) {
+  const committedPrefix = (): RecordedObservationBatch => {
     notifyChanged();
     // A successful Off cannot erase rows that already crossed their real durable barrier.
     // Retain only the successfully processed prefix for subsequent Goal/worker/recovery work.
     return { sessionId, stored, activity, goalCandidates: stored > 0 ? goalCandidates : [],
       committedObservations, remainderSuppressed: processed < observations.length };
-  }
-  if (pageTitle) await promoteConversationTitle(sessionId, pageTitle.text, conversationId);
-  // Completion and delivery readiness are separate: retain the exact native final
-  // while a tool drains. The input owner keeps its in-flight fence until sending is safe.
-  const completion = recoveredFinal ? await readCompletedFinal(sessionId, conversationId, recoveredFinal.turnId) : null;
-  if (recoveredFinal && completion && live?.turnId === recoveredFinal.turnId && live.openTurns.has(recoveredFinal.turnId)) {
-    const { turnId, time } = recoveredFinal;
-    await appendEvent(sessionId, {
-      time, source: 'extension', kind: 'turn_end', turnId, outcome: 'completed',
-      detail: 'recovered from a final assistant message after the ChatGPT page reloaded',
-      ...(agent ? { agent } : {})
-    });
-    // Commit before publishing, preserving the same late-tool evidence as an explicit end.
-    live.openTurns.delete(turnId);
-    live.knownTurnEnds.add(turnId);
-    live.lastTurnOutcome = 'completed';
-    live.lastTurnStartedAt = live.turnStartedAt;
-    // Native message time may be its creation time, long before this final was observed.
-    live.endedTurn = { turnId, startedAt: live.turnStartedAt, endedAt: Date.now(), requestIds: live.turnRequestIds };
-    live.turnRequestIds = new Set<string>();
-    live.turnStartedAt = null;
-    live.turnId = null;
-    activity.meaningful = true;
-    activity.at = Math.max(activity.at ?? 0, time);
-    activity.terminal = true;
-    activity.endedTurnId = turnId;
-    stored++;
+  };
+  if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) return committedPrefix();
+  try {
+    if (pageTitle) await promoteConversationTitle(sessionId, pageTitle.text, conversationId);
+    // Completion and delivery readiness are separate: retain the exact native final
+    // while a tool drains. The input owner keeps its in-flight fence until sending is safe.
+    const completion = recoveredFinal ? await readCompletedFinal(sessionId, conversationId, recoveredFinal.turnId) : null;
+    if (recoveredFinal && !explicitEnds.has(recoveredFinal.turnId) && completion &&
+        live?.turnId === recoveredFinal.turnId && live.openTurns.has(recoveredFinal.turnId)) {
+      const { turnId, time } = recoveredFinal;
+      // The read above awaits disk independently of the original canonical shard.
+      // If Off settles during that await, its synthetic end has no write authority.
+      if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) return committedPrefix();
+      await appendEvent(sessionId, {
+        time, source: 'extension', kind: 'turn_end', turnId, outcome: 'completed',
+        detail: 'recovered from a final assistant message after the ChatGPT page reloaded',
+        ...(agent ? { agent } : {})
+      });
+      // Commit before publishing, preserving the same late-tool evidence as an explicit end.
+      live.openTurns.delete(turnId);
+      live.knownTurnEnds.add(turnId);
+      live.lastTurnOutcome = 'completed';
+      live.lastTurnStartedAt = live.turnStartedAt;
+      // Native message time may be its creation time, long before this final was observed.
+      live.endedTurn = { turnId, startedAt: live.turnStartedAt, endedAt: Date.now(), requestIds: live.turnRequestIds };
+      live.turnRequestIds = new Set<string>();
+      live.turnStartedAt = null;
+      live.turnId = null;
+      activity.meaningful = true;
+      activity.at = Math.max(activity.at ?? 0, time);
+      activity.terminal = true;
+      activity.endedTurnId = turnId;
+      stored++;
+    }
+  } catch (error) {
+    if (isRecordingDisabledError(error)) {
+      // A rejected post-loop synthetic write must never erase a completed original row.
+      // Failed Off still rejects to the bridge's existing idempotent retry path.
+      const attemptedOff = pendingRecordingOffDecision();
+      if ((attemptedOff && await attemptedOff.settled) || !recordingEnabled() ||
+          getRecordingRevision() !== recordingRevision) return committedPrefix();
+    }
+    throw error;
   }
   if (recoveredGoalSeen && live) live.lastTurnOutcome = 'completed';
   notifyChanged();
