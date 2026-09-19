@@ -88,7 +88,10 @@ const sessionEvents = (payload: unknown): Promise<any> => handlers.get('sessions
 const sessionList = (): Promise<any> => handlers.get('sessions:list')!(null, undefined) as Promise<any>;
 
 function selectionWindow() {
-  const mainFrame = { url: pathToFileURL(path.join(process.cwd(), 'src/renderer/index.html')).href };
+  const mainFrame = {
+    url: pathToFileURL(path.join(process.cwd(), 'src/renderer/index.html')).href,
+    processId: 101, routingId: 7
+  };
   const webContents = Object.assign(new EventEmitter(), {
     send: vi.fn(), mainFrame, getURL: () => mainFrame.url, isDestroyed: () => false,
     isLoadingMainFrame: () => true
@@ -233,8 +236,12 @@ describe('main-owned, inert UI selection witness', () => {
     expect(currentUiSelectionFor(webContents as any)).toBeNull();
     expect(await handler(event, { sessionId: session.id, rendererGeneration: 2 })).toMatchObject({ ok: false });
     expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    // An in-page completion does not finish an outside-document navigation, even if it
+    // advertises the same app URL and the outgoing frame's real routing identity.
+    webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId, mainFrame.routingId);
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 3 })).toMatchObject({ ok: false });
     webContents.emit('did-start-loading');
-    const newFrame = { url: mainFrame.url };
+    const newFrame = { url: mainFrame.url, processId: 102, routingId: 8 };
     webContents.mainFrame = newFrame;
     (webContents as any).isLoadingMainFrame = () => false;
     webContents.emit('did-finish-load');
@@ -245,6 +252,91 @@ describe('main-owned, inert UI selection witness', () => {
     expect(recovered).toMatchObject({ ok: true, data: { sessionId: session.id } });
     expect(recovered.data.generation).toBeGreaterThan(original.data.generation);
     expect(currentUiSelectionFor(webContents as any)).toEqual(recovered.data);
+  });
+
+  it('reopens only fresh reports after verified same-document main-frame navigation, never its old witness', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const a = await createSession({ title: 'in-page A' });
+    const b = await createSession({ title: 'in-page B' });
+    const { window, webContents, mainFrame, event } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    const first = await handler(event, { sessionId: a.id, rendererGeneration: 1 }) as any;
+    expect(first).toMatchObject({ ok: true, data: { sessionId: a.id } });
+    const report = (sessionId: string, rendererGeneration: number, invokeEvent: unknown = event) =>
+      handler(invokeEvent, { sessionId, rendererGeneration }) as Promise<any>;
+
+    // Electron delivers did-start-navigation then did-navigate-in-page for a same-document
+    // transition. There is NO did-start-loading, provisional abort, or replaced mainFrame.
+    (webContents as any).isLoadingMainFrame = () => false;
+    webContents.emit('did-start-navigation', {
+      url: mainFrame.url, isSameDocument: true, isMainFrame: true, frame: mainFrame
+    });
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect(await report(b.id, 2)).toMatchObject({ ok: false }); // Old frame cannot report early.
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+
+    // A subframe completion, foreign contents, wrong routing identity and wrong URL must
+    // not make the pending transition reportable. The URL comes only from Electron.
+    webContents.emit('did-navigate-in-page', {}, mainFrame.url, false, mainFrame.processId, mainFrame.routingId);
+    expect(await report(b.id, 3)).toMatchObject({ ok: false });
+    const foreign = selectionWindow();
+    currentWindow = window as any;
+    foreign.webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId, mainFrame.routingId);
+    expect(await report(b.id, 4)).toMatchObject({ ok: false });
+    webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId + 1, mainFrame.routingId);
+    expect(await report(b.id, 4)).toMatchObject({ ok: false });
+    webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId, mainFrame.routingId + 1);
+    expect(await report(b.id, 5)).toMatchObject({ ok: false });
+    webContents.emit('did-navigate-in-page', {}, 'https://foreign.example/', true, mainFrame.processId, mainFrame.routingId);
+    expect(await report(b.id, 6)).toMatchObject({ ok: false });
+    webContents.mainFrame = { ...mainFrame };
+    webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId, mainFrame.routingId);
+    expect(await report(b.id, 6)).toMatchObject({ ok: false });
+    webContents.mainFrame = mainFrame;
+
+    expect(webContents.mainFrame).toBe(mainFrame);
+    webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId, mainFrame.routingId);
+    expect(currentUiSelectionFor(webContents as any)).toBeNull(); // Completion never restores A.
+    expect(await report(a.id, 1)).toMatchObject({ ok: false }); // No renderer sequence reset.
+    const second = await report(b.id, 7);
+    expect(second).toMatchObject({ ok: true, data: { sessionId: b.id } });
+    expect(second.data.generation).toBeGreaterThan(first.data.generation);
+    const back = await report(a.id, 8);
+    expect(back).toMatchObject({ ok: true, data: { sessionId: a.id } });
+    expect(back.data.generation).toBeGreaterThan(second.data.generation);
+    expect(currentUiSelectionFor(webContents as any)).toEqual(back.data);
+  });
+
+  it('cannot publish an in-flight old A report after same-document A→B→A completion', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const store = await import('../src/main/session/store.js');
+    const a = await createSession({ title: 'in-page pending A' });
+    const b = await createSession({ title: 'in-page pending B' });
+    const { webContents, mainFrame, event } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    expect(await handler(event, { sessionId: a.id, rendererGeneration: 1 })).toMatchObject({ ok: true });
+    let release!: (value: Awaited<ReturnType<typeof store.getSession>>) => void;
+    const original = store.getSession;
+    const spy = vi.spyOn(store, 'getSession').mockImplementation(id => id === a.id && !release
+      ? new Promise(resolve => { release = resolve; }) : original(id));
+    try {
+      const pendingA = handler(event, { sessionId: a.id, rendererGeneration: 2 });
+      expect(currentUiSelectionFor(webContents as any)).toBeNull();
+      (webContents as any).isLoadingMainFrame = () => false;
+      webContents.emit('did-start-navigation', {
+        url: mainFrame.url, isSameDocument: true, isMainFrame: true, frame: mainFrame
+      });
+      expect(await handler(event, { sessionId: b.id, rendererGeneration: 3 })).toMatchObject({ ok: false });
+      webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId, mainFrame.routingId);
+      const winnerB = await handler(event, { sessionId: b.id, rendererGeneration: 4 }) as any;
+      expect(winnerB).toMatchObject({ ok: true, data: { sessionId: b.id } });
+      const winnerA = await handler(event, { sessionId: a.id, rendererGeneration: 5 }) as any;
+      expect(winnerA).toMatchObject({ ok: true, data: { sessionId: a.id } });
+      release(await original(a.id));
+      expect(await pendingA).toMatchObject({ ok: false });
+      expect(currentUiSelectionFor(webContents as any)).toEqual(winnerA.data);
+      expect(winnerA.data.generation).toBeGreaterThan(winnerB.data.generation);
+    } finally { spy.mockRestore(); }
   });
 
   it('ignores subframe navigation and never retires the current main-frame witness', async () => {

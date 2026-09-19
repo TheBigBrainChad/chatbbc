@@ -27,6 +27,7 @@ type WindowRecord = {
   navigation: {
     frame: WebContents['mainFrame'] | null;
     url: string;
+    sameDocument: boolean;
     loading: boolean;
     aborted: boolean;
     stopped: boolean;
@@ -76,7 +77,7 @@ export class UiSelectionOwner {
       ready: true, navigation: null, dispose: () => {}
     };
     const revoke = (): void => this.invalidate(record);
-    const navigation = (details: { isMainFrame?: boolean; url?: string; frame?: WebContents['mainFrame'] | null }): void => {
+    const navigation = (details: { isMainFrame?: boolean; isSameDocument?: boolean; url?: string; frame?: WebContents['mainFrame'] | null }): void => {
       if (details?.isMainFrame === false) return;
       revoke();
       record.ready = false;
@@ -85,8 +86,22 @@ export class UiSelectionOwner {
       // report must remain refused until this exact main-frame transition is resolved.
       record.navigation = {
         frame: details?.frame === contents.mainFrame ? contents.mainFrame : null,
-        url: details?.url ?? '', loading: false, aborted: false, stopped: false
+        url: details?.url ?? '', sameDocument: details?.isSameDocument === true,
+        loading: false, aborted: false, stopped: false
       };
+    };
+    const inPage = (_event: unknown, url: string, isMainFrame: boolean,
+      frameProcessId: number, frameRoutingId: number): void => {
+      const pending = record.navigation;
+      const frame = contents.mainFrame;
+      if (!pending?.sameDocument || pending.loading || !isMainFrame || !pending.frame ||
+          pending.frame !== frame || pending.url !== url ||
+          frame.processId !== frameProcessId || frame.routingId !== frameRoutingId ||
+          contents.isLoadingMainFrame?.() !== false || !isAppFrame(contents)) return;
+      // Only Electron's matching completion reopens report admission. The previous
+      // selection, pending lookup and renderer sequence remain retired/fenced.
+      record.navigation = null;
+      record.ready = true;
     };
     const load = (): void => {
       if (contents.isLoadingMainFrame?.() === false) return;
@@ -130,6 +145,7 @@ export class UiSelectionOwner {
     const crashed = (): void => { revoke(); record.ready = false; };
     const listeners = [
       [contents, 'did-start-navigation', navigation],
+      [contents, 'did-navigate-in-page', inPage],
       [contents, 'did-start-loading', load],
       [contents, 'did-finish-load', loaded],
       [contents, 'did-fail-provisional-load', abort],
