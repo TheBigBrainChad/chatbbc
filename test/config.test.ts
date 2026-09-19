@@ -94,7 +94,7 @@ describe('settings migration', () => {
       expect((await loadConfig()).goal).toMatchObject({ backend, loopBackend: 'api' });
     }
   });
-  it('normalizes every writer and legacy file to recording on with no age expiry', async () => {
+  it('preserves explicit recording off through saving and legacy loading without age expiry', async () => {
     const legacy = {
       ...defaultConfig(),
       sessions: { ...defaultConfig().sessions, record: false, retainDays: 30 },
@@ -102,13 +102,25 @@ describe('settings migration', () => {
     };
 
     const saved = await saveConfig(legacy);
-    expect(saved.sessions).toMatchObject({ record: true, retainDays: 0 });
+    expect(saved.sessions).toMatchObject({ record: false, retainDays: 0 });
     expect(saved.goal.enabled).toBe(true);
+    expect(JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8')).sessions)
+      .toMatchObject({ record: false, retainDays: 0 });
 
     await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(legacy), 'utf8');
     const loaded = await loadConfig();
-    expect(loaded.sessions).toMatchObject({ record: true, retainDays: 0 });
+    expect(loaded.sessions).toMatchObject({ record: false, retainDays: 0 });
     expect(loaded.goal.enabled).toBe(true);
+  });
+
+  it('keeps recording off through an unrelated queued config update and permits explicit re-enable', async () => {
+    const base = defaultConfig();
+    await saveConfig({ ...base, sessions: { ...base.sessions, record: false } });
+    await updateConfig(current => ({ ...current, ui: { ...current.ui, autoConnect: true } }));
+    expect((await loadConfig()).sessions).toMatchObject({ record: false, retainDays: 0 });
+    expect((await loadConfig()).ui.autoConnect).toBe(true);
+    await updateConfig(current => ({ ...current, sessions: { ...current.sessions, record: true, retainDays: 3650 } }));
+    expect((await loadConfig()).sessions).toMatchObject({ record: true, retainDays: 0 });
   });
 
   it('preserves old settings when new safe-default capabilities and UI prefs are added', async () => {
@@ -439,12 +451,12 @@ describe('shipped defaults', () => {
     expect(loaded.multiAgent.enabled).toBe(false);
   });
 
-  it('does not persist obsolete recording-off or age-retention choices', async () => {
+  it('persists explicit recording-off but never persists age expiry', async () => {
     const config = defaultConfig();
     await saveConfig({ ...config, sessions: { ...config.sessions, record: false, retainDays: 3650 } });
-    expect((await loadConfig()).sessions).toMatchObject({ record: true, retainDays: 0 });
+    expect((await loadConfig()).sessions).toMatchObject({ record: false, retainDays: 0 });
     const stored = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
-    expect(stored.sessions).toMatchObject({ record: true, retainDays: 0 });
+    expect(stored.sessions).toMatchObject({ record: false, retainDays: 0 });
   });
 
   it('applies the new default to a config written before the setting existed', async () => {
@@ -452,6 +464,10 @@ describe('shipped defaults', () => {
     const { sessions: _dropped, ...withoutSessions } = before;
     await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(withoutSessions), 'utf8');
     expect((await loadConfig()).sessions.record).toBe(true);
+    await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify({ ...before,
+      sessions: { advisoryTokens: 350_000, limitTokens: 460_000, retainDays: 45 }
+    }), 'utf8');
+    expect((await loadConfig()).sessions).toMatchObject({ record: true, retainDays: 0, advisoryTokens: 350_000 });
   });
 
   /**

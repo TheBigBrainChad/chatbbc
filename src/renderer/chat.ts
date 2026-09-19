@@ -2414,9 +2414,7 @@ export function chatSettingsPatch(current: Config): {
   const threshold = number('autoCompactTokens', current.compaction.autoTokens, 10_000, 4_000_000);
   return {
     sessions: {
-      // Main enforces these invariants too. Keeping the canonical values in the complete
-      // renderer snapshot prevents an old/foreign control value from being proposed at all.
-      record: true,
+      record: $<HTMLInputElement>('sessRecord').checked,
       retainDays: 0,
       // Both follow the single threshold above rather than being typed separately.
       advisoryTokens: threshold,
@@ -2792,11 +2790,11 @@ function applyAutoCompactHint(config: Config): void {
  * A field that is not here does not save: it keeps what was typed until the next repaint
  * and then quietly reverts. `autoCompactTokens` was missing, which made the one number the
  * automatic trigger fires on the one control in the app that never kept what you typed.
- * Recording and age retention are absent because history is always recorded and does not
- * expire by age.
+ * Age retention is absent because history does not expire by age.
  */
 const CHAT_INPUTS = [
   'chatBrowser',
+  'sessRecord',
   'goalIncludeToolCalls',
   'planBackend',
   'finishTool', 'finishLeadMinutes', 'workerModel', 'workerReasoning', 'backgroundChats', 'browserOnly', 'autoRefreshPlugins',
@@ -2825,6 +2823,7 @@ export function chatApply(state: AppState, previous?: Config): void {
   paintContextMeter(sessions.find(session => session.id === selectedId) ?? null, config, confirmedComposerModel());
   applyChatModels(config, previous);
 
+  applyChatChecked($<HTMLInputElement>('sessRecord'), config.sessions.record, previous?.sessions.record);
   applyChatChecked($<HTMLInputElement>('autoCompact'), config.compaction.auto, previous?.compaction.auto);
   applyChatValue(
     $<HTMLInputElement>('autoCompactTokens'),
@@ -2862,7 +2861,7 @@ export function chatApply(state: AppState, previous?: Config): void {
     : !secureStorageAvailable
       ? (state.secureStorage?.detail ?? t("Secure credential storage is unavailable, so the extension cannot pair safely."))
     : !bridge.running
-      ? t("The local bridge is off even though recording or multi-agent mode needs it.")
+      ? t("The local bridge is off even though browser-backed features need it.")
       : bridge.present
         ? t("Connected. Listening on 127.0.0.1:{0} · last message {1}.", [bridge.port ?? '?', ago(bridge.lastSeenAt)])
         : bridge.paired

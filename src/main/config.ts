@@ -46,10 +46,9 @@ import { capabilitiesForPlatform } from './platform.js';
  * Defaults for the newer sections, in one place so the schema and defaultConfig()
  * cannot drift apart.
  *
- * Recording is always ON and retained without an age limit. Everything the app is actually
- * for — the readable timeline, Compact & resume, and agent attribution — reads that durable
- * history. It writes only to this app's own data folder and uploads nothing. The separate
- * bounded image store keeps its own quota and explicit cleanup controls.
+ * Recording defaults ON but a saved explicit Off must survive loading and all settings writes.
+ * Existing history does not expire by age. The separate bounded image store keeps its own
+ * quota and explicit cleanup controls.
  *
  * Existing configs still keep every explicit permission choice. Fresh installs are different:
  * the Home screen is meant to start fully usable, so every tool permission and the agents
@@ -315,10 +314,9 @@ const configSchema = z.object({
         .default(DEFAULT_SESSIONS.advisoryTokens),
       limitTokens: z.number().int().min(10_000).max(4_000_000).optional().default(DEFAULT_SESSIONS.limitTokens)
     })
-    // `record` and `retainDays` remain readable for old configs and wire compatibility, but
-    // they are no longer user choices. Normalizing here covers disk load, renderer saves,
-    // extension/config writers and direct updateConfig callers at one boundary.
-    .transform((sessions) => ({ ...sessions, record: true, retainDays: 0 }))
+    // An explicit recording choice survives every config writer. Age expiry remains retired:
+    // normalize old retainDays at disk load and all writes without touching record.
+    .transform((sessions) => ({ ...sessions, retainDays: 0 }))
     .optional()
     .default({ ...DEFAULT_SESSIONS }),
   compaction: z

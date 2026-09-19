@@ -85,6 +85,24 @@ const removeRoot = (payload: unknown): Promise<any> => handlers.get('roots:remov
 const sessionEvents = (payload: unknown): Promise<any> => handlers.get('sessions:events')!(null, payload) as Promise<any>;
 const sessionList = (): Promise<any> => handlers.get('sessions:list')!(null, undefined) as Promise<any>;
 
+it('keeps recording off against stale unrelated Settings saves, then accepts an explicit on choice', async () => {
+  const base = getConfig();
+  const off = { ...base, sessions: { ...base.sessions, record: false, retainDays: 60 } };
+  expect(await save(off, base)).toMatchObject({ ok: true });
+  expect(getConfig().sessions).toMatchObject({ record: false, retainDays: 0 });
+  expect((await handlers.get('state:get')!(null, undefined) as any).data.config.sessions.record).toBe(false);
+
+  const staleUnrelated = { ...base, ui: { ...base.ui, autoConnect: !base.ui.autoConnect } };
+  expect(await save(staleUnrelated, base)).toMatchObject({ ok: true });
+  expect(getConfig().ui.autoConnect).toBe(!base.ui.autoConnect);
+  expect(getConfig().sessions).toMatchObject({ record: false, retainDays: 0 });
+  expect(JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8')).sessions.record).toBe(false);
+
+  const fresh = getConfig();
+  expect(await save({ ...fresh, sessions: { ...fresh.sessions, record: true } }, fresh)).toMatchObject({ ok: true });
+  expect(getConfig().sessions).toMatchObject({ record: true, retainDays: 0 });
+});
+
 it('persists arbitrary colors through Settings IPC and preserves concurrent per-field edits', async () => {
   const { defaultAppearance } = await import('../src/shared/appearance.js');
   const base = getConfig();
@@ -163,14 +181,14 @@ it('rejects stale profile tunnel edits after A to B to A while accepting unrelat
   expect(getConfig().setupProfiles).toHaveLength(1);
 });
 
-it.each([true, false])('forwards canonical input commitment even when a legacy writer proposes recording=%s', async recording => {
+it('forwards canonical input commitment when recording is enabled', async () => {
   const input = await import('../src/main/session/input.js');
   const store = await import('../src/main/session/store.js');
   const previous = await readDurable('session-input');
   const session = await createSession({ title: 'Input commitment fixture', conversationId: 'input-commitment-fixture' });
   const id = '30000000-0000-4000-8000-000000000001';
   try {
-    await saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: recording } });
+    await saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: true } });
     await writeDurableNow('session-input', [{ id, sessionId: session.id, text: 'Delivered fixture', mode: 'auto', model: null,
       reasoningEffort: null, dueAt: 100, createdAt: 100, state: 'sent', owner: null, conversationId: 'input-commitment-fixture',
       messageId: `input:${id}`, offeredAt: 200, deliveredAt: 300, historyRecorded: false,
@@ -489,7 +507,7 @@ describe('turning multi-agent mode off', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(pendingCommands().length).toBe(1);
 
-    // Recording off as well, so this really is the case where the bridge is shut down.
+    // The worker teardown is independent of the saved recording preference and bridge lifetime.
     await save(settings({ record: false, multiAgent: false }));
 
     expect(getConfig().multiAgent.enabled).toBe(false);

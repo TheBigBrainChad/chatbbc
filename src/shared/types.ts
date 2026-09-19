@@ -156,9 +156,9 @@ export interface UiPrefs {
 }
 
 /**
- * Session recording is a product invariant. Legacy/wire fields remain so old configs and
- * clients parse, but the main config boundary always publishes `record: true` and
- * `retainDays: 0` (no age expiry). Large image bytes retain their separate bounded quota.
+ * Recording defaults on, and an explicit saved Off remains the user's preference.
+ * The main config boundary always publishes `retainDays: 0` (no age expiry).
+ * Large image bytes retain their separate bounded quota.
  */
 export interface SessionSettings {
   record: boolean;
@@ -625,9 +625,8 @@ export interface MacOSDesktopAccessStatus {
 /**
  * Whether the enabled product surface currently needs the companion browser extension.
  *
- * Recording is always on and consumes browser observations, so the extension bridge is an
- * unconditional product dependency. Keep the parameter for source compatibility with callers
- * that already pass their config snapshot.
+ * Browser-backed features share the extension bridge independently of the recording setting.
+ * Keep the unconditional dependency and the parameter for source compatibility with callers.
  */
 export function browserExtensionRequired(_config: Pick<Config, 'sessions' | 'multiAgent'> & Partial<Pick<Config, 'capabilities'>>): boolean {
   return true;
