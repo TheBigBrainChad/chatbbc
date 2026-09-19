@@ -2178,6 +2178,134 @@ describe('activity feed', () => {
     }
   );
 
+  it.each([
+    { owner: 'goal', offSucceeds: true },
+    { owner: 'worker', offSucceeds: true },
+    { owner: 'goal', offSucceeds: false }
+  ] as const)('preserves an in-switch physically committed $owner final when the recovered end meets $offSucceeds Off', async ({ owner, offSucceeds }) => {
+    await pair();
+    const conversationId = randomUUID();
+    const turnId = `in-switch-${conversationId}`;
+    const finalId = `in-switch-final-${conversationId}`;
+    let commandId: string | undefined;
+    if (owner === 'worker') {
+      spawn({ workers: [{ task: 'report the exact committed thinking-failure final only' }], caller: { conversationId: PRIME_CHAT } });
+      commandId = (await redeem()).id;
+    }
+    const now = Date.now();
+    const initial = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: now, turnId },
+      { kind: 'user_message', time: now + 1, turnId, messageId: `question-${conversationId}`, text: 'Finish after a failed view' },
+      { kind: 'turn_end', time: now + 2, turnId, outcome: 'failed', reason: 'thinking_failed' }
+    ] } });
+    expect(initial.status).toBe(200);
+    const sessionId = initial.body.sessionId as string;
+    const originalRows = await readEvents(sessionId);
+    expect(originalRows.filter(row => row.kind === 'turn_end')).toMatchObject([
+      { turnId, outcome: 'failed', reason: 'thinking_failed' }
+    ]);
+    const originalRename = fs.rename.bind(fs);
+    const originalOpen = fs.open.bind(fs);
+    const configTarget = path.join(dir, 'config.json');
+    let finalPath: string | null = null;
+    let finalRenames = 0;
+    let finalEntered!: () => void, releaseFinal!: () => void;
+    let readEntered!: () => void, releaseRead!: () => void;
+    let configEntered!: () => void, releaseConfig!: () => void;
+    const finalReached = new Promise<void>(resolve => { finalEntered = resolve; });
+    const finalGate = new Promise<void>(resolve => { releaseFinal = resolve; });
+    const readReached = new Promise<void>(resolve => { readEntered = resolve; });
+    const readGate = new Promise<void>(resolve => { releaseRead = resolve; });
+    const configReached = new Promise<void>(resolve => { configEntered = resolve; });
+    const configGate = new Promise<void>(resolve => { releaseConfig = resolve; });
+    let readHeld = false;
+    let configHeld = false;
+    const renameSpy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      const target = String(to);
+      if (target.includes(`${path.sep}messages${path.sep}`) && target.endsWith('.json')) {
+        if (!finalPath) {
+          finalPath = target;
+          finalRenames++;
+          await originalRename(from, to);
+          finalEntered();
+          await finalGate;
+          return;
+        }
+        if (target === finalPath) finalRenames++;
+      }
+      if (!configHeld && target === configTarget) {
+        configHeld = true;
+        configEntered();
+        await configGate;
+        if (!offSucceeds) throw Object.assign(new Error('in-switch Off EIO'), { code: 'EIO' });
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation((async (file, flags, mode) => {
+      if (finalPath && !readHeld && String(file).endsWith(`${path.sep}events.jsonl`) && flags === 'r') {
+        readHeld = true;
+        readEntered();
+        await readGate;
+      }
+      return originalOpen(file, flags, mode);
+    }) as typeof fs.open);
+    let batch: Promise<Reply> | null = null;
+    let disabling: Promise<unknown> | null = null;
+    try {
+      batch = request('POST', '/events', { body: {
+        conversationId,
+        ...(commandId ? { agent: 'worker-1', agentCommandId: commandId } : {}),
+        events: [{ kind: 'assistant_message', time: now + 3, turnId, messageId: finalId,
+          providerMessageId: randomUUID(), text: 'Exact native final after failed thinking',
+          state: 'final', final: true, goalEligible: true }]
+      } });
+      void batch.catch(() => undefined);
+      await finalReached;
+      const committed = JSON.parse(await fs.readFile(finalPath!, 'utf8'));
+      expect(committed).toMatchObject({ kind: 'assistant_message', messageId: finalId, goalEligible: true });
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      void disabling.catch(() => undefined);
+      await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+      releaseFinal();
+      // Physical session writer has drained; hold the real in-switch read of the
+      // already-committed failed end while the independent config rename settles.
+      await configReached;
+      await readReached;
+      releaseConfig();
+      if (offSucceeds) await disabling;
+      else await expect(disabling).rejects.toThrow('in-switch Off EIO');
+      releaseRead();
+      const reply = await batch;
+      expect(reply).toMatchObject({ status: 200, body: { sessionId, stored: offSucceeds ? 1 : 2 } });
+      expect(reply.body).not.toHaveProperty('recordingSuppressed', true);
+      expect(reply.body).not.toHaveProperty('partialCommitted', true); // Original HTTP batch contains one row.
+      const rows = await readEvents(sessionId);
+      expect(rows.filter(row => row.kind === 'assistant_message').map(row => row.messageId)).toEqual([finalId]);
+      expect(rows.filter(row => row.kind === 'turn_end')).toMatchObject(offSucceeds
+        ? [{ turnId, outcome: 'failed', reason: 'thinking_failed' }]
+        : [{ turnId, outcome: 'failed', reason: 'thinking_failed' }, { turnId, outcome: 'completed' }]);
+      expect(finalRenames).toBe(1); // Failed-Off retry must not rewrite the original canonical shard.
+      expect((await readDurable<{ replies: Array<{ conversationId: string; replyId: string; state: string }> }>(GOAL_REPLIES_STATE))?.replies
+        .filter(reply => reply.conversationId === conversationId)).toMatchObject([
+          { replyId: finalId, state: offSucceeds ? 'handled' : expect.any(String) }
+        ]);
+      if (owner === 'worker') {
+        expect((await getSession(sessionId))?.origin).toMatchObject({ kind: 'worker', agentId: 'worker-1' });
+        expect(swarmStateForCaller({ conversationId: PRIME_CHAT }).agents.find(agent => agent.id === 'worker-1'))
+          .toMatchObject({ state: 'sleeping', result: 'Exact native final after failed thinking' });
+      }
+    } finally {
+      releaseFinal();
+      releaseConfig();
+      releaseRead();
+      await Promise.allSettled([batch, disabling].filter(promise => promise !== null));
+      openSpy.mockRestore();
+      renameSpy.mockRestore();
+      await updateConfig(() => suiteConfig);
+    }
+  });
+
+
   it.each([true, false])('preserves a physically committed final across post-loop recovery read and %s Off', async offSucceeds => {
     await pair();
     const conversationId = randomUUID();

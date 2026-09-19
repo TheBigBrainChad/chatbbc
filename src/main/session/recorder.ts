@@ -2129,6 +2129,7 @@ async function recordChatObservationsNow(
   for (const item of observations) {
     if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) break;
     processed++;
+    let originalCommitted = false;
     const base = {
       time: item.time,
       source: 'extension' as const,
@@ -2214,23 +2215,20 @@ async function recordChatObservationsNow(
           ...(item.providerMessageId ? { providerMessageId: item.providerMessageId } : {}),
           ...(goalEligible && state === 'final' ? { goalEligible: true } : {})
         }, { preferTime: item.authoredTime === true, work: item.activeNow === true });
-        if (item.rich) await recordRichObservation(conversationId, item);
         const canonicalTurn = written.event.turnId;
-        // A stopped partial answer stays streaming in history. Re-observing its
-        // DOM after restart cannot renew work, nor can an old message borrow a
-        // newer page turn. Preserve the revision while using its canonical owner
-        // and the recorder's terminal boundary to decide activity.
-        const [uncertainEnd] = canonicalTurn && !live?.turnId
-          ? await readRecentEvents(sessionId, 1, { kinds: ['turn_start', 'turn_end', 'user_message'] }) : [];
-        // A fresh exact interim can resume an uncertain failure without inventing
-        // a new user turn. Old messages and explicit completed/stopped turns cannot.
-        const resumedUncertainTurn = uncertainEnd?.kind === 'turn_end' && uncertainEnd.turnId === canonicalTurn &&
-          uncertainEnd.outcome !== 'completed' && uncertainEnd.outcome !== 'stopped' && item.time > uncertainEnd.time;
-        // HTML, provider identity and authored-time promotion revise history, not work.
-        // In particular a post-failure Fiber backfill must not reopen the dead turn.
-        const workingActivity = written.contentChanged && state !== 'final' && item.activeNow === true &&
-          (!canonicalTurn || canonicalTurn === live?.turnId || resumedUncertainTurn) &&
-          !(live?.turnStartedAt === null && (live.lastTurnOutcome === 'stopped' || live.lastTurnOutcome === 'completed'));
+        // The assistant shard has already crossed its physical write barrier. Any rich
+        // revision, recovery read or synthetic lifecycle append below is supplemental and
+        // may independently meet Recording Off, so retain this exact original prefix now.
+        if (written.changed) {
+          stored++;
+          committedObservations.push(item);
+          originalCommitted = true;
+          if (terminalActivity) {
+            activity.meaningful = true;
+            activity.at = Math.max(activity.at ?? 0, item.time);
+            activity.terminal = true;
+          }
+        }
         if (state === 'final' && written.event.kind === 'assistant_message' && canonicalTurn && recoverableTurns.has(canonicalTurn) &&
             !explicitEnds.has(canonicalTurn) && live?.turnId === canonicalTurn) {
           recoveredFinal = { turnId: canonicalTurn, time: item.time,
@@ -2255,13 +2253,30 @@ async function recordChatObservationsNow(
           // can still replay the same obligation even after this stronger final evidence wins.
           recoveredGoalSeen = true;
         }
+        if (item.rich) await recordRichObservation(conversationId, item);
         if (!written.changed) continue;
+        // A stopped partial answer stays streaming in history. Re-observing its
+        // DOM after restart cannot renew work, nor can an old message borrow a
+        // newer page turn. Preserve the revision while using its canonical owner
+        // and the recorder's terminal boundary to decide activity.
+        const [uncertainEnd] = canonicalTurn && !live?.turnId
+          ? await readRecentEvents(sessionId, 1, { kinds: ['turn_start', 'turn_end', 'user_message'] }) : [];
+        // A fresh exact interim can resume an uncertain failure without inventing
+        // a new user turn. Old messages and explicit completed/stopped turns cannot.
+        const resumedUncertainTurn = uncertainEnd?.kind === 'turn_end' && uncertainEnd.turnId === canonicalTurn &&
+          uncertainEnd.outcome !== 'completed' && uncertainEnd.outcome !== 'stopped' && item.time > uncertainEnd.time;
+        // HTML, provider identity and authored-time promotion revise history, not work.
+        // In particular a post-failure Fiber backfill must not reopen the dead turn.
+        const workingActivity = written.contentChanged && state !== 'final' && item.activeNow === true &&
+          (!canonicalTurn || canonicalTurn === live?.turnId || resumedUncertainTurn) &&
+          !(live?.turnStartedAt === null && (live.lastTurnOutcome === 'stopped' || live.lastTurnOutcome === 'completed'));
         if (state === 'final' && written.event.kind === 'assistant_message' && written.event.providerMessageId &&
             uncertainEnd?.kind === 'turn_end' && uncertainEnd.reason === 'thinking_failed' &&
             uncertainEnd.turnId === canonicalTurn && (written.event.finalContentSeq ?? written.event.seq) > uncertainEnd.seq &&
             live && !live.turnId && runningToolCalls(conversationId) === 0) {
           await appendEvent(sessionId, { ...base, kind: 'turn_end', turnId: canonicalTurn, outcome: 'completed',
             detail: 'the exact native final superseded the failed view' });
+          stored++;
           live.lastTurnOutcome = 'completed';
           activity.endedTurnId = canonicalTurn;
           activity.terminal = true;
@@ -2418,8 +2433,10 @@ async function recordChatObservationsNow(
         break;
       }
     }
-    stored++;
-    committedObservations.push(item);
+    if (!originalCommitted) {
+      stored++;
+      committedObservations.push(item);
+    }
     } catch (error) {
       if (isRecordingDisabledError(error)) {
         // A pending Off rejects the following store write BEFORE config is published.
@@ -2428,7 +2445,7 @@ async function recordChatObservationsNow(
         const attemptedOff = pendingRecordingOffDecision();
         if ((attemptedOff && await attemptedOff.settled) || !recordingEnabled() ||
             getRecordingRevision() !== recordingRevision) {
-          processed--;
+          if (!originalCommitted) processed--;
           break;
         }
       }
