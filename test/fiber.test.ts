@@ -65,7 +65,7 @@ const LIVE_DEPTH = 30;
 
 interface Message {
   id: string;
-  author: { role: string };
+  author: { role: string; name?: string };
   recipient: string;
   channel?: string;
   create_time?: number;
@@ -248,6 +248,7 @@ interface TurnEvidence {
   conversationConflict?: boolean;
   endMessageId?: string | null;
   calls: TurnCall[];
+  codeModeCalls?: Array<{ messageId: string; requestId: string | null; answered: boolean }>;
   requests?: Array<{ requestId: string; messageId: string | null; createTime: number | null }>;
   messages: Array<{
     messageId: string;
@@ -429,6 +430,31 @@ const rowInTurn = (messages: Message[], turnMessages: Message[], collapsed = 0) 
 // --------------------------------------------------------------------- tests
 
 describe('reading a row out of the page', () => {
+  it('recognises a native result-only call without inventing its missing request parent', async () => {
+    // Observed provider shape: tool/api_tool.call_tool with invoked_resource,
+    // but no request message or metadata.parent_id in the rehydrated turn.
+    const result = answer('result-only', 'unused', 'read');
+    result.author.name = 'api_tool.call_tool';
+    delete result.metadata!.parent_id;
+    Object.defineProperty(result.content!, 'text', { get() { throw new Error('Result bytes must remain unread'); } });
+    const { rows, turns } = await scan([rowInTurn([result], [result])], [{ id: 'result-only-turn', messages: [result] }]);
+    expect(rows[0]).toMatchObject({ messageId: 'result-only', tool: 'read', app: APP, path: null, answered: true, localCount: 1 });
+    expect(turns[0]!.calls).toEqual([{ messageId: 'result-only', tool: 'read', order: 0,
+      answered: true, requestId: 'wfr_01a009', createTime: 1786873669.5 }]);
+  });
+
+  it.each([APP, DESKTOP_APP, 'ChatBBC Plugins', 'ChatBBC Backup', 'Gmail'])(
+    'keeps result-only metadata scoped to the exact supported connector %s', async app => {
+      const result = answer('result-scope', 'unused', 'read', app);
+      result.author.name = 'api_tool.call_tool';
+      delete result.metadata!.parent_id;
+      const { turns } = await scan([], [{ id: 'result-scope-turn', messages: [result, result] }]);
+      // Duplicate provider objects are ambiguous, including result-only shapes.
+      expect(turns[0]!.calls).toEqual([]);
+      const single = await scan([], [{ id: 'result-scope-turn', messages: [result] }]);
+      expect(single.turns[0]!.calls).toHaveLength(['ChatBBC Backup', 'Gmail'].includes(app) ? 0 : 1);
+    });
+
   /**
    * The regression the whole batch exists for. The group node is exactly `MAX_CLIMB`
    * levels up, which the old `up < MAX_CLIMB` stopped one short of, so this row — and
@@ -459,8 +485,8 @@ describe('reading a row out of the page', () => {
 
   it('keeps the version it was built for on the reply', async () => {
     const { version, rows } = await scan([row([request('req-1', 'read_file')])]);
-    expect(version).toBe(12);
-    expect(rows[0]!.v).toBe(12);
+    expect(version).toBe(13);
+    expect(rows[0]!.v).toBe(13);
   });
   it('counts only TobisComputer requests in the complete turn, not api_tool metadata calls', async () => {
     const mine1 = request('req-1', 'read_file');
@@ -501,6 +527,32 @@ describe('reading a row out of the page', () => {
  * source: a turn that rendered nothing still says exactly what it asked for.
  */
 describe('the calls a turn says it made', () => {
+  it.each(['pending', 'complete', 'wrong-request', 'missing-parent', 'duplicate-result', 'wrong-tool'])(
+    'waits for the exact enclosing native Code Mode result (%s)', async mode => {
+      const root: Message = { id: 'code-root', author: { role: 'assistant' }, recipient: 'functions.exec',
+        status: 'finished_successfully', metadata: { request_id: 'wfr_01a009', turn_exchange_id: 'batch', working_turn_id: 'work' } };
+      const first = request('batch-first', 'read', { parent: root.id });
+      const second = request('batch-second', 'read', { parent: first.id });
+      const firstResult = answer('batch-result-first', second.id, 'read');
+      const secondResult = answer('batch-result-second', firstResult.id, 'read');
+      firstResult.author.name = secondResult.author.name = 'api_tool.call_tool';
+      const result: Message = { id: 'code-result', author: { role: 'tool', name: 'functions.exec' },
+        recipient: 'all', status: 'finished_successfully', metadata: { parent_id: secondResult.id } };
+      for (const message of [first, second, firstResult, secondResult, result]) {
+        message.metadata = { ...message.metadata, request_id: 'wfr_01a009', turn_exchange_id: 'batch', working_turn_id: 'work' };
+      }
+      if (mode === 'wrong-request') result.metadata!.request_id = 'another-request';
+      if (mode === 'missing-parent') result.metadata!.parent_id = 'unseen-parent';
+      if (mode === 'wrong-tool') result.author.name = 'some_other.exec';
+      const following = request('ordinary-after-code', 'read', { parent: result.id });
+      const messages = [root, first, second, firstResult, secondResult,
+        ...(mode === 'pending' ? [] : [result]), ...(mode === 'duplicate-result' ? [result] : []),
+        ...(mode === 'complete' ? [following] : [])];
+      const { turns } = await scan([], [{ id: 'native-code-batch', messages }]);
+      expect(turns[0]!.calls.map(call => call.answered)).toEqual(mode === 'complete' ? [true, true, false] : [false, false]);
+      expect(turns[0]!.codeModeCalls).toEqual([{ messageId: root.id, requestId: 'wfr_01a009', answered: mode === 'complete' }]);
+    });
+
   /**
    * The live regression: 1.7.1 renamed the connector and split it in two, and this test
    * spelled only the old name. Every request on every page stopped being recognised as
@@ -773,18 +825,18 @@ describe('the calls a turn says it made', () => {
       : mode === 'duplicate' ? [null, null, stamp(b.id), stamp(final.id)] : [null, null, stamp(final.id)]);
   });
 
-  it.each(['exact', 'duplicate', 'conflicting-label', 'wrong-type', 'unknown-owner'])('stamps only exact typed thought notifications and retains duplicate DOM copies (%s)', async mode => {
+  it.each(['exact', 'empty-label', 'duplicate', 'conflicting-label', 'wrong-type', 'unknown-owner'])('stamps only exact typed thought notifications and retains duplicate DOM copies (%s)', async mode => {
     const owner = '11111111-2222-4333-8444-555555555555';
     const key = `thought-${mode === 'unknown-owner' ? 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' : owner}-7`;
     const fiber = chain({ item: { type: mode === 'wrong-type' ? 'preamble' : 'thought', key } });
     const activities = [
-      { label: '任意の実行通知', fiber, staleThoughtStamp: 'old-scan:0:stale' },
+      { label: mode === 'empty-label' ? '' : '任意の実行通知', fiber, staleThoughtStamp: 'old-scan:0:stale' },
       ...(['duplicate', 'conflicting-label'].includes(mode)
         ? [{ label: mode === 'conflicting-label' ? '別の表示' : '任意の実行通知', fiber }]
         : [])
     ];
     const result = await scan([], [{ id: 'typed-thought-turn', messages: [thought(owner)], activities }], true);
-    const accepted = ['exact', 'duplicate', 'conflicting-label'].includes(mode);
+    const accepted = ['exact', 'empty-label', 'duplicate', 'conflicting-label'].includes(mode);
     expect(result.turns[0]?.thoughtNotifications).toEqual(accepted
       ? [{ messageId: `thought-${owner}-7`, kind: 'thought_notification' }]
       : undefined);

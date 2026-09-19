@@ -31,6 +31,7 @@ import type {
 } from '../../shared/session.js';
 import { estimateTokens, originTitle } from '../../shared/session.js';
 import { chatErrorMessageKey } from '../../shared/chat-error.js';
+import { overlappingRequestTurns, recordedRequestTurn, responseTurnId } from '../../shared/chronology.js';
 import { getConfig } from '../config.js';
 import { logInfo, logWarn } from '../logger.js';
 import { redactCredentialText } from '../redaction.js';
@@ -233,12 +234,17 @@ export async function sessionForConversation(
  * history first, then use the ordinary reopen path so live turn/session state is rebuilt from
  * the existing log exactly as if the page had just reported an observation.
  */
-export async function restoreRecordedConversation(conversationId: string): Promise<string | null> {
+export async function restoreRecordedConversation(conversationId: string, pageObservedAt = Date.now()): Promise<string | null> {
   if (!recordingEnabled() || !conversationId) return null;
   const existing = conversations.get(conversationId);
-  if (existing) return existing.sessionId;
-  const known = await findSessionByConversation(conversationId);
+  const known = existing ? await getSession(existing.sessionId) : await findSessionByConversation(conversationId);
   if (!known) return null;
+  if (known.browserRecoveryDismissedAt !== undefined) {
+    // A poll accepted before Close cannot undo a newer user decision after an await.
+    if (pageObservedAt <= known.browserRecoveryDismissedAt) return null;
+    await reopenSession(known.id, pageObservedAt);
+  }
+  if (existing) return existing.sessionId;
   return sessionForConversation(conversationId);
 }
 
@@ -1287,6 +1293,19 @@ async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolC
     const evidence = input.evidence ?? currentCall()?.evidence ?? emptyEvidence();
     const sessionId = await targetSession(target);
     if (!sessionId) return null;
+    if (target.attribution === 'request_id' && target.conversationId && input.requestId) {
+      const stored = await getSession(sessionId);
+      const owner = recordedRequestTurn(stored?.requestTurns, input.requestId, target.conversationId);
+      // The request keeps its recorded generation after completion, reload, and a
+      // newer user turn. A current live turn is only used for a previously unseen request.
+      // Preserve the second document's observation long enough for the store to
+      // record their exact same-request relation. A later question/ended response
+      // still cannot steal this request from its original owner.
+      if (owner !== undefined && !(owner && target.turnId &&
+          overlappingRequestTurns(stored?.timelineTurns, owner.turnId, target.turnId, stored?.requestTurns, input.requestId))) {
+        target = { ...target, turnId: owner?.turnId ?? null };
+      }
+    }
     // A proven request can outlive the swarm object and even the worker tab that issued it.
     // Request-id correlation still recovers the exact old conversation/session in that case,
     // but the live broker can no longer answer `agentForCaller()`. Worker origin is already
@@ -1407,7 +1426,8 @@ async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolC
       target.conversationId,
       input.requestId ?? null,
       input.startedAt,
-      eventAgent
+      eventAgent,
+      target.turnId
     ));
     notifyChanged();
     try {
@@ -1481,18 +1501,19 @@ async function reopenFalselyEndedTurn(
   conversationId: string | null,
   requestId: string | null,
   startedAt: number,
-  agent: string | null
+  agent: string | null,
+  callTurnId: string | null
 ): Promise<string | null> {
   if (!conversationId || !requestId) return null;
   const live = conversations.get(conversationId);
   if (!live || live.sessionId !== sessionId) return null;
-  const failed = await reopenThinkingFailure(sessionId, live, startedAt);
+  const failed = await reopenThinkingFailure(sessionId, live, startedAt, callTurnId ?? undefined);
   if (failed) {
     live.turnRequestIds.add(requestId);
     return failed;
   }
   if (live.turnStartedAt !== null) {
-    live.turnRequestIds.add(requestId);
+    if (callTurnId === live.turnId) live.turnRequestIds.add(requestId);
     return null;
   }
   const ended = live.endedTurn;
@@ -1666,6 +1687,8 @@ export interface ChatObservation {
   reasoningEffort?: import('../../shared/session.js').ReasoningEffort;
   /** True when `time` is ChatGPT's own authored create_time, not local observation time. */
   authoredTime?: boolean;
+  /** Provider time retained for display without changing local recovery clocks. */
+  authoredAt?: number;
   /** True only for the newest DOM user row that this document proved was just sent. */
   authoredNow?: boolean;
   /** True only when the current page generation owns this assistant revision now. */
@@ -1900,7 +1923,7 @@ export function recordChatObservations(
 ): Promise<{
   sessionId: string | null;
   stored: number;
-  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; endedTurnId?: string };
+  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; startedAt?: number; endedTurnId?: string };
   goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
 }> {
   const hasEvidence = observations.some((item) => item.kind === 'tool_evidence');
@@ -1961,6 +1984,7 @@ async function recordSupersededMessages(
     if (!item.messageId) continue;
     const base = {
       time: item.time,
+      ...(item.authoredAt !== undefined ? { authoredAt: item.authoredAt } : {}),
       source: 'extension' as const,
       ...(item.turnId ? { turnId: item.turnId } : {})
     };
@@ -1976,7 +2000,7 @@ async function recordSupersededMessages(
           ...(item.reaction !== undefined ? { reaction: item.reaction } : {}),
           messageId: item.messageId
         },
-        { preferTime: item.authoredTime === true }
+        { preferTime: item.authoredTime === true, work: false }
       );
     } else if (item.kind === 'assistant_message') {
       const state = item.state ?? (item.final === true ? 'final' : 'streaming');
@@ -2013,10 +2037,10 @@ async function recordChatObservationsNow(
 ): Promise<{
   sessionId: string | null;
   stored: number;
-  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; endedTurnId?: string };
+  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; startedAt?: number; endedTurnId?: string };
   goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
 }> {
-  const activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; endedTurnId?: string } = { meaningful: false, working: false, terminal: false };
+  const activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; startedAt?: number; endedTurnId?: string } = { meaningful: false, working: false, terminal: false };
   if (!recordingEnabled()) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
   if (!conversations.has(conversationId)) {
     const lineage = await supersededLineage(conversationId);
@@ -2063,6 +2087,7 @@ async function recordChatObservationsNow(
     const base = {
       time: item.time,
       source: 'extension' as const,
+      ...(item.authoredAt !== undefined ? { authoredAt: item.authoredAt } : {}),
       ...(item.turnId ? { turnId: item.turnId } : {}),
       ...(agent ? { agent } : {})
     };
@@ -2084,7 +2109,7 @@ async function recordChatObservationsNow(
           ...(item.attachments?.length ? { attachments: item.attachments } : {}),
           ...(item.reaction !== undefined ? { reaction: item.reaction } : {}),
           messageId: item.messageId
-        }, { preferTime: item.authoredTime === true });
+        }, { preferTime: item.authoredTime === true, work: item.authoredNow === true });
         if (!written.changed) continue;
         if (item.authoredNow === true) {
           activity.meaningful = true; activity.at = Math.max(activity.at ?? 0, item.time);
@@ -2154,9 +2179,13 @@ async function recordChatObservationsNow(
         const workingActivity = written.contentChanged && state !== 'final' && item.activeNow === true &&
           (!canonicalTurn || canonicalTurn === live?.turnId || resumedUncertainTurn) &&
           !(live?.turnStartedAt === null && (live.lastTurnOutcome === 'stopped' || live.lastTurnOutcome === 'completed'));
-        if (state === 'final' && written.event.kind === 'assistant_message' && canonicalTurn && recoverableTurns.has(canonicalTurn) &&
-            !explicitEnds.has(canonicalTurn) && live?.turnId === canonicalTurn) {
-          recoveredFinal = { turnId: canonicalTurn, time: item.time,
+        const turns = state === 'final' && canonicalTurn && live?.turnId && live.turnId !== canonicalTurn && written.event.kind === 'assistant_message' &&
+          written.event.providerMessageId ? (await getSession(sessionId))?.timelineTurns : undefined;
+        const finishingTurn = canonicalTurn && live?.turnId && (canonicalTurn === live.turnId ||
+          (turns && responseTurnId(turns, canonicalTurn) === responseTurnId(turns, live.turnId))) ? live.turnId : null;
+        if (state === 'final' && written.event.kind === 'assistant_message' && finishingTurn && recoverableTurns.has(finishingTurn) &&
+            !explicitEnds.has(finishingTurn)) {
+          recoveredFinal = { turnId: finishingTurn, time: item.time,
             seq: written.event.finalContentSeq ?? written.event.origin ?? written.event.seq,
             origin: written.event.origin ?? written.event.seq, native: Boolean(written.event.providerMessageId) };
         }
@@ -2276,6 +2305,9 @@ async function recordChatObservationsNow(
           live.turnRequestIds = new Set<string>();
           live.endedTurn = null;
         }
+        // An accepted start can wake a reported worker; a later first capture of
+        // its old interim cannot. Replayed starts never reach this point.
+        activity.startedAt = Math.max(activity.startedAt ?? 0, item.time);
         activity.meaningful = true; activity.at = Math.max(activity.at ?? 0, item.time);
         activity.working = true;
         break;
@@ -2517,9 +2549,13 @@ export async function ensureHandoffRecorded(
  * stays open; the detach is recorded as a note, which the timeline shows without ending
  * anything, and recordChatObservations writes the real terminal when the chat comes back.
  */
-export async function closeConversation(conversationId: string): Promise<void> {
+export async function closeConversation(conversationId: string, dismissBrowserRecovery = false): Promise<void> {
   const live = conversations.get(conversationId);
-  if (!live) return;
+  if (!live) {
+    const known = dismissBrowserRecovery ? await findSessionByConversation(conversationId) : null;
+    if (known) await endSession(known.id, true, conversationId);
+    return;
+  }
   if (live.turnStartedAt !== null) {
     await appendEvent(live.sessionId, {
       time: Date.now(),
@@ -2534,7 +2570,7 @@ export async function closeConversation(conversationId: string): Promise<void> {
     }).catch(() => undefined);
   }
   conversations.delete(conversationId);
-  await endSession(live.sessionId).catch(() => undefined);
+  await endSession(live.sessionId, dismissBrowserRecovery, conversationId);
   notifyChanged();
 }
 

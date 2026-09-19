@@ -33,6 +33,20 @@ app and controllable per skill from Settings.
   then the skill's own declaration, then on.
 
 ### Fixed
+- **Upstream reliability catch-up** — adapted response identity, queued-editor and Continue
+  custody, ten-image injection, browser inspection/creation, native compaction receipts,
+  worker-wake recovery, a 60-second journal deadline, and the GVDB source mirror from
+  upstream PRs [#297](https://github.com/totec448-spec/chat-on-steroids/pull/297),
+  [#300](https://github.com/totec448-spec/chat-on-steroids/pull/300),
+  [#310](https://github.com/totec448-spec/chat-on-steroids/pull/310),
+  [#312](https://github.com/totec448-spec/chat-on-steroids/pull/312),
+  [#313](https://github.com/totec448-spec/chat-on-steroids/pull/313) and
+  [#316](https://github.com/totec448-spec/chat-on-steroids/pull/316). ChatBBC branding,
+  version 2.1.17, protocol 15 and local appearance/skill-pack work are preserved.
+- **Background browser screenshots no longer stall after offscreen input or layout changes.**
+  A capture-scoped compositor wake preserves hidden-tab operation without selecting the tab,
+  extending the timeout or leaving a stream running.
+
 
 - **The advertised catalog no longer lists skills you switched off.** The connector's handshake
   instructions read the unfiltered library, so a disabled skill was still offered and then failed

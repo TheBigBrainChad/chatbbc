@@ -275,6 +275,10 @@ interface BaseEvent {
   /** 1-based, strictly increasing within a session. Ordering never relies on time. */
   seq: number;
   time: number;
+  /** Provider timestamp for transcript presentation, independent of local activity. */
+  authoredAt?: number;
+  /** Read projection: owning start outside this page, or null for an unowned row. */
+  turnOrigin?: number | null;
   source: EventSource;
   /** Multi-agent attribution. Absent when no swarm is running. */
   agent?: string;
@@ -520,6 +524,12 @@ export function originTitle(origin: SessionOrigin, source: string | null): strin
 }
 
 export interface SessionSummary {
+  /** Rebuildable transcript boundaries; no message bodies or execution authority. */
+  timelineTurns?: import('./chronology.js').TimelineTurns;
+  /** Rebuildable request-to-turn proof from recorded MCP calls, never a caller permission. */
+  requestTurns?: import('./chronology.js').RequestTurns;
+  /** Rebuildable native question boundary; tool-result instructions never replace it. */
+  nativeQuestion?: { messageId: string; origin: number } | null;
   /** Durable naming authority; absent only on legacy recordings. */
   titleSource?: 'fallback' | 'provider' | 'manual';
   /** Latest proven native picker selection; scoped to its frontend, never worker creation intent. */
@@ -544,10 +554,15 @@ export interface SessionSummary {
    * can be recognised rather than silently filed as if nothing had moved.
    */
   chatIds: string[];
+  /** Durable departure times from the same rebind commit. Used only to recover plans
+   * accepted before a historical frontend was replaced, never to infer caller identity. */
+  retiredChatAt?: Record<string, number>;
   startedAt: number;
   updatedAt: number;
   /** Null while the session is still the active one. */
   endedAt: number | null;
+  /** Explicit user departure suspends activity and automatic recovery until the exact page returns. */
+  browserRecoveryDismissedAt?: number;
   events: number;
   userMessages: number;
   toolCalls: number;
