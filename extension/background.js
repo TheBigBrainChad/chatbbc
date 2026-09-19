@@ -28,11 +28,13 @@ const activeTabs = globalThis.chrome?.debugger ? createActiveTabs(chrome) : null
 const PORTS = [8765, 8766, 8767, 8768, 8769];
 const HELLO_TIMEOUT_MS = 1200;
 const REQUEST_TIMEOUT_MS = 10_000;
+/** A journal receipt follows durable session writes, which can outlast an ordinary read. */
+const EVENTS_REQUEST_TIMEOUT_MS = 60_000;
 /**
  * The deadline for the one route that waits on a model rather than on the app's own state.
  *
- * Every other request this worker makes is answered from something the app already has, so the
- * ordinary ten seconds is a generous ceiling for it. `/goal/open` is different: it holds the
+ * Ordinary reads use ten seconds; journal delivery has its own durable-write budget.
+ * `/goal/open` is different: it holds the
  * connection open for a whole OpenRouter completion, which the app itself allows 180s for. A
  * shorter deadline here does not cancel that work — the app keeps going and the account is
  * still billed for the answer — it only guarantees nobody is left to receive it.
@@ -713,6 +715,7 @@ async function deliverJournalBatch(batch) {
   const { conversationId, mine, agent, agentCommandId } = batch;
   const result = await call('/events', {
     method: 'POST',
+    timeoutMs: EVENTS_REQUEST_TIMEOUT_MS,
     body: JSON.stringify({
       conversationId,
       agent,
@@ -726,6 +729,7 @@ async function deliverJournalBatch(batch) {
     const half = mine.slice(0, Math.floor(mine.length / 2));
     const retry = await call('/events', {
       method: 'POST',
+      timeoutMs: EVENTS_REQUEST_TIMEOUT_MS,
       body: JSON.stringify({ conversationId, agent, agentCommandId, events: half.map((entry) => entry.event) })
     });
     noteDelivery(retry, half.length, conversationId);
@@ -2663,7 +2667,7 @@ async function drainCloses() {
       if (conversationStillOpen(conversationId)) continue;
       const result = await call('/closed', {
         method: 'POST',
-        body: JSON.stringify({ conversationId })
+        body: JSON.stringify({ conversationId, manual: true })
       });
       if (!result.ok) {
         scheduleRetry();
@@ -2808,7 +2812,7 @@ const COMPACT_CHECKPOINT_FLAGS = [
   'destinationDispatch',
   'destinationLost'
 ];
-const COMPACT_CHECKPOINT_TEXT = ['summary', 'sourceMessageId', 'destinationMessageId'];
+const COMPACT_CHECKPOINT_TEXT = ['summary', 'sourceMessageId', 'destinationMessageId', 'sourceError'];
 // Not a checkpoint of its own: it qualifies `sourceMessageId` by saying how far that exact
 // marked response has grown. Sent only alongside the field it describes, so a bare count can
 // never move a deadline by itself.
@@ -3237,7 +3241,9 @@ const HANDLERS = {
     const query =
       `?conversationId=${encodeURIComponent(message.conversationId)}` +
       `&since=${Number(message.since) || 0}` +
-      `&goalClient=${encodeURIComponent(String(source.tab))}`;
+      `&goalClient=${encodeURIComponent(String(source.tab))}` +
+      (message.fiber === 'absent' || message.fiber === 'empty' || message.fiber === 'ok'
+        ? `&fiber=${message.fiber}` : '');
     const result = await call(`/activity${query}`);
     if (ownsDocument(source) && result.ok && result.data && await acceptBrowserRevival(result.data.revival)) {
       await recoverDeferredRevivals();

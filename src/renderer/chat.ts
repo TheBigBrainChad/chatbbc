@@ -28,7 +28,7 @@ import { communicationTitle, foldAgentCommunication } from './agent-communicatio
 import { initContextMeter, paintContextMeter } from './context-meter.js';
 import { isProModel } from '../shared/chat-models.js';
 import type { InputImage, InputAttachment, InputAutomation } from '../shared/input.js';
-import { injectableAttachments } from '../shared/input.js';
+import { injectableAttachments, MAX_INPUT_IMAGES } from '../shared/input.js';
 import type { InputEntry } from '../main/session/input.js';
 import type { LocalProject } from '../shared/projects.js';
 import type { TaskProgress } from '../shared/task-progress.js';
@@ -424,7 +424,12 @@ function paintGoalProgress(): void {
   const mode = $<HTMLSelectElement>('chatAutomation').value === 'loop' ? t('Loop') : t('Goal');
   labels.settling = `${mode} · ${wait?.reason === 'native-busy' ? t('ChatGPT resumed work · waiting before retry') : wait?.reason === 'silence' ? t('Waiting before recovery reload') : wait?.reason === 'quiet' ? t('Waiting for tool inactivity') :
     wait?.reason === 'tools' ? t('Waiting for running tools') : wait?.reason === 'listening' ? t('Waiting for activity after recovery') : t('Answer settling')}`;
-  row.hidden = !phase; if (!phase) { paintComposerStatusLine(); return; }
+  const sharedRecoveryWait = phase === 'settling' && wait?.until !== undefined &&
+    ['silence', 'listening', 'native-busy', 'quiet'].includes(wait.reason) && controlledRecovery.some(countdown =>
+      ['silence', 'post-reload', 'native-busy', 'thinking-failed'].includes(countdown.kind) &&
+      countdown.deadline === wait.until && (countdown.visibleAt ?? 0) <= Date.now());
+  row.hidden = !phase || sharedRecoveryWait;
+  if (row.hidden) { row.replaceChildren(); row.setAttribute('aria-busy', 'false'); paintComposerStatusLine(); return; }
   const busy = ['settling', 'saving', 'preparing', 'generating', 'retrying', 'sending', 'answering', 'browser', 'queued', 'ready'].includes(phase) && !error;
   row.setAttribute('aria-busy', String(busy));
   const marker = el('span', busy ? 'session-status is-working' : 'session-status');
@@ -440,6 +445,7 @@ function paintGoalProgress(): void {
   paintComposerStatusLine();
 }
 const cancelledStarts = new Set<string>();
+
 let durationTimer: number | undefined;
 function paintActiveGoal(): void {
   const row = $('activeGoalRow');
@@ -1187,7 +1193,7 @@ function retainedInputImages(event: Extract<SessionEvent, { kind: 'user_message'
   const companion = root.companionInputId ? pendingComposerInputs.find(entry => entry.id === root.companionInputId &&
     (entry.sessionId ?? entry.deliveredSessionId) === sessionId && entry.messageId === root.messageId) : undefined;
   // Match combinedInput's canonical image order for asset-index fallback.
-  return [...root.images ?? [], ...companion?.images ?? [], ...root.toolImages ?? []].slice(0, 4);
+  return [...root.images ?? [], ...companion?.images ?? [], ...root.toolImages ?? []].slice(0, MAX_INPUT_IMAGES);
 }
 
 function paintMessageReaction(box: HTMLElement, value: unknown): void {
@@ -1212,7 +1218,7 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       box.append(el('b', '', () => t("You")));
       const attachments = el('div', 'message-attachments');
       if (event.attachments?.length) attachments.append(...event.attachments.map(file => attachmentCard(file)));
-      const assets = event.assets?.filter(asset => asset.mimeType === 'image/webp').slice(0, 4) ?? [];
+      const assets = event.assets?.filter(asset => asset.mimeType === 'image/webp').slice(0, MAX_INPUT_IMAGES) ?? [];
       const retained = retainedInputImages(event, context?.id ?? selectedId);
       const preview = (data: string, retainedOnly = false, slot?: HTMLElement) => {
         const image = document.createElement('img');
@@ -2168,7 +2174,11 @@ function paintRecoveryStatus(): boolean {
   const recovery = detailFor === selectedId ? [...events].reverse().find(event => event.source === 'app' && event.kind === 'progress' && event.progressId?.startsWith('browser-repair:')) : undefined;
   const sessionId = selectedId;
   const revision = recovery?.kind === 'progress' ? JSON.stringify([recovery.progressId, recovery.time, recovery.message.text]) : '';
-  host.hidden = !recovery || Date.now() - recovery.time > 120000 || (!!sessionId && dismissedRecoveryNotices.get(sessionId) === revision);
+  // Newer questions retire this live notice; the original receipt stays in history.
+  const advanced = recovery && events.some(event => positionOf(event) > positionOf(recovery) &&
+    ((event.kind === 'turn_start' && event.turnId !== recovery.turnId) ||
+      (event.kind === 'user_message' && event.source === 'extension')));
+  host.hidden = !recovery || !!advanced || Date.now() - recovery.time > 120000 || (!!sessionId && dismissedRecoveryNotices.get(sessionId) === revision);
   host.replaceChildren();
   if (!host.hidden && recovery?.kind === 'progress') {
     const row = el('div', 'recovery-notice');
@@ -2863,6 +2873,7 @@ function scheduleReload(): void {
 
 
 /** Local admission moves the draft; a native receipt alone may mark it sent. */
+
 async function stopCurrentTurn(): Promise<void> {
   const id = selectedId, turnId = controlledTurnId, generation = selectionGeneration;
   if (!id || controlledSessionId !== id || controlledSelection !== generation || !turnId || controlledStopPending) return;
@@ -3011,6 +3022,8 @@ function selectSession(id: string): void {
   const ownerChanged = id !== selectedId;
   rememberDraft();
   selectionGeneration++; replaceComposerDraft();
+  inputQueueGeneration++;
+  $('finishQueue').replaceChildren(); $('finishQueue').hidden = true;
   newChatSelected = false;
   selectedId = id;
   const selected = sessions.find(row => row.id === id);
@@ -3047,6 +3060,8 @@ function selectSession(id: string): void {
 
 function selectNewChat(projectId: string | null = null): void {
   rememberDraft(); selectionGeneration++; replaceComposerDraft(); pendingNewInput = null;
+  inputQueueGeneration++;
+  $('finishQueue').replaceChildren(); $('finishQueue').hidden = true;
   newChatSelected = true; selectedId = null; selectedProjectId = projectId; detailFor = null; detailCursor = null;
   if (projectId) expandedProjects.add(projectId);
   applyComposerSessionModel(null, null);
