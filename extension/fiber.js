@@ -78,12 +78,11 @@
   const GENERATED_IMAGE = '[class~="group/imagegen-image"] img';
   const OWN_SURFACES = '.clf-stream, .clf-stage, .clf-composer, .clf-boot';
   const MAX_RENDERED_HTML = 120_000;
-  // A 15k–20k-token compaction answer is routinely 60k–90k characters. Capping public
-  // assistant prose at 32k here made the canonical session transcript lose the back half
-  // even though Compact & Resume itself carried the full DOM answer. One event still stays
-  // comfortably below the 512 KiB bridge body cap alongside its bounded rendered HTML.
-  // Safety guard only. Compact & Resume is specified in tokens (up to 30k), so this must be
-  // comfortably larger than a normal handoff rather than acting as a second token budget.
+  // Handoff answers are intentionally compact now, but legacy 15k–30k-token handoffs remain
+  // valid recorded history. Capping public assistant prose at 32k here made those sessions lose
+  // the back half even though Compact & Resume itself carried the full DOM answer. One event
+  // still stays comfortably below the 512 KiB bridge body cap alongside bounded rendered HTML.
+  // This is a safety guard, not the current handoff's much smaller semantic token budget.
   const MAX_RENDERED_TEXT = 256_000;
   /** Aggregate authored text/HTML copied through MAIN -> isolated world in one scan. */
   const MAX_RESPONSE_TEXT = MAX_TURNS * 512 * 1024;

@@ -64,7 +64,7 @@ import {
   writeAsset
 } from '../src/main/session/store.js';
 import { summarizeToolCall } from '../src/main/session/summarize.js';
-import { HANDOFF_BRIEF_RULES, nativeHandoffPrompt } from '../src/main/session/handoff-prompt.js';
+import { nativeHandoffPrompt } from '../src/main/session/handoff-prompt.js';
 import {
   CHAT_ACTIVE_MS,
   CHAT_SILENCE_MS,
@@ -2084,19 +2084,16 @@ describe('handoff storage', () => {
     expect(chunkText('short brief', 1000)).toEqual(['short brief']);
   });
 
-  it('asks for user-authoritative handoffs up to the documented 30k-token ceiling', () => {
-    const prompt = nativeHandoffPrompt();
-    expect(prompt).toContain(HANDOFF_BRIEF_RULES);
-    expect(prompt).toMatch(/user's messages as the highest-authority source/i);
-    expect(prompt).toMatch(/10,000[–-]30,000 tokens/i);
-    expect(prompt).toMatch(/~6,000-token brief is normally too short/i);
-    expect(prompt).toMatch(/Never exceed 30,000 tokens/i);
-    expect(prompt).toMatch(/lossless operational compression/i);
+  it('asks for a bounded artifact-driven operational handoff', () => {
+    const prompt = nativeHandoffPrompt('0123456789abcdef', false);
+    expect(prompt.length).toBeLessThanOrEqual(3_500);
+    expect(prompt).toMatch(/latest accepted requirements/i);
+    expect(prompt).toMatch(/1,500[–-]3,000 tokens/i);
+    expect(prompt).toMatch(/hard maximum 4,000/i);
+    expect(prompt).toMatch(/Superpowers/i);
     expect(prompt).toMatch(/failure.*root cause.*change.*verification/i);
-    expect(prompt).toMatch(/PLANNED \/ DECIDED/i);
-    expect(prompt).toMatch(/FAILED \/ UNRESOLVED/i);
-    expect(prompt).toMatch(/VERIFICATION/i);
-    expect(prompt).toMatch(/completed and verified/i);
+    expect(prompt).toMatch(/spec.*plan.*progress\.md/i);
+    expect(prompt).not.toMatch(/10,000[–-]30,000 tokens/i);
   });
 
   it('honors the tool-detail setting in the handoff brief without claiming to erase seen history', () => {

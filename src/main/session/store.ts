@@ -57,9 +57,9 @@ import { logError, logInfo, logWarn } from '../logger.js';
  * pass can still skim.
  */
 // A Compact & Resume handoff becomes the next chat's opening user message. This is a wire /
-// storage safety bound, not a token budget; keep it comfortably above the model's 30k-token
-// handoff ceiling so the recorder does not immediately turn the carried brief into an inline
-// stub plus asset reference. Truly runaway messages still spill to assets through storeText().
+// storage safety bound, not the prompt's much smaller token budget. Keep enough headroom for
+// legacy briefs without turning the carried document into an inline stub plus asset reference.
+// Truly runaway messages still spill to assets through storeText().
 export const MAX_USER_MESSAGE_CHARS = 256_000;
 export const MAX_MESSAGE_CHARS = 12_000;
 export const MAX_TOOL_ARGS_CHARS = 8_000;

@@ -323,21 +323,19 @@ const BROWSER_PRESENT_MS = 60_000;
 /**
  * The longest native compaction brief the browser bridge will carry across.
  *
- * This used to be 24k characters, which silently forced even a model instructed to write a
- * large token-budget handoff down to roughly six thousand tokens. The model-side prompt owns
- * the semantic ceiling (30k tokens); this is deliberately *not* another token approximation.
- * It is only a generous runaway-input guard, far above a normal 30k-token operational brief.
+ * This remains a wire-safety bound rather than the prompt's semantic budget. The normal compact
+ * brief is far smaller; generous headroom prevents legacy or misbehaving answers from being
+ * mistaken for transport failures while the replacement-message envelope remains authoritative.
  */
 const MAX_BRIEF_CHARS = 256_000;
 
 /**
  * Cuts an over-long brief down to what will be typed, from the middle.
  *
- * Truncating the end was worse than not truncating at all: a brief is written TASK first
- * and NEXT / DO NOT last, so cutting the tail hands the fresh chat pages of history with
- * the instructions for what to do about it deleted — and nothing in the text says so. The
- * two ends are the parts that must survive, so the middle goes instead, with a marker in
- * its place. Both halves therefore end and begin at a line boundary where one is near.
+ * Truncating the end is worse than not truncating at all: the brief starts with the task and
+ * ends with NEXT / PRESERVE, so cutting the tail removes the instructions for what to do and
+ * what not to damage. The two ends are the parts that must survive, so the middle goes instead,
+ * with an explicit marker. Both halves therefore end and begin at a nearby line boundary.
  */
 function boundBrief(text: string, maxChars = MAX_BRIEF_CHARS): string {
   if (text.length <= maxChars) return text;
