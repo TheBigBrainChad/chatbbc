@@ -571,6 +571,9 @@ export async function createSession(options: {
   open.set(id, entry);
   try {
     await fs.mkdir(sessionDir(id), { recursive: true });
+    // A missing shard directory after publication could hide lost owners. Create it
+    // even for empty sessions so cleanup can treat later absence as unknown.
+    await fs.mkdir(path.join(sessionDir(id), 'messages'), { recursive: true });
     await fs.writeFile(path.join(sessionDir(id), 'events.jsonl'), '', { flag: 'a' });
     // A reserved opening can retry after its shard was created but meta publication failed.
     // Never append another object or overwrite already-recorded canonical messages.
@@ -3434,9 +3437,10 @@ function cleanupRichMedia(event: Extract<SessionEvent, { kind: 'assistant_messag
   } catch { return null; }
 }
 
-/** Unlike readEvents, deletion must not interpret a skipped unreadable/oversized canonical
- * shard or malformed legacy snapshot as proof of zero owners. Reads happen INSIDE the session
- * queue, after every preceding writer, without acquiring the outer asset queue again. */
+/** Unlike readEvents, deletion must not interpret a missing owner source, skipped
+ * unreadable/oversized canonical shard or malformed legacy snapshot as proof of zero owners.
+ * Reads happen INSIDE the session queue, after preceding writers, without reacquiring the
+ * outer asset queue. Older sessions missing a source conservatively cannot be cleaned. */
 const MAX_CLEANUP_OWNER_SCAN_BYTES = 64 * 1024 * 1024;
 const cleanupEventKinds = new Set<SessionEvent['kind']>([
   'session_start', 'user_message', 'assistant_message', 'native_image', 'progress', 'page_tool',
@@ -3460,9 +3464,7 @@ async function cleanupOwnerInventory(sessionId: string, entry: OpenSession): Pro
             messageKey(candidate) !== key) return null;
         disk.set(key, candidate);
       }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
-    }
+    } catch { return null; }
     try {
       const directory = path.join(base, 'messages');
       const stat = await fs.lstat(directory);
@@ -3481,9 +3483,7 @@ async function cleanupOwnerInventory(sessionId: string, entry: OpenSession): Pro
             `${createHash('sha256').update(key).digest('hex')}.json` !== name) return null;
         disk.set(key, candidate);
       }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
-    }
+    } catch { return null; }
     // The journal can contain unkeyed references and pre-canonical snapshots. Its latter
     // copies are superseded by a valid authoritative canonical shard of the SAME identity.
     const events: SessionEvent[] = [];
@@ -3500,9 +3500,7 @@ async function cleanupOwnerInventory(sessionId: string, entry: OpenSession): Pro
         const key = messageKey(event);
         if (!key || !disk.has(key)) events.push(event);
       }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
-    }
+    } catch { return null; }
     // Read-only per-session recovery may collapse old provider aliases. An unrepresented
     // on-disk owner must veto deletion rather than exposing bytes that cleanup cannot retire.
     for (const [key, candidate] of disk) {

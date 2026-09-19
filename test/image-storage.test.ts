@@ -154,6 +154,70 @@ it('vetoes deletion if a future canonical owner shard or the legacy owner map is
   expect(await readAsset(session.id, asset.id)).toEqual(pixels);
 });
 
+it('keeps image bytes when a canonical-only rich owner directory disappears before restart', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#334477' } }).png().toBuffer();
+  const asset = await writeAsset(session.id, pixels, 'image/png');
+  await seedFutureRichOwner(session.id, asset);
+  await fs.rm(path.join(sessionsRoot(), session.id, 'messages'), { recursive: true });
+  resetSessionStoreForTests(); initSessionStore(directory);
+
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 0, freedBytes: 0 });
+  expect(await readAsset(session.id, asset.id)).toEqual(pixels);
+});
+
+it('keeps image bytes when the missing journal might contain another durable owner', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#775544' } }).png().toBuffer();
+  const asset = await writeAsset(session.id, pixels, 'image/png');
+  await appendEvent(session.id, { time: 100, source: 'app', kind: 'user_message',
+    messageId: 'journal-only-owner', message: text('Retain journal image'), assets: [asset] });
+  await flushSessions();
+  await fs.rm(path.join(sessionsRoot(), session.id, 'events.jsonl'));
+  resetSessionStoreForTests(); initSessionStore(directory);
+
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 0, freedBytes: 0 });
+  expect(await readAsset(session.id, asset.id)).toEqual(pixels);
+});
+
+it('keeps image bytes when the legacy owner map disappears before restart', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#774455' } }).png().toBuffer();
+  const asset = await writeAsset(session.id, pixels, 'image/png');
+  const legacyOwner = { seq: 1, time: 100, source: 'app', kind: 'user_message',
+    messageId: 'legacy-only-owner', message: text('Retain legacy image'), assets: [asset] };
+  await fs.writeFile(path.join(sessionsRoot(), session.id, 'messages.json'), JSON.stringify({
+    'user_message\u0000legacy-only-owner': legacyOwner
+  }));
+  resetSessionStoreForTests(); initSessionStore(directory);
+  expect((await readEvents(session.id)).find(event => event.kind === 'user_message')).toMatchObject({ assets: [asset] });
+  await fs.rm(path.join(sessionsRoot(), session.id, 'messages.json'));
+  resetSessionStoreForTests(); initSessionStore(directory);
+
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 0, freedBytes: 0 });
+  expect(await readAsset(session.id, asset.id)).toEqual(pixels);
+});
+
+it('cleans image bytes from a fresh session with no authored messages', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#445577' } }).png().toBuffer();
+  const asset = await writeAsset(session.id, pixels, 'image/png');
+
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 1, freedBytes: pixels.length });
+  expect(await readAsset(session.id, asset.id)).toBeNull();
+});
+
+it('vetoes deletion when the journal exceeds the bounded owner inventory scan', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#667744' } }).png().toBuffer();
+  const asset = await writeAsset(session.id, pixels, 'image/png');
+  await fs.truncate(path.join(sessionsRoot(), session.id, 'events.jsonl'), 64 * 1024 * 1024 + 1);
+  resetSessionStoreForTests(); initSessionStore(directory);
+
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 0, freedBytes: 0 });
+  expect(await readAsset(session.id, asset.id)).toEqual(pixels);
+});
+
 it('vetoes unreadable shard I/O rather than trusting an already-loaded in-memory owner map', async () => {
   const session = await createSession({ conversationId: randomUUID() });
   const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#448866' } }).png().toBuffer();
