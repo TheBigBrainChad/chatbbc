@@ -88,5 +88,8 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
 // integer moved together for this rename.
 // 16 — bounded rich-response observations and separately journalled Chrome sender evidence.
 // A 15 app would ACK the new wire fields without understanding them; a 15 extension cannot
-// supply the paired envelope. The release/package version is deliberately unchanged here.
-export const BRIDGE_PROTOCOL = 16;
+// supply the paired envelope.
+// 17 — authenticated, pre-observation recording generations and a positional journal envelope
+// suppress old/unknown rows after Recording Off→On, including retries. A 16 peer cannot safely
+// exchange this wire shape. The release/package version is deliberately unchanged here.
+export const BRIDGE_PROTOCOL = 17;

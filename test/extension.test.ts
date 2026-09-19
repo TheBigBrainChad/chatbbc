@@ -39,8 +39,8 @@ describe('extension release metadata', () => {
     expect(lock.version).toBe(APP_VERSION);
     expect(lock.packages?.['']?.version).toBe(APP_VERSION);
     expect(manifest.version).toBe(APP_VERSION);
-    expect(BRIDGE_PROTOCOL).toBe(16);
-    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 16;');
+    expect(BRIDGE_PROTOCOL).toBe(17);
+    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 17;');
   });
 
   /**
@@ -2445,21 +2445,88 @@ describe('extension revival delivery', () => {
 });
 
 describe('extension observation journal', () => {
-  it('refuses a protocol-15 hello without attempting an events POST or retiring the journal', async () => {
+  it('binds old and renewed recording grants to the Chrome document before accepting page rows and preserves 413 positions', async () => {
+    const g0 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const g2 = 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
+    let issued = g0;
+    const id = '11111111-2222-3333-4444-555555555555';
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const batches: any[] = [];
+    let first = true;
+    const worker = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      const route = new URL(input).pathname;
+      if (route === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (route === '/recording/generation') return response(200, { recordingGeneration: issued });
+      if (route === '/events') {
+        const body = JSON.parse(String(init.body));
+        batches.push(body);
+        if (first) { first = false; return response(413, { error: 'body_too_large' }); }
+        return response(200, { stored: body.events.length });
+      }
+      return response(200, {});
+    } });
+    const initial = await worker.registerTab(42, 'issued-document');
+    expect(initial).toMatchObject({ ok: true, recordingGeneration: g0 });
+    issued = g2; // App committed Off then On before content's old G0 queue reached worker.
+    expect(await worker.send({ type: 'recording_generation', navigationEpoch: 0 }, 42, 'issued-document'))
+      .toMatchObject({ ok: true, recordingGeneration: g2 });
+    await worker.send({ type: 'events', conversationId: id, navigationEpoch: 0, entries: [
+      { conversationId: id, recordingGeneration: g0, recordingNavigationEpoch: 0,
+        event: { kind: 'user_message', messageId: 'old-g0', text: 'private', recordingGeneration: g2 } },
+      { conversationId: id, recordingGeneration: g2, recordingNavigationEpoch: 0,
+        event: { kind: 'assistant_message', messageId: 'fresh-g2', text: 'new', recordingGeneration: g0 } },
+      { conversationId: id, recordingGeneration: 'forged', recordingNavigationEpoch: 0,
+        event: { kind: 'user_message', messageId: 'unknown', text: 'not authorized' } }
+    ] }, 42, 'issued-document');
+    expect(batches.map(batch => batch.recordingGenerations)).toEqual([
+      [g0, g2, null], [g0], [g2, null]
+    ]);
+    expect(batches[0].events.every((entry: any) => !Object.hasOwn(entry, 'recordingGeneration'))).toBe(true);
+    expect(session.data.journal).toEqual([]);
+    const registered = session.data.registeredDocuments as Record<string, any>;
+    expect(registered['42'].recordingIssuances).toMatchObject([
+      { generation: g0, epoch: 0 }, { generation: g2, epoch: 0 }
+    ]);
+  });
+
+  it('retires unversioned and malformed saved observations as unknown without forging a new gap', async () => {
+    const id = '11111111-2222-3333-4444-555555555555';
+    const session = new FakeStorageArea({ journal: [
+      { conversationId: id, provisional: null, event: { kind: 'user_message', messageId: 'v16-legacy', text: 'old' } },
+      { conversationId: id, provisional: null, recordingGeneration: 'malformed-v17',
+        event: { kind: 'assistant_message', messageId: 'bad-token', text: 'unknown' } }
+    ] });
+    const posts: any[] = [];
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session,
+      fetch: async (input, init = {}) => {
+        if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
+        if (new URL(input).pathname === '/events') posts.push(JSON.parse(String(init.body)));
+        return response(200, { stored: 0, recordingSuppressed: true });
+      } });
+    await worker.send({ type: 'status' });
+    await vi.waitFor(() => expect(journalOf(session)).toEqual([]));
+    expect(posts).toMatchObject([{ recordingGenerations: [null, null], events: [
+      { messageId: 'v16-legacy' }, { messageId: 'bad-token' }
+    ] }]);
+    expect(posts.flatMap(post => post.events).some(entry => entry.kind === 'chat_error')).toBe(false);
+  });
+
+  it('refuses a protocol-16 hello without attempting an events POST or retiring the journal', async () => {
     const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
     const session = new FakeStorageArea();
     const requests: string[] = [];
     const worker = loadWorker({ local, session, fetch: async (input) => {
       const path = new URL(input).pathname;
       requests.push(path);
-      if (path === '/hello') return response(200, { app: APP_SLUG, bridge: 15, compatible: false, paired: true });
+      if (path === '/hello') return response(200, { app: APP_SLUG, bridge: 16, compatible: false, paired: true });
       throw new Error(`incompatible extension attempted ${path}`);
     } });
     const id = '11111111-2222-3333-4444-555555555555';
     await worker.send({ type: 'events', conversationId: id,
       entries: [{ conversationId: id, event: { kind: 'user_message', time: Date.now(), text: 'retain' } }] });
     const status = await worker.send({ type: 'status' });
-    expect(status).toMatchObject({ compatible: false, extensionProtocol: 16, appProtocol: 15, pending: 1 });
+    expect(status).toMatchObject({ compatible: false, extensionProtocol: 17, appProtocol: 16, pending: 1 });
     expect(requests).not.toContain('/events');
     expect(journalOf(session)).toHaveLength(1);
   });
@@ -3090,7 +3157,8 @@ describe('extension observation journal', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(postedEvents).toEqual([
-      { conversationId, events: [expect.objectContaining({ kind: 'user_message', text: 'command bootstrap' })] }
+      { conversationId, events: [expect.objectContaining({ kind: 'user_message', text: 'command bootstrap' })],
+        recordingGenerations: [null] }
     ]);
     expect(session.data.commandAckOutbox).toEqual([]);
     expect(journalOf(session)).toEqual([]);
@@ -3254,8 +3322,8 @@ describe('extension observation journal', () => {
     });
 
     expect(posted).toEqual([
-      { conversationId: a, events: [{ kind: 'progress', time: expect.any(Number), text: 'A1' }, { kind: 'progress', time: expect.any(Number), text: 'A2' }] },
-      { conversationId: b, events: [{ kind: 'progress', time: expect.any(Number), text: 'B1' }] }
+      { conversationId: a, events: [{ kind: 'progress', time: expect.any(Number), text: 'A1' }, { kind: 'progress', time: expect.any(Number), text: 'A2' }], recordingGenerations: [null, null] },
+      { conversationId: b, events: [{ kind: 'progress', time: expect.any(Number), text: 'B1' }], recordingGenerations: [null] }
     ]);
     expect(journalOf(session)).toEqual([]);
   });

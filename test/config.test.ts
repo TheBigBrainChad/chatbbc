@@ -1,12 +1,14 @@
 import { REASONING_EFFORTS } from '../src/shared/session.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_GOAL_MODEL,
   defaultConfig,
+  getConfig,
   initConfigPath,
   loadConfig,
+  recordingGenerationGrant,
   saveConfig,
   updateConfig
 } from '../src/main/config.js';
@@ -25,6 +27,105 @@ afterAll(async () => {
 });
 
 describe('settings migration', () => {
+  it('keeps committed Off when a detached pre-Off snapshot saves cosmetic settings, while explicit On rotates', async () => {
+    await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
+    const detached = structuredClone(getConfig());
+    await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: false } }));
+    const off = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+    expect(off.sessions.record).toBe(false);
+    await saveConfig({ ...detached, sessions: { ...detached.sessions }, ui: { ...detached.ui, theme: 'light' } });
+    const afterCosmetic = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+    expect(afterCosmetic.sessions.record).toBe(false);
+    expect(afterCosmetic.recordingGeneration).toBe(off.recordingGeneration);
+    await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
+    const deliberateOn = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+    expect(deliberateOn.sessions.record).toBe(true);
+    expect(deliberateOn.recordingGeneration).not.toBe(off.recordingGeneration);
+  });
+
+  it('publishes an opaque private recording generation atomically with each committed On/Off transition', async () => {
+    await saveConfig(defaultConfig());
+    const initial = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+    expect(initial.recordingGeneration).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const stale = defaultConfig();
+    await saveConfig({ ...stale, ui: { ...stale.ui, theme: 'light' } });
+    const cosmetic = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+    expect(cosmetic.recordingGeneration).toBe(initial.recordingGeneration);
+    await saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+    const off = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+    expect(off.sessions.record).toBe(false);
+    expect(off.recordingGeneration).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(off.recordingGeneration).not.toBe(initial.recordingGeneration);
+    // A settings form opened while On can finish its cosmetic save after Off.
+    // Its old record flag is not a fresh user decision to resume recording.
+    await saveConfig({ ...stale, ui: { ...stale.ui, theme: 'dark' } });
+    const afterStale = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+    expect(afterStale.sessions.record).toBe(false);
+    expect(afterStale.recordingGeneration).toBe(off.recordingGeneration);
+    await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
+    const on = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+    expect(on.recordingGeneration).not.toBe(off.recordingGeneration);
+    expect(on.recordingGeneration).not.toBe(initial.recordingGeneration);
+  });
+
+  it('migrates valid legacy choices before granting new admission and keeps corrupt epochs disabled', async () => {
+    const before = defaultConfig();
+    await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify({ ...before,
+      sessions: { ...before.sessions, record: false } }), 'utf8');
+    initConfigPath(dir); // Simulate process restart; no old private epoch survives.
+    expect(recordingGenerationGrant()).toBeNull();
+    expect((await loadConfig()).sessions.record).toBe(false);
+    const migrated = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+    expect(migrated.recordingGeneration).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(migrated.sessions.record).toBe(false);
+    await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify({ ...before, recordingGeneration: 'invalid' }), 'utf8');
+    expect((await loadConfig()).sessions.record).toBe(false);
+    expect(recordingGenerationGrant()).toBeNull();
+    expect(JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8')).recordingGeneration).toBe('invalid');
+    await fs.writeFile(path.join(dir, 'config.json'), '{ corrupt', 'utf8');
+    expect((await loadConfig()).sessions.record).toBe(false);
+    expect(recordingGenerationGrant()).toBeNull();
+  });
+
+  it('does not publish a generation or Recording On when first-launch persistence fails', async () => {
+    await fs.rm(path.join(dir, 'config.json'), { force: true });
+    initConfigPath(dir);
+    const originalRename = fs.rename.bind(fs);
+    const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (String(to) === path.join(dir, 'config.json')) throw Object.assign(new Error('generation init EIO'), { code: 'EIO' });
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    try {
+      expect((await loadConfig()).sessions.record).toBe(false);
+      expect(recordingGenerationGrant()).toBeNull();
+    } finally { spy.mockRestore(); }
+    expect((await loadConfig()).sessions.record).toBe(true);
+    expect(recordingGenerationGrant()).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+
+  it('does not rotate the committed generation after a rejected Off rename or a failed post-publish callback', async () => {
+    await saveConfig(defaultConfig());
+    const first = recordingGenerationGrant();
+    const originalRename = fs.rename.bind(fs);
+    const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (String(to) === path.join(dir, 'config.json')) throw Object.assign(new Error('Off publish EIO'), { code: 'EIO' });
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    try {
+      await expect(saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } }))
+        .rejects.toThrow('Off publish EIO');
+      expect(getConfig().sessions.record).toBe(true);
+      expect(recordingGenerationGrant()).toBe(first);
+    } finally { spy.mockRestore(); }
+    await expect(updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: false } }),
+      async () => { throw new Error('dependent callback failed'); })).rejects.toThrow('dependent callback failed');
+    const stored = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+    expect(stored.sessions.record).toBe(false);
+    expect(stored.recordingGeneration).not.toBe(first);
+    expect(recordingGenerationGrant()).toBeNull();
+    await loadConfig();
+    await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
+  });
   it('round-trips custom appearance and isolates malformed appearance from permissions', async () => {
     const { defaultAppearance } = await import('../src/shared/appearance.js');
     const config = defaultConfig(); config.readOnly = true; config.capabilities.command = false;

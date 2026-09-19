@@ -125,6 +125,7 @@ interface Hook {
   emit(observation: Record<string, unknown>): void;
   flush(): Promise<void>;
   observe(): void;
+  checkStatus(): Promise<void>;
   syncTheme(): void;
   meterView(): { filled: number; level: string; status: string; tip: string } | null;
   paint(): void;
@@ -230,7 +231,10 @@ async function harness(
   let runtimeListener: RuntimeListener | null = null;
   const runtimeListeners = new Set<RuntimeListener>();
   const storageListeners = new Set<(changes: Record<string, any>, areaName: string) => void>();
-  reply.set('register_document', () => ({ ok: true }));
+  // The content script may observe for persistence only after this fake worker's
+  // registration has obtained a real-shaped authenticated issuance from its app.
+  reply.set('register_document', () => ({ ok: true, recordingGeneration: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }));
+  reply.set('recording_generation', () => ({ ok: true, recordingGeneration: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }));
   reply.set('status', () => ({ connected: true, paired: true, port: 8765, pending: 0 }));
   reply.set('events', () => ({ ok: true, pending: 0, durable: true }));
   reply.set('bind', () => ({ ok: true, bound: 0 }));
@@ -651,6 +655,72 @@ describe('exact native rich response observation (no action authority)', () => {
       expect.objectContaining({ providerMessageId: foreign, rich: expect.objectContaining({ status: 'unavailable' }) })
     ]);
     expect(entries.at(-1).event).not.toHaveProperty('text');
+  });
+
+  it('freezes a pre-Off Fiber capture in the page queue rather than coalescing it with a fresh post-On generation', async () => {
+    const g0 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const g2 = 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
+    let committedGeneration = g0;
+    let workerAccepts = false;
+    live = await harness(undefined, {
+      register_document: () => ({ ok: true, recordingGeneration: committedGeneration }),
+      recording_generation: () => ({ ok: true, recordingGeneration: committedGeneration }),
+      // Force the first flush to fail custody: content.js must retain its page-local
+      // observation, not assume merely calling the worker made it durable.
+      events: () => workerAccepts ? { ok: true, durable: true, pending: 0 } : { ok: false, error: 'worker_unreachable' }
+    });
+    const { surface } = rootFixture(live.document);
+
+    // The real Fiber scan reads authored prose and a native rich root under G0.
+    // Its attempted worker handoff fails; the same observation remains page-local.
+    await replyFiber([], [descriptor()]);
+    expect(emitted(live.sent, 'assistant_message')).toHaveLength(1);
+
+    // Simulate the app committing Off (G1) and a later On (G2) while that page
+    // queue is still held. A worker-issued renewal may authorize only NEW scans.
+    committedGeneration = g2;
+    await live.runtimeMessage({ type: 'clf-recording-generation-refresh' });
+    surface.querySelector('button[disabled]')!.removeAttribute('disabled');
+    surface.querySelector('[aria-disabled]')!.removeAttribute('aria-disabled');
+    // The unchanged old Fiber descriptor remains visible after the transition.
+    // Re-scanning it under G2 cannot re-acquire its already observed G0 prose.
+    await replyFiber([], [descriptor()]);
+    workerAccepts = true;
+    await live.hook.flush();
+
+    const acceptedBatch = live.sent.filter(message => message.type === 'events').at(-1);
+    const entries = acceptedBatch?.entries.filter((entry: any) => entry.event.messageId === messageId) ?? [];
+    expect(entries).toHaveLength(2);
+    expect(entries.map((entry: any) => entry.recordingGeneration)).toEqual([g0, g2]);
+    expect(entries[0].event).toMatchObject({ text: 'Which scene?', rich: { status: 'available' } });
+    expect(entries[1].event.rich).toMatchObject({ status: 'available' });
+    expect(entries[1].event).not.toHaveProperty('text');
+    expect(entries[0].event).not.toHaveProperty('recordingGeneration');
+    expect(entries[1].event).not.toHaveProperty('recordingGeneration');
+  });
+
+  it('renews G0 from the real periodic status path so unchanged documents can acquire fresh G2', async () => {
+    const g0 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const g2 = 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
+    let issued = g0;
+    live = await harness(undefined, {
+      register_document: () => ({ ok: true, recordingGeneration: issued }),
+      recording_generation: () => ({ ok: true, recordingGeneration: issued })
+    });
+    const page = live;
+    rootFixture(live.document);
+    await replyFiber([], [descriptor()]);
+    expect(emitted(live.sent, 'assistant_message').at(-1)?.recordingGeneration).toBe(g0);
+    issued = g2; // Same physical tab and SPA route; there is no navigation hook to help.
+    const beforeRenewal = live.sent.filter(row => row.type === 'recording_generation').length;
+    await live.hook.checkStatus(); // The live 15-second status timer owns this renewal.
+    await vi.waitFor(() => expect(page.sent.filter(row => row.type === 'recording_generation').length).toBeGreaterThan(beforeRenewal));
+    const fresh = descriptor();
+    fresh.messages[0]!.rawText = 'Only acquired after G2';
+    await replyFiber([], [fresh]);
+    expect(emitted(live.sent, 'assistant_message').at(-1)).toMatchObject({
+      recordingGeneration: g2, event: { messageId, text: 'Only acquired after G2' }
+    });
   });
 
   it('refuses an old rich stamp across A-to-B-to-A until the returned document earns a fresh exact scan', async () => {
@@ -7907,6 +7977,9 @@ describe('a stop button that goes missing while the turn is still running', () =
     live.dom.reconfigure({ url: `https://chatgpt.com/c/${conversationB}` }); live.hook.observe();
     live.dom.reconfigure({ url: `https://chatgpt.com/c/${conversationA}` }); live.hook.observe();
     const bytes = new TextEncoder().encode('late-webp');
+    // SPA epochs now require a new registered-document issuance before a fresh
+    // persistence capture. The retired A encode keeps its old immutable grant.
+    expect(await live.runtimeMessage({ type: 'clf-recording-generation-refresh' })).toMatchObject({ ok: true });
     await replyFiber([], [descriptor]); await settle();
     expect(finishes).toHaveLength(2);
     finishes[0]!({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
@@ -7921,6 +7994,55 @@ describe('a stop button that goes missing while the turn is still running', () =
     expect(events.filter(event => event.previewStatus === 'pending')).toHaveLength(2);
     expect(events.filter(event => event.previewStatus === 'available')).toHaveLength(1);
     expect(events.filter(event => event.previewStatus === 'unavailable')).toHaveLength(0);
+  });
+
+  it('keeps an in-flight G0 generated image immutable while a fresh G2 acquisition encodes the same asset independently', async () => {
+    const g0 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const g2 = 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
+    let issued = g0;
+    live = await harness(undefined, {
+      register_document: () => ({ ok: true, recordingGeneration: issued }),
+      recording_generation: () => ({ ok: true, recordingGeneration: issued })
+    });
+    const section = assistantTurn(live.document, 'turn-epoch-image', []);
+    section.setAttribute('data-clf-fiber-turn', '0');
+    const messageId = '4150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const assetId = 'file_000000005f2c823085a542762d1de785';
+    const group = live.document.createElement('div'); group.className = 'group/imagegen-image';
+    const image = live.document.createElement('img');
+    image.src = `https://chatgpt.com/backend-api/estuary/content?id=${assetId}&sig=private`;
+    image.setAttribute('data-clf-fiber-image', `0:${encodeURIComponent(messageId)}:${encodeURIComponent(assetId)}`);
+    Object.defineProperties(image, {
+      complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 1254 }, naturalHeight: { configurable: true, value: 1254 }
+    });
+    image.getBoundingClientRect = () => ({ width: 480, height: 480 } as DOMRect);
+    group.append(image); section.append(group);
+    const pendingBlobs: Array<(blob: any) => void> = [];
+    (live.window.HTMLCanvasElement.prototype as any).getContext = () => ({ drawImage: () => undefined });
+    (live.window.HTMLCanvasElement.prototype as any).toBlob = (callback: (blob: any) => void) => { pendingBlobs.push(callback); };
+    const descriptor = { turnId: 'turn-epoch-image', conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      messages: [], activities: [], images: [{ messageId, assetId, providerRole: 'tool',
+        providerChannel: 'final', providerStatus: 'finished_successfully', width: 1254, height: 1254,
+        order: 0, partOrder: 0 }] };
+    await replyFiber([], [descriptor]); await settle();
+    expect(pendingBlobs).toHaveLength(1);
+    issued = g2; // Successful Off then On, without navigation or changing the native asset.
+    expect(await live.runtimeMessage({ type: 'clf-recording-generation-refresh' })).toMatchObject({ ok: true });
+    await replyFiber([], [descriptor]); await settle();
+    expect(pendingBlobs).toHaveLength(2);
+    const bytes = new TextEncoder().encode('image-epoch-webp');
+    pendingBlobs[0]!({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
+    await settle();
+    pendingBlobs[1]!({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
+    await settle(); await live.hook.flush();
+    const entries = emitted(live.sent, 'native_image');
+    expect(entries.filter(row => row.event.previewStatus === 'pending').map(row => row.recordingGeneration)).toEqual([g0, g2]);
+    const available = entries.filter(row => row.event.previewStatus === 'available');
+    expect(available.length).toBeGreaterThanOrEqual(1);
+    expect(available.every(row => row.recordingGeneration === g0 || row.recordingGeneration === g2)).toBe(true);
+    expect(available.some(row => row.recordingGeneration === g2)).toBe(true);
+    expect(JSON.stringify(entries)).not.toContain('sig=private');
   });
 
   it('waits for a complete generated-image node even when progressive pixels already expose dimensions', async () => {

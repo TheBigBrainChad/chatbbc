@@ -47,7 +47,7 @@ vi.mock('electron', () => ({
 }));
 const { safeStorage } = await import('electron');
 
-const { defaultConfig, getConfig, initConfigPath, pendingRecordingOffDecision, saveConfig } = await import('../src/main/config.js');
+const { defaultConfig, getConfig, initConfigPath, pendingRecordingOffDecision, recordingGenerationGrant, saveConfig, updateConfig } = await import('../src/main/config.js');
 const { initSecretsPath, resetSecretsCacheForTests, setSecret } = await import('../src/main/secrets.js');
 const {
   bridgePort,
@@ -232,6 +232,9 @@ let anonymousRedeemIndex = 0;
 let dir: string;
 let base: string;
 let token: string | null = null;
+/** The test worker freezes its issued grant when it queues an observation; while
+ * Off is pending it retains the previous grant instead of retro-stamping On. */
+let testRecordingGeneration: string | null = null;
 
 interface Reply {
   status: number;
@@ -245,7 +248,15 @@ function request(
   options: { body?: unknown; origin?: string | null; auth?: string | null; raw?: string; extensionVersion?: string; protocol?: number } = {}
 ): Promise<Reply> {
   const url = new URL(path, base);
-  const payload = options.raw ?? (options.body === undefined ? null : JSON.stringify(options.body));
+  const freshGrant = recordingGenerationGrant();
+  if (freshGrant) testRecordingGeneration = freshGrant;
+  const body = path === '/events' && options.body && typeof options.body === 'object' &&
+    !Array.isArray(options.body) && Array.isArray((options.body as Record<string, unknown>).events) &&
+    !Object.hasOwn(options.body, 'recordingGenerations')
+      ? { ...options.body, recordingGenerations: (options.body as { events: unknown[] }).events.map(() =>
+          freshGrant ?? testRecordingGeneration) }
+      : options.body;
+  const payload = options.raw ?? (body === undefined ? null : JSON.stringify(body));
   const headers: Record<string, string> = {};
   // Every extension request carries its protocol generation. Pairing must fail closed
   // across incompatible app/extension builds instead of provisioning a token that can
@@ -356,7 +367,8 @@ beforeAll(async () => {
     ui: { ...baseConfig.ui, autoContinue: false },
     multiAgent: { ...baseConfig.multiAgent, enabled: true, recoverAgentTabs: true }
   };
-  await saveConfig(suiteConfig);
+  await updateConfig(() => suiteConfig);
+  testRecordingGeneration = recordingGenerationGrant();
   const port = await startBridge();
   expect(port, 'no loopback port in 8765-8769 was free').not.toBeNull();
   base = `http://127.0.0.1:${port}`;
@@ -372,7 +384,7 @@ beforeEach(async () => {
   recoveryBrowserWake.mockClear();
   vi.mocked(safeStorage.isAsyncEncryptionAvailable).mockResolvedValue(true);
   // A test that writes its own config is not allowed to leak it into the next one.
-  await saveConfig(suiteConfig);
+  await updateConfig(() => suiteConfig);
   // The swarm goes first: ending a run queues stop notices into the chats of any workers
   // still live, and those would otherwise be dropped into the queue the bridge reset had
   // just emptied — the previous test's cleanup showing up as the next test's first command.
@@ -413,7 +425,7 @@ describe('rich observations require capture-time Chrome document authority', () 
       events: [forged], sourceCaptures: [{ tab: 42, documentId: 'claimed-document',
         navigationEpoch: 9, routeVerified: true, conversationId }] } });
     expect(reply.status).toBe(200);
-    expect(reply.body.sessionId).toBe(sessionId);
+    expect(reply.body).toMatchObject({ sessionId: null, stored: 0, recordingSuppressed: true });
     expect(await readEvents(sessionId)).toEqual(before);
     expect(before.find(row => row.kind === 'assistant_message')).not.toHaveProperty('richMedia');
   });
@@ -454,16 +466,16 @@ describe('rich observations require capture-time Chrome document authority', () 
     expect(parseObservations([raw], [capture, capture], conversationId)[0]).not.toHaveProperty('rich');
   });
 
-  it('rejects protocol-15 /events even with a valid old bearer before creating a session', async () => {
+  it('rejects protocol-16 /events even with a valid old bearer before creating a session', async () => {
     await pair();
     const conversationId = randomUUID();
-    const oldHello = await request('GET', '/hello', { protocol: 15 });
-    expect(oldHello.body).toMatchObject({ bridge: 16, compatible: false });
-    const oldEvents = await request('POST', '/events', { protocol: 15, body: {
+    const oldHello = await request('GET', '/hello', { protocol: 16 });
+    expect(oldHello.body).toMatchObject({ bridge: 17, compatible: false });
+    const oldEvents = await request('POST', '/events', { protocol: 16, body: {
       conversationId, events: [{ kind: 'assistant_message', time: Date.now(),
-        text: 'Old peer cannot write under protocol 16', messageId: 'logical-old' }]
+        text: 'Old peer cannot write under protocol 17', messageId: 'logical-old' }]
     } });
-    expect(oldEvents).toMatchObject({ status: 426, body: expect.objectContaining({ bridge: 16 }) });
+    expect(oldEvents).toMatchObject({ status: 426, body: expect.objectContaining({ bridge: 17 }) });
     expect(await findSessionByConversation(conversationId)).toBeNull();
   });
 
@@ -645,6 +657,29 @@ describe('who is allowed to talk to it', () => {
     expect(Object.keys(reply.body)).toEqual(['app', 'version', 'bridge', 'compatible', 'paired', 'disconnected']);
     expect(reply.body.disconnected).toBe(false);
     expect(reply.body.compatible).toBe(true);
+  });
+
+  it('issues a recording generation only through the authenticated versioned route and never hello', async () => {
+    const anonymous = await request('GET', '/recording/generation', { auth: null });
+    expect(anonymous.status).toBe(401);
+    expect(JSON.stringify(anonymous.body)).not.toMatch(/[A-Za-z0-9_-]{43}/);
+    const oldPeer = await request('GET', '/recording/generation', { auth: null, protocol: BRIDGE_PROTOCOL - 1 });
+    expect(oldPeer.status).toBe(401);
+    await pair();
+    expect((await request('GET', '/recording/generation', { protocol: BRIDGE_PROTOCOL - 1 })).status).toBe(426);
+    const first = await request('GET', '/recording/generation');
+    expect(first).toMatchObject({ status: 200, body: { recordingGeneration: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) } });
+    expect((await request('GET', '/hello', { auth: null })).body).not.toHaveProperty('recordingGeneration');
+    try {
+      await saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      expect(await request('GET', '/recording/generation')).toMatchObject({ status: 200, body: { recordingGeneration: null } });
+      await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
+      const next = await request('GET', '/recording/generation');
+      expect(next).toMatchObject({ status: 200, body: { recordingGeneration: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) } });
+      expect(next.body.recordingGeneration).not.toBe(first.body.recordingGeneration);
+    } finally {
+      await saveConfig(suiteConfig);
+    }
   });
 
   it('refuses every web page origin, chatgpt.com included', async () => {
@@ -938,6 +973,7 @@ describe('authorisation', () => {
     await pair();
     for (const [method, path] of [
       ['GET', '/status'],
+      ['GET', '/recording/generation'],
       ['GET', '/activity?conversationId=abcdabcd'],
       ['POST', '/events'],
       ['POST', '/correlations'],
@@ -1171,6 +1207,47 @@ describe('observations', () => {
 // ---------------------------------------------------------------- activity
 
 describe('activity feed', () => {
+  it('suppresses old, unknown and shifted-index observations while retaining only fresh G2 in a mixed HTTP batch', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const g0 = recordingGenerationGrant();
+    expect(g0).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const baseline = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', turnId: 'epoch-baseline', time: Date.now() }
+    ], recordingGenerations: [g0] } });
+    expect(baseline.status).toBe(200);
+    const sessionId = baseline.body.sessionId as string;
+    await saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+    await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
+    const g2 = recordingGenerationGrant();
+    expect(g2).not.toBe(g0);
+    const stale = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'user_message', time: Date.now() + 1, messageId: 'pre-off-timeout-retry', text: 'must not backfill' }
+    ], recordingGenerations: [g0] } });
+    expect(stale).toMatchObject({ status: 200, body: { stored: 0, recordingSuppressed: true } });
+    const mixed = await request('POST', '/events', { body: {
+      conversationId,
+      events: [
+        { kind: 'user_message', time: Date.now() + 2, messageId: 'stale-g0', text: 'old' },
+        { kind: 'unrecognized', time: Date.now() + 3, messageId: 'malformed-middle' },
+        { kind: 'user_message', time: Date.now() + 4, messageId: 'unknown-v16', text: 'unknown' },
+        { kind: 'user_message', time: Date.now() + 5, messageId: 'fresh-g2', text: 'fresh' }
+      ],
+      recordingGenerations: [g0, g2, null, g2]
+    } });
+    expect(mixed).toMatchObject({ status: 200, body: { stored: 1 } });
+    expect((await readEvents(sessionId)).filter(row => row.kind === 'user_message').map(row => row.messageId))
+      .toEqual(['fresh-g2']);
+    expect((await request('POST', '/events', { body: { conversationId,
+      events: [{ kind: 'user_message', time: Date.now(), messageId: 'missing-generation', text: 'legacy' }],
+      recordingGenerations: [null] } })).body).toMatchObject({ stored: 0, recordingSuppressed: true });
+    expect((await request('POST', '/events', { body: { conversationId,
+      events: [{ kind: 'user_message', time: Date.now(), messageId: 'wrong-length', text: 'malformed' }],
+      recordingGenerations: [g2, g2] } })).body).toMatchObject({ stored: 0, recordingSuppressed: true });
+    expect((await readEvents(sessionId)).filter(row => row.kind === 'user_message').map(row => row.messageId))
+      .toEqual(['fresh-g2']);
+  });
+
   it('reopens a durable still-open chat after recorder memory is lost', async () => {
     await pair();
     const conversationId = '98989898-7777-6666-5555-444444444444';
@@ -1618,7 +1695,7 @@ describe('activity feed', () => {
       ] } });
       const after = await readEvents(feed.body.sessionId);
       expect(after).toHaveLength(before.length);
-      await saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: true } });
+      await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
       await request('POST', '/events', { body: { conversationId, events: [
         { kind: 'turn_start', time: Date.now() + 2, turnId: 'recorded-after-reenable' }
       ] } });
@@ -1660,7 +1737,7 @@ describe('activity feed', () => {
       // answered 500 immediately, and its Chrome journal then replayed on the next On.
       expect(await Promise.race([pending.then(reply => reply.status),
         new Promise<'waiting'>(resolve => setTimeout(() => resolve('waiting'), 200))])).toBe('waiting');
-      enabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: true } });
+      enabling = updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
       release();
       await disabling;
       await enabling;
@@ -1740,7 +1817,7 @@ describe('activity feed', () => {
     expect(baseline.status).toBe(200);
     const body = JSON.stringify({ conversationId, events: [
       { kind: 'user_message', time: 101, messageId: 'pre-off-partial-body', text: 'private before Off' }
-    ] });
+    ], recordingGenerations: [recordingGenerationGrant()] });
     const split = 20;
     let releaseBody!: () => void;
     let sentHeaders!: () => void;
@@ -1772,7 +1849,7 @@ describe('activity feed', () => {
     try {
       await reached;
       await saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
-      await saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: true } });
+      await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
       releaseBody();
       expect(await pending).toMatchObject({ status: 200, body: { stored: 0 } });
       expect((await readEvents(baseline.body.sessionId)).filter(row => row.kind === 'user_message')).toEqual([]);
@@ -1782,6 +1859,111 @@ describe('activity feed', () => {
       await saveConfig(suiteConfig);
     }
   });
+
+  it('retires an aborted 10-second G0 POST after the 15-second Off drain succeeds and a later On issues G2', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const baseline = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: Date.now(), turnId: 'timeout-generation-turn' }
+    ] } });
+    expect(baseline.status).toBe(200);
+    const sessionId = baseline.body.sessionId as string;
+    const g0 = recordingGenerationGrant();
+    expect(g0).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const originalRename = fs.rename.bind(fs);
+    let reached!: () => void, release!: () => void;
+    const entered = new Promise<void>(resolve => { reached = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let heldWriter = false;
+    const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (!heldWriter && String(to).includes(`${path.sep}messages${path.sep}`) && String(to).endsWith('.json')) {
+        heldWriter = true;
+        reached();
+        await gate;
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    const oldPayload = { conversationId, events: [
+      { kind: 'assistant_message', time: Date.now() + 2, messageId: 'aborted-before-off',
+        turnId: 'timeout-generation-turn', text: 'old private answer', state: 'final', final: true }
+    ], recordingGenerations: [g0] };
+    let first: Promise<Reply> | null = null;
+    let disabling: Promise<unknown> | null = null;
+    let interrupted: Promise<'aborted' | 'response'> | null = null;
+    const aborter = new AbortController();
+    let abortTimer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      first = request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'user_message', time: Date.now() + 1, messageId: 'physical-before-off', text: 'original write' }
+      ], recordingGenerations: [g0] } });
+      await entered;
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      void disabling.catch(() => undefined);
+      await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+      // This is actual authenticated HTTP over an isolated port. A Chrome-style
+      // 10-second AbortController deadline loses the response while the original
+      // config transaction legitimately has up to 15 seconds to settle its writer.
+      const target = new URL('/events', base);
+      const body = JSON.stringify(oldPayload);
+      interrupted = new Promise<'aborted' | 'response'>((resolve, reject) => {
+        const req = http.request({ hostname: target.hostname, port: target.port, path: target.pathname,
+          method: 'POST', signal: aborter.signal, headers: {
+            origin: EXTENSION_ORIGIN, authorization: `Bearer ${token}`,
+            'x-extension-version': APP_VERSION, 'x-extension-protocol': String(BRIDGE_PROTOCOL),
+            'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body))
+          } }, res => {
+          res.resume();
+          res.once('end', () => resolve('response'));
+        });
+        req.on('error', error => {
+          if ((error as NodeJS.ErrnoException).code === 'ABORT_ERR') resolve('aborted');
+          else reject(error);
+        });
+        req.end(body);
+      });
+      abortTimer = setTimeout(() => aborter.abort(), 10_000);
+      expect(await interrupted).toBe('aborted');
+      expect(heldWriter).toBe(true);
+      expect(getConfig().sessions.record).toBe(true); // No false Off ACK at 10 seconds.
+      release();
+      expect((await first).status).toBe(200);
+      await disabling;
+      expect(getConfig().sessions.record).toBe(false);
+      await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
+      const g2 = recordingGenerationGrant();
+      expect(g2).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(g2).not.toBe(g0);
+      expect(await request('POST', '/events', { body: oldPayload })).toMatchObject({
+        status: 200, body: { stored: 0, recordingSuppressed: true }
+      });
+      expect((await readEvents(sessionId)).filter(row => row.kind === 'assistant_message')).toEqual([]);
+      expect((await readEvents(sessionId)).filter(row => row.kind === 'user_message').map(row => row.messageId))
+        .toEqual(['physical-before-off']);
+      const fresh = await request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'assistant_message', time: Date.now() + 3, messageId: 'fresh-after-10s-abort',
+          turnId: 'timeout-generation-turn', text: 'fresh G2 only', state: 'final', final: true }
+      ], recordingGenerations: [g2] } });
+      // The recorder counts the accepted final and its independently committed
+      // recovered turn_end. Neither may be borrowed from the aborted G0 response.
+      expect(fresh).toMatchObject({ status: 200, body: { stored: 2 } });
+      const after = await readEvents(sessionId);
+      expect(after.filter(row => row.kind === 'assistant_message').map(row => row.messageId))
+        .toEqual(['fresh-after-10s-abort']);
+      expect(after.filter(row => row.kind === 'turn_end')).toMatchObject([
+        { turnId: 'timeout-generation-turn', outcome: 'completed',
+          detail: 'recovered from a final assistant message after the ChatGPT page reloaded' }
+      ]);
+      expect(JSON.stringify(after)).not.toContain('aborted-before-off');
+      expect(JSON.stringify(after)).not.toContain('old private answer');
+    } finally {
+      if (abortTimer) clearTimeout(abortTimer);
+      aborter.abort();
+      release();
+      await Promise.allSettled([first, disabling, interrupted].filter(promise => promise !== null));
+      spy.mockRestore();
+      await saveConfig(suiteConfig);
+    }
+  }, 25_000);
 
   it.each([true, false])(
     'settles a physically committed first canonical row before %s Off and handles the second without duplicate Goal debt',
@@ -3592,6 +3774,8 @@ describe('delivering a bootstrap', () => {
   });
 
   it('recovers a lost worker ACK only when events carry the exact redeemed command id', async () => {
+    expect(getConfig().sessions.record, 'suite must restore Recording On').toBe(true);
+    expect(recordingGenerationGrant(), 'suite must issue the grant').toBeTruthy();
     await pair();
     spawn({ workers: [{ task: 'recover my binding' }], caller: { conversationId: PRIME_CHAT } });
     const command = await redeem(undefined, 'worker-page');
@@ -3607,6 +3791,7 @@ describe('delivering a bootstrap', () => {
     });
     expect(missingRun.status).toBe(200);
     expect(swarmState().agents.find((agent) => agent.id === 'worker-1')?.conversationId).toBeNull();
+    expect(pendingCommands().find(entry => entry.id === command.id), 'exact lost-ACK command must remain leased').toMatchObject({ id: command.id });
 
     const recovered = await request('POST', '/events', {
       body: {
@@ -3617,9 +3802,43 @@ describe('delivering a bootstrap', () => {
       }
     });
     expect(recovered.status).toBe(200);
+    expect(recovered.body).toMatchObject({ workerCommandRecovered: true, stored: 0 });
+    expect(recovered.body).not.toHaveProperty('recordingSuppressed', true);
     const worker = swarmState().agents.find((agent) => agent.id === 'worker-1')!;
     expect(worker.state).toBe('active');
     expect(worker.conversationId).toBe(conversationId);
+  });
+
+  it('cannot activate an exact claimed worker from a malformed current-generation observation', async () => {
+    await pair();
+    spawn({ workers: [{ task: 'wait for actual evidence' }], caller: { conversationId: PRIME_CHAT } });
+    const command = await redeem();
+    const generation = recordingGenerationGrant();
+    const malformed = await request('POST', '/events', { body: {
+      conversationId: LOST_ACK_CHAT, agent: 'worker-1', agentCommandId: command.id,
+      events: [{ kind: 'unrecognized', time: Date.now(), text: 'no canonical evidence' }],
+      recordingGenerations: [generation]
+    } });
+    expect(malformed).toMatchObject({ status: 200, body: { stored: 0, recordingSuppressed: true } });
+    expect(swarmState().agents.find(agent => agent.id === 'worker-1')).toMatchObject({ state: 'invited', conversationId: null });
+    expect(pendingCommands().find(entry => entry.id === command.id)).toMatchObject({ id: command.id });
+    expect(await findSessionByConversation(LOST_ACK_CHAT)).toBeNull();
+  });
+
+  it('does not bind a worker from a parsed rich-only row refused before session creation', async () => {
+    await pair();
+    spawn({ workers: [{ task: 'await an actual canonical row' }], caller: { conversationId: PRIME_CHAT } });
+    const command = await redeem();
+    const reply = await request('POST', '/events', { body: {
+      conversationId: LOST_ACK_CHAT, agent: 'worker-1', agentCommandId: command.id,
+      events: [{ kind: 'assistant_message', time: Date.now(), messageId: 'only-rich-no-prose',
+        rich: { version: 1, status: 'unavailable', reason: 'unverified' } }],
+      recordingGenerations: [recordingGenerationGrant()]
+    } });
+    expect(reply).toMatchObject({ status: 200, body: { stored: 0, recordingSuppressed: true } });
+    expect(swarmState().agents.find(agent => agent.id === 'worker-1')).toMatchObject({ state: 'invited', conversationId: null });
+    expect(pendingCommands().find(entry => entry.id === command.id)).toMatchObject({ id: command.id });
+    expect(await findSessionByConversation(LOST_ACK_CHAT)).toBeNull();
   });
 
   it('detaches an active worker when the browser reports its final chat tab closed', async () => {
@@ -5999,6 +6218,152 @@ describe('a worker chat that never opens', () => {
   });
 
   /** Lost-ACK retirement settles only that marker; siblings already own their attempts. */
+  it('does not activate a lost-ACK worker from an events row suppressed while its origin lookup crosses Off', async () => {
+    await pair();
+    spawn({ workers: [{ task: 'preserve the original recording decision' }], caller: { conversationId: PRIME_CHAT } });
+    const openedWorker = await redeem();
+    const existing = await createSession({ conversationId: LOST_ACK_CHAT, title: 'Before worker origin' });
+    const beforeOrigin = await getSession(existing.id);
+    const originalLookup = sessionStoreModule.findSessionByConversation.bind(sessionStoreModule);
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let intercepted = false;
+    const spy = vi.spyOn(sessionStoreModule, 'findSessionByConversation').mockImplementation((async (conversation, options) => {
+      if (!intercepted && conversation === PRIME_CHAT) {
+        intercepted = true;
+        entered();
+        await blocked;
+      }
+      return originalLookup(conversation, options);
+    }) as typeof sessionStoreModule.findSessionByConversation);
+    let requestWork: Promise<Reply> | null = null;
+    let disabling: Promise<unknown> | null = null;
+    try {
+      requestWork = request('POST', '/events', { body: { conversationId: LOST_ACK_CHAT,
+        agent: 'worker-1', agentCommandId: openedWorker.id,
+        events: [{ kind: 'turn_start', time: Date.now(), turnId: 'suppressed-worker-turn' }] } });
+      await reached;
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      await disabling;
+      await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
+      release();
+      expect(await requestWork).toMatchObject({ status: 200, body: { stored: 0, recordingSuppressed: true } });
+      expect(swarmState().agents.find(agent => agent.id === 'worker-1')?.state).toBe('invited');
+      expect((await readEvents(existing.id)).filter(row => row.kind === 'turn_start')).toEqual([]);
+      expect((await getSession(existing.id))?.origin).toEqual(beforeOrigin?.origin);
+      expect((await getSession(existing.id))?.title).toBe(beforeOrigin?.title);
+      const freshWithoutCommand = await request('POST', '/events', { body: { conversationId: LOST_ACK_CHAT,
+        events: [{ kind: 'turn_start', time: Date.now(), turnId: 'fresh-unowned-turn' }] } });
+      expect(freshWithoutCommand).toMatchObject({ status: 200, body: { stored: 1 } });
+      expect((await getSession(existing.id))?.origin).toEqual(beforeOrigin?.origin);
+      const freshWithCommand = await request('POST', '/events', { body: { conversationId: LOST_ACK_CHAT,
+        agent: 'worker-1', agentCommandId: openedWorker.id,
+        events: [{ kind: 'turn_start', time: Date.now(), turnId: 'fresh-owned-turn' }] } });
+      expect(freshWithCommand).toMatchObject({ status: 200, body: { stored: 1 } });
+      expect((await getSession(existing.id))?.origin).toMatchObject({ kind: 'worker', agentId: 'worker-1' });
+      expect((await getSession(existing.id))?.title).not.toBe(beforeOrigin?.title);
+    } finally {
+      release();
+      await Promise.allSettled([requestWork, disabling].filter(p => p !== null));
+      spy.mockRestore();
+      await updateConfig(() => suiteConfig);
+    }
+  });
+
+  it('acknowledges a committed worker turn when its subsequent agent report is held across Off', async () => {
+    await pair();
+    spawn({ workers: [{ task: 'finish then prove a fresh turn' }], caller: { conversationId: PRIME_CHAT } });
+    const command = await redeem();
+    const conversationId = randomUUID();
+    expect((await request('POST', '/commands/ack', { body: {
+      id: command.id, status: 'sent', conversationId, agent: 'worker-1'
+    } })).status).toBe(200);
+    finishAgent({ conversationId }, 'finished before the new turn');
+    expect(swarmState().agents.find(agent => agent.id === 'worker-1')?.state).toBe('sleeping');
+    const originalAppend = fs.appendFile.bind(fs);
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let held = false;
+    const spy = vi.spyOn(fs, 'appendFile').mockImplementation((async (file, data, options) => {
+      if (!held && String(file).endsWith('events.jsonl') && String(data).includes('"kind":"agent_message"')) {
+        held = true;
+        entered();
+        await blocked;
+      }
+      return originalAppend(file, data, options);
+    }) as typeof fs.appendFile);
+    let eventRequest: Promise<Reply> | null = null;
+    let disabling: Promise<unknown> | null = null;
+    try {
+      eventRequest = request('POST', '/events', { body: { conversationId,
+        events: [{ kind: 'turn_start', time: Date.now() + 1000, turnId: 'committed-before-report-off' }] } });
+      await vi.waitFor(() => expect(held).toBe(true));
+      await reached;
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+      release();
+      const accepted = await eventRequest;
+      expect(accepted).toMatchObject({ status: 200, body: { stored: 1 } });
+      expect(accepted.body).not.toHaveProperty('recordingSuppressed', true);
+      await disabling;
+      expect((await readEvents(accepted.body.sessionId)).filter(row => row.kind === 'turn_start'))
+        .toMatchObject([{ turnId: 'committed-before-report-off' }]);
+      expect(swarmState().agents.find(agent => agent.id === 'worker-1')).toMatchObject({
+        state: 'active', conversationId
+      });
+    } finally {
+      release();
+      await Promise.allSettled([eventRequest, disabling].filter(promise => promise !== null));
+      spy.mockRestore();
+      await updateConfig(() => suiteConfig);
+    }
+  });
+
+  it('does not misreport an already committed worker row as suppressed when its origin rename crosses Off', async () => {
+    await pair();
+    spawn({ workers: [{ task: 'retain committed origin and row' }], caller: { conversationId: PRIME_CHAT } });
+    const command = await redeem();
+    const existing = await createSession({ conversationId: LOST_ACK_CHAT, title: 'Before accepted origin' });
+    const target = path.join(dir, 'sessions', existing.id, 'meta.json');
+    const originalRename = fs.rename.bind(fs);
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let intercepted = false;
+    const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (!intercepted && String(to) === target) {
+        intercepted = true;
+        entered();
+        await blocked;
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    let work: Promise<Reply> | null = null;
+    let disabling: Promise<unknown> | null = null;
+    try {
+      work = request('POST', '/events', { body: { conversationId: LOST_ACK_CHAT,
+        agent: 'worker-1', agentCommandId: command.id,
+        events: [{ kind: 'turn_start', time: Date.now(), turnId: 'committed-before-origin-rename' }] } });
+      await reached;
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+      release();
+      expect(await work).toMatchObject({ status: 200, body: { sessionId: existing.id, stored: 1 } });
+      await disabling;
+      expect((await getSession(existing.id))?.origin).toMatchObject({ kind: 'worker', agentId: 'worker-1' });
+      expect((await readEvents(existing.id)).filter(row => row.kind === 'turn_start'))
+        .toMatchObject([{ turnId: 'committed-before-origin-rename' }]);
+      expect(swarmState().agents.find(agent => agent.id === 'worker-1')?.state).toBe('active');
+    } finally {
+      release();
+      await Promise.allSettled([work, disabling].filter(promise => promise !== null));
+      spy.mockRestore();
+      await updateConfig(() => suiteConfig);
+    }
+  });
+
   it('does not reopen a sibling when a lost-ACK bootstrap retires', async () => {
     vi.useFakeTimers();
     try {

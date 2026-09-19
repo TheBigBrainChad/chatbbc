@@ -9,6 +9,7 @@ import { appearanceSchema } from './appearance-schema.js';
  */
 
 import { promises as fs } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { z } from 'zod';
 import {
@@ -481,6 +482,7 @@ function conservativeRecoveryConfig(): Config {
     ...defaultConfig(),
     capabilities: { ...DEFAULT_CAPABILITIES },
     readOnly: true,
+    sessions: { ...DEFAULT_SESSIONS, record: false },
     multiAgent: { ...DEFAULT_MULTI_AGENT },
     ui: { ...defaultConfig().ui, autoContinue: false },
     // A config file that could not be trusted is not consent to have a second model typing
@@ -513,6 +515,10 @@ function adoptCurrentGoalPrompt(config: Config): Config {
 
 let configPath = '';
 let current: Config = defaultConfig();
+/** Private persistent admission epoch, never a caller-writable Config field. */
+let recordingGeneration: string | null = null;
+let configLoad: Promise<Config> | null = null;
+const RECORDING_GENERATION_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 /** One config-owned generation for recording admission across an Off → On transition. */
 let recordingRevision = 0;
 /** Closing admission precedes waiting for already-started transcript and asset writes. */
@@ -529,35 +535,66 @@ let mutationQueue: Promise<void> = Promise.resolve();
 
 export function initConfigPath(userDataDir: string): void {
   configPath = path.join(userDataDir, 'config.json');
+  recordingGeneration = null;
 }
 
 export async function loadConfig(): Promise<Config> {
-  try {
-    const raw = await fs.readFile(configPath, 'utf8');
-    const parsed = configSchema.safeParse(JSON.parse(raw));
-    if (!parsed.success) {
-      logError('Settings file was invalid and has been reset to defaults');
-      current = conservativeRecoveryConfig();
-    } else {
-      current = adoptCurrentGoalPrompt(adoptWiderWindow(adoptAutoCompaction(recalibrateTokens(parsed.data))));
-      // Duplicate root names would make a virtual path ambiguous.
+  if (configLoad) return configLoad;
+  // Before even the first disk await, revoke prior-process or prior-path admission.
+  recordingGeneration = null;
+  const operation = mutationQueue.then(async (): Promise<Config> => {
+    let next: Config;
+    let generation: string | null = null;
+    let migrate = false;
+    try {
+      const raw = JSON.parse(await fs.readFile(configPath, 'utf8')) as Record<string, unknown>;
+      const parsed = configSchema.safeParse(raw);
+      if (!parsed.success || (Object.hasOwn(raw, 'recordingGeneration') &&
+          (typeof raw.recordingGeneration !== 'string' || !RECORDING_GENERATION_PATTERN.test(raw.recordingGeneration)))) {
+        logError('Settings file was invalid; recording is disabled until settings are repaired');
+        current = conservativeRecoveryConfig();
+        return current;
+      }
+      next = adoptCurrentGoalPrompt(adoptWiderWindow(adoptAutoCompaction(recalibrateTokens(parsed.data))));
       const seen = new Set<string>();
-      current.roots = current.roots.filter((r) => {
+      next.roots = next.roots.filter((r) => {
         const key = r.name.toLowerCase();
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
       });
+      generation = typeof raw.recordingGeneration === 'string' ? raw.recordingGeneration : null;
+      migrate = generation === null;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        logError(`Could not read settings: ${(err as Error).message}`);
+        current = conservativeRecoveryConfig();
+        return current;
+      }
+      next = defaultConfig();
+      migrate = true;
     }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      logError(`Could not read settings: ${(err as Error).message}`);
-      current = conservativeRecoveryConfig();
-    } else {
-      current = defaultConfig();
+    if (migrate) {
+      // Fresh installs and valid old configs only regain recording after a single
+      // atomic publication of both choice and a cryptographically fresh epoch.
+      generation = randomBytes(32).toString('base64url');
+      try {
+        await fs.mkdir(path.dirname(configPath), { recursive: true });
+        await fs.writeFile(`${configPath}.tmp`, JSON.stringify({ ...next, recordingGeneration: generation }, null, 2), 'utf8');
+        await fs.rename(`${configPath}.tmp`, configPath);
+      } catch (error) {
+        logError(`Could not initialize recording admission: ${(error as Error).message}`);
+        current = { ...next, sessions: { ...next.sessions, record: false } };
+        return current;
+      }
     }
-  }
-  return current;
+    current = next;
+    recordingGeneration = generation;
+    return current;
+  });
+  mutationQueue = operation.then(() => undefined, () => undefined);
+  configLoad = operation.finally(() => { configLoad = null; });
+  return configLoad;
 }
 
 /** Applies any superseded pair in OLD_TOKEN_DEFAULTS → DEFAULT_SESSIONS, untouched pairs only. */
@@ -633,6 +670,16 @@ export function getRecordingRevision(): number {
   return recordingRevision;
 }
 
+/** Read-only admission snapshot: null while Off, pending, corrupt or uninitialized. */
+export function recordingGenerationGrant(): string | null {
+  return current.sessions.record && !recordingDisablePending ? recordingGeneration : null;
+}
+
+/** A persisted generation match does not itself bypass pending Off's physical fence. */
+export function recordingGenerationMatches(value: unknown): boolean {
+  return typeof value === 'string' && recordingGeneration !== null && value === recordingGeneration;
+}
+
 export function pendingRecordingOffDecision(): { readonly settled: Promise<boolean> } | null {
   return recordingOffDecision;
 }
@@ -644,7 +691,7 @@ export function registerRecordingWriteDrain(drain: () => Promise<void>): void {
 
 /** A write admitted before an attempted Off cannot resume across that Off or a later On. */
 export function recordingWriteAllowed(revision: number): boolean {
-  return getConfig().sessions.record && !recordingDisablePending && recordingRevision === revision;
+  return getConfig().sessions.record && recordingGeneration !== null && !recordingDisablePending && recordingRevision === revision;
 }
 
 async function drainBeforeRecordingOff(): Promise<void> {
@@ -684,6 +731,8 @@ async function persistConfig(next: Config): Promise<Config> {
   const parsed = configSchema.parse(next);
   const tmp = `${configPath}.tmp`;
   const disablingRecording = current.sessions.record && !parsed.sessions.record;
+  const nextGeneration = recordingGeneration === null || current.sessions.record !== parsed.sessions.record
+    ? randomBytes(32).toString('base64url') : recordingGeneration;
   let settleOff: (committed: boolean) => void = () => undefined;
   if (disablingRecording) {
     recordingDisablePending = true;
@@ -695,12 +744,13 @@ async function persistConfig(next: Config): Promise<Config> {
     // lock. Off cannot be acknowledged ahead of an already-started physical write.
     if (disablingRecording) await drainBeforeRecordingOff();
     await fs.mkdir(path.dirname(configPath), { recursive: true });
-    await fs.writeFile(tmp, JSON.stringify(parsed, null, 2), 'utf8');
+    await fs.writeFile(tmp, JSON.stringify({ ...parsed, recordingGeneration: nextGeneration }, null, 2), 'utf8');
     await fs.rename(tmp, configPath);
     // Only publish the new in-memory state after the durable write succeeded. A disk
     // error must not leave the UI believing settings were saved when they were not.
     if (current.sessions.record !== parsed.sessions.record) recordingRevision++;
     current = parsed;
+    recordingGeneration = nextGeneration;
     return current;
   } finally {
     // On failure the old committed setting remains authoritative and the UI gets
@@ -741,7 +791,13 @@ export function updateConfig(
   return operation;
 }
 
-/** Replaces the complete config. Prefer updateConfig for read-modify-write changes. */
+/** Replaces a legacy full snapshot without silently restoring Recording On.
+ * Only an explicit current-state updateConfig transition may re-enable recording:
+ * a detached snapshot has no trustworthy base to distinguish intent from stale On.
+ * A deliberate Off remains safe through this legacy full-snapshot API.
+ */
 export function saveConfig(next: Config): Promise<Config> {
-  return updateConfig(() => next);
+  return updateConfig(latest => !latest.sessions.record && next.sessions.record
+    ? { ...next, sessions: { ...next.sessions, record: false } }
+    : next);
 }

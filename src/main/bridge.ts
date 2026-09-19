@@ -50,7 +50,7 @@ import { CHAT_ACTIVE_MS, CHAT_SILENCE_MS, continuationMarkerOf, isReasoningEffor
   type ReasoningEffort, type SessionEvent, type SessionOrigin, type StoredText, type ToolCallRecord } from '../shared/session.js';
 import { isChatBlocked, chatBlockedAt } from './session/blocked-chats.js';
 export { CHAT_ACTIVE_MS, CHAT_SILENCE_MS } from '../shared/session.js';
-import { effectiveCapabilities, getConfig, getRecordingRevision, pendingRecordingOffDecision, updateConfig } from './config.js';
+import { effectiveCapabilities, getConfig, getRecordingRevision, pendingRecordingOffDecision, recordingGenerationGrant, recordingGenerationMatches, updateConfig } from './config.js';
 import { getSecret, secureStorageStatus, setSecret } from './secrets.js';
 import {
   acceptGoalReplyNow,
@@ -1914,6 +1914,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   if (rateLimited()) return json(res, 429, { error: 'rate_limited' }, origin);
   if (noteBrowserSeen()) changed();
 
+  // Read-only source of capture admission for the paired extension. Never surface
+  // this token in public /hello or a cached /status projection: a page must obtain
+  // it through its registered Chrome sender before observing persistent content.
+  if (route === '/recording/generation' && req.method === 'GET') {
+    return json(res, 200, { recordingGeneration: recordingGenerationGrant() }, origin);
+  }
+
   if (route === '/browser-control' && req.method === 'POST') {
     const body = await readBody(req) as Record<string, unknown>;
     if (!body || typeof body.browserId !== 'string' || !/^[a-f\d-]{36}$/i.test(body.browserId))
@@ -2225,6 +2232,21 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const offDecision = eventIngressDecision ?? pendingRecordingOffDecision();
     if (offDecision && await offDecision.settled) return suppressed();
     if (eventIngressRevision !== getRecordingRevision()) return suppressed();
+    // Protocol-17 admission is positional. Invalid, unknown or legacy generations
+    // are suppressed with a successful custody receipt, never assigned the current
+    // generation from HTTP arrival time. Keep null placeholders at original indexes
+    // so parseObservations' separately validated sourceCaptures do not shift.
+    const rawEvents = body['events'];
+    const suppliedGenerations = body['recordingGenerations'];
+    if (!Array.isArray(rawEvents) || rawEvents.length > MAX_OBSERVATIONS ||
+        !Array.isArray(suppliedGenerations) || suppliedGenerations.length !== rawEvents.length)
+      return suppressed();
+    const admissionGeneration = recordingGenerationGrant();
+    if (!admissionGeneration) return suppressed();
+    const admittedEvents = rawEvents.map((event, index) =>
+      recordingGenerationMatches(suppliedGenerations[index]) &&
+      suppliedGenerations[index] === admissionGeneration ? event : null);
+    if (admittedEvents.every(event => event === null)) return suppressed();
     // Normal worker binding happens on the exact command ACK. `/events` is the lost-ACK
     // recovery path, but the friendly id (`worker-1`) is reused by every later swarm and is
     // therefore not enough authority on its own. A command-opened document also carries the
@@ -2235,23 +2257,32 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       ? body['agent']
       : null;
     const reportedCommandId = typeof body['agentCommandId'] === 'string' ? body['agentCommandId'] : null;
-    if (reportedAgent && reportedCommandId) {
-      const pending = commands.find(
+    const pendingWorkerCommand = reportedAgent && reportedCommandId
+      ? commands.find(
         (command) =>
           command.id === reportedCommandId &&
           command.spec.type === 'worker' &&
           command.spec.agent === reportedAgent &&
           swarmRunning(command.spec.runId) &&
           command.claimedAt !== null
-      );
-      if (pending?.spec.type === 'worker') bindConversation(reportedAgent, id, pending.spec.runId);
+      ) ?? null : null;
+    const observations = parseObservations(admittedEvents, body['sourceCaptures'], id);
+    if (!observations.length) {
+      // Only an exact leased command accompanied by well-formed legacy progress
+      // is independent worker binding evidence. Unknown/malformed observations
+      // are discarded without activating a worker or changing command custody.
+      const progressOnly = admittedEvents.length > 0 && admittedEvents.every(event =>
+        event && typeof event === 'object' && !Array.isArray(event) &&
+        event.kind === 'progress' && typeof event.time === 'number' && Number.isFinite(event.time) &&
+        typeof event.text === 'string' && event.text.length <= 500);
+      if (!progressOnly || pendingWorkerCommand?.spec.type !== 'worker') return suppressed();
+      const noRowsOff = pendingRecordingOffDecision();
+      if (noRowsOff && await noRowsOff.settled) return suppressed();
+      if (eventIngressRevision !== getRecordingRevision() || recordingGenerationGrant() !== admissionGeneration)
+        return suppressed();
+      if (!bindConversation(pendingWorkerCommand.spec.agent, id, pendingWorkerCommand.spec.runId)) return suppressed();
+      return json(res, 200, { sessionId: null, stored: 0, workerCommandRecovered: true }, origin);
     }
-    // The page reporting for a conversation is the other half of first-hand liveness, and
-    // the reason a worker whose tab is open is never on the silence clock at all. It also
-    // takes back a worker this app gave up on while its tab was gone but its turn was not.
-    const revived = noteAgentAlive(id, 'page');
-    if (revived?.report) await recordAgentMessage(revived.report, 'sent', id);
-    const observations = parseObservations(body['events'], body['sourceCaptures'], id);
     // A turn beginning is the one page fact that outranks the app's own idea of this worker's
     // state. Reported here rather than inferred from `generating`, because this is the exact
     // moment the model started running and the only one that can outvote a sleep decision made
@@ -2262,32 +2293,24 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         turnStartedAt = Math.max(turnStartedAt, item.time);
       }
     }
-    if (turnStartedAt > 0) {
-      const woke = noteAgentAlive(id, 'turn', turnStartedAt);
-      if (woke?.report) await recordAgentMessage(woke.report, 'sent', id);
-      // A turn that finished a wake has spent its revival command; retire it now rather than
-      // on the next poll, so the prime's status and the command queue agree with the broker.
-      if (woke?.revived) tidyCommands();
-    }
     observationWritesInFlight += 1;
     let committed: { sessionId: string | null; stored: number; wake: boolean } | undefined;
     try {
-      const agent = agentForOwnedConversation(id);
-      // The command acknowledgement normally supplies this origin before the worker's first
-      // observation. Its pending copy lives in recorder memory until a session exists, though,
-      // so an app restart in that narrow gap used to create an origin-less worker session even
-      // though the broker had durably restored the exact worker binding and task. Reconstitute
-      // the same origin from that authoritative binding before the recorder creates the session.
+      const agent = agentForOwnedConversation(id) ??
+        (pendingWorkerCommand?.spec.type === 'worker' ? pendingWorkerCommand.spec.agent : null);
+      // The command ACK normally supplies this origin. Recover its exact identity
+      // from the durable broker/command here, but delay any origin mutation until
+      // this request has passed recording and the original Off decision.
+      let workerOrigin: SessionOrigin | null = null;
       if (agent && agent !== 'prime') {
         const worker = agentInfoForOwnedConversation(id);
-        if (worker?.role === 'worker') {
+        workerOrigin = pendingWorkerCommand?.spec.type === 'worker'
+          ? await commandOrigin(pendingWorkerCommand.id) : null;
+        if (!workerOrigin && worker?.role === 'worker') {
           const prime = primeForOwnedConversation(id);
-          await noteChatOrigin(id, {
-            kind: 'worker',
+          workerOrigin = { kind: 'worker',
             fromSessionId: prime ? (await findSessionByConversation(prime, { requireUnique: true }))?.id ?? null : null,
-            agentId: worker.id,
-            task: worker.task
-          });
+            agentId: worker.id, task: worker.task };
         }
       }
       // Worker-origin lookup above may yield across Off→On. Recheck this request's
@@ -2295,6 +2318,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       const lateOff = pendingRecordingOffDecision();
       if (lateOff && await lateOff.settled) return suppressed();
       if (eventIngressRevision !== getRecordingRevision()) return suppressed();
+      if (recordingGenerationGrant() !== admissionGeneration) return suppressed();
       let result: Awaited<ReturnType<typeof recordChatObservations>>;
       try {
         result = await recordChatObservations(id, observations, agent);
@@ -2305,8 +2329,30 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         // permits one idempotent retry under the still-current On generation.
         const interruptedOff = pendingRecordingOffDecision();
         if (interruptedOff && await interruptedOff.settled) return suppressed();
-        if (eventIngressRevision !== getRecordingRevision() || !getConfig().sessions.record) return suppressed();
+        if (eventIngressRevision !== getRecordingRevision() || recordingGenerationGrant() !== admissionGeneration) return suppressed();
         result = await recordChatObservations(id, observations, agent);
+      }
+      // A partial batch may return without throwing after a successful Off; do not
+      // acknowledge it as an ordinary accepted Goal/lifecycle observation.
+      if (offDecision && await offDecision.settled) return suppressed();
+      if (eventIngressRevision !== getRecordingRevision() || recordingGenerationGrant() !== admissionGeneration)
+        return suppressed();
+      // Parsed rich-only presentation is intentionally refused before session
+      // creation. No canonical owner was admitted, so it cannot wake a worker,
+      // bind its command or install an origin as a side effect.
+      if (!result.sessionId) return suppressed();
+      // A request earns its transcript verdict before any observation-derived
+      // origin, worker or report mutation. Subsequent Off cannot retroactively
+      // suppress the already committed row while those independent writes drain.
+      if (workerOrigin) await noteChatOrigin(id, workerOrigin);
+      if (pendingWorkerCommand?.spec.type === 'worker')
+        bindConversation(pendingWorkerCommand.spec.agent, id, pendingWorkerCommand.spec.runId);
+      const revived = noteAgentAlive(id, 'page');
+      if (revived?.report) await recordAgentMessage(revived.report, 'sent', id);
+      if (turnStartedAt > 0) {
+        const woke = noteAgentAlive(id, 'turn', turnStartedAt);
+        if (woke?.report) await recordAgentMessage(woke.report, 'sent', id);
+        if (woke?.revived) tidyCommands();
       }
       const superseded = await conversationWasSuperseded(id);
       if (!superseded && result.sessionId) await collectRecordedBrowserDecision(id);

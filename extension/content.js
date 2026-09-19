@@ -1071,6 +1071,41 @@
   }
 
   let documentReady = null;
+  const RECORDING_GENERATION = /^[A-Za-z0-9_-]{43}$/;
+  /** Authenticated worker issuance is bound to this registered document/SPA epoch.
+   * This is an admission snapshot, not a DOM provenance or action grant. */
+  let recordingGrant = null;
+  let recordingGrantRefresh = null;
+
+  function acquisitionGrant() {
+    return recordingGrant && recordingGrant.epoch === epoch &&
+      // The initial document registers before ChatGPT assigns the first route.
+      // Its Chrome-issued grant is document/SPA scoped, not a conversation claim.
+      (recordingGrant.conversationId === null || recordingGrant.conversationId === conversationId)
+      ? recordingGrant : null;
+  }
+
+  function installRecordingGrant(reply, heldEpoch, heldConversation) {
+    if (!alive || epoch !== heldEpoch || conversationId !== heldConversation) return null;
+    const generation = reply?.recordingGeneration;
+    recordingGrant = reply?.ok === true && typeof generation === 'string' && RECORDING_GENERATION.test(generation)
+      ? Object.freeze({ generation, epoch: heldEpoch, conversationId: heldConversation }) : null;
+    return recordingGrant;
+  }
+
+  /** Refresh authorizes only subsequent captures; queued/in-flight rows keep their old token. */
+  function refreshRecordingGeneration() {
+    if (recordingGrantRefresh) return recordingGrantRefresh;
+    const heldEpoch = epoch;
+    const heldConversation = conversationId;
+    const work = ask({ type: 'recording_generation' },
+      () => alive && epoch === heldEpoch && conversationId === heldConversation)
+      .then(reply => installRecordingGrant(reply, heldEpoch, heldConversation))
+      .catch(() => null);
+    const tracked = work.finally(() => { if (recordingGrantRefresh === tracked) recordingGrantRefresh = null; });
+    recordingGrantRefresh = tracked;
+    return recordingGrantRefresh;
+  }
 
   async function sendToWorker(message) {
     if (!alive) return null;
@@ -1089,7 +1124,14 @@
     // any observation or mutation. This is what lets the worker retain a terminal tombstone
     // across external navigation and still admit the genuinely new page, without accepting
     // delayed IPC from the dead one merely because both share a numeric tab id.
-    if (!documentReady) documentReady = sendToWorker({ type: 'register_document', navigationEpoch: epoch });
+    if (!documentReady) {
+      const registeredEpoch = epoch;
+      const registeredConversation = conversationId;
+      documentReady = sendToWorker({ type: 'register_document', navigationEpoch: registeredEpoch }).then(reply => {
+        installRecordingGrant(reply, registeredEpoch, registeredConversation);
+        return reply;
+      });
+    }
     const registered = await documentReady;
     if (!registered || registered.ok !== true) {
       // A sleeping/reloading service worker is transient. Keep the document unregistered
@@ -1129,9 +1171,15 @@
    * whole batch with whatever is current then files A's messages into B's history —
    * silently, permanently, and with no way to tell afterwards which entries were real.
    */
-  function emit(observation) {
+  function emit(observation, capture = acquisitionGrant()) {
     if (temporaryPlannerPage()) return;
+    if (!capture || capture.epoch !== epoch ||
+        (capture.conversationId !== null && capture.conversationId !== conversationId)) return;
     const bounded = { ...observation };
+    // A MAIN-world event can neither supply nor overwrite this outer issuance.
+    delete bounded.recordingGeneration;
+    delete bounded.captureGeneration;
+    delete bounded.generation;
     // One browser observation must fit the bridge's bounded HTTP body even when JavaScript
     // character counts badly understate UTF-8 (emoji/CJK). Share one byte budget between
     // prose and rendered HTML; otherwise a single 413 can never be halved and blocks every
@@ -1181,6 +1229,8 @@
       conversationId,
       agent,
       agentCommandId,
+      recordingGeneration: capture.generation,
+      recordingNavigationEpoch: capture.epoch,
       event: { time: Date.now(), ...bounded }
     };
     // Streaming canonical messages replace their older unsent snapshot. Keeping every
@@ -1192,6 +1242,8 @@
           !queueGapKeys.has(entry) &&
           entry.conversationId === queued.conversationId &&
           entry.agent === queued.agent &&
+          entry.recordingGeneration === queued.recordingGeneration &&
+          entry.recordingNavigationEpoch === queued.recordingNavigationEpoch &&
           entry.event?.kind === 'assistant_message' &&
           entry.event?.messageId === messageId
       );
@@ -1232,7 +1284,7 @@
       const index = queue.findIndex((entry) => !queueGapKeys.has(entry));
       if (index < 0) break;
       const dropped = removeQueueEntry(index);
-      const key = `${dropped.conversationId || ''}\u0000${dropped.agent || ''}\u0000${dropped.agentCommandId || ''}`;
+      const key = `${dropped.conversationId || ''}\u0000${dropped.agent || ''}\u0000${dropped.agentCommandId || ''}\u0000${dropped.recordingGeneration || ''}\u0000${dropped.recordingNavigationEpoch}`;
       let held = queueGaps.get(key);
       if (!held) {
         held = {
@@ -1240,6 +1292,8 @@
             conversationId: dropped.conversationId,
             agent: dropped.agent,
             agentCommandId: dropped.agentCommandId,
+            recordingGeneration: dropped.recordingGeneration,
+            recordingNavigationEpoch: dropped.recordingNavigationEpoch,
             event: {
               time: dropped.event.time,
               kind: 'chat_error',
@@ -2230,6 +2284,9 @@
         retireVisible(turnsNow());
         epoch++;
         conversationId = id;
+        recordingGrant = null;
+        recordingGrantRefresh = null;
+        documentReady = null;
         // The worker identity belongs to the conversation the bootstrap created, not to this
         // tab. On 2026-09-02 the user pressed New chat in worker-3's tab and typed their own
         // message: every event of that chat went out labelled worker-3 with the worker's
@@ -2321,6 +2378,14 @@
       // destroy and rebuild the node injectStage() had just put back — a fresh element once a
       // second, so its progress animation never survived long enough to play a single cycle.
       void flush();
+      return;
+    }
+
+    // Native page playback/control still works without an issued grant. Do not
+    // read persistence transcripts or advance dedupe baselines until registration
+    // and authenticated issuance are complete for this exact document/SPA epoch.
+    if (!acquisitionGrant()) {
+      void refreshRecordingGeneration();
       return;
     }
 
@@ -3427,17 +3492,17 @@
     return found[0] || null;
   }
 
-  function nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation) {
+  function nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation, capture) {
     if (epoch !== heldEpoch || conversationId !== heldConversation) return false;
     const reported = nativeImagesReported.get(nativeImageKey(image));
     const owner = observation.turnId || '';
     return Boolean(reported && !reported.conflicted && reported.owner === owner &&
       reported.signature === `${owner}\u0000${image.providerRole}\u0000${image.providerChannel || ''}\u0000${image.providerStatus || ''}\u0000${image.width || ''}\u0000${image.height || ''}` &&
-      key === `${heldConversation || ''}\u0000${nativeImageKey(image)}`);
+      key === `${heldConversation || ''}\u0000${nativeImageKey(image)}\u0000${capture?.generation || ''}`);
   }
 
-  function nativeImageUnavailable(key, image, observation, reason, fingerprint, heldEpoch, heldConversation) {
-    if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation)) return;
+  function nativeImageUnavailable(key, image, observation, reason, fingerprint, heldEpoch, heldConversation, capture) {
+    if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation, capture)) return;
     const prior = nativeImageCaptures.get(key);
     const sameFingerprint = prior?.fingerprint === fingerprint || Boolean(
       prior?.fingerprint?.node && fingerprint?.node && prior.fingerprint.node === fingerprint.node &&
@@ -3450,25 +3515,27 @@
       providerRole: image.providerRole, ...(image.providerChannel ? { providerChannel: image.providerChannel } : {}),
       ...(image.providerStatus ? { providerStatus: image.providerStatus } : {}),
       ...(image.width ? { width: image.width } : {}), ...(image.height ? { height: image.height } : {}),
-      previewStatus: 'unavailable', previewError: reason });
+      previewStatus: 'unavailable', previewError: reason }, capture);
     void flush();
   }
 
   /** Captures one already-rendered native image without fetching or retaining its signed URL. */
   async function captureNativeImage(task) {
-    const { key, image, observation, heldEpoch, heldConversation } = task;
-    if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation)) return;
+    const { key, image, observation, heldEpoch, heldConversation, capture } = task;
+    if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation, capture)) return;
+    if (!capture || capture.epoch !== heldEpoch ||
+        (capture.conversationId !== null && capture.conversationId !== heldConversation)) return;
     const node = nativeImageNode(image);
-    if (!node) return nativeImageUnavailable(key, image, observation, 'ambiguous', 'missing', heldEpoch, heldConversation);
+    if (!node) return nativeImageUnavailable(key, image, observation, 'ambiguous', 'missing', heldEpoch, heldConversation, capture);
     const sourceWidth = node.naturalWidth;
     const sourceHeight = node.naturalHeight;
     const sourceUrl = node.currentSrc || node.src;
     const fingerprint = { node, sourceWidth, sourceHeight, complete: node.complete === true, sourceUrl };
     if (!fingerprint.complete || !Number.isInteger(sourceWidth) || !Number.isInteger(sourceHeight) || sourceWidth <= 0 || sourceHeight <= 0) {
-      return nativeImageUnavailable(key, image, observation, 'not_loaded', fingerprint, heldEpoch, heldConversation);
+      return nativeImageUnavailable(key, image, observation, 'not_loaded', fingerprint, heldEpoch, heldConversation, capture);
     }
     if (sourceWidth * sourceHeight > 30_000_000) {
-      return nativeImageUnavailable(key, image, observation, 'oversized', fingerprint, heldEpoch, heldConversation);
+      return nativeImageUnavailable(key, image, observation, 'oversized', fingerprint, heldEpoch, heldConversation, capture);
     }
     const prior = nativeImageCaptures.get(key);
     if (prior?.status === 'available' || prior?.status === 'pending' ||
@@ -3481,7 +3548,7 @@
     const width = Math.max(1, Math.round(sourceWidth * scale));
     const height = Math.max(1, Math.round(sourceHeight * scale));
     if (width * height > 2_560_000) {
-      return nativeImageUnavailable(key, image, observation, 'oversized', fingerprint, heldEpoch, heldConversation);
+      return nativeImageUnavailable(key, image, observation, 'oversized', fingerprint, heldEpoch, heldConversation, capture);
     }
     try {
       const canvas = document.createElement('canvas');
@@ -3490,7 +3557,7 @@
       if (!context) throw new Error('tainted');
       context.drawImage(node, 0, 0, width, height);
       const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/webp', 0.8));
-      if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation) || nativeImageNode(image) !== node ||
+      if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation, capture) || nativeImageNode(image) !== node ||
           !node.complete || node.naturalWidth !== sourceWidth || node.naturalHeight !== sourceHeight || (node.currentSrc || node.src) !== sourceUrl) {
         if (nativeImageCaptures.get(key) === pendingCapture) nativeImageCaptures.delete(key);
         return;
@@ -3498,7 +3565,7 @@
       if (!blob) throw new Error('tainted');
       if (blob.type !== 'image/webp' || blob.size <= 0 || blob.size > 384_000) throw new Error('oversized');
       const bytes = new Uint8Array(await blob.arrayBuffer());
-      if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation) || nativeImageNode(image) !== node ||
+      if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation, capture) || nativeImageNode(image) !== node ||
           !node.complete || node.naturalWidth !== sourceWidth || node.naturalHeight !== sourceHeight || (node.currentSrc || node.src) !== sourceUrl) {
         if (nativeImageCaptures.get(key) === pendingCapture) nativeImageCaptures.delete(key);
         return;
@@ -3511,17 +3578,17 @@
         providerRole: image.providerRole, ...(image.providerChannel ? { providerChannel: image.providerChannel } : {}),
         ...(image.providerStatus ? { providerStatus: image.providerStatus } : {}),
         ...(image.width ? { width: image.width } : {}), ...(image.height ? { height: image.height } : {}),
-        previewStatus: 'available', previewWidth: width, previewHeight: height, previewDataUrl });
+        previewStatus: 'available', previewWidth: width, previewHeight: height, previewDataUrl }, capture);
       nativeImageCaptures.set(key, { status: 'available', fingerprint });
       void flush();
     } catch (error) {
-      if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation) || nativeImageNode(image) !== node ||
+      if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation, capture) || nativeImageNode(image) !== node ||
           !node.complete || node.naturalWidth !== sourceWidth || node.naturalHeight !== sourceHeight || (node.currentSrc || node.src) !== sourceUrl) {
         if (nativeImageCaptures.get(key) === pendingCapture) nativeImageCaptures.delete(key);
         return;
       }
       const reason = String(error?.message || error) === 'oversized' ? 'oversized' : 'tainted';
-      nativeImageUnavailable(key, image, observation, reason, fingerprint, heldEpoch, heldConversation);
+      nativeImageUnavailable(key, image, observation, reason, fingerprint, heldEpoch, heldConversation, capture);
     }
   }
 
@@ -3537,16 +3604,19 @@
     }
   }
 
-  function queueNativeImageCapture(image, observation) {
+  function queueNativeImageCapture(image, observation, capture) {
+    if (!capture) return;
     const heldConversation = conversationId;
-    const key = `${heldConversation || ''}\u0000${nativeImageKey(image)}`;
+    // G0's pending image must not block a genuinely acquired G2 pixel capture.
+    // Both tasks retain their independent, immutable admission through toBlob.
+    const key = `${heldConversation || ''}\u0000${nativeImageKey(image)}\u0000${capture.generation}`;
     const prior = nativeImageCaptures.get(key);
     if (prior?.status === 'available' || prior?.status === 'pending') {
       nativeImageCaptures.delete(key); nativeImageCaptures.set(key, prior);
       return;
     }
     if (nativeImageCaptureQueue.has(key)) return;
-    nativeImageCaptureQueue.set(key, { key, image, observation, heldEpoch: epoch, heldConversation });
+    nativeImageCaptureQueue.set(key, { key, image, observation, capture, heldEpoch: epoch, heldConversation });
     pumpNativeImageCaptures();
   }
 
@@ -3778,6 +3848,11 @@
     // A. A fresh, never-bound composer still scans normally because `conversationId` is null.
     const routeConversation = CLF_DOM.conversationId();
     if (conversationId && routeConversation !== conversationId) return false;
+    const fiberCapture = acquisitionGrant();
+    if (!fiberCapture) {
+      void refreshRecordingGeneration();
+      return false;
+    }
     // The page-context round-trip can settle after ChatGPT navigates this tab. Capture the
     // logical chat before crossing that async boundary so an answer read from chat A can
     // never be emitted under chat B's conversation id.
@@ -4070,7 +4145,7 @@
             concreteConversation(turn.conversationId) !== askedConversation
           ) ? { fiberConversationId: turn.conversationId } : {}),
           calls: fresh
-        });
+        }, fiberCapture);
       }
     }
     // What the settle window is waiting for, decided from the scan itself rather than from a
@@ -4187,15 +4262,16 @@
             ...(historical ? { time: image.createTime, authoredTime: true } : {})
           };
           const signature = `${owner}\u0000${image.providerRole}\u0000${image.providerChannel || ''}\u0000${image.providerStatus || ''}\u0000${image.width || ''}\u0000${image.height || ''}`;
-          if (prior?.signature !== signature) {
+          if (prior?.signature !== signature || prior.generation !== fiberCapture.generation) {
             nativeImagesReported.delete(key);
-            nativeImagesReported.set(key, { signature, owner, conflicted: ownerConflict });
+            nativeImagesReported.set(key, { signature, owner, conflicted: ownerConflict,
+              generation: fiberCapture.generation });
             emit({ ...observation, kind: 'native_image', messageId: image.messageId,
               providerAssetId: image.assetId, providerRole: image.providerRole,
               ...(image.providerChannel ? { providerChannel: image.providerChannel } : {}),
               ...(image.providerStatus ? { providerStatus: image.providerStatus } : {}),
               ...(image.width ? { width: image.width } : {}), ...(image.height ? { height: image.height } : {}),
-              previewStatus: 'pending' });
+              previewStatus: 'pending' }, fiberCapture);
           } else {
             // LRU touch. The bounded cache can then discard rows outside the currently
             // scanned history without repeatedly reminting visible metadata.
@@ -4203,7 +4279,7 @@
           }
           // Each tuple captures independently. The helper itself fences route/epoch and exact
           // current Fiber ownership after every await, so one slow image cannot overwrite another.
-          if (image.providerStatus === 'finished_successfully') queueNativeImageCapture(image, observation);
+          if (image.providerStatus === 'finished_successfully') queueNativeImageCapture(image, observation, fiberCapture);
           continue;
         }
         if (item.type === 'activity') {
@@ -4220,7 +4296,7 @@
             messageId: activity.messageId,
             activeNow: generating && owner === turnId && previous === undefined && freshPublication,
             turnId: localOwner || undefined
-          });
+          }, fiberCapture);
           continue;
         }
 
@@ -4242,7 +4318,7 @@
             text: message.rawText,
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
             ...(message.createTime ? { time: message.createTime, authoredTime: true } : {})
-          });
+          }, fiberCapture);
           continue;
         }
         // `endMessageId` identifies the one public assistant message that actually ended the
@@ -4294,16 +4370,22 @@
         const signature =
           `${state}\u0000${message.rawText}\u0000${message.renderedHtml}\u0000${owner}` +
           `\u0000${message.createTime || ''}\u0000${message.rawMessageId || ''}`;
+        // An unchanged Fiber descriptor is the same previously acquired prose.
+        // A fresh grant permits a newly observed rich presentation, but cannot
+        // turn old G0 text into newly authored G2 text merely by rescanning it.
         const sameProse = priorMessage?.signature === signature;
+        const sameCaptureGeneration = priorMessage?.generation === fiberCapture.generation;
         if (sameProse && !richChanged) continue;
         // Keep only the latest 64 exact rich signatures: 64 × 128 KiB is bounded.
         // The existing message map remains the sole owner of observations; evicted
         // signatures may re-observe presentation, never replay an action or prose.
         messagesReported.delete(message.messageId);
         messagesReported.set(message.messageId, { signature, owner, conflicted: ownerConflict, text: message.rawText,
-          richSignature: richSignature ?? priorMessage?.richSignature ?? null,
+          generation: fiberCapture.generation,
+          richSignature: richSignature ?? (sameCaptureGeneration ? priorMessage?.richSignature : null) ?? null,
           richOwner: rich?.status === 'available' ? { epoch: askedEpoch, conversationId: askedConversation,
-            messageId: message.messageId, providerMessageId: message.rawMessageId } : priorMessage?.richOwner ?? null });
+            messageId: message.messageId, providerMessageId: message.rawMessageId } :
+            (sameCaptureGeneration ? priorMessage?.richOwner : null) ?? null });
         if (richSignature) {
           let retained = 0;
           for (const state of messagesReported.values()) if (state.richSignature) retained += 1;
@@ -4320,14 +4402,14 @@
         // No empty text, synthetic progress, activity, finality, or Goal tick.
         if (!message.rawText && !message.renderedHtml && rich && !exactTerminal) {
           emit({ kind: 'assistant_message', messageId: message.messageId,
-            providerMessageId: message.rawMessageId, fiberConversationId: askedConversation, rich });
+            providerMessageId: message.rawMessageId, fiberConversationId: askedConversation, rich }, fiberCapture);
           continue;
         }
         // Hydration or native state changed, not authored prose/model work. Never emit
         // text, activity, final/Goal or a second logical message for this revision.
         if (sameProse) {
           emit({ kind: 'assistant_message', messageId: message.messageId,
-            providerMessageId: message.rawMessageId, fiberConversationId: askedConversation, rich });
+            providerMessageId: message.rawMessageId, fiberConversationId: askedConversation, rich }, fiberCapture);
           continue;
         }
         if (state === 'streaming' && owner && priorMessage?.text !== message.rawText && freshPublication) noteTurnProgress(owner);
@@ -4355,7 +4437,7 @@
               marked.kind === 'HANDOFF' && marked.answer === turn))
             ? { goalEligible: true }
             : {})
-        });
+        }, fiberCapture);
         if (state === 'final' && localOwner && notePresentation(message.messageId, message.rawText)) {
           // The page has produced a newer exact revision than the app-owned renderer can
           // possibly hold. Reuse the one activity scheduler and bring its next pass forward;
@@ -9723,6 +9805,9 @@
         disconnected: reply.disconnected === true
       };
     }
+    // Status is not admission authority; explicitly refresh via the worker's
+    // authenticated, document-bound issuance rather than cached /hello metadata.
+    void refreshRecordingGeneration();
     renderStreams();
     renderControl();
   }
@@ -11154,6 +11239,11 @@
       // revival response race against its successor even though sendToWorker() is already inert.
       if (!alive) return false;
       if (!message || typeof message.type !== 'string') return false;
+      if (message.type === 'clf-recording-generation-refresh') {
+        void refreshRecordingGeneration().then(grant => sendResponse({ ok: Boolean(grant) }))
+          .catch(() => sendResponse({ ok: false }));
+        return true;
+      }
       // background.js uses this only to distinguish a live isolated-world recorder from the
       // dead context Chrome leaves behind when an unpacked extension is reloaded while the
       // ChatGPT document stays open. No page/session data crosses in this health check.
@@ -11448,6 +11538,7 @@
       emit,
       flush,
       observe,
+      checkStatus: async () => { await checkStatus(); await refreshRecordingGeneration(); },
       syncTheme,
       meterView,
       paint,

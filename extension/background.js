@@ -45,7 +45,7 @@ const MODEL_REQUEST_TIMEOUT_MS = 190_000;
 /** The reason a deadline aborts with, so it is a fact the caller can act on rather than prose. */
 const TIMED_OUT = 'the app took too long to answer';
 /** Bumped only when the request/response shape changes; the app compares it. */
-const BRIDGE_PROTOCOL = 16;
+const BRIDGE_PROTOCOL = 17;
 /** Browser-owned presentation preferences also exposed by the popup. */
 const RENDER_STREAM_KEY = 'renderStreamEnabled';
 const SHOW_TIMES_KEY = 'showStreamTimes';
@@ -100,6 +100,8 @@ let loaded = false;
  * awaits the same promise and never re-reads.
  */
 let loading = null;
+const RECORDING_GENERATION = /^[A-Za-z0-9_-]{43}$/;
+const MAX_DOCUMENT_GENERATIONS = 16;
 
 /**
  * Set when the user disconnected on purpose, and cleared only when they connect again.
@@ -485,11 +487,17 @@ function routeOf(entry) {
 
 function routeKey(entry) {
   const route = routeOf(entry);
-  return JSON.stringify([route.conversationId, route.provisional, route.agent, route.agentCommandId]);
+  return JSON.stringify([route.conversationId, route.provisional, route.agent, route.agentCommandId,
+    validRecordingGeneration(entry?.recordingGeneration)]);
+}
+
+function validRecordingGeneration(value) {
+  return typeof value === 'string' && RECORDING_GENERATION.test(value) ? value : null;
 }
 
 function gapEntry(source, kind, text) {
-  return { ...routeOf(source), gap: true, event: { kind, time: Date.now(), text } };
+  return { ...routeOf(source), recordingGeneration: validRecordingGeneration(source?.recordingGeneration),
+    gap: true, event: { kind, time: Date.now(), text } };
 }
 
 /**
@@ -610,6 +618,8 @@ function enqueue(entries) {
       provisional: typeof entry.provisional === 'string' ? entry.provisional : null,
       agent: typeof entry.agent === 'string' ? entry.agent : null,
       agentCommandId: typeof entry.agentCommandId === 'string' ? entry.agentCommandId : null,
+      // Preserve the original issued epoch, including explicit unknown legacy rows.
+      recordingGeneration: validRecordingGeneration(entry.recordingGeneration),
       // This is a detached copy installed by HANDLERS.events from Chrome MessageSender;
       // never take an origin from message.entries or the page-controlled event body.
       capture: entry.capture ?? null,
@@ -721,12 +731,12 @@ function nextJournalBatch(preferredConversationId = null, excluded = []) {
 
 async function deliverJournalBatch(batch) {
   const { conversationId, mine, agent, agentCommandId } = batch;
-  // Optional protocol-16 envelope is attached ONLY to batches containing rich payloads.
-  // Every slot is positional, including null/ordinary slots, and the same helper is used
-  // for initial delivery and 413 halves. Legacy prose keeps its exact existing wire shape.
+  // Protocol 17 always sends original per-row admission, including gaps and unknown
+  // legacy rows. The same slice builder owns ordinary/413/retry positional alignment.
   const payload = (entries) => ({
     conversationId, agent, agentCommandId,
     events: entries.map((entry) => entry.event),
+    recordingGenerations: entries.map(entry => validRecordingGeneration(entry.recordingGeneration)),
     ...(entries.some((entry) => entry.event?.kind === 'assistant_message' && entry.event.rich !== undefined)
       ? { sourceCaptures: entries.map((entry) => entry.capture ?? null) } : {})
   });
@@ -1656,6 +1666,40 @@ async function registerDocument(sender, message) {
   delete terminalDocuments[key];
   await persistLive();
   return { ok: true, tab: id, documentId, navigationEpoch: requestedEpoch };
+}
+
+/** An app bearer alone never attests capture. Bind the authenticated issuance to
+ * the already registered Chrome sender's immutable document and SPA epoch. */
+async function issueRecordingGeneration(source) {
+  if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
+  const owner = registeredDocuments[String(source.tab)];
+  if (!owner || owner.documentId !== source.documentId) return { ok: false, error: 'document_unregistered' };
+  const result = await call('/recording/generation', { method: 'GET' });
+  if (!ownsDocument(source) || registeredDocuments[String(source.tab)] !== owner)
+    return { ok: false, error: 'stale_document' };
+  const issued = result.ok ? validRecordingGeneration(result.data?.recordingGeneration) : null;
+  if (issued) {
+    const previous = Array.isArray(owner.recordingIssuances) ? owner.recordingIssuances : [];
+    owner.recordingIssuances = [...previous.filter(row =>
+      row && validRecordingGeneration(row.generation) && Number.isSafeInteger(row.epoch) &&
+      (row.epoch !== source.navigationEpoch || row.generation !== issued)),
+      { epoch: source.navigationEpoch, generation: issued }].slice(-MAX_DOCUMENT_GENERATIONS);
+    await persistLive();
+    if (!ownsDocument(source) || registeredDocuments[String(source.tab)] !== owner)
+      return { ok: false, error: 'stale_document' };
+  }
+  return { ok: true, recordingGeneration: issued };
+}
+
+function issuedForSender(source, entry) {
+  const owner = source && registeredDocuments[String(source.tab)];
+  const generation = validRecordingGeneration(entry?.recordingGeneration);
+  const captureEpoch = entry?.recordingNavigationEpoch;
+  if (!generation || !Number.isSafeInteger(captureEpoch) || captureEpoch < 0 ||
+      !owner || owner.documentId !== source.documentId ||
+      !Array.isArray(owner.recordingIssuances)) return null;
+  return owner.recordingIssuances.some(row => row?.epoch === captureEpoch && row?.generation === generation)
+    ? generation : null;
 }
 
 function ownsDocument(source) {
@@ -3005,9 +3049,17 @@ const HANDLERS = {
   },
   async register_document(_message, sender) {
     const result = await registerDocument(sender, _message);
+    if (result?.ok === true) {
+      const issued = await issueRecordingGeneration(result);
+      if (!issued.ok) return issued;
+      result.recordingGeneration = issued.recordingGeneration;
+    }
     if (result?.ok === true) void maintain(true).catch(() => undefined);
     if (result && result.ok === true) void recoverDeferredRevivals().catch(() => undefined);
     return result;
+  },
+  async recording_generation(_message, _sender, source) {
+    return issueRecordingGeneration(source);
   },
   async status() {
     await load();
@@ -3216,8 +3268,12 @@ const HANDLERS = {
         delete event.capture;
         delete event.richCapture;
         delete event.richOrigin;
+        delete event.recordingGeneration;
+        delete event.captureGeneration;
+        delete event.generation;
       }
-      return { ...entry, capture, event, ...(!entry.conversationId ? { provisional: key } : {}) };
+      return { ...entry, capture, event, recordingGeneration: issuedForSender(source, entry),
+        ...(!entry.conversationId ? { provisional: key } : {}) };
     });
     enqueue(entries);
     let ackBound = 0;
@@ -3705,6 +3761,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     'plugin_refresh',
     'usage_observation',
     'events',
+    'recording_generation',
     'bind',
     'activity',
     'activity_detail',
