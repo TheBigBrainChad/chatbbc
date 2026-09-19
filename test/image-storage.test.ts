@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
@@ -7,14 +8,19 @@ import {
   appendEvent,
   clearImageStorage,
   createSession,
+  flushSessions,
+  getSession,
   getImageStorage,
   initSessionStore,
   MAX_GLOBAL_ASSET_BYTES,
   readAsset,
   readEvents,
   resetSessionStoreForTests,
+  sessionsRoot,
   upsertMessageEvent,
   upsertNativeImageEvent,
+  upsertRichMedia,
+  upsertRichMessage,
   writeAsset
 } from '../src/main/session/store.js';
 
@@ -32,6 +38,185 @@ afterEach(async () => {
 });
 
 const text = (value: string) => ({ text: value, chars: value.length, truncated: false });
+
+/** Future available refs seeded in a real canonical shard ONLY for cleanup compatibility.
+ * Production upsertRichMedia must continue refusing assets and available status. */
+async function seedFutureRichOwner(sessionId: string, asset: Awaited<ReturnType<typeof writeAsset>>, suffix = 'one') {
+  const session = await getSession(sessionId);
+  const messageId = `rich-owner-${suffix}`;
+  const providerMessageId = randomUUID();
+  const origin = { conversationId: session!.conversationId!, bindingRevision: session!.bindingRevision ?? 0,
+    documentId: `document-${suffix}`, navigationEpoch: 1 };
+  const nodes = ['left', 'right'].map(side => ({ id: `node-${suffix}-${side}`, kind: 'image' as const,
+    mediaId: `media-${suffix}-${side}`, alt: `${side} reference`, width: 5, height: 4 }));
+  await upsertMessageEvent(sessionId, { time: 200, source: 'extension', kind: 'assistant_message',
+    messageId, providerMessageId, message: text('Retain the authored answer.'), final: true });
+  expect(await upsertRichMessage(sessionId, messageId, {
+    version: 1, status: 'available', reason: null, conversationId: origin.conversationId,
+    messageId, providerMessageId, revision: 0, accessibleText: 'Two reference images', nodes
+  }, origin)).toBe('stored');
+  await flushSessions();
+  const file = path.join(sessionsRoot(), sessionId, 'messages',
+    `${createHash('sha256').update(`assistant_message\u0000${messageId}`).digest('hex')}.json`);
+  const original = JSON.parse(await fs.readFile(file, 'utf8'));
+  await fs.writeFile(file, JSON.stringify({ ...original, richMedia: nodes.map(node => ({
+    mediaId: node.mediaId, nodeId: node.id, source: { kind: 'page', nodeId: node.id },
+    status: 'available', previewWidth: 5, previewHeight: 4, asset
+  })) }), 'utf8');
+  resetSessionStoreForTests(); initSessionStore(directory);
+  return { file, messageId, origin };
+}
+
+it('retires a native and two future rich owners of one asset once, keeping metadata and restart tombstones', async () => {
+  const conversationId = randomUUID();
+  const session = await createSession({ title: 'shared owner', conversationId });
+  const png = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#224466' } }).png().toBuffer();
+  const shared = await writeAsset(session.id, png, 'image/png');
+  const unrelated = await writeAsset(session.id, Buffer.from('not an image'), 'text/plain');
+  const native = await upsertNativeImageEvent(session.id, { time: 100, source: 'extension', kind: 'native_image',
+    messageId: 'provider-native', providerAssetId: 'provider-image', providerRole: 'tool',
+    providerStatus: 'finished_successfully', previewStatus: 'available', asset: shared });
+  const { messageId, origin } = await seedFutureRichOwner(session.id, shared);
+  const before = (await readEvents(session.id)).find(row => row.kind === 'assistant_message');
+  expect(before?.kind === 'assistant_message' && before.richMedia?.length).toBe(2);
+  const cleared = await clearImageStorage('all');
+  expect(cleared).toMatchObject({ removedFiles: 1, freedBytes: png.length });
+  expect(await readAsset(session.id, shared.id)).toBeNull();
+  expect(await readAsset(session.id, unrelated.id)).toEqual(Buffer.from('not an image'));
+  const rows = await readEvents(session.id);
+  const assistant = rows.find(row => row.kind === 'assistant_message');
+  expect(assistant).toMatchObject({ messageId, retiredRichImageAssetIds: [shared.id] });
+  if (assistant?.kind !== 'assistant_message') throw new Error('assistant missing');
+  expect(assistant.richMedia).toHaveLength(2);
+  expect(assistant.richMedia?.every(media => media.status === 'unavailable' && media.reason === 'removed' && !media.asset)).toBe(true);
+  expect(assistant.rich?.nodes).toEqual(before?.kind === 'assistant_message' ? before.rich?.nodes : undefined);
+  expect(assistant.message).toEqual(before?.kind === 'assistant_message' ? before.message : undefined);
+  expect(assistant.contentSeq).toBe(before?.kind === 'assistant_message' ? before.contentSeq : undefined);
+  expect(rows.find(row => row.kind === 'native_image')).toMatchObject({ previewStatus: 'unavailable', previewError: 'removed' });
+  await flushSessions(); resetSessionStoreForTests(); initSessionStore(directory);
+  expect((await readEvents(session.id)).find(row => row.kind === 'assistant_message')).toMatchObject({
+    retiredRichImageAssetIds: [shared.id], richMedia: [
+      { status: 'unavailable', reason: 'removed' }, { status: 'unavailable', reason: 'removed' }
+    ] });
+  expect(await upsertRichMedia(session.id, messageId, {
+    mediaId: 'media-one-left', nodeId: 'node-one-left', source: { kind: 'page', nodeId: 'node-one-left' },
+    status: 'available', asset: shared
+  }, origin, 1)).toBe('refused');
+  expect(await upsertRichMedia(session.id, messageId, {
+    mediaId: 'media-one-left', nodeId: 'node-one-left', source: { kind: 'page', nodeId: 'node-one-left' },
+    status: 'unavailable', reason: 'tainted'
+  }, origin, 1)).toBe('refused');
+  const { seq: _seq, origin: _origin, ...replay } = native.event;
+  expect((await upsertNativeImageEvent(session.id, { ...replay, previewStatus: 'available', asset: shared })).accepted).toBe(false);
+});
+
+it('a failure on the SECOND owner shard vetoes every physical deletion and a later retry converges', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#556677' } }).png().toBuffer();
+  const shared = await writeAsset(session.id, pixels, 'image/png');
+  await seedFutureRichOwner(session.id, shared, 'first');
+  await seedFutureRichOwner(session.id, shared, 'second');
+  const rename = fs.rename.bind(fs);
+  let shardWrites = 0;
+  const failure = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+    if (String(to).includes(`${path.sep}messages${path.sep}`) && ++shardWrites === 2) throw new Error('second shard failed');
+    return rename(from, to);
+  }) as typeof fs.rename);
+  await expect(clearImageStorage('all')).rejects.toThrow('second shard failed');
+  expect(shardWrites).toBe(2);
+  expect(await readAsset(session.id, shared.id)).toEqual(pixels);
+  failure.mockRestore();
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 1, freedBytes: pixels.length });
+  await flushSessions(); resetSessionStoreForTests(); initSessionStore(directory);
+  const assistants = (await readEvents(session.id)).filter(row => row.kind === 'assistant_message');
+  expect(assistants).toHaveLength(2);
+  for (const row of assistants) expect(row).toMatchObject({ retiredRichImageAssetIds: [shared.id],
+    richMedia: [{ reason: 'removed' }, { reason: 'removed' }] });
+});
+
+it('vetoes deletion if a future canonical owner shard or the legacy owner map is unreadable', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#778899' } }).png().toBuffer();
+  const asset = await writeAsset(session.id, pixels, 'image/png');
+  const { file } = await seedFutureRichOwner(session.id, asset);
+  await fs.writeFile(file, '{corrupt-json', 'utf8');
+  resetSessionStoreForTests(); initSessionStore(directory);
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 0 });
+  expect(await readAsset(session.id, asset.id)).toEqual(pixels);
+  await fs.writeFile(file, ' '.repeat(1024 * 1024 + 1));
+  resetSessionStoreForTests(); initSessionStore(directory);
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 0 });
+  expect(await readAsset(session.id, asset.id)).toEqual(pixels);
+  await fs.rm(file);
+  await fs.writeFile(path.join(sessionsRoot(), session.id, 'messages.json'), '{broken');
+  resetSessionStoreForTests(); initSessionStore(directory);
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 0 });
+  expect(await readAsset(session.id, asset.id)).toEqual(pixels);
+});
+
+it('vetoes unreadable shard I/O rather than trusting an already-loaded in-memory owner map', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#448866' } }).png().toBuffer();
+  const asset = await writeAsset(session.id, pixels, 'image/png');
+  const { file } = await seedFutureRichOwner(session.id, asset);
+  expect((await readEvents(session.id)).find(event => event.kind === 'assistant_message')).toBeDefined();
+  const realRead = fs.readFile.bind(fs);
+  const failure = vi.spyOn(fs, 'readFile').mockImplementation(((name, ...args) =>
+    String(name) === file ? Promise.reject(Object.assign(new Error('owner unreadable'), { code: 'EACCES' })) :
+      (realRead as (...args: unknown[]) => Promise<unknown>)(name, ...args)) as typeof fs.readFile);
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 0 });
+  failure.mockRestore();
+  expect(await readAsset(session.id, asset.id)).toEqual(pixels);
+});
+
+it('does not confuse identical content-addressed image IDs across different sessions', async () => {
+  const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#aa7744' } }).png().toBuffer();
+  const first = await createSession({ conversationId: randomUUID() });
+  const second = await createSession({ conversationId: randomUUID() });
+  const left = await writeAsset(first.id, pixels, 'image/png');
+  const right = await writeAsset(second.id, pixels, 'image/png');
+  expect(left.id).toBe(right.id);
+  await seedFutureRichOwner(first.id, left, 'left');
+  await seedFutureRichOwner(second.id, right, 'right');
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 2, freedBytes: pixels.length * 2 });
+  for (const id of [first.id, second.id]) {
+    expect(await readAsset(id, left.id)).toBeNull();
+    expect((await readEvents(id)).find(row => row.kind === 'assistant_message')).toMatchObject({
+      retiredRichImageAssetIds: [left.id] });
+  }
+});
+
+it('serializes newly queued owner publication before deletion inventory instead of using a stale prequeue snapshot', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#5599aa' } }).png().toBuffer();
+  const asset = await writeAsset(session.id, pixels, 'image/png');
+  let entered!: () => void;
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const atWrite = new Promise<void>(resolve => { entered = resolve; });
+  const realRename = fs.rename.bind(fs);
+  const hold = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+    if (String(to).includes(`${path.sep}messages${path.sep}`)) {
+      entered();
+      await blocked;
+    }
+    return realRename(from, to);
+  }) as typeof fs.rename);
+  const owner = upsertMessageEvent(session.id, {
+    time: 300, source: 'app', kind: 'user_message', messageId: 'new-before-cleanup',
+    message: text('A new owner was queued first'), assets: [asset]
+  });
+  await atWrite;
+  const cleanup = clearImageStorage('all');
+  release();
+  await owner;
+  const result = await cleanup;
+  hold.mockRestore();
+  expect(result).toMatchObject({ removedFiles: 1, freedBytes: pixels.length });
+  expect((await readEvents(session.id)).find(row => row.kind === 'user_message')).toMatchObject({
+    assets: undefined, retiredImageAssetIds: [asset.id] });
+  expect(await readAsset(session.id, asset.id)).toBeNull();
+});
 
 it('reads cold usage without opening asset contents and reuses the maintained quota after writes', async () => {
   const session = await createSession({ title: 'Usage accounting' });

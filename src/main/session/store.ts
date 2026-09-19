@@ -1518,7 +1518,8 @@ export function upsertRichMedia(
     const existing = current.find(item => item.mediaId === clean.mediaId);
     if (existing && (existing.nodeId !== clean.nodeId ||
         JSON.stringify(existing.source) !== JSON.stringify(clean.source) ||
-        (existing.status === 'unavailable' && clean.status === 'pending'))) return 'refused';
+        (existing.status === 'unavailable' && clean.status === 'pending') ||
+        (existing.reason === 'removed' && clean.reason !== 'removed'))) return 'refused';
     if (existing && JSON.stringify(existing) === JSON.stringify(clean)) return 'unchanged';
     if (!existing && current.length >= 64) return 'refused';
     const nextMedia = existing ? current.map(item => item.mediaId === clean.mediaId ? clean : item) : [...current, clean];
@@ -3380,7 +3381,143 @@ function referencedAssetIds(event: SessionEvent): readonly AssetRef[] {
   if (event.kind === 'native_image') return event.asset ? [event.asset] : [];
   if (event.kind === 'user_message') return event.assets ?? [];
   if (event.kind === 'tool_call') return event.call.assets ?? [];
+  if (event.kind === 'assistant_message') return event.richMedia?.flatMap(media => media.asset ? [media.asset] : []) ?? [];
   return [];
+}
+
+/** Read-only compatibility with future rich assets, NOT permission to admit them. Every
+ * existing slot must be well formed before its references can authorize physical deletion. */
+function cleanupRichMedia(event: Extract<SessionEvent, { kind: 'assistant_message' }>): RichMediaState[] | null {
+  if (event.richMedia === undefined) return [];
+  const rich = event.rich ? parseRichResponse(event.rich) : null;
+  const origin = event.richOrigin ? parseRichOrigin(event.richOrigin) : null;
+  if (!rich || rich.status !== 'available' || !event.providerMessageId ||
+      rich.providerMessageId !== event.providerMessageId || rich.messageId !== event.messageId ||
+      !origin || origin.conversationId !== rich.conversationId) return null;
+  try {
+    if (!Array.isArray(event.richMedia) || event.richMedia.length > 64 ||
+        Reflect.ownKeys(event.richMedia).length !== event.richMedia.length + 1) return null;
+    const found = new Set<string>();
+    const clean: RichMediaState[] = [];
+    for (let index = 0; index < event.richMedia.length; index++) {
+      const descriptor = Object.getOwnPropertyDescriptor(event.richMedia, String(index));
+      if (!descriptor?.enumerable || !('value' in descriptor)) return null;
+      const fields = richMediaFields(descriptor.value, ['mediaId', 'nodeId', 'source', 'status'],
+        ['mediaId', 'nodeId', 'source', 'status', 'reason', 'previewWidth', 'previewHeight', 'asset']);
+      if (!fields || !richMediaOpaque(fields.mediaId) || !richMediaOpaque(fields.nodeId) ||
+          found.has(fields.mediaId) || !exactRichImageNode(rich, fields.mediaId, fields.nodeId)) return null;
+      const source = parseMetadataRichMedia({ mediaId: fields.mediaId, nodeId: fields.nodeId,
+        source: fields.source, status: 'pending' });
+      if (!source || (source.source.kind === 'native' && source.source.providerMessageId !== event.providerMessageId)) return null;
+      if (fields.status !== 'available') {
+        if (Object.hasOwn(fields, 'asset') || Object.hasOwn(fields, 'previewWidth') ||
+            Object.hasOwn(fields, 'previewHeight')) return null;
+        const metadata = parseMetadataRichMedia(fields);
+        if (!metadata) return null;
+        clean.push(metadata);
+      } else {
+        if (Object.hasOwn(fields, 'reason') || !Number.isSafeInteger(fields.previewWidth) ||
+            !Number.isSafeInteger(fields.previewHeight) || (fields.previewWidth as number) < 1 ||
+            (fields.previewHeight as number) < 1 || (fields.previewWidth as number) > 1600 ||
+            (fields.previewHeight as number) > 1600) return null;
+        const asset = richMediaFields(fields.asset, ['id', 'mimeType', 'bytes'], ['id', 'mimeType', 'bytes']);
+        if (!asset || typeof asset.id !== 'string' || !/^[a-f0-9]{8,64}\.(?:bin|png|jpg)$/.test(asset.id) ||
+            !['image/png', 'image/jpeg', 'image/webp'].includes(asset.mimeType as string) ||
+            !Number.isSafeInteger(asset.bytes) || (asset.bytes as number) < 1 ||
+            (asset.bytes as number) > MAX_ASSET_BYTES) return null;
+        clean.push({ ...source, status: 'available', previewWidth: fields.previewWidth as number,
+          previewHeight: fields.previewHeight as number, asset: asset as unknown as AssetRef });
+      }
+      found.add(fields.mediaId);
+    }
+    return clean;
+  } catch { return null; }
+}
+
+/** Unlike readEvents, deletion must not interpret a skipped unreadable/oversized canonical
+ * shard or malformed legacy snapshot as proof of zero owners. Reads happen INSIDE the session
+ * queue, after every preceding writer, without acquiring the outer asset queue again. */
+const MAX_CLEANUP_OWNER_SCAN_BYTES = 64 * 1024 * 1024;
+const cleanupEventKinds = new Set<SessionEvent['kind']>([
+  'session_start', 'user_message', 'assistant_message', 'native_image', 'progress', 'page_tool',
+  'turn_start', 'turn_end', 'chat_error', 'tool_call', 'note', 'agent_message', 'handoff'
+]);
+async function cleanupOwnerInventory(sessionId: string, entry: OpenSession): Promise<SessionEvent[] | null> {
+  const disk = new Map<string, CanonicalEvent>();
+  const base = sessionDir(sessionId);
+  try {
+    const legacy = path.join(base, 'messages.json');
+    try {
+      const stat = await fs.lstat(legacy);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
+      const raw = await fs.readFile(legacy, 'utf8');
+      if (Buffer.byteLength(raw, 'utf8') > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      for (const [key, value] of Object.entries(parsed)) {
+        const candidate = value as CanonicalEvent;
+        if (!candidate || typeof candidate !== 'object' || !Number.isSafeInteger(candidate.seq) ||
+            messageKey(candidate) !== key) return null;
+        disk.set(key, candidate);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+    }
+    try {
+      const directory = path.join(base, 'messages');
+      const stat = await fs.lstat(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return null;
+      for (const name of await fs.readdir(directory)) {
+        if (!name.endsWith('.json')) continue; // Temporary incomplete writes are not published.
+        if (!/^[a-f0-9]{64}\.json$/.test(name)) return null;
+        const file = path.join(directory, name);
+        const stat = await fs.lstat(file);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CANONICAL_MESSAGE_BYTES) return null;
+        const raw = await fs.readFile(file, 'utf8');
+        if (Buffer.byteLength(raw, 'utf8') > MAX_CANONICAL_MESSAGE_BYTES) return null;
+        const candidate: CanonicalEvent = JSON.parse(raw);
+        const key = messageKey(candidate);
+        if (!key || !Number.isSafeInteger(candidate.seq) ||
+            `${createHash('sha256').update(key).digest('hex')}.json` !== name) return null;
+        disk.set(key, candidate);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+    }
+    // The journal can contain unkeyed references and pre-canonical snapshots. Its latter
+    // copies are superseded by a valid authoritative canonical shard of the SAME identity.
+    const events: SessionEvent[] = [];
+    try {
+      const journalFile = path.join(base, 'events.jsonl');
+      const stat = await fs.lstat(journalFile);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
+      const journal = await fs.readFile(journalFile, 'utf8');
+      if (Buffer.byteLength(journal, 'utf8') > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
+      for (const line of journal.split('\n')) {
+        if (!line.trim()) continue;
+        const event: SessionEvent = JSON.parse(line);
+        if (!event || !Number.isSafeInteger(event.seq) || !cleanupEventKinds.has(event.kind)) return null;
+        const key = messageKey(event);
+        if (!key || !disk.has(key)) events.push(event);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+    }
+    // Read-only per-session recovery may collapse old provider aliases. An unrepresented
+    // on-disk owner must veto deletion rather than exposing bytes that cleanup cannot retire.
+    for (const [key, candidate] of disk) {
+      if (!entry.messages.has(key) && referencedAssetIds(candidate).length) return null;
+    }
+    for (const [key, current] of entry.messages) disk.set(key, current);
+    const all = [...disk.values(), ...events];
+    for (const event of all) {
+      if (event.kind === 'assistant_message' && cleanupRichMedia(event) === null) return null;
+      for (const asset of referencedAssetIds(event)) {
+        if (!asset || typeof asset.id !== 'string' || !/^[a-f0-9]{8,64}\.(?:bin|png|jpg|txt)$/.test(asset.id)) return null;
+      }
+    }
+    return all;
+  } catch { return null; }
 }
 
 function retireImageReferences(event: CanonicalEvent, selected: ReadonlySet<string>): CanonicalEvent | null {
@@ -3395,6 +3532,17 @@ function retireImageReferences(event: CanonicalEvent, selected: ReadonlySet<stri
     const retiredImageAssetIds = [...new Set([...(event.retiredImageAssetIds ?? []), ...removed.map((asset) => asset.id)])];
     return { ...event, assets: retainedAssets(event.assets, retiredImageAssetIds), retiredImageAssetIds };
   }
+  if (event.kind === 'assistant_message') {
+    const removed = (event.richMedia ?? []).filter(media => media.asset && selected.has(media.asset.id));
+    if (!removed.length) return null;
+    const retiredRichImageAssetIds = mergedRetiredAssetIds(event.retiredRichImageAssetIds,
+      removed.map(media => media.asset!.id));
+    return { ...event, retiredRichImageAssetIds, richMedia: (event.richMedia ?? []).map(media => {
+      if (!media.asset || !selected.has(media.asset.id)) return media;
+      const { asset: _asset, previewWidth: _width, previewHeight: _height, ...withoutPreview } = media;
+      return { ...withoutPreview, status: 'unavailable' as const, reason: 'removed' as const };
+    }) };
+  }
   if (event.kind !== 'tool_call') return null;
   const removed = (event.call.assets ?? []).filter((asset) => selected.has(asset.id));
   if (!removed.length) return null;
@@ -3408,20 +3556,22 @@ function retireImageReferences(event: CanonicalEvent, selected: ReadonlySet<stri
  * is available. Unsupported unkeyed references veto deletion for their exact asset.
  */
 async function retireSessionImages(sessionId: string, selected: ReadonlySet<string>): Promise<Set<string>> {
-  const events = await readEvents(sessionId);
-  const safe = new Set(selected);
-  const keyed = new Map<string, CanonicalEvent>();
-  for (const event of events) {
-    if (!referencedAssetIds(event).some((asset) => selected.has(asset.id))) continue;
-    const key = messageKey(event);
-    if (!key || !['user_message', 'native_image', 'tool_call'].includes(event.kind)) {
-      for (const asset of referencedAssetIds(event)) safe.delete(asset.id);
-      continue;
-    }
-    keyed.set(key, event as CanonicalEvent);
-  }
   const entry = await ensureOpen(sessionId);
-  await enqueueSessionOperation(entry, 'image storage cleanup', async () => {
+  return enqueueSessionOperation(entry, 'image storage cleanup', async () => {
+    const events = await cleanupOwnerInventory(sessionId, entry);
+    if (!events) return new Set<string>(); // Unknown owner is never evidence for deletion.
+    const safe = new Set(selected);
+    const keyed = new Map<string, CanonicalEvent>();
+    for (const event of events) {
+      const matching = referencedAssetIds(event).filter(asset => selected.has(asset.id));
+      if (!matching.length) continue;
+      const key = messageKey(event);
+      if (!key || !['user_message', 'native_image', 'tool_call', 'assistant_message'].includes(event.kind)) {
+        for (const asset of matching) safe.delete(asset.id);
+        continue;
+      }
+      keyed.set(key, event as CanonicalEvent);
+    }
     for (const [key, observed] of keyed) {
       const current = entry.messages.get(key) ?? observed;
       const retired = retireImageReferences(current, safe);
@@ -3433,8 +3583,8 @@ async function retireSessionImages(sessionId: string, selected: ReadonlySet<stri
       entry.historySeq = full.seq;
     }
     if (keyed.size) scheduleMeta(entry);
+    return safe;
   });
-  return safe;
 }
 
 export function getImageStorage(): Promise<ImageStorageInfo> {
