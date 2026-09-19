@@ -24,6 +24,13 @@ type WindowRecord = {
   pending: boolean;
   pendingSessionId: string | null;
   ready: boolean;
+  navigation: {
+    frame: WebContents['mainFrame'] | null;
+    url: string;
+    loading: boolean;
+    aborted: boolean;
+    stopped: boolean;
+  } | null;
   dispose: () => void;
 };
 
@@ -65,30 +72,76 @@ export class UiSelectionOwner {
     const contents = window.webContents;
     const record: WindowRecord = {
       window, contents, incarnation: 0, latestRendererGeneration: -1, generation: 0,
-      token: 0, selected: null, pending: false, pendingSessionId: null, ready: true, dispose: () => {}
+      token: 0, selected: null, pending: false, pendingSessionId: null,
+      ready: true, navigation: null, dispose: () => {}
     };
     const revoke = (): void => this.invalidate(record);
-    const load = (): void => {
+    const navigation = (details: { isMainFrame?: boolean; url?: string; frame?: WebContents['mainFrame'] | null }): void => {
+      if (details?.isMainFrame === false) return;
       revoke();
       record.ready = false;
       record.incarnation++;
-      // Only the actual main-frame reload may reset renderer sequence admission.
-      if (contents.isLoadingMainFrame?.() === true) record.latestRendererGeneration = -1;
+      // A stale outgoing frame still has the app's URL before loading begins. Its next IPC
+      // report must remain refused until this exact main-frame transition is resolved.
+      record.navigation = {
+        frame: details?.frame === contents.mainFrame ? contents.mainFrame : null,
+        url: details?.url ?? '', loading: false, aborted: false, stopped: false
+      };
     };
-    const loaded = (): void => { record.ready = true; };
+    const load = (): void => {
+      if (contents.isLoadingMainFrame?.() === false) return;
+      revoke();
+      record.ready = false;
+      record.incarnation++;
+      // The outgoing document retains its sequence through a canceled navigation. Reset
+      // admission only when a replacement main frame actually finishes loading.
+      if (record.navigation) record.navigation.loading = true;
+      else if (contents.isLoadingMainFrame?.() === true) record.latestRendererGeneration = -1;
+    };
+    const recoverAborted = (): void => {
+      const pending = record.navigation;
+      if (!pending?.aborted || !pending.stopped || pending.frame === null ||
+          contents.mainFrame !== pending.frame || contents.isLoadingMainFrame?.() !== false ||
+          !isAppFrame(contents)) return;
+      record.navigation = null;
+      record.ready = true;
+    };
+    const abort = (_event: unknown, code: number, _description: string, url: string, isMainFrame: boolean): void => {
+      const pending = record.navigation;
+      if (!isMainFrame || code !== -3 || !pending || pending.url !== url) return;
+      pending.aborted = true;
+      recoverAborted();
+    };
+    const stopped = (): void => {
+      if (!record.navigation) return;
+      record.navigation.stopped = true;
+      recoverAborted();
+    };
+    const loaded = (): void => {
+      const pending = record.navigation;
+      if (pending) {
+        if (!pending.loading || pending.frame === null || contents.mainFrame === pending.frame ||
+            contents.isLoadingMainFrame?.() === true || !isAppFrame(contents)) return;
+        record.navigation = null;
+        record.latestRendererGeneration = -1;
+      }
+      record.ready = true;
+    };
     const crashed = (): void => { revoke(); record.ready = false; };
     const listeners = [
+      [contents, 'did-start-navigation', navigation],
       [contents, 'did-start-loading', load],
       [contents, 'did-finish-load', loaded],
-      [contents, 'did-start-navigation', revoke],
+      [contents, 'did-fail-provisional-load', abort],
+      [contents, 'did-stop-loading', stopped],
       [contents, 'render-process-gone', crashed],
       [contents, 'destroyed', crashed],
       [window, 'hide', revoke],
       [window, 'closed', crashed]
     ] as const;
-    for (const [target, name, callback] of listeners) target.on(name as never, callback);
+    for (const [target, name, callback] of listeners) target.on(name as never, callback as never);
     record.dispose = () => {
-      for (const [target, name, callback] of listeners) target.removeListener(name as never, callback);
+      for (const [target, name, callback] of listeners) target.removeListener(name as never, callback as never);
     };
     this.current = record;
     return record;

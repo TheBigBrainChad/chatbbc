@@ -310,6 +310,21 @@ async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers
   };
 }
 
+/** Recorded inert controls remain focusable DOM until their selected transcript is retired. */
+function retiringRichAnswer(): SessionEvent {
+  const rich: RichResponse = {
+    version: 1, status: 'available', reason: null,
+    conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    messageId: 'retired-selection', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+    revision: 1, accessibleText: 'Old selected answer', nodes: [{
+      id: 'old-choice', kind: 'control', control: 'choice', label: 'Old session choice',
+      groupId: 'old-group', value: 'old', selected: false, disabled: false, children: []
+    }]
+  };
+  return { kind: 'assistant_message', seq: 1, time: T0, source: 'extension',
+    messageId: rich.messageId, message: text('Old selected answer'), final: true, rich };
+}
+
 it('reports startup New Chat, sidebar A→B→A, same-id Write Directly and New Chat in increasing renderer epochs', async () => {
   const first = summary([]), second = { ...first, id: '2026-09-02-test0002' };
   const { w, live, writeSession } = await boot([], true, [], [], { sessions: [first, second] });
@@ -383,6 +398,90 @@ it('revokes the exact selected session after deletion and reports a new project 
   await settle();
   expect(live.selectionReports).toHaveLength(before + 2);
   expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+});
+
+it('retires deleted rich controls before the null report even when the follow-up list stalls and fails', async () => {
+  const { w, live } = await boot([retiringRichAnswer()]);
+  const api = (w as any).api;
+  const draft = w.document.getElementById('chatInput') as HTMLTextAreaElement;
+  // The existing New Chat draft belongs to its own key, independent of A's deletion.
+  w.document.getElementById('newChat')!.click();
+  draft.value = 'Preserve my new conversation';
+  draft.dispatchEvent(new w.Event('input', { bubbles: true }));
+  (w.document.querySelector(`#sessionList [data-id="${summary([]).id}"]`) as HTMLElement).click();
+  await settle();
+  const timeline = w.document.getElementById('timeline')!;
+  const oldChoice = timeline.querySelector<HTMLElement>('.rich-control[data-rich-node-id="old-choice"]')!;
+  expect(oldChoice.textContent).toContain('Old session choice');
+  expect(oldChoice.isConnected).toBe(true);
+  let atNullReport: { oldConnected: boolean; oldInteractive: boolean } | null = null;
+  const originalReport = api.reportUiSelection;
+  api.reportUiSelection = vi.fn((payload: { sessionId: string | null; rendererGeneration: number }) => {
+    if (payload.sessionId === null) atNullReport = {
+      oldConnected: oldChoice.isConnected,
+      oldInteractive: oldChoice.isConnected && !timeline.hasAttribute('inert')
+    };
+    return originalReport(payload);
+  });
+  let failList!: (reply: unknown) => void;
+  api.listSessions = vi.fn(() => new Promise(resolve => { failList = resolve; }));
+  api.deleteSession = vi.fn(async () => ({ ok: true, data: true }));
+  (w.document.querySelector(`#sessionList [data-id="${summary([]).id}"] .sess-del`) as HTMLElement).click();
+  await vi.waitFor(() => expect(api.listSessions).toHaveBeenCalled());
+  expect(atNullReport).toEqual({ oldConnected: false, oldInteractive: false });
+  expect(timeline.textContent).not.toContain('Old session choice');
+  expect(timeline.querySelector('.rich-control')).toBeNull();
+  expect(w.document.getElementById('sessionControlStatus')!.textContent).toBe('');
+  expect(draft.value).toBe('Preserve my new conversation');
+  expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+  failList({ ok: false, error: 'List temporarily unavailable' });
+  await settle();
+  expect(timeline.querySelector('.rich-control')).toBeNull();
+  expect(timeline.textContent).not.toContain('Old selected answer');
+  expect(draft.value).toBe('Preserve my new conversation');
+});
+
+it('retires confirmed-missing rich controls at the null report and ignores later failed refreshes', async () => {
+  const answer = retiringRichAnswer();
+  const first = summary([answer]), other = { ...first, id: '2026-09-02-test0002', title: 'Other session' };
+  const { w, live, notifySession } = await boot([answer], true, [], [], { sessions: [first, other] });
+  const api = (w as any).api;
+  const timeline = w.document.getElementById('timeline')!;
+  const oldChoice = timeline.querySelector<HTMLElement>('.rich-control[data-rich-node-id="old-choice"]')!;
+  expect(oldChoice.isConnected).toBe(true);
+  let atNullReport: { oldConnected: boolean; oldInteractive: boolean } | null = null;
+  const originalReport = api.reportUiSelection;
+  api.reportUiSelection = vi.fn((payload: { sessionId: string | null; rendererGeneration: number }) => {
+    if (payload.sessionId === null) atNullReport = {
+      oldConnected: oldChoice.isConnected,
+      oldInteractive: oldChoice.isConnected && !timeline.hasAttribute('inert')
+    };
+    return originalReport(payload);
+  });
+  api.listSessions = vi.fn(async () => ({ ok: true, data: {
+    sessions: [other], total: 61, nextCursor: { id: other.id, updatedAt: other.updatedAt },
+    activeId: other.id, blocked: [], pressure: []
+  } }));
+  let resolveExistence!: (reply: unknown) => void;
+  api.getSession = vi.fn((_id: string, options?: { limit?: number }) => options?.limit === 1
+    ? new Promise(resolve => { resolveExistence = resolve; })
+    : Promise.resolve({ ok: true, data: { summary: first, events: [answer], total: 1, nextFrom: 2 } }));
+  notifySession();
+  await vi.waitFor(() => expect(resolveExistence).toBeTypeOf('function'));
+  expect(oldChoice.isConnected).toBe(true); // A missing newest-page row is not deletion proof.
+  resolveExistence({ ok: false, error: 'Session not found' });
+  await vi.waitFor(() => expect(live.selectionReports.at(-1)?.sessionId).toBeNull());
+  expect(atNullReport).toEqual({ oldConnected: false, oldInteractive: false });
+  expect(timeline.querySelector('.rich-control')).toBeNull();
+  let failNextList!: (reply: unknown) => void;
+  api.listSessions = vi.fn(() => new Promise(resolve => { failNextList = resolve; }));
+  notifySession();
+  await vi.waitFor(() => expect(api.listSessions).toHaveBeenCalled());
+  expect(timeline.textContent).not.toContain('Old selected answer');
+  failNextList({ ok: false, error: 'Storage temporarily unavailable' });
+  await settle();
+  expect(timeline.querySelector('.rich-control')).toBeNull();
+  expect(timeline.textContent).not.toContain('Old selected answer');
 });
 
 it('cannot repaint B from an old A→B→A acknowledgment or failed latest witness', async () => {

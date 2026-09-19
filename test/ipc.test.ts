@@ -218,6 +218,76 @@ describe('main-owned, inert UI selection witness', () => {
     } finally { spy.mockRestore(); }
   });
 
+  it('suspends a main-frame navigation before loading and accepts only the new app frame after reload', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const session = await createSession({ title: 'navigation boundary' });
+    const { webContents, mainFrame, event } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    const original = await handler(event, { sessionId: session.id, rendererGeneration: 1 }) as any;
+    expect(original.ok).toBe(true);
+    // Electron announces navigation before a loading event or change to getURL(). The old
+    // document must not resurrect itself by sending one more valid, increasing sequence.
+    webContents.emit('did-start-navigation', {
+      url: mainFrame.url, isSameDocument: false, isMainFrame: true, frame: mainFrame
+    });
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 2 })).toMatchObject({ ok: false });
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    webContents.emit('did-start-loading');
+    const newFrame = { url: mainFrame.url };
+    webContents.mainFrame = newFrame;
+    (webContents as any).isLoadingMainFrame = () => false;
+    webContents.emit('did-finish-load');
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 3 })).toMatchObject({ ok: false });
+    const recovered = await handler({ sender: webContents, senderFrame: newFrame },
+      { sessionId: session.id, rendererGeneration: 0 }) as any;
+    expect(recovered).toMatchObject({ ok: true, data: { sessionId: session.id } });
+    expect(recovered.data.generation).toBeGreaterThan(original.data.generation);
+    expect(currentUiSelectionFor(webContents as any)).toEqual(recovered.data);
+  });
+
+  it('ignores subframe navigation and never retires the current main-frame witness', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const session = await createSession({ title: 'subframe navigation' });
+    const { webContents, mainFrame, event } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    const original = await handler(event, { sessionId: session.id, rendererGeneration: 1 }) as any;
+    expect(original.ok).toBe(true);
+    webContents.emit('did-start-navigation', {
+      url: 'https://embedded.example/', isSameDocument: false, isMainFrame: false,
+      frame: { url: 'https://embedded.example/' }
+    });
+    expect(currentUiSelectionFor(webContents as any)).toEqual(original.data);
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 2 })).toMatchObject({ ok: true });
+    expect(webContents.mainFrame).toBe(mainFrame);
+  });
+
+  it('recovers a canceled main-frame navigation only after exact abort and old-frame readiness', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const session = await createSession({ title: 'canceled navigation' });
+    const { webContents, mainFrame, event } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    const original = await handler(event, { sessionId: session.id, rendererGeneration: 1 }) as any;
+    expect(original.ok).toBe(true);
+    webContents.emit('did-start-navigation', {
+      url: 'https://external.example/', isSameDocument: false, isMainFrame: true, frame: mainFrame
+    });
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 2 })).toMatchObject({ ok: false });
+    // A stop-loading event alone is not proof that the external navigation was canceled.
+    (webContents as any).isLoadingMainFrame = () => false;
+    webContents.emit('did-stop-loading');
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 3 })).toMatchObject({ ok: false });
+    // Electron's aborted provisional load retains the original current app frame. No prior
+    // witness is restored; a fresh selection report must validate this same frame again.
+    webContents.emit('did-fail-provisional-load', {}, -3, 'ERR_ABORTED',
+      'https://external.example/', true, 1, 1);
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    const recovered = await handler(event, { sessionId: session.id, rendererGeneration: 4 }) as any;
+    expect(recovered).toMatchObject({ ok: true, data: { sessionId: session.id } });
+    expect(recovered.data.generation).toBeGreaterThan(original.data.generation);
+  });
+
   it.each(['hide', 'did-start-loading', 'render-process-gone', 'destroyed', 'closed'])('revokes the original window on %s', async lifecycle => {
     const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
     const session = await createSession({ title: `lifecycle ${lifecycle}` });

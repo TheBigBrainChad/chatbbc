@@ -261,6 +261,7 @@ async function toggleSessionBlock(id: string, blocked: boolean): Promise<void> {
 /** One selection retirement path for deletion and independently confirmed disappearance. */
 function clearSelectedSession(): void {
   retireRichImageViewer();
+  rememberDraft();
   selectionGeneration++;
   replaceComposerDraft();
   selectedId = null;
@@ -275,8 +276,20 @@ function clearSelectedSession(): void {
   handoffFor = null;
   detailLoadGeneration++;
   handoffLoadGeneration++;
-  reportVisibleSelection(true);
+  // Deletion and confirmed absence arrive outside selectSession/selectNewChat. Retire the old
+  // recorded controls and their cached rows on this same stack, before reporting null or
+  // awaiting another list/detail read that could fail or stall indefinitely.
+  $('timeline').setAttribute('inert', '');
+  $('inputQueue').setAttribute('inert', '');
+  $('timeline').replaceChildren();
+  $('inputQueue').replaceChildren();
+  forgetTimelineRows();
+  restoreDraft();
   void refreshSessionControls();
+  paintSessions(sessionHost);
+  paintDetail(false);
+  paintHandoff();
+  reportVisibleSelection(true);
 }
 
 async function deleteSession(id: string): Promise<void> {
