@@ -3453,15 +3453,55 @@ const cleanupEventKinds = new Set<SessionEvent['kind']>([
   'session_start', 'user_message', 'assistant_message', 'native_image', 'progress', 'page_tool',
   'turn_start', 'turn_end', 'chat_error', 'tool_call', 'note', 'agent_message', 'handoff'
 ]);
-/** Streaming line slices avoid allocating an unbounded split array from a malformed journal. */
-function* imageReadJournalLines(raw: string): Generator<string> {
-  let start = 0;
-  while (start < raw.length) {
-    const end = raw.indexOf('\n', start);
-    if (end < 0) { yield raw.slice(start); return; }
-    yield raw.slice(start, end);
-    start = end + 1;
-  }
+/** Scan a journal incrementally, checking the same inode and path before and after. */
+async function scanImageOwnerJournal(file: string, visit: (event: SessionEvent) => boolean): Promise<boolean> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    const before = await fs.lstat(file);
+    if (!before.isFile() || before.isSymbolicLink() || before.size > MAX_CLEANUP_OWNER_SCAN_BYTES) return false;
+    const parent = path.dirname(file);
+    const parentBefore = await fs.lstat(parent);
+    if (!parentBefore.isDirectory() || parentBefore.isSymbolicLink()) return false;
+    const [parentReal, fileReal] = await Promise.all([fs.realpath(parent), fs.realpath(file)]);
+    if (!sameFilesystemPath(path.dirname(fileReal), parentReal) || path.basename(fileReal) !== path.basename(file)) return false;
+    handle = await fs.open(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino || stat.size !== before.size) return false;
+    const chunk = Buffer.alloc(64 * 1024);
+    let carry = Buffer.alloc(0), position = 0, lines = 0;
+    const accept = (line: Buffer): boolean => {
+      if (line.length > MAX_LINE_BYTES || !isUtf8(line)) return false;
+      const text = line.toString('utf8');
+      if (!text.trim()) return true;
+      if (++lines > 100_000) return false;
+      try {
+        const event: SessionEvent = JSON.parse(text);
+        return !!event && Number.isSafeInteger(event.seq) && cleanupEventKinds.has(event.kind) && visit(event);
+      } catch { return false; }
+    };
+    while (position < stat.size) {
+      const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, stat.size - position), position);
+      if (!bytesRead) return false;
+      position += bytesRead;
+      const joined = carry.length ? Buffer.concat([carry, chunk.subarray(0, bytesRead)]) : chunk.subarray(0, bytesRead);
+      let start = 0;
+      for (;;) {
+        const newline = joined.indexOf(0x0a, start);
+        if (newline < 0) break;
+        if (!accept(joined.subarray(start, newline))) return false;
+        start = newline + 1;
+      }
+      // The next read reuses `chunk`; retain the trailing bytes independently.
+      carry = Buffer.from(joined.subarray(start));
+      if (carry.length > MAX_LINE_BYTES) return false;
+    }
+    if (!accept(carry)) return false;
+    const after = await fs.lstat(file), parentAfter = await fs.lstat(parent);
+    return after.isFile() && !after.isSymbolicLink() && after.dev === stat.dev && after.ino === stat.ino &&
+      after.size === stat.size && parentAfter.isDirectory() && !parentAfter.isSymbolicLink() &&
+      parentAfter.dev === parentBefore.dev && parentAfter.ino === parentBefore.ino;
+  } catch { return false; }
+  finally { await handle?.close().catch(() => undefined); }
 }
 /** Image membership reads cannot trust a stat-then-readFile path that becomes a symlink or
  * grows after stat. This does not change the existing cleanup transaction's read contract. */
@@ -3500,27 +3540,135 @@ async function readBoundedOwnerSource(
   } catch { return null; }
   finally { await handle?.close().catch(() => undefined); }
 }
+interface ImageOwnerInventory {
+  events: SessionEvent[];
+  ambiguousProviders: ReadonlySet<string>;
+}
+
+/** Strictly validate image ownership without retaining unrelated journal rows or canonical
+ * message bodies. Source bounds are per file, with a cap on canonical directory entries. */
+async function imageOwnerInventory(sessionId: string, entry: OpenSession, assetId: string): Promise<ImageOwnerInventory | null> {
+  const base = sessionDir(sessionId);
+  const canonicalKeys = new Set<string>();
+  const targetOwners = new Map<string, CanonicalEvent>();
+  const diskOwnersWithAssets = new Set<string>();
+  const providerByKey = new Map<string, string>();
+  // Bound only references to this exact asset. Unrelated prose never spends this budget.
+  const MAX_TARGET_OWNER_BYTES = 8 * 1024 * 1024;
+  let targetBytes = 0;
+  const journalOwners: SessionEvent[] = [];
+  const targetSizes = new Map<string, number>();
+  const target = (key: string | null, event: SessionEvent): boolean => {
+    if (!referencedAssetIds(event).some(asset => asset.id === assetId)) {
+      if (key) { targetBytes -= targetSizes.get(key) ?? 0; targetSizes.delete(key); targetOwners.delete(key); }
+      return true;
+    }
+    const bytes = Buffer.byteLength(JSON.stringify(event), 'utf8');
+    const nextBytes = targetBytes - (key ? targetSizes.get(key) ?? 0 : 0) + bytes;
+    if (nextBytes > MAX_TARGET_OWNER_BYTES ||
+        targetSizes.size + journalOwners.length + (key && targetSizes.has(key) ? 0 : 1) > 512) return false;
+    targetBytes = nextBytes;
+    if (key) { targetSizes.set(key, bytes); targetOwners.set(key, event as CanonicalEvent); }
+    else journalOwners.push(event);
+    return true;
+  };
+  const validReferences = (event: SessionEvent): boolean =>
+    (event.kind !== 'assistant_message' || cleanupRichMedia(event) !== null) &&
+    referencedAssetIds(event).every(asset => !!asset && typeof asset.id === 'string' &&
+      /^[a-f0-9]{8,64}\.(?:bin|png|jpg|txt)$/.test(asset.id));
+  const add = (key: string, row: CanonicalEvent): boolean => {
+    if (!validReferences(row)) return false;
+    canonicalKeys.add(key);
+    if (referencedAssetIds(row).length) diskOwnersWithAssets.add(key);
+    else diskOwnersWithAssets.delete(key);
+    if (row.kind === 'assistant_message' && row.providerMessageId) providerByKey.set(key, row.providerMessageId);
+    else providerByKey.delete(key);
+    return target(key, row);
+  };
+  try {
+    const legacy = path.join(base, 'messages.json');
+    const legacyStat = await fs.lstat(legacy);
+    if (!legacyStat.isFile() || legacyStat.isSymbolicLink() ||
+        legacyStat.size > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
+    const legacyRaw = await readBoundedOwnerSource(legacy, legacyStat);
+    if (legacyRaw === null) return null;
+    const parsed: unknown = JSON.parse(legacyRaw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    for (const [key, value] of Object.entries(parsed)) {
+      const candidate = value as CanonicalEvent;
+      if (!candidate || typeof candidate !== 'object' || !Number.isSafeInteger(candidate.seq) ||
+          messageKey(candidate) !== key || !add(key, candidate)) return null;
+    }
+    const directory = path.join(base, 'messages');
+    const directoryStat = await fs.lstat(directory);
+    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) return null;
+    const listing = await fs.opendir(directory);
+    try {
+      let entries = 0;
+      for await (const item of listing) {
+        if (++entries > 8192) return null;
+        const name = item.name;
+        if (!name.endsWith('.json')) continue;
+        if (!/^[a-f0-9]{64}\.json$/.test(name)) return null;
+        const file = path.join(directory, name);
+        const stat = await fs.lstat(file);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CANONICAL_MESSAGE_BYTES) return null;
+        const raw = await readBoundedOwnerSource(file, stat);
+        if (raw === null) return null;
+        const candidate: CanonicalEvent = JSON.parse(raw);
+        const key = messageKey(candidate);
+        if (!key || !Number.isSafeInteger(candidate.seq) ||
+            `${createHash('sha256').update(key).digest('hex')}.json` !== name || !add(key, candidate)) return null;
+      }
+    } finally { await listing.close().catch(() => undefined); }
+    // Apply shard precedence before checking legacy owners: cleanup may have retired
+    // an image in a newer shard while its historical legacy snapshot retains the asset.
+    for (const key of diskOwnersWithAssets) if (!entry.messages.has(key)) return null;
+    // A cold restore can ignore damaged shards and collapse provider aliases. A cached
+    // owner of the requested bytes must equal the exact committed revision on disk.
+    for (const [key, current] of entry.messages) {
+      if (referencedAssetIds(current).some(asset => asset.id === assetId)) {
+        const committed = targetOwners.get(key);
+        if (!committed || JSON.stringify(committed) !== JSON.stringify(current)) return null;
+      }
+      if (!validReferences(current)) return null;
+      canonicalKeys.add(key);
+      if (current.kind === 'assistant_message' && current.providerMessageId) providerByKey.set(key, current.providerMessageId);
+      else providerByKey.delete(key);
+      if (!target(key, current)) return null;
+    }
+    const firstProvider = new Map<string, string>();
+    const ambiguousProviders = new Set<string>();
+    const recordProvider = (id: string, identity: string): void => {
+      const first = firstProvider.get(id);
+      if (first !== undefined && first !== identity) ambiguousProviders.add(id);
+      else firstProvider.set(id, identity);
+    };
+    for (const [key, id] of providerByKey) recordProvider(id, key);
+    const validJournal = await scanImageOwnerJournal(path.join(base, 'events.jsonl'), row => {
+      const key = messageKey(row);
+      if (key && canonicalKeys.has(key)) return true;
+      if (!validReferences(row)) return false;
+      if (row.kind === 'assistant_message' && row.providerMessageId)
+        recordProvider(row.providerMessageId, `journal:${row.seq}`);
+      return target(null, row);
+    });
+    if (!validJournal) return null;
+    return { events: [...targetOwners.values(), ...journalOwners], ambiguousProviders };
+  } catch { return null; }
+}
+
 async function cleanupOwnerInventory(
-  sessionId: string, entry: OpenSession,
-  imageRead?: { assetId: string; maxSourceBytes: number }
+  sessionId: string, entry: OpenSession
 ): Promise<SessionEvent[] | null> {
   const disk = new Map<string, CanonicalEvent>();
   const base = sessionDir(sessionId);
-  // A thumbnail cannot allocate an unbounded whole-history snapshot. Cleanup retains its
-  // independent 64-MiB-per-source rules; an oversized read fails closed, never truncates.
-  let remaining = imageRead?.maxSourceBytes ?? Number.POSITIVE_INFINITY;
-  const charge = (bytes: number): boolean => {
-    if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > remaining) return false;
-    remaining -= bytes;
-    return true;
-  };
   try {
     const legacy = path.join(base, 'messages.json');
     try {
       const stat = await fs.lstat(legacy);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CLEANUP_OWNER_SCAN_BYTES || !charge(stat.size)) return null;
-      const raw = imageRead ? await readBoundedOwnerSource(legacy, stat) : await fs.readFile(legacy, 'utf8');
-      if (raw === null) return null;
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
+      const raw = await fs.readFile(legacy, 'utf8');
       if (Buffer.byteLength(raw, 'utf8') > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
       const parsed: unknown = JSON.parse(raw);
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
@@ -3535,26 +3683,14 @@ async function cleanupOwnerInventory(
       const directory = path.join(base, 'messages');
       const stat = await fs.lstat(directory);
       if (!stat.isDirectory() || stat.isSymbolicLink()) return null;
-      let names: string[];
-      if (imageRead) {
-        // Do not eagerly materialize a potentially huge directory before bounding it.
-        names = [];
-        const listing = await fs.opendir(directory);
-        try {
-          for await (const item of listing) {
-            if (names.length >= 8192) return null;
-            names.push(item.name);
-          }
-        } finally { await listing.close().catch(() => undefined); }
-      } else names = await fs.readdir(directory);
+      const names = await fs.readdir(directory);
       for (const name of names) {
         if (!name.endsWith('.json')) continue; // Temporary incomplete writes are not published.
         if (!/^[a-f0-9]{64}\.json$/.test(name)) return null;
         const file = path.join(directory, name);
         const stat = await fs.lstat(file);
-        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CANONICAL_MESSAGE_BYTES || !charge(stat.size)) return null;
-        const raw = imageRead ? await readBoundedOwnerSource(file, stat) : await fs.readFile(file, 'utf8');
-        if (raw === null) return null;
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CANONICAL_MESSAGE_BYTES) return null;
+        const raw = await fs.readFile(file, 'utf8');
         if (Buffer.byteLength(raw, 'utf8') > MAX_CANONICAL_MESSAGE_BYTES) return null;
         const candidate: CanonicalEvent = JSON.parse(raw);
         const key = messageKey(candidate);
@@ -3569,14 +3705,11 @@ async function cleanupOwnerInventory(
     try {
       const journalFile = path.join(base, 'events.jsonl');
       const stat = await fs.lstat(journalFile);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CLEANUP_OWNER_SCAN_BYTES || !charge(stat.size)) return null;
-      const journal = imageRead ? await readBoundedOwnerSource(journalFile, stat) : await fs.readFile(journalFile, 'utf8');
-      if (journal === null) return null;
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
+      const journal = await fs.readFile(journalFile, 'utf8');
       if (Buffer.byteLength(journal, 'utf8') > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
-      let lines = 0;
-      for (const line of imageRead ? imageReadJournalLines(journal) : journal.split('\n')) {
+      for (const line of journal.split('\n')) {
         if (!line.trim()) continue;
-        if (imageRead && ++lines > 100_000) return null;
         const event: SessionEvent = JSON.parse(line);
         if (!event || !Number.isSafeInteger(event.seq) || !cleanupEventKinds.has(event.kind)) return null;
         const key = messageKey(event);
@@ -3587,16 +3720,6 @@ async function cleanupOwnerInventory(
     // on-disk owner must veto deletion rather than exposing bytes that cleanup cannot retire.
     for (const [key, candidate] of disk) {
       if (!entry.messages.has(key) && referencedAssetIds(candidate).length) return null;
-    }
-    if (imageRead) {
-      // The normal reader tolerates old canonical projections and skipped corrupt shards.
-      // Neither can authorize bytes: any cached owner of this asset must still be identical
-      // to its committed counterpart after joining the session queue.
-      for (const [key, current] of entry.messages) {
-        if (!referencedAssetIds(current).some(asset => asset.id === imageRead.assetId)) continue;
-        const committed = disk.get(key);
-        if (!committed || JSON.stringify(committed) !== JSON.stringify(current)) return null;
-      }
     }
     for (const [key, current] of entry.messages) disk.set(key, current);
     const all = [...disk.values(), ...events];
@@ -3817,7 +3940,8 @@ async function committedImageOwner(sessionId: string, owner: CanonicalEvent): Pr
 /** A future available rich slot may only grant a LOCAL read, never publication or action.
  * All slots on the owner must validate; an ambiguous provider alias vetoes the entire owner. */
 async function richImageReference(
-  sessionId: string, entry: OpenSession, events: SessionEvent[], assetId: string
+  sessionId: string, entry: OpenSession, events: SessionEvent[], assetId: string,
+  ambiguousProviders: ReadonlySet<string>
 ): Promise<{ asset: AssetRef; width: number; height: number } | null> {
   const assistants = events.filter((row): row is Extract<SessionEvent, { kind: 'assistant_message' }> =>
     row.kind === 'assistant_message');
@@ -3836,7 +3960,8 @@ async function richImageReference(
         rich.messageId !== row.messageId || rich.providerMessageId !== row.providerMessageId ||
         origin.bindingRevision > (entry.summary.bindingRevision ?? 0) ||
         !entry.summary.chatIds.includes(origin.conversationId) ||
-        assistants.some(other => other !== row && other.providerMessageId === row.providerMessageId)) return null;
+        (ambiguousProviders.has(row.providerMessageId) ||
+          assistants.some(other => other !== row && other.providerMessageId === row.providerMessageId))) return null;
     const retired = row.retiredRichImageAssetIds;
     if (retired !== undefined && (!Array.isArray(retired) || retired.length > 4096 ||
         retired.some(id => typeof id !== 'string' || !/^[a-f0-9]{8,64}\.(?:bin|png|jpg)$/.test(id)) ||
@@ -3925,11 +4050,10 @@ export async function readRecordedSessionImage(sessionId: string, assetId: strin
         if (assetMutationEpoch !== requestedAt || deletingSessions.has(sessionId) ||
             sessionDeletionEpoch !== deletionAt) return null;
         if (!await verifiedAssetsDirectory(sessionId)) return null;
-        const events = await cleanupOwnerInventory(sessionId, entry, {
-          assetId, maxSourceBytes: MAX_RECENT_READ_BYTES
-        });
-        if (!events) return null;
-        const rich = await richImageReference(sessionId, entry, events, assetId);
+        const inventory = await imageOwnerInventory(sessionId, entry, assetId);
+        if (!inventory) return null;
+        const { events, ambiguousProviders } = inventory;
+        const rich = await richImageReference(sessionId, entry, events, assetId, ambiguousProviders);
         // An independent existing user/native/tool owner may share the same content-addressed
         // file. Never turn a malformed rich reference into permission for a different asset.
         const legacy = events.flatMap(row => {

@@ -137,6 +137,77 @@ it('does not normalize invalid UTF-8 journal bytes into seemingly valid owner ev
   expect(await recordedInputImage(owner.session.id, owner.asset.id)).toBeNull();
 });
 
+async function recordedImageWithLongHistory() {
+  const session = await createSession({ conversationId: randomUUID(), title: 'Long image history' });
+  const images = [];
+  for (const background of ['#2856a3', '#882255', '#229966']) {
+    const bytes = await sharp({ create: { width: 5, height: 4, channels: 3, background } }).png().toBuffer();
+    images.push({ bytes, asset: await writeAsset(session.id, bytes, 'image/png') });
+  }
+  await upsertMessageEvent(session.id, { kind: 'user_message', source: 'app', time: 100,
+    messageId: 'long-history-user', message: { text: 'User image', chars: 10, truncated: false }, assets: [images[0]!.asset] });
+  await upsertNativeImageEvent(session.id, { kind: 'native_image', source: 'extension', time: 101,
+    messageId: 'long-history-native', providerAssetId: 'provider-image', providerRole: 'tool',
+    providerStatus: 'finished_successfully', previewStatus: 'available', previewWidth: 5, previewHeight: 4, asset: images[1]!.asset });
+  await appendEvent(session.id, { kind: 'tool_call', source: 'mcp', time: 102, call: {
+    callId: 'long-history-tool', tool: 'view_image', requestId: null, conversationId: null,
+    attribution: 'unattributed', attributionMethod: 'unattributed',
+    args: { text: '{}', chars: 2, truncated: false }, result: { text: '{}', chars: 2, truncated: false },
+    outcome: 'ok', durationMs: 1, summary: { kind: 'other', title: 'Image', tone: 'neutral' }, assets: [images[2]!.asset]
+  } });
+  const note = 'ordinary session history '.repeat(19_000);
+  for (let index = 0; index < 20; index++) await appendEvent(session.id, {
+    kind: 'note', source: 'app', time: 200 + index,
+    message: { text: note, chars: note.length, truncated: false }
+  });
+  await flushSessions();
+  expect((await fs.stat(path.join(sessionsRoot(), session.id, 'events.jsonl'))).size).toBeGreaterThan(8 * 1024 * 1024);
+  return { session, images };
+}
+
+it('keeps committed user/native/tool pixels readable after more than 8 MiB of unrelated valid history', async () => {
+  const owner = await recordedImageWithLongHistory();
+  for (const { asset, bytes } of owner.images) {
+    expect(await recordedInputImage(owner.session.id, asset.id)).toBe(`data:image/png;base64,${bytes.toString('base64')}`);
+  }
+});
+
+it('still refuses a malformed source in a long otherwise valid image history', async () => {
+  const owner = await recordedImageWithLongHistory();
+  await fs.appendFile(path.join(sessionsRoot(), owner.session.id, 'events.jsonl'), '{invalid-journal-row}\n');
+  expect(await recordedInputImage(owner.session.id, owner.images[0]!.asset.id)).toBeNull();
+});
+
+it('reads the exact owner revision queued before an image request', async () => {
+  const session = await createSession({ title: 'Queued image revision' });
+  const firstBytes = await sharp({ create: { width: 3, height: 2, channels: 3, background: '#123456' } }).png().toBuffer();
+  const nextBytes = await sharp({ create: { width: 3, height: 2, channels: 3, background: '#987654' } }).png().toBuffer();
+  const first = await writeAsset(session.id, firstBytes, 'image/png');
+  const next = await writeAsset(session.id, nextBytes, 'image/png');
+  const message = { kind: 'user_message' as const, source: 'app' as const, time: 100,
+    messageId: 'revision-owner', message: { text: 'Updated image', chars: 13, truncated: false } };
+  await upsertMessageEvent(session.id, { ...message, assets: [first] });
+  const shard = path.join(sessionsRoot(), session.id, 'messages',
+    `${createHash('sha256').update('user_message\u0000revision-owner').digest('hex')}.json`);
+  let entered!: () => void, release!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const originalRename = fs.rename.bind(fs);
+  const hold = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+    if (String(to) === shard) { entered(); await gate; }
+    return originalRename(from, to);
+  }) as typeof fs.rename);
+  const revision = upsertMessageEvent(session.id, { ...message, assets: [next] });
+  await reached;
+  const stale = recordedInputImage(session.id, first.id);
+  const updated = recordedInputImage(session.id, next.id);
+  release();
+  await revision;
+  expect(await stale).toBeNull();
+  expect(await updated).toBe(`data:image/png;base64,${nextBytes.toString('base64')}`);
+  hold.mockRestore();
+});
+
 it('rejects provider alias ambiguity and mismatched native/asset content without cross-session fallback', async () => {
   const owner = await richImageFixture();
   const second = { ...JSON.parse(await fs.readFile(owner.shard, 'utf8')),
