@@ -1756,7 +1756,9 @@ export interface PageCallEvidence {
 async function recordNativeImage(
   sessionId: string,
   item: ChatObservation,
-  base: { time: number; source: 'extension'; turnId?: string; agent?: string }
+  base: { time: number; source: 'extension'; turnId?: string; agent?: string },
+  onCommitted?: (count: number) => void,
+  retriedFailedOff = false
 ): Promise<number> {
   if (!recordingEnabled() || !item.messageId || !item.providerAssetId || !item.providerRole) return 0;
   const recordingRevision = getRecordingRevision();
@@ -1780,6 +1782,7 @@ async function recordNativeImage(
     return 0;
   }
   let changed = metadata.changed ? 1 : 0;
+  if (metadata.changed) onCommitted?.(1);
   if (!item.previewDataUrl || metadata.event.asset) return changed;
   if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) return changed;
   try {
@@ -1813,13 +1816,27 @@ async function recordNativeImage(
       previewHeight: info.height,
       asset
     });
-    if (enriched.changed) changed += 1;
+    if (enriched.changed) {
+      changed += 1;
+      onCommitted?.(1);
+    }
   } catch (error) {
     // A committed metadata row remains history; Off during decode/storage cannot
     // create a late failure revision or provoke a replay after recording resumes.
     // Pending Off is different: if saving the preference fails, an ACK here would
     // permanently retire the browser's only copy while recording remains On.
-    if (isRecordingDisabledError(error) && recordingEnabled()) throw error;
+    if (isRecordingDisabledError(error) && recordingEnabled()) {
+      // Only the optional preview failed: metadata may already be canonical. If this
+      // exact attempted Off fails, resume the same provider tuple idempotently while
+      // the original HTTP receipt still owns both physical revisions. Never cross a
+      // committed Off/On generation or spin across repeated pending decisions.
+      const attemptedOff = pendingRecordingOffDecision();
+      if (!retriedFailedOff && (!attemptedOff || !(await attemptedOff.settled)) &&
+          recordingEnabled() && getRecordingRevision() === recordingRevision) {
+        return changed + await recordNativeImage(sessionId, item, base, onCommitted, true);
+      }
+      throw error;
+    }
     if (isRecordingDisabledError(error) || !recordingEnabled() ||
         getRecordingRevision() !== recordingRevision) return changed;
     const reason = /quota/i.test((error as Error).message) ? 'quota' : 'invalid';
@@ -1837,7 +1854,10 @@ async function recordNativeImage(
       previewStatus: 'unavailable',
       previewError: reason
     });
-    if (unavailable.changed) changed += 1;
+    if (unavailable.changed) {
+      changed += 1;
+      onCommitted?.(1);
+    }
   }
   return changed;
 }
@@ -2012,12 +2032,21 @@ async function supersededLineage(conversationId: string): Promise<string | null>
 async function recordSupersededMessages(
   sessionId: string,
   observations: readonly ChatObservation[]
-): Promise<number> {
+): Promise<{ stored: number; committedObservations: ChatObservation[]; remainderSuppressed: boolean }> {
   let stored = 0;
+  let processed = 0;
+  const committedObservations: ChatObservation[] = [];
   const revision = getRecordingRevision();
   for (const item of observations) {
     if (!recordingEnabled() || getRecordingRevision() !== revision) break;
+    processed++;
     if (!item.messageId) continue;
+    let originalCommitted = false;
+    const countCommitted = (count: number): void => {
+      stored += count;
+      if (!originalCommitted) committedObservations.push(item);
+      originalCommitted = true;
+    };
     const base = {
       time: item.time,
       source: 'extension' as const,
@@ -2062,17 +2091,22 @@ async function recordSupersededMessages(
         { preferTime: item.authoredTime === true }
       );
     } else if (item.kind === 'native_image') {
-      stored += await recordNativeImage(sessionId, item, base);
+      // The exact old-chat tuple is transcript-only. Its metadata may be committed
+      // before a preview encounters Off; count each real revision at its own barrier.
+      await recordNativeImage(sessionId, item, base, countCommitted);
       continue;
     }
-    if (written?.changed) stored++;
+    if (written?.changed) countCommitted(1);
     } catch (error) {
-      if (isRecordingDisabledError(error) && !recordingEnabled()) break;
+      if (isRecordingDisabledError(error) && !recordingEnabled()) {
+        if (!originalCommitted) processed--;
+        break;
+      }
       throw error;
     }
   }
   if (stored > 0) notifyChanged();
-  return stored;
+  return { stored, committedObservations, remainderSuppressed: processed < observations.length };
 }
 
 async function recordChatObservationsNow(
@@ -2093,9 +2127,8 @@ async function recordChatObservationsNow(
   if (!conversations.has(conversationId)) {
     const lineage = await supersededLineage(conversationId);
     if (lineage) {
-      const stored = await recordSupersededMessages(lineage, observations);
-      return { sessionId: lineage, stored, activity, goalCandidates: [],
-        committedObservations: observations, remainderSuppressed: false };
+      const prefix = await recordSupersededMessages(lineage, observations);
+      return { sessionId: lineage, ...prefix, activity, goalCandidates: [] };
     }
   }
   let pageTitle: ChatObservation | undefined;
@@ -2294,16 +2327,38 @@ async function recordChatObservationsNow(
       case 'native_image': {
         // Native media is transcript content only. It does not renew activity, close a turn,
         // create a Goal candidate, or masquerade as a locally executed tool call.
-        const written = await recordNativeImage(sessionId, item, base);
-        stored += written;
-        if (written > 0) committedObservations.push(item);
+        await recordNativeImage(sessionId, item, base, count => {
+          stored += count;
+          if (!originalCommitted) committedObservations.push(item);
+          originalCommitted = true;
+        });
         continue;
       }
       case 'page_tool': {
         const newlyObserved = !!live && !!item.messageId && !live.pageTools.has(item.messageId);
         const written = await recordPageTool(sessionId, live, item, base);
         if (!written) continue;
-        if (newlyObserved && item.activeNow !== false && item.turnId && await reopenThinkingFailure(sessionId, live, item.time, item.turnId)) {
+        // The original page row is durable before its independent app-owned reopen.
+        // A refused reopen cannot turn this physical append into a zero HTTP receipt.
+        stored++;
+        committedObservations.push(item);
+        originalCommitted = true;
+        let reopened: string | null = null;
+        if (newlyObserved && item.activeNow !== false && item.turnId) {
+          try {
+            reopened = await reopenThinkingFailure(sessionId, live, item.time, item.turnId);
+          } catch (error) {
+            if (!isRecordingDisabledError(error)) throw error;
+            const attemptedOff = pendingRecordingOffDecision();
+            if ((attemptedOff && await attemptedOff.settled) || !recordingEnabled() ||
+                getRecordingRevision() !== recordingRevision) throw error;
+            // The attempted Off failed without changing this generation. Retry only
+            // the exact original turn's app-owned reopen; never replay the page tool.
+            reopened = await reopenThinkingFailure(sessionId, live, item.time, item.turnId);
+          }
+        }
+        if (reopened) {
+          stored++;
           activity.terminal = false;
           activity.working = true;
           activity.meaningful = true;
@@ -2316,7 +2371,7 @@ async function recordChatObservationsNow(
           activity.working = true;
           activity.at = Math.max(activity.at ?? 0, item.time);
         }
-        break;
+        continue;
       }
       case 'chat_error': {
         if (item.reason === 'thinking_failed' && !item.turnId) continue;

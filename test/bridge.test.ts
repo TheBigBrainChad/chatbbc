@@ -2306,6 +2306,222 @@ describe('activity feed', () => {
   });
 
 
+  it.each([true, false])('preserves a physically committed page tool when its separate reopen meets %s Off', async offSucceeds => {
+    await pair();
+    const conversationId = randomUUID();
+    const turnId = `page-prefix-${conversationId}`;
+    const toolId = `tool-prefix-${conversationId}`;
+    const now = Date.now();
+    const initial = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: now, turnId },
+      { kind: 'user_message', time: now + 1, turnId, messageId: `question-${conversationId}`, text: 'Observe real tool work' },
+      { kind: 'turn_end', time: now + 2, turnId, outcome: 'failed', reason: 'thinking_failed' }
+    ] } });
+    expect(initial.status).toBe(200);
+    const sessionId = initial.body.sessionId as string;
+    const tool = { kind: 'page_tool', time: now + 3, turnId, messageId: toolId,
+      text: 'Native page tool physically committed', activeNow: true };
+    const originalAppend = fs.appendFile.bind(fs);
+    const originalOpen = fs.open.bind(fs);
+    const originalRename = fs.rename.bind(fs);
+    let releaseTool!: () => void, toolEntered!: () => void;
+    let releaseRead!: () => void, readEntered!: () => void;
+    let releaseConfig!: () => void, configEntered!: () => void;
+    const toolGate = new Promise<void>(resolve => { releaseTool = resolve; });
+    const toolReached = new Promise<void>(resolve => { toolEntered = resolve; });
+    const readGate = new Promise<void>(resolve => { releaseRead = resolve; });
+    const readReached = new Promise<void>(resolve => { readEntered = resolve; });
+    const configGate = new Promise<void>(resolve => { releaseConfig = resolve; });
+    const configReached = new Promise<void>(resolve => { configEntered = resolve; });
+    let heldTool = false, heldRead = false, heldConfig = false;
+    const appendSpy = vi.spyOn(fs, 'appendFile').mockImplementation((async (file, ...args) => {
+      await (originalAppend as (...args: unknown[]) => Promise<void>)(file, ...args);
+      if (!heldTool && String(file).endsWith(`${path.sep}events.jsonl`) && String(args[0]).includes(`"messageId":"${toolId}"`)) {
+        heldTool = true;
+        toolEntered();
+        await toolGate;
+      }
+    }) as typeof fs.appendFile);
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation((async (file, flags, mode) => {
+      if (heldTool && !heldRead && flags === 'r' && String(file).endsWith(`${path.sep}events.jsonl`)) {
+        heldRead = true;
+        readEntered();
+        await readGate;
+      }
+      return originalOpen(file, flags, mode);
+    }) as typeof fs.open);
+    const renameSpy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (!heldConfig && String(to) === path.join(dir, 'config.json')) {
+        heldConfig = true;
+        configEntered();
+        await configGate;
+        if (!offSucceeds) throw Object.assign(new Error('page prefix Off EIO'), { code: 'EIO' });
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    let batch: Promise<Reply> | null = null, disabling: Promise<unknown> | null = null;
+    try {
+      batch = request('POST', '/events', { body: { conversationId, events: [tool] } });
+      void batch.catch(() => undefined);
+      await toolReached;
+      expect(await fs.readFile(path.join(dir, 'sessions', sessionId, 'events.jsonl'), 'utf8')).toContain(toolId);
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      void disabling.catch(() => undefined);
+      await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+      releaseTool();
+      await configReached;
+      await readReached;
+      releaseConfig();
+      if (offSucceeds) await disabling;
+      else await expect(disabling).rejects.toThrow('page prefix Off EIO');
+      releaseRead();
+      expect(await batch).toMatchObject({ status: 200, body: { sessionId, stored: offSucceeds ? 1 : 2 } });
+      const rows = await readEvents(sessionId);
+      expect(rows.filter(row => row.kind === 'page_tool')).toMatchObject([
+        { messageId: toolId, label: 'Native page tool physically committed' }
+      ]);
+      expect(rows.filter(row => row.kind === 'turn_start')).toMatchObject(offSucceeds
+        ? [{ source: 'extension', turnId }]
+        : [{ source: 'extension', turnId }, { source: 'app', turnId }]);
+      expect((await readDurable<{ replies: Array<{ conversationId: string }> }>(GOAL_REPLIES_STATE))?.replies
+        .filter(reply => reply.conversationId === conversationId) ?? []).toEqual([]);
+      expect(getConfig().sessions.record).toBe(!offSucceeds);
+      if (!offSucceeds) {
+        expect((await request('POST', '/events', { body: { conversationId, events: [tool] } })).body.stored).toBe(0);
+        expect((await readEvents(sessionId)).filter(row => row.kind === 'page_tool')).toHaveLength(1);
+        expect((await readEvents(sessionId)).filter(row => row.kind === 'turn_start')).toHaveLength(2);
+      }
+    } finally {
+      releaseTool(); releaseRead(); releaseConfig();
+      await Promise.allSettled([batch, disabling].filter(promise => promise !== null));
+      renameSpy.mockRestore(); openSpy.mockRestore(); appendSpy.mockRestore();
+      await updateConfig(() => suiteConfig);
+    }
+  });
+
+  it.each([
+    { historical: false, offSucceeds: true },
+    { historical: false, offSucceeds: false },
+    { historical: true, offSucceeds: true },
+    { historical: true, offSucceeds: false }
+  ] as const)('preserves native-image metadata for historical=$historical, Off success=$offSucceeds without invented pixels', async ({ historical, offSucceeds }) => {
+    await pair();
+    const conversationId = randomUUID();
+    const successor = randomUUID();
+    const providerMessageId = randomUUID();
+    const providerAssetId = `file_${randomUUID().replaceAll('-', '')}`;
+    const initial = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'user_message', time: Date.now(), messageId: `question-${conversationId}`, text: 'An image' }
+    ] } });
+    expect(initial.status).toBe(200);
+    const sessionId = initial.body.sessionId as string;
+    if (historical) {
+      const continuation = await openContinuationNow(sessionId, conversationId);
+      expect(await attachSummary(continuation.token, SAMPLE_BRIEF)).not.toBeNull();
+      await claimContinuationNow(continuation.token, 'native-image-prefix-fixture');
+      expect(await commitContinuation(continuation.token, successor)).toBe(true);
+      expect((await getSession(sessionId))?.conversationId).toBe(successor);
+    }
+    const pixels = await sharp({ create: { width: 4, height: 3, channels: 3,
+      background: '#2266aa' } }).webp().toBuffer();
+    const image = {
+      kind: 'native_image', time: Date.now() + 1, messageId: providerMessageId, providerAssetId,
+      providerRole: 'tool', providerChannel: 'final', providerStatus: 'finished_successfully',
+      width: 1024, height: 768, previewStatus: 'available', previewWidth: 4, previewHeight: 3,
+      previewDataUrl: `data:image/webp;base64,${pixels.toString('base64')}`
+    };
+    const originalStats = sharp.prototype.stats;
+    const originalRename = fs.rename.bind(fs);
+    let metadataPath: string | null = null;
+    let renames = 0, heldConfig = false;
+    let metadataEntered!: () => void, releaseMetadata!: () => void;
+    let statsEntered!: () => void, releaseStats!: () => void;
+    let configEntered!: () => void, releaseConfig!: () => void;
+    const metadataReached = new Promise<void>(resolve => { metadataEntered = resolve; });
+    const metadataGate = new Promise<void>(resolve => { releaseMetadata = resolve; });
+    const statsReached = new Promise<void>(resolve => { statsEntered = resolve; });
+    const statsGate = new Promise<void>(resolve => { releaseStats = resolve; });
+    const configReached = new Promise<void>(resolve => { configEntered = resolve; });
+    const configGate = new Promise<void>(resolve => { releaseConfig = resolve; });
+    const statsSpy = vi.spyOn(sharp.prototype, 'stats').mockImplementation(async function (this: ReturnType<typeof sharp>,
+      ...args: Parameters<typeof originalStats>) {
+      statsEntered();
+      await statsGate;
+      return originalStats.apply(this, args);
+    });
+    const renameSpy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      const target = String(to);
+      if (target.includes(`${path.sep}messages${path.sep}`) && target.endsWith('.json')) {
+        if (!metadataPath) {
+          metadataPath = target;
+          renames++;
+          await originalRename(from, to);
+          metadataEntered();
+          await metadataGate;
+          return;
+        }
+        if (metadataPath === target) renames++;
+      }
+      if (!heldConfig && target === path.join(dir, 'config.json')) {
+        heldConfig = true;
+        configEntered();
+        await configGate;
+        if (!offSucceeds) throw Object.assign(new Error('image prefix Off EIO'), { code: 'EIO' });
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    let batch: Promise<Reply> | null = null, disabling: Promise<unknown> | null = null;
+    try {
+      batch = request('POST', '/events', { body: { conversationId, events: [image] } });
+      void batch.catch(() => undefined);
+      await metadataReached;
+      expect(JSON.parse(await fs.readFile(metadataPath!, 'utf8'))).toMatchObject({
+        kind: 'native_image', messageId: providerMessageId, providerAssetId, previewStatus: 'pending'
+      });
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      void disabling.catch(() => undefined);
+      await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+      releaseMetadata();
+      await configReached;
+      await statsReached;
+      releaseStats();
+      // The metadata writer is fully drained and config rename remains gated. Actual
+      // preview decode has crossed into the optional write while Off admission is closed.
+      expect(await Promise.race([batch.then(() => 'response'),
+        new Promise<'waiting'>(resolve => setTimeout(() => resolve('waiting'), 100))])).toBe('waiting');
+      releaseConfig();
+      if (offSucceeds) await disabling;
+      else await expect(disabling).rejects.toThrow('image prefix Off EIO');
+      const reply = await batch;
+      expect(reply).toMatchObject({ status: 200, body: { sessionId, stored: offSucceeds ? 1 : 2 } });
+      expect(reply.body).not.toHaveProperty('recordingSuppressed', true);
+      expect(reply.body).not.toHaveProperty('partialCommitted', true);
+      const images = (await readEvents(sessionId)).filter(row => row.kind === 'native_image');
+      expect(images).toHaveLength(1);
+      expect(images[0]).toMatchObject(offSucceeds
+        ? { messageId: providerMessageId, providerAssetId, previewStatus: 'pending', asset: undefined }
+        : { messageId: providerMessageId, providerAssetId, previewStatus: 'available',
+          asset: { mimeType: 'image/webp', bytes: pixels.length } });
+      expect(renames).toBe(offSucceeds ? 1 : 2);
+      expect((await getSession(sessionId))?.conversationId).toBe(historical ? successor : conversationId);
+      expect((await readDurable<{ replies: Array<{ conversationId: string }> }>(GOAL_REPLIES_STATE))?.replies
+        .filter(reply => reply.conversationId === conversationId) ?? []).toEqual([]);
+      expect(getConfig().sessions.record).toBe(!offSucceeds);
+      if (!offSucceeds) {
+        expect((await request('POST', '/events', { body: { conversationId, events: [image] } })).body)
+          .toMatchObject({ sessionId, stored: 0 });
+        expect((await readEvents(sessionId)).filter(row => row.kind === 'native_image')).toHaveLength(1);
+        expect(renames).toBe(2); // Exactly metadata + enrichment, not a third canonical image claim.
+      }
+    } finally {
+      releaseMetadata(); releaseStats(); releaseConfig();
+      await Promise.allSettled([batch, disabling].filter(promise => promise !== null));
+      statsSpy.mockRestore();
+      renameSpy.mockRestore();
+      await updateConfig(() => suiteConfig);
+    }
+  });
+
   it.each([true, false])('preserves a physically committed final across post-loop recovery read and %s Off', async offSucceeds => {
     await pair();
     const conversationId = randomUUID();
@@ -3787,7 +4003,11 @@ describe('delivering a bootstrap', () => {
     expect((await redeem(command.id, 'tab-b2')).text).toContain('the brief for the armed move');
     expect((await request('POST', '/compact', { body: { token, commandId: command.id, client: 'tab-b2', destinationAttempt: true } })).body.allowed).toBe(true);
     expect((await request('POST', '/compact', { body: { token, commandId: command.id, client: 'tab-b2', destinationDispatch: true } })).body.armed).toBe(true);
-    const logged = getLog().length;
+    // The diagnostics log is a 500-entry ring. An absolute array offset stops
+    // advancing once full, so count this exact chat's evidence rather than slicing
+    // an obsolete ring index after other physical-prefix regressions add logs.
+    const armedLogCount = () => getLog().filter(entry => entry.message.includes(`resumed chat ${chatB} armed`)).length;
+    const logged = armedLogCount();
 
     const reply = await request('POST', '/compact', {
       body: { conversationId: chatB, token, destinationMessageId: 'm-b2-marked-resume' }
@@ -3795,11 +4015,7 @@ describe('delivering a bootstrap', () => {
     expect(reply.status).toBe(200);
     expect(reply.body.committed).toBe(true);
     expect((await getSession(sessionId))?.conversationId).toBe(chatB);
-    expect(
-      getLog()
-        .slice(logged)
-        .some((entry) => entry.message.includes(`resumed chat ${chatB} armed`))
-    ).toBe(true);
+    expect(armedLogCount()).toBe(logged + 1);
     expect((await request('GET', '/status')).body.recoveryMonitoring).toBe(true);
 
     // Idempotent re-reads of the marked message (a reloaded B) do not arm it a second time.
@@ -3807,11 +4023,7 @@ describe('delivering a bootstrap', () => {
       body: { conversationId: chatB, token, destinationMessageId: 'm-b2-marked-resume' }
     });
     expect(again.status).toBe(200);
-    expect(
-      getLog()
-        .slice(logged)
-        .filter((entry) => entry.message.includes(`resumed chat ${chatB} armed`))
-    ).toHaveLength(1);
+    expect(armedLogCount()).toBe(logged + 1);
   });
 
   /**
