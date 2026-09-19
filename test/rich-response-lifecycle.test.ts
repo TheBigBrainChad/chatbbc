@@ -430,6 +430,56 @@ it('does not acknowledge Recording Off while first-sight recording creates a ses
   }
 });
 
+it('rejects a stalled first-sight physical writer at the 15-second Off drain deadline without publishing Off', async () => {
+  const revision = getRecordingRevision();
+  let entered!: () => void, release!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const originalWrite = fs.writeFile.bind(fs);
+  let held = false;
+  const spy = vi.spyOn(fs, 'writeFile').mockImplementation((async (file, ...args) => {
+    if (!held && String(file).endsWith(path.join('messages.json'))) {
+      held = true;
+      entered();
+      await gate;
+    }
+    return (originalWrite as (...args: unknown[]) => Promise<void>)(file, ...args);
+  }) as typeof fs.writeFile);
+  let creating: Promise<string | null> | null = null;
+  let disabling: Promise<void> | null = null;
+  let queuedOn: Promise<unknown> | null = null;
+  try {
+    creating = sessionForConversation(randomUUID());
+    void creating.catch(() => undefined);
+    await reached;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    disabling = off();
+    void disabling.catch(() => undefined);
+    queuedOn = on();
+    for (let attempt = 0; attempt < 30 && recordingWriteAllowed(revision); attempt++) await Promise.resolve();
+    expect(recordingWriteAllowed(revision)).toBe(false);
+    let finished = false;
+    void disabling.finally(() => { finished = true; }).catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(finished).toBe(false);
+    expect(getConfig().sessions.record).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(disabling).rejects.toThrow('Recording Off could not settle active writes');
+    await queuedOn;
+    expect(getConfig().sessions.record).toBe(true);
+    expect(getRecordingRevision()).toBe(revision);
+    expect(JSON.parse(await fs.readFile(path.join(directory, 'config.json'), 'utf8')).sessions.record).toBe(true);
+    release();
+    expect(await creating).toBeTruthy();
+    expect(getConfig().sessions.record).toBe(true);
+  } finally {
+    release();
+    vi.useRealTimers();
+    await Promise.allSettled([creating, disabling, queuedOn].filter(promise => promise !== null));
+    spy.mockRestore();
+  }
+});
+
 it('flushes a pre-Off dirty session summary before acknowledging Off and leaves no delayed metadata writer', async () => {
   const session = await createSession({ conversationId: randomUUID() });
   const meta = path.join(sessionsRoot(), session.id, 'meta.json');
@@ -449,6 +499,82 @@ it('flushes a pre-Off dirty session summary before acknowledging Off and leaves 
     await new Promise(resolve => setTimeout(resolve, 1650));
     expect(lateMetaWrites).toBe(0);
   } finally {
+    spy.mockRestore();
+  }
+});
+
+it('rejects Off on a metadata checkpoint EIO and retries the dirty summary before any later Off acknowledgement', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const meta = path.join(sessionsRoot(), session.id, 'meta.json');
+  await appendEvent(session.id, { kind: 'turn_start', source: 'extension', time: 100, turnId: 'checkpoint-eio' });
+  const priorRevision = getRecordingRevision();
+  const rename = fs.rename.bind(fs);
+  let failOnce = true;
+  let acknowledged = false;
+  let writesAfterAck = 0;
+  const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+    if (String(to) === meta) {
+      if (acknowledged) writesAfterAck++;
+      if (failOnce) {
+        failOnce = false;
+        throw Object.assign(new Error('Metadata checkpoint EIO'), { code: 'EIO' });
+      }
+    }
+    return rename(from, to);
+  }) as typeof fs.rename);
+  try {
+    await expect(off()).rejects.toThrow('Metadata checkpoint EIO');
+    expect(getConfig().sessions.record).toBe(true);
+    expect(getRecordingRevision()).toBe(priorRevision);
+    expect(JSON.parse(await fs.readFile(path.join(directory, 'config.json'), 'utf8')).sessions.record).toBe(true);
+    expect(JSON.parse(await fs.readFile(meta, 'utf8')).events).toBe(0);
+    expect((await readEvents(session.id)).some(row => row.kind === 'turn_start' && row.turnId === 'checkpoint-eio')).toBe(true);
+    expect(JSON.parse(await fs.readFile(meta, 'utf8')).events).toBe(1);
+    await off();
+    acknowledged = true;
+    await readEvents(session.id);
+    expect(writesAfterAck).toBe(0);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('settles all started metadata flushes before rejecting a failed Off', async () => {
+  const blocked = await createSession({ conversationId: randomUUID() });
+  const failing = await createSession({ conversationId: randomUUID() });
+  await appendEvent(blocked.id, { kind: 'turn_start', source: 'extension', time: 100, turnId: 'held-meta' });
+  await appendEvent(failing.id, { kind: 'turn_start', source: 'extension', time: 101, turnId: 'failing-meta' });
+  const heldTarget = path.join(sessionsRoot(), blocked.id, 'meta.json');
+  const failedTarget = path.join(sessionsRoot(), failing.id, 'meta.json');
+  let entered!: () => void, release!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const rename = fs.rename.bind(fs);
+  let failed = false;
+  const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+    if (String(to) === heldTarget) { entered(); await gate; }
+    if (String(to) === failedTarget && !failed) {
+      failed = true;
+      throw Object.assign(new Error('Second metadata EIO'), { code: 'EIO' });
+    }
+    return rename(from, to);
+  }) as typeof fs.rename);
+  let saving: Promise<void> | null = null;
+  try {
+    saving = off();
+    void saving.catch(() => undefined);
+    await reached;
+    await vi.waitFor(() => expect(failed).toBe(true));
+    expect(await Promise.race([saving.then(() => 'resolved', () => 'rejected'),
+      new Promise<'waiting'>(resolve => setTimeout(() => resolve('waiting'), 100))])).toBe('waiting');
+    expect(getConfig().sessions.record).toBe(true);
+    release();
+    await expect(saving).rejects.toThrow('Second metadata EIO');
+    expect(JSON.parse(await fs.readFile(path.join(sessionsRoot(), blocked.id, 'meta.json'), 'utf8')).events).toBe(1);
+    expect(getConfig().sessions.record).toBe(true);
+  } finally {
+    release();
+    await Promise.allSettled([saving].filter(promise => promise !== null));
     spy.mockRestore();
   }
 });

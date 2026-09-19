@@ -50,7 +50,7 @@ import { CHAT_ACTIVE_MS, CHAT_SILENCE_MS, continuationMarkerOf, isReasoningEffor
   type ReasoningEffort, type SessionEvent, type SessionOrigin, type StoredText, type ToolCallRecord } from '../shared/session.js';
 import { isChatBlocked, chatBlockedAt } from './session/blocked-chats.js';
 export { CHAT_ACTIVE_MS, CHAT_SILENCE_MS } from '../shared/session.js';
-import { effectiveCapabilities, getConfig, updateConfig } from './config.js';
+import { effectiveCapabilities, getConfig, getRecordingRevision, pendingRecordingOffDecision, updateConfig } from './config.js';
 import { getSecret, secureStorageStatus, setSecret } from './secrets.js';
 import {
   acceptGoalReplyNow,
@@ -107,6 +107,7 @@ import {
   conversationWasSuperseded,
   findSessionByConversation,
   getSession,
+  isRecordingDisabledError,
   readSessionPlan,
   listUsageSessions,
   readRecentEvents,
@@ -1792,6 +1793,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   const { ok: originAllowed, origin } = originOf(req);
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   const route = url.pathname;
+  // The HTTP body can arrive in pieces. Freeze this process's original admission
+  // epoch before the first await: Off→On during readBody must not turn an old POST
+  // into newly authorized transcript work. Cross-process Chrome retry still needs
+  // a source-issued durable generation; this ingress fence alone cannot prove it.
+  const eventIngressRevision = route === '/events' && req.method === 'POST' ? getRecordingRevision() : null;
+  const eventIngressDecision = eventIngressRevision !== null ? pendingRecordingOffDecision() : null;
 
   if (req.method === 'OPTIONS') {
     // A preflight always carries an Origin, so a missing one here is not our extension.
@@ -2211,6 +2218,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     const id = conversationId(body['conversationId']);
     if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
+    const suppressed = (): void => json(res, 200, { sessionId: null, stored: 0, recordingSuppressed: true }, origin);
+    // Once this request has reached the bridge during an Off attempt, its outcome
+    // belongs to that exact config transaction. It must not see a later On and
+    // revive a browser-journal batch that the user already switched Off.
+    const offDecision = eventIngressDecision ?? pendingRecordingOffDecision();
+    if (offDecision && await offDecision.settled) return suppressed();
+    if (eventIngressRevision !== getRecordingRevision()) return suppressed();
     // Normal worker binding happens on the exact command ACK. `/events` is the lost-ACK
     // recovery path, but the friendly id (`worker-1`) is reused by every later swarm and is
     // therefore not enough authority on its own. A command-opened document also carries the
@@ -2276,7 +2290,24 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           });
         }
       }
-      const result = await recordChatObservations(id, observations, agent);
+      // Worker-origin lookup above may yield across Off→On. Recheck this request's
+      // original epoch immediately before submitting transcript work.
+      const lateOff = pendingRecordingOffDecision();
+      if (lateOff && await lateOff.settled) return suppressed();
+      if (eventIngressRevision !== getRecordingRevision()) return suppressed();
+      let result: Awaited<ReturnType<typeof recordChatObservations>>;
+      try {
+        result = await recordChatObservations(id, observations, agent);
+      } catch (error) {
+        if (!isRecordingDisabledError(error)) throw error;
+        // One batch may have committed its first canonical row and then met Off on
+        // the next row. Off success retires the remaining observations. Off failure
+        // permits one idempotent retry under the still-current On generation.
+        const interruptedOff = pendingRecordingOffDecision();
+        if (interruptedOff && await interruptedOff.settled) return suppressed();
+        if (eventIngressRevision !== getRecordingRevision() || !getConfig().sessions.record) return suppressed();
+        result = await recordChatObservations(id, observations, agent);
+      }
       const superseded = await conversationWasSuperseded(id);
       if (!superseded && result.sessionId) await collectRecordedBrowserDecision(id);
       // The stable assistant message, not the page-local turn id, is the exactly-once Goal

@@ -2876,6 +2876,80 @@ describe('extension observation journal', () => {
     expect(JSON.stringify(journalOf(session))).not.toContain('rejected by the local bridge');
   });
 
+  it('retains a 500-failed batch in Chrome storage and retries the exact payload after service-worker restart', async () => {
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const conversationId = '77777777-8888-4999-aaaa-bbbbbbbbbbbb';
+    let original: unknown = null;
+    const failing = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (new URL(input).pathname === '/events') {
+        original = JSON.parse(String(init.body));
+        return response(500, { error: 'pending_off' });
+      }
+      return response(200, {});
+    } });
+    await failing.send({ type: 'events', conversationId, entries: [
+      { conversationId, event: { kind: 'user_message', time: 101, messageId: 'original-500', text: 'owed once' } }
+    ] });
+    expect(journalOf(session)).toMatchObject([{ event: { messageId: 'original-500', text: 'owed once' } }]);
+    const posts: unknown[] = [];
+    const restored = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (new URL(input).pathname === '/events') posts.push(JSON.parse(String(init.body)));
+      return response(200, { stored: 1 });
+    } });
+    await restored.send({ type: 'status' });
+    await vi.waitFor(() => expect(journalOf(session)).toEqual([]));
+    expect(posts).toEqual([original]);
+  });
+
+  it('retains the exact journal payload through the real 10-second events AbortController deadline', async () => {
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const conversationId = '77777777-8888-4999-aaaa-cccccccccccc';
+    let reached!: () => void;
+    const started = new Promise<void>(resolve => { reached = resolve; });
+    let original: unknown = null;
+    const timedFetch = async (input: string, init: Record<string, unknown> = {}) => {
+      if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (new URL(input).pathname !== '/events') return response(200, {});
+      original = JSON.parse(String(init.body));
+      reached();
+      return new Promise<ReturnType<typeof response>>((_resolve, reject) => {
+        const signal = init.signal as AbortSignal;
+        if (signal.aborted) reject(signal.reason);
+        else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    };
+    try {
+      // Inject the fake clock before constructing the VM; it captures its timer
+      // references at load time, not when a later request starts.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const failing = loadWorker({ local, session, fetch: timedFetch });
+      const pending = failing.send({ type: 'events', conversationId, entries: [
+        { conversationId, event: { kind: 'assistant_message', time: 101, messageId: 'timeout-owned', text: 'original final' } }
+      ] });
+      await started;
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(journalOf(session)).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await pending).toMatchObject({ ok: true, pending: 1, durable: true });
+      expect(journalOf(session)).toMatchObject([{ event: { messageId: 'timeout-owned', text: 'original final' } }]);
+    } finally {
+      vi.useRealTimers();
+    }
+    const posts: unknown[] = [];
+    const restored = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (new URL(input).pathname === '/events') posts.push(JSON.parse(String(init.body)));
+      return response(200, { stored: 1 });
+    } });
+    await restored.send({ type: 'status' });
+    await vi.waitFor(() => expect(journalOf(session)).toEqual([]));
+    expect(posts).toEqual([original]);
+  });
+
   it('keeps one retry alarm while work remains instead of resetting it on every failure', async () => {
     const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
     const session = new FakeStorageArea();

@@ -230,8 +230,12 @@ registerRecordingWriteDrain(async () => {
   // An admitted append can finish its queue and leave a delayed summary timer. Flush
   // those summaries inside this barrier so their physical meta/backup writes cannot
   // start after Off was acknowledged.
-  await Promise.all([...open.values()].map(entry => flushSessionEntry(entry)));
+  // Every flush must settle before a failure releases the config admission gate.
+  // Promise.all would reject while another session could still be writing meta.json.
+  const metaFlushes = await Promise.allSettled([...open.values()].map(entry => flushSessionEntry(entry, true)));
   await assetWriteQueue;
+  const failed = metaFlushes.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (failed) throw failed.reason;
 });
 
 function enqueueAssetOperation<T>(operation: () => Promise<T>): Promise<T> {
@@ -559,14 +563,16 @@ async function flushSession(sessionId: string): Promise<void> {
   if (entry) await flushSessionEntry(entry);
 }
 
-async function flushSessionEntry(entry: OpenSession): Promise<void> {
+async function flushSessionEntry(entry: OpenSession, strict = false): Promise<void> {
   if (entry.metaTimer) {
     clearTimeout(entry.metaTimer);
     entry.metaTimer = null;
   }
-  await enqueueSessionOperation(entry, 'meta flush', async () => {
+  const flush = enqueueSessionOperation(entry, 'meta flush', async () => {
     if (entry.metaDirty) await writeMeta(entry);
-  }).catch(() => undefined);
+  });
+  if (strict) await flush;
+  else await flush.catch(() => undefined);
 }
 
 // ----------------------------------------------------------------- create

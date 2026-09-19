@@ -8,6 +8,7 @@
  */
 
 import http from 'node:http';
+import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
@@ -1625,6 +1626,159 @@ describe('activity feed', () => {
       expect(resumed.at(-1)).toMatchObject({ kind: 'turn_start', turnId: 'recorded-after-reenable' });
     } finally {
       await saveConfig(previous);
+    }
+  });
+
+  it('binds a pending Off events ACK to the successful decision despite queued On', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const baseline = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: 100, turnId: 'committed-before-off' }
+    ] } });
+    expect(baseline.status).toBe(200);
+    const sessionId = baseline.body.sessionId as string;
+    const originalRename = fs.rename.bind(fs);
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (String(to) === `${dir}/config.json`) { entered(); await blocked; }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    let disabling: Promise<unknown> | null = null;
+    let enabling: Promise<unknown> | null = null;
+    let pending: Promise<Reply> | null = null;
+    try {
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      await reached;
+      pending = request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'user_message', time: 101, messageId: 'off-bound-user', text: 'must never backfill' },
+        { kind: 'assistant_message', time: 102, messageId: 'off-bound-assistant', text: 'private result', final: true }
+      ] } });
+      // The actual HTTP handler must park while this Off rename is held. Previously it
+      // answered 500 immediately, and its Chrome journal then replayed on the next On.
+      expect(await Promise.race([pending.then(reply => reply.status),
+        new Promise<'waiting'>(resolve => setTimeout(() => resolve('waiting'), 200))])).toBe('waiting');
+      enabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: true } });
+      release();
+      await disabling;
+      await enabling;
+      expect(await pending).toMatchObject({ status: 200, body: { stored: 0 } });
+      expect((await readEvents(sessionId)).filter(row => row.kind === 'user_message' || row.kind === 'assistant_message')).toEqual([]);
+      const fresh = await request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'user_message', time: 103, messageId: 'fresh-after-on', text: 'record this' }
+      ] } });
+      expect(fresh.status).toBe(200);
+      expect((await readEvents(sessionId)).filter(row => row.kind === 'user_message')).toMatchObject([
+        { messageId: 'fresh-after-on' }
+      ]);
+    } finally {
+      release();
+      await Promise.allSettled([disabling, enabling, pending].filter(promise => promise !== null));
+      spy.mockRestore();
+      await saveConfig(suiteConfig);
+    }
+  });
+
+  it('accepts a pending Off events batch exactly once when the config rename fails', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const baseline = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: 100, turnId: 'before-failed-off' }
+    ] } });
+    expect(baseline.status).toBe(200);
+    const originalRename = fs.rename.bind(fs);
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let failed = false;
+    const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (String(to) === `${dir}/config.json` && !failed) {
+        failed = true;
+        entered();
+        await blocked;
+        throw Object.assign(new Error('Off rename EIO'), { code: 'EIO' });
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    let disabling: Promise<unknown> | null = null;
+    let pending: Promise<Reply> | null = null;
+    const payload = { conversationId, events: [
+      { kind: 'user_message', time: 101, messageId: 'retry-after-failed-off', text: 'must be retained once' }
+    ] };
+    try {
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      void disabling.catch(() => undefined);
+      await reached;
+      pending = request('POST', '/events', { body: payload });
+      expect(await Promise.race([pending.then(reply => reply.status),
+        new Promise<'waiting'>(resolve => setTimeout(() => resolve('waiting'), 200))])).toBe('waiting');
+      release();
+      await expect(disabling).rejects.toThrow('Off rename EIO');
+      expect(await pending).toMatchObject({ status: 200, body: { stored: 1 } });
+      expect((await readEvents(baseline.body.sessionId)).filter(row => row.kind === 'user_message')).toMatchObject([
+        { messageId: 'retry-after-failed-off' }
+      ]);
+      expect((await request('POST', '/events', { body: payload })).status).toBe(200);
+      expect((await readEvents(baseline.body.sessionId)).filter(row => row.kind === 'user_message')).toHaveLength(1);
+      expect(getConfig().sessions.record).toBe(true);
+    } finally {
+      release();
+      await Promise.allSettled([disabling, pending].filter(promise => promise !== null));
+      spy.mockRestore();
+      await saveConfig(suiteConfig);
+    }
+  });
+
+  it('does not admit a pre-Off HTTP request whose body completes only after Off and On', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const baseline = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: 100, turnId: 'split-body-baseline' }
+    ] } });
+    expect(baseline.status).toBe(200);
+    const body = JSON.stringify({ conversationId, events: [
+      { kind: 'user_message', time: 101, messageId: 'pre-off-partial-body', text: 'private before Off' }
+    ] });
+    const split = 20;
+    let releaseBody!: () => void;
+    let sentHeaders!: () => void;
+    const reached = new Promise<void>(resolve => { sentHeaders = resolve; });
+    const target = new URL('/events', base);
+    const pending = new Promise<Reply>((resolve, reject) => {
+      const req = http.request({ hostname: target.hostname, port: target.port, path: target.pathname,
+        method: 'POST', headers: {
+          origin: EXTENSION_ORIGIN, authorization: `Bearer ${token}`,
+          'x-extension-version': APP_VERSION, 'x-extension-protocol': String(BRIDGE_PROTOCOL),
+          'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)),
+          expect: '100-continue'
+        } }, res => {
+        const chunks: Buffer[] = [];
+        res.on('data', chunk => chunks.push(chunk as Buffer));
+        res.on('end', () => {
+          const raw = Buffer.concat(chunks).toString('utf8');
+          resolve({ status: res.statusCode ?? 0, headers: res.headers, body: raw ? JSON.parse(raw) : null });
+        });
+      });
+      releaseBody = () => req.end(body.slice(split));
+      req.on('error', reject);
+      // 100 Continue is emitted by the actual HTTP listener when it accepts the
+      // headers; only then send a partial body and keep readBody waiting for the rest.
+      req.once('continue', () => req.write(body.slice(0, split), sentHeaders));
+      req.flushHeaders();
+    });
+    void pending.catch(() => undefined);
+    try {
+      await reached;
+      await saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      await saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: true } });
+      releaseBody();
+      expect(await pending).toMatchObject({ status: 200, body: { stored: 0 } });
+      expect((await readEvents(baseline.body.sessionId)).filter(row => row.kind === 'user_message')).toEqual([]);
+    } finally {
+      releaseBody();
+      await Promise.allSettled([pending]);
+      await saveConfig(suiteConfig);
     }
   });
 

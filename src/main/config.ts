@@ -517,6 +517,9 @@ let current: Config = defaultConfig();
 let recordingRevision = 0;
 /** Closing admission precedes waiting for already-started transcript and asset writes. */
 let recordingDisablePending = false;
+/** The exact Off attempt owns its immutable answer even if a queued On publishes before
+ * an awaiting HTTP request runs again. This is process-local coordination, not disk state. */
+let recordingOffDecision: { settled: Promise<boolean> } | null = null;
 let drainRecordingWrites: (() => Promise<void>) | null = null;
 const RECORDING_DRAIN_TIMEOUT_MS = 15_000;
 // Every UI mutation ultimately lands in the same tiny JSON file. Keep those
@@ -630,6 +633,10 @@ export function getRecordingRevision(): number {
   return recordingRevision;
 }
 
+export function pendingRecordingOffDecision(): { readonly settled: Promise<boolean> } | null {
+  return recordingOffDecision;
+}
+
 /** The session store registers its existing writer queues without giving them settings authority. */
 export function registerRecordingWriteDrain(drain: () => Promise<void>): void {
   drainRecordingWrites = drain;
@@ -677,7 +684,11 @@ async function persistConfig(next: Config): Promise<Config> {
   const parsed = configSchema.parse(next);
   const tmp = `${configPath}.tmp`;
   const disablingRecording = current.sessions.record && !parsed.sessions.record;
-  if (disablingRecording) recordingDisablePending = true;
+  let settleOff: (committed: boolean) => void = () => undefined;
+  if (disablingRecording) {
+    recordingDisablePending = true;
+    recordingOffDecision = { settled: new Promise<boolean>(resolve => { settleOff = resolve; }) };
+  }
   try {
     // Admission closes synchronously before this await. The existing session/asset
     // queues drain in their own order; no config-owned disk operation takes either
@@ -694,7 +705,12 @@ async function persistConfig(next: Config): Promise<Config> {
   } finally {
     // On failure the old committed setting remains authoritative and the UI gets
     // an error; the attempted transition never falsely acknowledges Recording Off.
-    if (disablingRecording) recordingDisablePending = false;
+    if (disablingRecording) {
+      recordingDisablePending = false;
+      // The answer belongs to this specific attempted transition, never to a later On.
+      settleOff(!current.sessions.record);
+      recordingOffDecision = null;
+    }
   }
 }
 
