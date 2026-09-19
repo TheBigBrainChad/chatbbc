@@ -547,6 +547,38 @@ describe('exact native rich response observation (no action authority)', () => {
     expect(iterated).toBe(false);
   });
 
+  it.each(['unique', 'repeated-stamp', 'repeated-uuid'])('bounds exact %s lookup without creating an unbounded selector NodeList', async mode => {
+    live = await harness();
+    const { root, row, section } = rootFixture(live.document);
+    const copies = live.document.createDocumentFragment();
+    for (let index = 0; index < (mode === 'unique' ? 0 : 1025); index++) {
+      if (mode === 'repeated-stamp') {
+        const duplicate = live.document.createElement('div');
+        duplicate.setAttribute('data-clf-fiber-rich', root.getAttribute('data-clf-fiber-rich')!);
+        copies.append(duplicate);
+      } else {
+        const duplicate = live.document.createElement('div');
+        duplicate.setAttribute('data-message-author-role', 'assistant');
+        duplicate.setAttribute('data-message-id', providerMessageId);
+        copies.append(duplicate);
+      }
+    }
+    section.append(copies);
+    const original = live.document.querySelectorAll.bind(live.document);
+    let exactStaticQueries = 0;
+    live.document.querySelectorAll = ((selector: string) => {
+      if (selector.startsWith('[data-clf-fiber-rich$=') ||
+          selector.startsWith('[data-message-author-role="assistant"][data-message-id="')) {
+        exactStaticQueries++;
+      }
+      return original(selector);
+    }) as typeof live.document.querySelectorAll;
+    const api = (live.window as any).CLF_DOM;
+    expect(api.richRootFor(messageId, providerMessageId)).toBe(mode === 'unique' ? root : null);
+    expect(exactStaticQueries).toBe(0);
+    expect(row.isConnected).toBe(true);
+  });
+
   it('refuses a stale or duplicated response root and leaves code literals as ordinary text', async () => {
     live = await harness();
     const { root, row, section, twin } = rootFixture(live.document);

@@ -545,23 +545,37 @@ var CLF_DOM = (() => {
     return { surface: surface?.parentElement === root ? surface : null, oversized: false };
   }
 
+  /** A static querySelectorAll would allocate all matches before any duplicate check. */
+  function uniqueBoundedDocumentMatch(selector) {
+    const first = document.querySelector(selector);
+    if (!first) return null;
+    const walker = document.createTreeWalker(document, 1);
+    walker.currentNode = first;
+    let checked = 1;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      // If another matching node exists, uniqueness is disproved immediately.
+      // If the rest of the document is too large, it remains unproven.
+      if (++checked > 1024 || node.matches(selector)) return null;
+    }
+    return first;
+  }
+
   function richRootFor(logicalMessageId, providerMessageId) {
     return safe(() => {
       if (typeof logicalMessageId !== 'string' || !logicalMessageId || logicalMessageId.length > 190 ||
           typeof providerMessageId !== 'string' || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(providerMessageId)) return null;
       const suffix = `:${encodeURIComponent(logicalMessageId)}:${encodeURIComponent(providerMessageId)}`;
-      // Both queries are constrained by already validated identities. Never enumerate
-      // every rich stamp or every assistant row before checking uniqueness.
-      const roots = document.querySelectorAll(`[data-clf-fiber-rich$="${suffix}"]`);
-      if (roots.length !== 1) return null;
-      const root = roots[0];
+      // Exact selectors still have arbitrarily many matching duplicates. Never
+      // allocate their static NodeLists before checking bounded uniqueness.
+      const root = uniqueBoundedDocumentMatch(`[data-clf-fiber-rich$="${suffix}"]`);
+      if (!root) return null;
       const stamp = root.getAttribute('data-clf-fiber-rich') || '';
       const prefix = stamp.slice(0, -suffix.length);
       if (!stamp.endsWith(suffix) || !/^[a-z\d-]{1,80}:\d+$/i.test(prefix)) return null;
-      const rows = document.querySelectorAll(`[data-message-author-role="assistant"][data-message-id="${providerMessageId}"]`);
-      if (rows.length !== 1) return null;
+      const uniqueRow = uniqueBoundedDocumentMatch(`[data-message-author-role="assistant"][data-message-id="${providerMessageId}"]`);
+      if (!uniqueRow) return null;
       const row = root.closest('[data-message-id]');
-      return root.isConnected && row === rows[0] && row.contains(root) && !root.closest(OWN_SURFACES) &&
+      return root.isConnected && row === uniqueRow && row.contains(root) && !root.closest(OWN_SURFACES) &&
         uniqueRichSurface(root).surface ? root : null;
     }, null);
   }

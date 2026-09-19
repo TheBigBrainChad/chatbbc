@@ -282,6 +282,8 @@ interface TurnFixture {
   rendered?: Array<string | { html: string; nativeId?: string; fiberProps?: Record<string, unknown>; fiber?: Fiber; staleMessageStamp?: string }>;
   rich?: Array<{ providerId: string; fiberMessageId?: string; fiberConversationId?: string; duplicate?: boolean }>;
   forbidBroadRichSelectors?: boolean;
+  auditExactRichSelector?: string;
+  repeatedExactRichRows?: number;
   activities?: Array<{ label: string; fiber: Fiber; staleThoughtStamp?: string }>;
   images?: Array<{ assetId: string; clones?: number }>;
   staleStamp?: string;
@@ -303,6 +305,7 @@ async function scan(
   thoughtStamps: Array<string | null>;
   imageStamps: Array<string | null>;
   richStamps: Array<string | null>;
+  exactRichSelectorQueries: number;
   repeatedStampMutations: number;
   turns: TurnEvidence[];
 }> {
@@ -354,6 +357,18 @@ async function scan(
         }
       }
     }
+    if (turn.repeatedExactRichRows && turn.rich?.[0]) {
+      // The 1,025 hostile duplicates need not contain a DIL renderer: duplicate
+      // assistant UUID ownership alone must veto the one otherwise-valid root.
+      const duplicates = document.createDocumentFragment();
+      for (let copy = 0; copy < turn.repeatedExactRichRows; copy++) {
+        const row = document.createElement('div');
+        row.setAttribute('data-message-author-role', 'assistant');
+        row.setAttribute('data-message-id', turn.rich[0].providerId);
+        duplicates.append(row);
+      }
+      section.append(duplicates);
+    }
     for (const entry of turn.rendered ?? []) {
       const block = document.createElement('div');
       block.className = 'markdown';
@@ -399,11 +414,16 @@ async function scan(
     return row;
   });
 
-  if (turnSections.some(turn => turn.forbidBroadRichSelectors)) {
+  let exactRichSelectorQueries = 0;
+  if (turnSections.some(turn => turn.forbidBroadRichSelectors || turn.auditExactRichSelector)) {
     const query = document.querySelectorAll.bind(document);
     document.querySelectorAll = ((selector: string) => {
       if (selector === '[data-message-author-role="assistant"][data-message-id]') {
         throw new Error('unbounded assistant selector');
+      }
+      if (turnSections.some(turn => turn.auditExactRichSelector &&
+          selector === `[data-message-author-role="assistant"][data-message-id="${turn.auditExactRichSelector}"]`)) {
+        exactRichSelectorQueries++;
       }
       return query(selector);
     }) as typeof document.querySelectorAll;
@@ -459,6 +479,7 @@ async function scan(
     thoughtStamps,
     imageStamps,
     richStamps,
+    exactRichSelectorQueries,
     repeatedStampMutations,
     turns: (data.turns ?? []) as TurnEvidence[]
   };
@@ -820,6 +841,17 @@ describe('the calls a turn says it made', () => {
       forbidBroadRichSelectors: true }]);
     expect(result.turns[0]?.messages[0]?.richRoot).toBe(true);
     expect(result.richStamps).toEqual([`${result.scanToken}:0:${provider}:${provider}`]);
+  });
+
+  it.each([0, 1025])('refuses %i duplicate exact assistant UUID rows without allocating a matching static NodeList', async duplicates => {
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const result = await scan([], [{ id: 'duplicate-rich-uuid',
+      messages: [authored(provider, 'Visible', { channel: 'final' })],
+      conversationProps: { conversationId: THREAD }, rich: [{ providerId: provider }],
+      repeatedExactRichRows: duplicates, auditExactRichSelector: provider }]);
+    expect(result.exactRichSelectorQueries).toBe(0);
+    expect(result.turns[0]?.messages[0]?.richRoot).toBe(duplicates ? undefined : true);
+    expect(result.richStamps[0]).toBe(duplicates ? null : `${result.scanToken}:0:${provider}:${provider}`);
   });
 
   it.each(['native', 'scoped', 'foreign', 'unknown', 'text-only', 'duplicate'])('stamps only exact current native message anchors (%s)', async mode => {

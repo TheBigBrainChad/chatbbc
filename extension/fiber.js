@@ -747,11 +747,20 @@
       if (item && item.id === providerId && ++occurrences > 1) return null;
     }
     if (occurrences !== 1) return null;
-    // Query by an already-validated UUID, not every assistant row in the page. Check
-    // cardinality on the NodeList before ever copying it into a JavaScript array.
-    const rows = document.querySelectorAll(`[data-message-author-role="assistant"][data-message-id="${providerId}"]`);
-    if (rows.length !== 1 || !sections.some(section => section.contains(rows[0]))) return null;
-    const row = rows[0];
+    // querySelectorAll creates a static NodeList containing *every* matching row,
+    // even when we check its length before spreading it. Start with one native
+    // selector result, then inspect at most 1,024 subsequent DOM elements for a
+    // second match. An unproven huge remainder fails closed rather than granting
+    // uniqueness from an incomplete search or allocating a hostile match array.
+    const selector = `[data-message-author-role="assistant"][data-message-id="${providerId}"]`;
+    const row = document.querySelector(selector);
+    if (!row || !sections.some(section => section.contains(row))) return null;
+    const ownershipWalk = document.createTreeWalker(document, 1);
+    ownershipWalk.currentNode = row;
+    let checked = 1;
+    for (let node = ownershipWalk.nextNode(); node; node = ownershipWalk.nextNode()) {
+      if (++checked > 1024 || node.matches(selector)) return null;
+    }
     if (!row.querySelector('.puik-root.not-prose.not-markdown')) return null;
     // A hostile or hydrating row may contain thousands of sibling DIL roots. Walk
     // incrementally and stop at the second exact surface or the 1024-element budget.
