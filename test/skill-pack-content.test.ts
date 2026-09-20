@@ -14,11 +14,33 @@ const EXPECTED = [
   'writing-plans', 'writing-skills'
 ];
 
+const UPSTREAM_RELEASE = {
+  version: 'v6.4.1',
+  commit: '5bf4e78011075bcfc0dc295f0724994cd123ee71'
+};
+
 it('ships exactly the curated fourteen skills with valid ids', async () => {
   const entries = (await fs.readdir(pack, { withFileTypes: true }))
     .filter(entry => entry.isDirectory()).map(entry => entry.name).sort();
   expect(entries).toEqual(EXPECTED);
   for (const id of entries) expect(SKILL_ID_PATTERN.test(id), id).toBe(true);
+});
+
+it('pins the reviewed upstream release and its native execution helpers', async () => {
+  const provenance = await fs.readFile(path.join(pack, 'PROVENANCE.md'), 'utf8');
+  expect(provenance).toContain(UPSTREAM_RELEASE.version);
+  expect(provenance).toContain(UPSTREAM_RELEASE.commit);
+  expect(provenance).toContain('diagnosing-superpowers');
+
+  const executing = await fs.readFile(path.join(pack, 'executing-plans', 'SKILL.md'), 'utf8');
+  expect(executing).toMatch(/Continuous execution/);
+  expect(executing).toMatch(/Do not pause to check in/);
+  expect(executing).not.toMatch(/using-superpowers\/references/);
+
+  for (const helper of ['task-start', 'task-done']) {
+    const body = await fs.readFile(path.join(pack, 'executing-plans', 'scripts', helper), 'utf8');
+    expect(body.startsWith('#!/usr/bin/env bash\n'), helper).toBe(true);
+  }
 });
 
 it('every SKILL.md has frontmatter, fits the admission limits, and is plain UTF-8', async () => {

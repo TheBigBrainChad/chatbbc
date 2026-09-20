@@ -54,6 +54,14 @@ app and controllable per skill from Settings.
 - **Regenerated `THIRD-PARTY-NOTICES.txt`**, which had gone stale and still carried a previous
   product name. Shipping was unaffected: packaging regenerates it before building.
 
+### Changed
+
+- **Bundled skill pack refreshed to [obra/superpowers v6.4.1](https://github.com/obra/superpowers).**
+  `executing-plans` is now the native/inline loop: continuous execution, a durable ledger, TDD
+  per task, and one whole-branch review. Helper scripts ship as inert files for `exec_command`.
+  `diagnosing-superpowers` is not included: it assumes another harness's session transcripts.
+  Unedited managed copies refresh on launch; copies you have edited stay yours.
+
 ### Notes
 
 - The pack is MIT licensed; attribution lives in `skill-pack/PROVENANCE.md`,
