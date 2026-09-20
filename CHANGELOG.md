@@ -25,6 +25,18 @@ the app refuses the extension and asks you to reload the matching copy.
   ownership, and extension journal delivery retains a 60-second observation deadline.
 - **The pinned GVDB native-source archive uses its byte-identical GitHub mirror** after the
   original GitLab endpoint stopped serving the archive.
+- **Compact & Resume handoffs are smaller and artifact-driven.** The prompt now targets a
+  1,500–3,000-token operational brief with a 4,000-token ceiling and points resumed Superpowers
+  work at its durable spec, plan, progress ledger and worktree instead of copying them.
+
+### Changed
+
+- **Bundled skill pack refreshed to [obra/superpowers v6.4.1](https://github.com/obra/superpowers).**
+  `executing-plans` is now the native/inline loop: continuous execution, a durable ledger, TDD
+  per task, and one whole-branch review. Helper scripts ship as inert files for `exec_command`.
+  `diagnosing-superpowers` is not included: it assumes another harness's session transcripts.
+  Unedited managed copies refresh on launch; copies you have edited stay yours.
+
 
 ### Notes
 
@@ -35,7 +47,7 @@ the app refuses the extension and asks you to reload the matching copy.
   [#313](https://github.com/totec448-spec/chat-on-steroids/pull/313) and
   [#316](https://github.com/totec448-spec/chat-on-steroids/pull/316), with original authorship
   retained in `CONTRIBUTORS.md` and the integration commit trailers.
-- ChatBBC identity, bridge protocol 15, appearance and skill-pack behavior remain unchanged.
+- ChatBBC identity, bridge protocol 15 and appearance remain unchanged.
 
 ## [2.1.17] — a skill pack you can switch on and off
 
@@ -67,13 +79,6 @@ app and controllable per skill from Settings.
 - **Regenerated `THIRD-PARTY-NOTICES.txt`**, which had gone stale and still carried a previous
   product name. Shipping was unaffected: packaging regenerates it before building.
 
-### Changed
-
-- **Bundled skill pack refreshed to [obra/superpowers v6.4.1](https://github.com/obra/superpowers).**
-  `executing-plans` is now the native/inline loop: continuous execution, a durable ledger, TDD
-  per task, and one whole-branch review. Helper scripts ship as inert files for `exec_command`.
-  `diagnosing-superpowers` is not included: it assumes another harness's session transcripts.
-  Unedited managed copies refresh on launch; copies you have edited stay yours.
 
 ### Notes
 

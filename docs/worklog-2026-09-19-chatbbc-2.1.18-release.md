@@ -8,6 +8,8 @@ Release branch: `release-2.1.18`, based on merged PR #5 at `8b7d75b`.
 - Move the upstream reliability catch-up out of the already-published 2.1.17 changelog section.
 - Add reviewed release notes for the response identity, queue/Continue custody, browser control, compaction receipt, worker wake, journal deadline, screenshot, and GVDB source-mirror changes.
 - Publish only through the tag-scoped `publish.yml` workflow.
+- Include merged `main` updates `5502b41` (compact artifact-driven handoffs) and `c3bc06e`
+  (Superpowers v6.4.1) before tagging.
 
 ## Local verification
 
@@ -18,6 +20,8 @@ Passed on the release candidate:
 - `node scripts/check-release-absent.mjs` with repository/tag credentials: release `v2.1.18` does not exist.
 - `npm run verify`: privacy, notices, typecheck, 220 test files / 5,361 tests, and the isolated 6-test shutdown suite passed; 13 files / 136 tests were skipped by their declared platform/runtime conditions.
 - `npm run build`: main, preload, and renderer bundles completed.
+- After merging the user updates: `npm run typecheck`, 194 focused session/resume/skill-pack tests,
+  release metadata agreement, and `npm run build` passed.
 
 ## Publication evidence
 
