@@ -445,7 +445,9 @@ is the single owner of seeding provenance, user enablement, implicit invocation 
 tombstones. `resolveSkillPolicy()` layers app choice over external Codex rules over the skill's
 own declaration; a disabled skill is absent from the catalog and from `/` completion. Refresh
 preserves a skill the user has edited, decided by the recorded digest, and a tombstone prevents
-a removed skill from being re-seeded.
+a removed skill from being re-seeded. Helper scripts under those skills are inert resources the
+executor may run through `exec_command`; ChatBBC never auto-runs them. `diagnosing-superpowers`
+is not shipped: it assumes another harness's session transcripts.
 
 Input `authoredSource` identifies which existing field contains the human request: `text`
 by default, `objective` for generated Goal/workflow openings, and `none` for generated
