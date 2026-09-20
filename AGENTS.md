@@ -445,7 +445,9 @@ is the single owner of seeding provenance, user enablement, implicit invocation 
 tombstones. `resolveSkillPolicy()` layers app choice over external Codex rules over the skill's
 own declaration; a disabled skill is absent from the catalog and from `/` completion. Refresh
 preserves a skill the user has edited, decided by the recorded digest, and a tombstone prevents
-a removed skill from being re-seeded.
+a removed skill from being re-seeded. Helper scripts under those skills are inert resources the
+executor may run through `exec_command`; ChatBBC never auto-runs them. `diagnosing-superpowers`
+is not shipped: it assumes another harness's session transcripts.
 
 Input `authoredSource` identifies which existing field contains the human request: `text`
 by default, `objective` for generated Goal/workflow openings, and `none` for generated
@@ -1927,11 +1929,16 @@ Destination proof requires the exact Project home, a different connected editor 
 turns. User interaction, cancellation or a foreign route revokes the attempt; no extra tab or
 second click compensates for a missing result.
 
-The brief includes the original task, accepted steering, current result, remaining checks and
-relevant durable ids. Linked project instructions and current executor settings still apply.
-Goal context can use a committed handoff as a provenance anchor; aborted/stale/legacy text is
-not one. A source reply obligation must be superseded when its work has moved, rather than
-mistaken for B's completed turn (§21 records the remaining ledger gap).
+The brief is compact operational state, not a transcript: target 1,500–3,000 tokens and never
+exceed 4,000. It preserves the final user requirements, verified current result, unresolved
+work, relevant durable ids and precise next actions while omitting repetition, raw tool
+transcripts and copied plans/specs. When Superpowers is active it names the exact skill plus
+spec, plan, worktree and `.superpowers/sdd/.../progress.md` paths and current task/fix round;
+the replacement reads those durable artifacts and verifies the ledger/git history instead of
+receiving duplicated content. Linked project instructions and current executor settings still
+apply. Goal context can use a committed handoff as a provenance anchor; aborted/stale/legacy
+text is not one. A source reply obligation must be superseded when its work has moved, rather
+than mistaken for B's completed turn (§21 records the remaining ledger gap).
 
 Legacy shadow repair requires exact old continuation proof. It may repair missing projections;
 it must not guess a new rebind, delete history or become the path for new continuations.

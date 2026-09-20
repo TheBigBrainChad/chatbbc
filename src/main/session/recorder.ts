@@ -2151,8 +2151,8 @@ async function recordChatObservationsNow(
         const written = await upsertMessageEvent(sessionId, {
           ...base,
           kind: 'assistant_message',
-          // Keep normal 15k–20k-token handoff-style answers inline rather than making the
-          // local transcript itself look truncated while the continuation carries more.
+          // Keep complete handoff answers inline so the local transcript and continuation carry
+          // the same document; the larger cap also preserves legacy briefs already in history.
           message: await storeText(sessionId, item.text ?? '', 256_000),
           ...(item.renderedHtml
             ? { renderedHtml: await storeText(sessionId, item.renderedHtml, 120_000) }

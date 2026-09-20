@@ -368,6 +368,8 @@ pptx/
 ```
 When: Reference material too large for inline
 
+Invoke bundled helper scripts through their interpreter in the prose — `bash` or `node` plus the helper path — never by bare path: some packagers strip executable bits, and a bare path then fails with Permission denied. ChatBBC helper scripts are inert until the executor runs them with `exec_command`.
+
 ## The Iron Law (Same as TDD)
 
 ```
