@@ -137,6 +137,10 @@ app.whenReady().then(async () => {
   win.webContents.setZoomFactor(1);
   await resize(1760, 980);
   const stable = await win.webContents.executeJavaScript(`(() => {
+    const frame = document.querySelector('.app');
+    // 42vw is only the fallback. An explicit width is the docked track. 360px still leaves the
+    // 800px prose measure in this window; 900px is wider than 42vw and must not be clamped.
+    frame.style.setProperty('--workbench-width', '360px');
     const measure = () => ({
       prose: document.getElementById('shellProse').getBoundingClientRect().width,
       composer: document.getElementById('composer').getBoundingClientRect().width
@@ -144,15 +148,21 @@ app.whenReady().then(async () => {
     const before = measure();
     window.__shell.setWorkbenchOpen(true);
     const open = measure();
+    frame.style.setProperty('--workbench-width', '900px');
+    const widened = document.getElementById('contextWorkbench').getBoundingClientRect().width;
+    frame.style.setProperty('--workbench-width', '360px');
+    const restored = measure();
     window.__shell.setWorkbenchOpen(false);
     const closed = measure();
-    return { before, open, closed, band: document.querySelector('.app').dataset.collapse };
+    return { before, open, restored, closed, widened, band: frame.dataset.collapse, viewport: window.innerWidth };
   })()`);
   assert.equal(stable.band, 'wide', JSON.stringify(stable));
   assert.equal(stable.open.prose, stable.before.prose, `prose width moved with the workbench ${JSON.stringify(stable)}`);
+  assert.equal(stable.restored.prose, stable.before.prose, `prose width stayed narrow after the explicit width returned ${JSON.stringify(stable)}`);
   assert.equal(stable.closed.prose, stable.before.prose, `prose width moved when the workbench closed ${JSON.stringify(stable)}`);
   assert.equal(stable.open.composer, stable.before.composer, `composer width moved with the workbench ${JSON.stringify(stable)}`);
   assert.equal(stable.closed.composer, stable.before.composer, `composer width moved when the workbench closed ${JSON.stringify(stable)}`);
+  assert.ok(stable.widened > stable.viewport * 0.42 + 40, `explicit workbench width was clamped to 42vw ${JSON.stringify(stable)}`);
 
   const keys = await win.webContents.executeJavaScript(`(() => {
     const buttons = [...document.querySelectorAll('#globalRail [data-destination]')];
