@@ -3,7 +3,7 @@ import { t, ui } from './i18n.js';
 import { lifecycleOf } from './message-lifecycle.js';
 import { paintComposerStatusLine } from './composer-status-line.js';
 import { isAstraModel } from '../shared/chat-models.js';
-import { injectableAttachments } from '../shared/input.js';
+import { injectableAttachments, queuedFollowup } from '../shared/input.js';
 import type { InputImage, InputAttachment } from '../shared/input.js';
 import type { InputArgs, InputEntry } from '../main/session/input.js';
 import type { SessionSummary } from '../shared/session.js';
@@ -168,7 +168,6 @@ export function paintComposerImages(host: DeliveryHost): void {
   paintDeliveryControls(host);
 }
 
-const queuedFollowup = (entry: InputEntry): boolean => !entry.opening && (entry.mode === 'finish' || (entry.mode === 'after-turn' && !!entry.sessionId && entry.purpose !== 'decision'));
 
 /** The one composer-bound pending delivery for the current selection, if any. */
 export function pendingComposerInput(host: DeliveryHost): InputEntry | undefined {
@@ -182,7 +181,8 @@ export function pendingComposerInput(host: DeliveryHost): InputEntry | undefined
 
 /** Retired automatic drafts belong to their creation time, never the live composer queue. */
 export function historicalAutomaticInput(entry: InputEntry): boolean {
-  return !!entry.finishOwner && !entry.finishOwner.userRequested && entry.state === 'cancelled' && !!entry.error;
+  return (!!entry.recovery || (!!entry.finishOwner && !entry.finishOwner.userRequested)) &&
+    entry.state === 'cancelled' && !!entry.error;
 }
 
 /**
@@ -421,6 +421,7 @@ export async function refreshInputQueue(host: DeliveryHost): Promise<void> {
   const opening = host.pendingNewInput();
   const accepted = opening && all.find(entry => entry.id === opening.id);
   if (accepted && await adoptAcceptedOpening(host, accepted)) return;
+  if (selection !== host.selectionGeneration() || request !== host.queueGeneration()) return;
   const belongsToSelection = (entry: { id: string; sessionId: string | null; deliveredSessionId?: string | null }): boolean => host.selectedId() === null
     ? host.pendingNewInput()?.generation === host.selectionGeneration() && entry.id === host.pendingNewInput()!.id
     : (entry.sessionId ?? entry.deliveredSessionId) === host.selectedId();
@@ -437,7 +438,7 @@ export async function refreshInputQueue(host: DeliveryHost): Promise<void> {
   const queueSession = host.selectedId();
   const reorder = async (from: string, to: string, after: boolean) => {
     if (!queueSession || host.selectedId() !== queueSession) return;
-    const ids = queuedTasks.filter(row => row.state === 'queued').map(row => row.id);
+    const ids = queuedTasks.filter(row => row.state === 'queued' && !row.recovery).map(row => row.id);
     if (from === to || !ids.includes(from) || !ids.includes(to)) return;
     ids.splice(ids.indexOf(from), 1);
     ids.splice(ids.indexOf(to) + Number(after), 0, from);
@@ -455,10 +456,29 @@ export async function refreshInputQueue(host: DeliveryHost): Promise<void> {
     if (entry.state === 'queued' && existing?.classList.contains('is-editing')) return existing;
     const card = el('div', 'queued-input'); card.dataset.inputId = entry.id;
     if (projectedIds.has(entry.id)) ui(card, 'aria-label', () => t("Plan stage · waiting for the first message to be sent"));
-    const label = el('span', 'queue-label', entry.text); ui(label, 'title', () => `${entry.state === 'queued' ? (entry.mode === 'after-turn' ? t("After the next completed answer") : t("At Session finish or after a completed answer")) : t("Awaiting receipt")} · ${entry.text}`);
+    if (entry.recovery) ui(card, 'aria-label', () => t('Automatic Continue'));
+    const label = el('span', 'queue-label', entry.recovery ? () => `${t('Automatic Continue')} · ${entry.text}` : entry.text);
+    ui(label, 'title', () => `${entry.recovery
+      ? t('Resumes without a final answer. If ChatGPT is still generating, the silent turn is stopped before Continue is sent.')
+      : entry.state === 'queued' ? (entry.mode === 'after-turn' ? t("After the next completed answer") : t("At Session finish or after a completed answer")) : t("Awaiting receipt")} · ${entry.text}`);
     label.dir = 'auto';
-    card.append(icon('i-clock'), label);
+    card.append(icon(entry.recovery ? 'i-pulse' : 'i-clock'), label);
     if (entry.state === 'queued') {
+      const retireCard = () => { card.remove(); taskList.hidden = taskList.childElementCount === 0; };
+      const cancel = dockAction(() => entry.recovery ? t('Cancel automatic Continue') : t("Remove queued task"), 'i-trash', () => {});
+      cancel.onclick = async () => {
+        if (cancel.disabled || !card.isConnected || selection !== host.selectionGeneration()) return;
+        cancel.disabled = true;
+        const removed = await run(window.api.cancelInput(entry.id));
+        if (!card.isConnected || selection !== host.selectionGeneration()) return;
+        if (removed === true || removed === false) {
+          host.retireQueueReads();
+          if (removed) host.setPendingComposerInputs(host.pendingComposerInputs().filter(row => row.id !== entry.id));
+          retireCard();
+          void refreshInputQueue(host);
+        } else cancel.disabled = false;
+      };
+      if (entry.recovery) { card.append(cancel); return card; }
       const queueSessionSummary = host.sessions().find(row => row.id === host.selectedId());
       const modelSelection = queueSessionSummary?.selectedModel;
       if (entry.mode === 'finish' && modelSelection?.conversationId === queueSessionSummary?.conversationId && isAstraModel(modelSelection?.model, modelSelection?.reasoningEffort)) {
@@ -497,19 +517,21 @@ export async function refreshInputQueue(host: DeliveryHost): Promise<void> {
       label.onkeydown = event => {
         if (!event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
         event.preventDefault();
-        const ids = queuedTasks.filter(row => row.state === 'queued').map(row => row.id);
+        const ids = queuedTasks.filter(row => row.state === 'queued' && !row.recovery).map(row => row.id);
         const next = ids[ids.indexOf(entry.id) + (event.key === 'ArrowDown' ? 1 : -1)];
         if (next) void reorder(entry.id, next, event.key === 'ArrowDown');
       };
       const edit = dockAction(() => t("Edit queued task"), 'i-pencil', () => {});
       edit.onclick = () => {
+        if (!card.isConnected || selection !== host.selectionGeneration()) return;
         const field = document.createElement('textarea'); field.dir = 'auto'; field.value = entry.text; ui(field, 'aria-label', () => t("Queued task"));
         const contents = [...card.childNodes];
         const save = el('button', 'btn', () => t("Save")) as HTMLButtonElement; save.type = 'button';
         save.onclick = async () => {
-          if (save.disabled) return;
+          if (save.disabled || cancel.disabled || !card.isConnected || selection !== host.selectionGeneration()) return;
           const value = field.value;
-          save.disabled = true; ui(save, 'textContent', () => t("Saving…")); field.readOnly = true;
+          if (!value.trim()) { cancel.click(); return; }
+          save.disabled = true; cancel.disabled = true; ui(save, 'textContent', () => t("Saving…")); field.readOnly = true;
           try {
             const saved = await run(window.api.editQueuedInput(entry.id, value));
             if (!card.isConnected || selection !== host.selectionGeneration()) return;
@@ -518,14 +540,18 @@ export async function refreshInputQueue(host: DeliveryHost): Promise<void> {
               // queue refresh. Refreshes preserve drafts; they do not own Save completion.
               entry.text = value.trim(); label.textContent = entry.text;
               card.classList.remove('is-editing'); card.replaceChildren(...contents);
+              host.retireQueueReads();
               void refreshInputQueue(host);
-            } else if (saved === false) toast(t("This task is no longer queued and could not be edited."));
+            } else if (saved === false) {
+              host.retireQueueReads();
+              retireCard();
+              void refreshInputQueue(host);
+            }
           } catch (error) { toast(error instanceof Error ? error.message : t("Could not save this task.")); }
-          finally { save.disabled = false; ui(save, 'textContent', () => t("Save")); field.readOnly = false; }
+          finally { save.disabled = false; cancel.disabled = false; ui(save, 'textContent', () => t("Save")); field.readOnly = false; }
         };
-        card.classList.add('is-editing'); card.replaceChildren(field, save); field.focus();
+        card.classList.add('is-editing'); card.replaceChildren(field, save, cancel); field.focus();
       };
-      const cancel = dockAction(() => t("Remove queued task"), 'i-trash', () => {}); cancel.onclick = async () => { await run(window.api.cancelInput(entry.id)); void refreshInputQueue(host); };
       card.append(edit, cancel);
     }
     return card;

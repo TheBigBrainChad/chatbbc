@@ -78,12 +78,11 @@
   const GENERATED_IMAGE = '[class~="group/imagegen-image"] img';
   const OWN_SURFACES = '.clf-stream, .clf-stage, .clf-composer, .clf-boot';
   const MAX_RENDERED_HTML = 120_000;
-  // A 15k–20k-token compaction answer is routinely 60k–90k characters. Capping public
-  // assistant prose at 32k here made the canonical session transcript lose the back half
-  // even though Compact & Resume itself carried the full DOM answer. One event still stays
-  // comfortably below the 512 KiB bridge body cap alongside its bounded rendered HTML.
-  // Safety guard only. Compact & Resume is specified in tokens (up to 30k), so this must be
-  // comfortably larger than a normal handoff rather than acting as a second token budget.
+  // Handoff answers are intentionally compact now, but legacy 15k–30k-token handoffs remain
+  // valid recorded history. Capping public assistant prose at 32k here made those sessions lose
+  // the back half even though Compact & Resume itself carried the full DOM answer. One event
+  // still stays comfortably below the 512 KiB bridge body cap alongside bounded rendered HTML.
+  // This is a safety guard, not the current handoff's much smaller semantic token budget.
   const MAX_RENDERED_TEXT = 256_000;
   /** Aggregate authored text/HTML copied through MAIN -> isolated world in one scan. */
   const MAX_RESPONSE_TEXT = MAX_TURNS * 512 * 1024;
@@ -1045,7 +1044,6 @@
           continue;
         }
         const label = visibleText(row.textContent).slice(0, 300);
-        if (!label || label.length > 300) continue;
         let activity = null;
         try {
           const fiber = fiberOf(row);
@@ -1060,6 +1058,9 @@
         // display text for this scan.
         exactThoughtRows.set(row, activity.messageId);
         notificationIds.add(activity.messageId);
+        // The native icon/empty layout mounts before its caption. Typed identity
+        // already proves what may be suppressed; only recording needs text.
+        if (!label) continue;
 
         let prior = null;
         for (let entryAt = 0; entryAt < held.length; entryAt++) {
@@ -1204,6 +1205,18 @@
     if (!resource || typeof resource !== 'object') return null;
     return { app: str(resource.app_name), resource: str(resource.resource_uri) };
   }
+
+  /** Rehydrated direct calls can expose only their public result object. Its UUID,
+   * request id and invoked resource are exact evidence; no parent or payload is guessed. */
+  function completedCallOf(message) {
+    if (!message || message.author?.role !== 'tool' || message.author.name !== 'api_tool.call_tool' ||
+        message.recipient !== 'all' || str(message.metadata?.parent_id)) return null;
+    const result = resultOf(message);
+    const messageId = str(message.id), requestId = str(message.metadata?.request_id);
+    const tool = result && toolName(result.resource);
+    if (!result || !ourApp(result.app) || !messageId || !requestId || !tool) return null;
+    return { ...result, messageId, requestId, tool, createTime: num(message.create_time) };
+  }
   /** Exact number of this app's own invocations represented by the whole turn, or null. */
   function localCountOf(messages) {
     if (!Array.isArray(messages)) return null;
@@ -1228,7 +1241,7 @@
       const result = resultOf(message);
       if (result && ourApp(result.app)) {
         const meta = message && typeof message === 'object' ? message.metadata : null;
-        remember(meta && typeof meta === 'object' ? str(meta.parent_id) : null);
+        remember((meta && typeof meta === 'object' ? str(meta.parent_id) : null) || completedCallOf(message)?.messageId);
       }
     }
     return Math.min(999, ids.length + anonymous);
@@ -1260,7 +1273,14 @@
     const localCount = localCountOf(turnMessages);
     const messages = group.messages;
     const request = requestOf(messages[0]);
-    if (!request) return null;
+    if (!request) {
+      const completed = completedCallOf(messages[0]);
+      return completed ? { v: VERSION, index, tool: completed.tool, path: null, app: completed.app,
+        resource: completed.resource, messageId: completed.messageId, turnId: str(group.turnId),
+        conversationId: str(group.clientThreadId) || str(group.conversationId), createTime: completed.createTime,
+        hidden: int(own.call(group, 'collapsedSameToolCallCount') ? group.collapsedSameToolCallCount : null),
+        localCount, answered: true } : null;
+    }
 
     let result = null;
     if (request.messageId) {
@@ -1327,7 +1347,66 @@
    * no whole objects. `content.text` is never parsed — only the anchored path is read off
    * the front of it, exactly as `requestOf` already does.
    */
-  function callsOf(messages) {
+  /** Native Code Mode chains child requests/results before one functions.exec result.
+   * A child's parent_id is then chronology, not its individual response receipt.
+   * Resolve the exact enclosing call without reading code or result payloads. */
+  function codeModeReceipts(messages) {
+    const byId = new Map();
+    for (const message of messages) {
+      const id = str(message && message.id);
+      if (id) byId.set(id, byId.has(id) ? null : message);
+    }
+    const owners = new Map();
+    const scope = message => {
+      const meta = message && message.metadata;
+      const request = str(meta && meta.request_id), working = str(meta && meta.working_turn_id),
+        exchange = str(meta && meta.turn_exchange_id);
+      return request && working && exchange ? `${request}\u0000${working}\u0000${exchange}` : null;
+    };
+    const ownerOf = message => {
+      const trail = [], visited = new Set();
+      let cursor = message, owner = null;
+      while (cursor && trail.length < MAX_CALLS) {
+        const id = str(cursor.id);
+        if (!id || byId.get(id) !== cursor || visited.has(id)) break;
+        visited.add(id);
+        const role = cursor.author && cursor.author.role;
+        if (role === 'assistant' && cursor.recipient === 'functions.exec') {
+          owner = { id, scope: scope(cursor), valid: cursor.status === 'finished_successfully' && !!scope(cursor) };
+          break;
+        }
+        // An earlier completed enclosing call cannot own a later ordinary invocation.
+        if (trail.length && role === 'tool' && cursor.author.name === 'functions.exec') break;
+        if (owners.has(id)) { owner = owners.get(id); break; }
+        if (!((role === 'assistant' && cursor.recipient === 'api_tool.call_tool') ||
+            (role === 'tool' && cursor.recipient === 'all' &&
+              (cursor.author.name === 'api_tool.call_tool' || cursor.author.name === 'functions.exec')))) break;
+        trail.push(cursor);
+        cursor = byId.get(str(cursor.metadata && cursor.metadata.parent_id));
+      }
+      for (let index = trail.length - 1; index >= 0; index--) {
+        if (owner) owner = { ...owner, valid: owner.valid && scope(trail[index]) === owner.scope };
+        owners.set(trail[index].id, owner);
+      }
+      return owner;
+    };
+    const completed = new Set();
+    for (const message of messages) {
+      if (message && message.author && message.author.role === 'tool' && message.author.name === 'functions.exec' &&
+          message.recipient === 'all' && message.status === 'finished_successfully' && byId.get(message.id) === message) {
+        const owner = ownerOf(message);
+        if (owner && owner.valid) completed.add(owner.id);
+      }
+    }
+    const receipts = new Map();
+    for (const message of messages) {
+      const owner = ownerOf(message);
+      if (owner) receipts.set(message.id, owner.valid && completed.has(owner.id));
+    }
+    return receipts;
+  }
+
+  function callsOf(messages, codeReceipts) {
     if (!Array.isArray(messages)) return [];
     const out = [];
     const seen = new Set();
@@ -1347,16 +1426,17 @@
     const duplicated = new Set();
     for (let at = 0; at < messages.length && out.length < MAX_CALLS; at++) {
       const request = requestOf(messages[at]);
-      if (!request || !ourPath(request.path)) continue;
-      const tool = toolName(request.path);
-      const id = request.messageId;
+      const completed = request ? null : completedCallOf(messages[at]);
+      if ((!request || !ourPath(request.path)) && !completed) continue;
+      const tool = completed ? completed.tool : toolName(request.path);
+      const id = completed ? completed.messageId : request.messageId;
       if (!tool || !id) continue;
       // An id reported twice is an ambiguity, not a second call, and it is dropped on
       // *both* sides: keeping the first would still hand the app one identity standing
       // for two different requests, which is the same piece of evidence spent twice.
       if (seen.has(id)) duplicated.add(id);
       seen.add(id);
-      const hasResult = answered.has(id);
+      const hasResult = codeReceipts.has(id) ? codeReceipts.get(id) : Boolean(completed) || answered.has(id);
       out.push({
         messageId: id,
         tool,
@@ -1366,8 +1446,8 @@
         // created. The app's existing stamp is when the *extension* observed the row, which
         // is a poll tick and jitters per tab; these are the only values on either side that
         // say which request this is and when it was actually issued.
-        requestId: request.requestId || null,
-        createTime: request.createTime
+        requestId: (completed || request).requestId || null,
+        createTime: (completed || request).createTime
       });
     }
 
@@ -1443,7 +1523,12 @@
         const fiber = fiberOf(section);
         if (!fiber) continue;
         const messages = turnMessagesOf(fiber);
-        const calls = callsOf(messages);
+        const codeReceipts = codeModeReceipts(messages || []);
+        const codeModeCalls = (messages || []).filter(message => message && message.author &&
+          message.author.role === 'assistant' && message.recipient === 'functions.exec').slice(0, MAX_CALLS)
+          .map(message => ({ messageId: str(message.id), requestId: str(message.metadata && message.metadata.request_id),
+            answered: codeReceipts.get(message.id) === true }));
+        const calls = callsOf(messages, codeReceipts);
         const requests = requestIdsOf(messages);
         const conversation = conversationEvidenceOf(fiber);
         const exactAnchors = new Map();
@@ -1460,7 +1545,7 @@
         const activities = nativeActivities.events;
         const endMessageId = turnEndMessageId(messages);
         if (
-          calls.length === 0 &&
+          codeModeCalls.length === 0 && calls.length === 0 &&
           requests.length === 0 &&
           renderedMessages.length === 0 &&
           activities.length === 0 && nativeActivities.notifications.length === 0 && generatedImages.length === 0 && !endMessageId
@@ -1473,6 +1558,7 @@
           conversationConflict: conversation.conflict,
           endMessageId,
           calls,
+          codeModeCalls,
           requests,
           messages: renderedMessages,
           activities,

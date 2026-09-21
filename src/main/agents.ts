@@ -3015,7 +3015,7 @@ export interface AliveResult {
  */
 export function noteAgentAlive(
   conversationId: string | null | undefined,
-  source: 'call' | 'page' | 'turn' = 'call',
+  source: 'call' | 'page' | 'turn' | 'output' = 'call',
   at = Date.now()
 ): AliveResult | null {
   const run = runForConversation(conversationId);
@@ -3052,8 +3052,10 @@ export function noteAgentAlive(
   // every page fact was refused here — the app then slept a worker that was visibly generating
   // and spent the next revival deadline typing at a chat it had already given up on.
   const sleeping = agent.info.state === 'sleeping' || agent.info.state === 'waking';
-  const staleTurn = source === 'turn' && at <= (agent.info.sleptAt ?? 0);
-  if (sleeping && (source === 'page' || staleTurn)) {
+  const staleTurn = (source === 'turn' || source === 'output') && at <= (agent.info.sleptAt ?? 0);
+  // Late native output must not retract a completed report or reclaim its slot.
+  const reportedOutput = source === 'output' && agent.info.result !== null;
+  if (sleeping && (source === 'page' || staleTurn || reportedOutput)) {
     agent.info.lastSeenAt = now;
     return { agentId: agent.info.id, revived: false, report: null };
   }
@@ -3107,7 +3109,8 @@ export function noteAgentAlive(
   let report: AgentMessage | null = null;
   if (was === 'failed' || was === 'sleeping') {
     const how =
-      source === 'page' ? 'reappeared in the browser' : source === 'turn' ? 'started another turn' : 'made another tool call';
+      source === 'page' ? 'reappeared in the browser' :
+        source === 'turn' || source === 'output' ? 'published new work' : 'made another tool call';
     report = newMessage(
       agent.info.id,
       PRIME_ID,
@@ -3516,6 +3519,12 @@ export function primeForOwnedConversation(conversationId: string): string | null
   const run = runForConversation(conversationId);
   if (run && agentForConversationId(conversationId)) return run.primeConversationId;
   return dormantAgentForConversation(conversationId)?.owner.primeConversationId ?? null;
+}
+
+/** A currently occupied slot; parked history must not grant or refuse browser recovery. */
+export function liveAgentForOwnedConversation(conversationId: string): AgentInfo | null {
+  const agent = agentForConversationId(conversationId);
+  return agent ? { ...agent.info } : null;
 }
 
 /** Read-only exact owner metadata for recorder/origin reconstruction across parked histories. */

@@ -4,7 +4,7 @@ import { REASONING_EFFORTS, workSequence } from '../../shared/session.js';
  * Tool delivery repeats under a stable message id until a later request proves receipt.
  */
 import { z } from 'zod';
-import { browserInputModel, type InputImage } from '../../shared/input.js';
+import { browserInputModel, manualInput, queuedFollowup, MAX_INPUT_IMAGES, type InputImage } from '../../shared/input.js';
 import type { SessionSummary } from '../../shared/session.js';
 import { getConfig } from '../config.js';
 import { randomUUID } from 'node:crypto';
@@ -33,7 +33,7 @@ export const inputArgs = z.object({
   /** Which existing field holds the human request, before generated workflow wrapping. */
   authoredSource: z.enum(['text', 'objective', 'none']).optional(),
   stages: z.array(z.string().trim().min(1).max(16000)).max(11).optional(),
-  images: z.array(z.object({ name: z.string().min(1).max(110), dataUrl: z.string().max(512100).regex(/^data:image\/webp;base64,[A-Za-z0-9+/]+={0,2}$/) })).max(4).optional(),
+  images: z.array(z.object({ name: z.string().min(1).max(110), dataUrl: z.string().max(512100).regex(/^data:image\/webp;base64,[A-Za-z0-9+/]+={0,2}$/) })).max(MAX_INPUT_IMAGES).optional(),
   attachments: z.array(attachmentSchema).max(20).optional(),
   /** User selected the next exact local-tool response, even before the first call. */
   delivery: z.literal('tool').optional(),
@@ -141,7 +141,7 @@ export async function sessionInputPolicy(sessionId: string, observedActivity?: I
   const injectionTurnId = canInject ? session.activeTurnId ?? (activity.turnId === end?.turnId ? activity.turnId ?? null : null) : null;
   const astra = session.origin?.kind !== 'worker' && session.origin?.kind !== 'helper' &&
     session.selectedModel?.conversationId === session.conversationId && isAstraModel(session.selectedModel.model, session.selectedModel.reasoningEffort);
-  const completed = !session.activeTurnId && !astra
+  const completed = !session.activeTurnId
     ? await readCompletedFinal(sessionId, session.conversationId) : null;
   const current = await getSession(sessionId);
   if (current?.conversationId !== session.conversationId || current?.activeTurnId !== session.activeTurnId)
@@ -149,11 +149,13 @@ export async function sessionInputPolicy(sessionId: string, observedActivity?: I
   const terminal = end?.kind === 'turn_end' && !!end.turnId && end.outcome !== 'unknown';
   const settled = (terminal && ((end.outcome === 'completed' && !activity.possible && !activity.exact) ||
     (end.outcome === 'failed' && end.reason === 'thinking_failed'))) ||
-    (!!completed && !activity.possible && !activity.exact);
+    (!astra && !!completed && !activity.possible && !activity.exact);
   const executing = inFlightToolCalls(session.conversationId) > 0;
   return { canInject, injectionTurnId, directTurn, queueAtFinish: astra && canInject && getConfig().ui.finishTool === true,
     browserAllowed: !session.activeTurnId && !activity.possible && !activity.exact && !executing && (!astra || terminal),
-    settled: settled && !executing && (session.lastToolCallAt ?? 0) <= (completed?.completedAt ?? end?.time ?? 0) };
+    // Completion already reconciles trailing same-request calls. A separate time
+    // comparison would leave the composer unsettled after the activity clock stopped.
+    settled: settled && !executing && (!!completed || (session.lastToolCallAt ?? 0) <= (end?.time ?? 0)) };
 }
 async function browserInputAllowed(entry: InputEntry): Promise<boolean> {
   if (entry.error?.startsWith('Local chat setup failed:')) return false;
@@ -225,9 +227,6 @@ const needsHistory = (row: InputEntry): boolean => row.purpose !== 'decision' &&
 const pendingStages = (row: InputEntry): boolean => row.state === 'sent' && !!row.stages?.length && !row.stagesApplied;
 const ordered = (rows: InputEntry[]): InputEntry[] => [...rows].sort((a, b) =>
   (a.queueOrder ?? a.dueAt) - (b.queueOrder ?? b.dueAt) || a.createdAt - b.createdAt);
-// Native files convert Auto to after-turn for transport, but retain the user's
-// immediate correction intent. They remain browser-only, never tool attachments.
-const manualInput = (row: InputEntry): boolean => (row.requestedMode ?? row.mode) === 'auto' && !row.finishOwner && row.purpose !== 'decision' && row.attachmentDelivery !== 'tool';
 const companionOf = (rows: InputEntry[], row: InputEntry): InputEntry | undefined => rows.find(root => root.companionInputId === row.id);
 const sameDelivery = (root: InputEntry, row: InputEntry): boolean => row.id === root.id || row.id === root.companionInputId;
 function combinedInput(root: InputEntry, companion?: InputEntry): InputEntry {
@@ -384,8 +383,21 @@ async function retireRemovedSessionReceipts(current: InputEntry[], pendingOnly =
 async function expireQueued(current: InputEntry[]): Promise<InputEntry[]> {
   const next = await Promise.all(current.map(async (row): Promise<InputEntry> => {
     if (companionOf(current, row)) return row;
-    if (row.recovery && !terminal(row) && row.sendAuthorizedAt === undefined && !await recoveryCurrent(row))
-      return { ...row, state: 'cancelled', error: 'Automatic Continue cancelled: the source turn, activity or setting changed.' };
+    if (row.recovery && row.state === 'browser' && row.sendAuthorizedAt !== undefined &&
+        row.sessionId && row.conversationId && row.silenceBoundary?.conversationId === row.conversationId &&
+        !row.companionInputId) {
+      const session = await getSession(row.sessionId);
+      // A committed handoff ends this generated Continue's wait in its old chat.
+      // Keep the original claim and authorization for an exact late receipt; this
+      // neither proves non-delivery nor authorizes a replay. Authored queue rows
+      // still follow the session, and time alone never releases an uncertain send.
+      if (session?.conversationId && session.conversationId !== row.conversationId &&
+          session.chatIds.includes(row.conversationId)) return { ...row, state: 'cancelled' };
+    }
+    if (row.recovery && !terminal(row) && row.sendAuthorizedAt === undefined) {
+      const reason = await recoveryInvalidReason(row);
+      if (reason) return { ...row, state: 'cancelled', error: `Automatic Continue cancelled: ${reason}.` };
+    }
     if (row.finishOwner && !terminal(row) && !(await finishInputCurrent(row)))
       return { ...row, state: 'cancelled', error: 'Automatic follow-up cancelled because its active turn or setting changed.' };
     if (row.purpose === 'decision') return row;
@@ -428,7 +440,12 @@ async function expireQueued(current: InputEntry[]): Promise<InputEntry[]> {
     const root = companionOf(next, next[i]!);
     if (root && root.state !== next[i]!.state) next[i] = { ...next[i]!, state: root.state, error: root.error };
   }
-  if (next.some((row, index) => row !== current[index])) await commit(next);
+  if (next.some((row, index) => row !== current[index])) {
+    await commit(next);
+    for (const [index, row] of next.entries()) if (row.recovery && row.state === 'cancelled' &&
+      current[index]?.state !== 'cancelled')
+      logInfo(`input ${row.id}: ${row.error ?? 'Automatic Continue wait retired after its session left the chat.'} conversation=${row.conversationId} turn=${row.silenceBoundary?.turnId}`);
+  }
   return entries!;
 }
 async function commit(next: InputEntry[]): Promise<void> {
@@ -487,8 +504,6 @@ async function prepare(entry: InputEntry, suffix = ''): Promise<InputEntry> {
     throw new Error('Prepared message exceeds the delivery limit; shorten the request or plan');
   return { ...entry, deliveryText };
 }
-/** Explicit follow-ups spend one verified completed turn; each transport elects its eligible FIFO. */
-const queuedFollowup = (row: InputEntry): boolean => !row.opening && !manualInput(row) && (row.mode === 'finish' || (row.mode === 'after-turn' && !!row.sessionId && row.purpose !== 'decision'));
 function append(current: InputEntry[], entry: InputEntry, stackDirect = false): InputEntry[] {
   if (queuedFollowup(entry)) {
     const positioned = current.filter(row => row.sessionId === entry.sessionId && queuedFollowup(row) && !terminal(row) && row.queueOrder !== undefined);
@@ -583,8 +598,8 @@ export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwn
     if (toolDelivery) {
       const turnId = policy?.directTurn?.id ?? policy?.injectionTurnId;
       if (!input.sessionId || input.mode !== 'auto' || finishOwner || input.stages?.length || !turnId ||
-          (input.images?.length ?? 0) + (input.attachments?.length ?? 0) > 4)
-        throw new Error('Inject up to four images into an active chat; otherwise use Send or After this turn');
+          (input.images?.length ?? 0) + (input.attachments?.length ?? 0) > MAX_INPUT_IMAGES)
+        throw new Error(`Inject up to ${MAX_INPUT_IMAGES} images into an active chat; otherwise use Send or After this turn`);
       const owner = await getSession(input.sessionId);
       if (!owner?.conversationId) throw new Error('Inject into an active chat');
       injectionOwner = { conversationId: owner.conversationId, turnId };
@@ -756,11 +771,12 @@ async function settleToolInputFromFinal(row: InputEntry): Promise<InputEntry> {
   return { ...row, state: 'sent', toolTurnId: call.turnId, messageId: `input:${row.id}`, deliveredAt: final.completedAt, historyRecorded: false };
 }
 
-/** Editing is possible only before handout; claimed text is immutable. */
+/** Editing is possible only before handout. Recovery shares delivery custody,
+ * but its frozen message and source never belong to the authored task order. */
 export function reorderQueuedInputs(sessionId: string, ids: string[]): Promise<boolean> {
   return serial(async () => {
     const current = await load();
-    const queue = current.filter(row => row.sessionId === sessionId && queuedFollowup(row) && row.state === 'queued');
+    const queue = current.filter(row => row.sessionId === sessionId && queuedFollowup(row) && !row.recovery && row.state === 'queued');
     // A stale snapshot must not move claimed input or omit newly queued work.
     if (!ids.length || ids.length !== queue.length || new Set(ids).size !== ids.length ||
         queue.some(row => !ids.includes(row.id))) return false;
@@ -788,7 +804,7 @@ export function editQueuedInput(id: string, text: string, afterTurn?: boolean): 
   return serial(async () => {
     const value = inputArgs.shape.text.parse(text);
     const current = await load();
-    const row = current.find(entry => entry.id === id && entry.state === 'queued' && queuedFollowup(entry));
+    const row = current.find(entry => entry.id === id && entry.state === 'queued' && queuedFollowup(entry) && !entry.recovery);
     if (!row) return false;
     if (current.filter(entry => !terminal(entry)).reduce((sum, entry) => sum + Buffer.byteLength(entry === row ? value : entry.text), 0) > 1024000) throw new Error('Queued messages exceed the text limit');
     await commit(current.map(entry => entry === row ? { ...row, text: value, authoredSource: 'text', ...(afterTurn === undefined ? {} : { afterTurn }), deliveryText: undefined } : entry));
@@ -978,23 +994,36 @@ function releaseRecoveryClaim(row: InputEntry): InputEntry {
     recovery: { ...row.recovery!, phase: row.recovery!.phase === 'ready' ? 'ready' : 'resumed' } };
 }
 async function recoveryCurrent(row: InputEntry): Promise<boolean> {
+  return await recoveryInvalidReason(row) === null;
+}
+/** Keep the rejection on the existing outbox receipt so an audit can identify the veto. */
+async function recoveryInvalidReason(row: InputEntry): Promise<string | null> {
   const boundary = row.silenceBoundary;
-  if (!row.recovery || !row.sessionId || !boundary || Date.now() - row.createdAt >= 12 * 60 * 60_000) return false;
-  const allowed = () => deliveryHooks?.recoveryAllowed?.(row.sessionId!, boundary.conversationId) === true &&
-    !isChatBlocked(boundary.conversationId) && inFlightToolCalls(boundary.conversationId) === 0;
-  if (!allowed()) return false;
+  if (!row.recovery || !row.sessionId || !boundary) return 'the recovery source is missing';
+  if (Date.now() - row.createdAt >= 12 * 60 * 60_000) return 'the twelve-hour recovery window expired';
+  const unavailable = () => isChatBlocked(boundary.conversationId) ? 'this chat is blocked' :
+    inFlightToolCalls(boundary.conversationId) > 0 ? 'a local tool is running' :
+    deliveryHooks?.recoveryAllowed?.(row.sessionId!, boundary.conversationId) !== true ? 'automatic continuation is off or paused' : null;
+  const reason = unavailable();
+  if (reason) return reason;
   const session = await getSession(row.sessionId);
-  if (!session || session.conversationId !== boundary.conversationId ||
-      session.origin?.kind === 'worker' || session.origin?.kind === 'helper' ||
-      (session.activeTurnId && session.activeTurnId !== boundary.turnId) || session.finishTurn?.released) return false;
+  if (!session || session.conversationId !== boundary.conversationId) return 'the session moved to another chat';
+  if (session.browserRecoveryDismissedAt !== undefined) return 'the browser chat was closed';
+  if (session.origin?.kind === 'worker' || session.origin?.kind === 'helper') return 'this task has a separate recovery owner';
+  if (session.activeTurnId && session.activeTurnId !== boundary.turnId) return 'another turn started';
+  if (session.finishTurn?.released) return 'the turn was released';
   const [end] = await readRecentEvents(row.sessionId, 1, { kinds: ['turn_start', 'turn_end'] });
-  if (end?.turnId !== boundary.turnId || (end.kind === 'turn_end' && end.outcome === 'stopped')) return false;
-  if (!await turnHasMcpCall(row.sessionId, boundary.conversationId, boundary.turnId)) return false;
-  if (await readCompletedFinal(row.sessionId, boundary.conversationId)) return false;
-  const question = await readLatestUserMessage(row.sessionId);
+  if (end?.turnId !== boundary.turnId) return 'the recorded turn changed';
+  if (end.kind === 'turn_end' && end.outcome === 'stopped') return 'the user stopped the turn';
+  if (!await turnHasMcpCall(row.sessionId, boundary.conversationId, boundary.turnId)) return 'the source has no confirmed local tool call';
+  if (await readCompletedFinal(row.sessionId, boundary.conversationId)) return 'the complete answer arrived';
+  const question = await readLatestUserMessage(row.sessionId, boundary.turnId);
   const [work] = await readRecentEvents(row.sessionId, 1, { kinds: RECOVERY_WORK_KINDS });
-  return question?.messageId === row.recovery.questionId && !!work && workSequence(work) === boundary.workSeq &&
-    allowed() && (await getSession(row.sessionId))?.conversationId === boundary.conversationId;
+  if (question?.messageId !== row.recovery.questionId) return 'another user message arrived';
+  if (!work || workSequence(work) !== boundary.workSeq) return 'the source received new work';
+  const changed = unavailable();
+  if (changed) return changed;
+  return (await getSession(row.sessionId))?.conversationId === boundary.conversationId ? null : 'the session moved to another chat';
 }
 
 /** Shared unfinished-response ticket; mode policy belongs to the bridge hook. */
@@ -1381,7 +1410,7 @@ export function offerToolInput(sessionId: string | null | undefined, conversatio
         const messageBytes = Buffer.byteLength(message) + (inputTaken ? 2 : 0);
         const reminderBytes = reminder ? Buffer.byteLength(reminder) + 2 : 0;
         const images = [...entry.images ?? [], ...entry.toolImages ?? []];
-        if (payloadBytes + messageBytes + reminderBytes > TOOL_INPUT_TEXT_BYTES || payloadImages + images.length > 4) { payloadFull = true; return entry; }
+        if (payloadBytes + messageBytes + reminderBytes > TOOL_INPUT_TEXT_BYTES || payloadImages + images.length > MAX_INPUT_IMAGES) { payloadFull = true; return entry; }
         payloadBytes += messageBytes;
         payloadImages += images.length;
         inputTaken = true;

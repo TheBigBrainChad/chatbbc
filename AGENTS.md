@@ -30,8 +30,9 @@ commitment.
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: **2026-09-21**, rich-response worktree. App/package/extension declarations remain
-**2.1.17**; main and extension declare bridge protocol **17** (`package.json`,
+Source alignment: **2026-09-21**, including the 2.1.18 release line merged into the
+rich-response worktree. App/package/extension declarations are **2.1.18**; main and
+extension declare bridge protocol **17** (`package.json`,
 `src/main/version.ts`, `extension/manifest.json`, `extension/background.js`). Protocol 16
 introduced bounded rich observations; 17 adds pre-observation recording generations and
 positional journal admission. Linux x64 packaging, packaged native runtime and a disposable
@@ -462,7 +463,9 @@ is the single owner of seeding provenance, user enablement, implicit invocation 
 tombstones. `resolveSkillPolicy()` layers app choice over external Codex rules over the skill's
 own declaration; a disabled skill is absent from the catalog and from `/` completion. Refresh
 preserves a skill the user has edited, decided by the recorded digest, and a tombstone prevents
-a removed skill from being re-seeded.
+a removed skill from being re-seeded. Helper scripts under those skills are inert resources the
+executor may run through `exec_command`; ChatBBC never auto-runs them. `diagnosing-superpowers`
+is not shipped: it assumes another harness's session transcripts.
 
 Input `authoredSource` identifies which existing field contains the human request: `text`
 by default, `objective` for generated Goal/workflow openings, and `none` for generated
@@ -865,7 +868,7 @@ text remains separate. A failed write cannot later become a successful hidden en
 | After turn | Existing-session FIFO spends one distinct completion or confirmed failure/silence-refresh ticket per browser claim. Replays/restart cannot drain the next entry. Does not block an otherwise eligible immediate tool injection. |
 | Finish checkpoint | Waits for a successful finish-tool boundary; ordinary eligible chats can deliver after verified completion. Astra's separate after-turn opt-in remains explicit. Checkpoints inherit the current chat model. |
 | Native attachment | Browser upload/send only. A file-bearing active-chat input waits for the browser-safe boundary; it never becomes a tool-result file reference. |
-| Image injection | When **Inject now** is available, an image-only selection of up to four PNG/JPEG/WebP/GIF files enters the exact chat's outer tool result as image blocks. New Chat, after-turn, mixed files and larger selections use native upload. |
+| Image injection | When **Inject now** is available, an image-only selection of up to ten PNG/JPEG/WebP/GIF files enters the exact chat's outer tool result as image blocks. Shared `MAX_INPUT_IMAGES` governs eligibility, admission, normalization, batching and retained previews. Existing per-file, decoded-pixel, normalized-image and aggregate byte bounds still apply. New Chat, after-turn, mixed files and larger selections use native upload. |
 | Decision/planner | Role-specific request through the same claim/receipt infrastructure, with its own result consumer and cancellation. |
 
 Browser delivery elects one exact tab/document/epoch and checks the right existing conversation
@@ -1412,7 +1415,13 @@ through a debugger. This fixture is not signed-in ChatGPT or installed-runtime a
 Chrome 125+ grants the companion required `debugger`, `tabs` and HTTP(S) host access. The app
 adds no per-tab approval UI: existing screen/control settings govern observation/input and
 Read-only still masks mutation. Only an explicit `browser_tabs new` creates a tab; listing or
-attaching never activates one. A soft blue edge glow, without a hard border or text badge,
+attaching never activates one. `browser_tabs new` starts the requested URL directly. Known
+attachment-capacity failure is refused before creation. Creation and attachment are separate
+receipts: a later attach failure returns the created handle with `created: true`, `attached: false`
+and bounded `attachmentError`; it does not invite another `new`. Listings may include pending
+destination, loading status and separate `access.snapshot` / `access.input` hints. Read-only
+inspection of a protected or foreign tab does not transfer debugger custody or grant input.
+A soft blue edge glow, without a hard border or text badge,
 identifies an attached tab; release removes the
 indicator and debugger without closing the page. Chrome's own permission/debugger UI remains.
 The root debugger session enables Chromium focus emulation while attached, so hidden pages
@@ -1446,6 +1455,8 @@ uses that frame's debugger widget after checking parent geometry/obstruction. Vi
 coordinates require the exact image id and unchanged viewport; full-page images are inspection
 only. Native mouse position and clipboard are untouched. Results report dispatch acceptance,
 not proof the website completed an action.
+`browser_snapshot format: dom` adds bounded attributes, rectangles and computed CSS through the existing isolated-world reader. Noninteractive containers become visible in that format; text remains the default. Password values and inline handlers stay omitted. Traversal, node and text budgets remain exact, with explicit attribute truncation.
+
 Snapshots retain independently actionable descendants and visible body text of named containers,
 traverse `display: contents` wrappers, and expose each contenteditable host once. Native selects
 include bounded options with exact values and selected/disabled state; canvas refs identify targets,
@@ -1458,7 +1469,9 @@ Named keys accept case-insensitive spellings; an optional key ref must acquire t
 target before input. `holdMs` holds a key for at most two seconds and releases it in the same
 call, retaining lease checks. Tab-closed, attachment-lost, foreign-owner and stale-page errors
 stay distinct. Diagnostic pagination marks remaining matching rows as truncated. Background
-screenshots have a 20-second CDP bound inside the existing 25-second RPC; other CDP operations
+screenshots wake a throttled Chromium compositor with a capture-scoped one-pixel screencast,
+stop that stream before returning, and retain their 20-second CDP bound inside the existing
+25-second RPC. This never selects the tab or creates persistent capture. Other CDP operations
 retain eight seconds. A timeout names the command and never replays it or opens a replacement.
 Releasing an existing exact-owner lease remains possible after the page becomes protected or
 navigates; release revokes custody without inspecting/reinitializing that page. Foreign release
@@ -1474,8 +1487,10 @@ HTTP tests and `scripts/verify-browser-control.mjs` (isolated real Chromium, no 
 
 The service worker journals observations before acknowledgement, batches/replays them after
 suspension, and preserves event identity so retransmission does not create duplicate turns or
-messages. Two transport slots, one batch per conversation and fair batch election prevent one
-hot/stalled chat blocking another. Command ACK custody precedes later observations from that
+messages. Durable `/events` batches and 413 split retries use a 60-second deadline; ordinary
+reads keep ten seconds. Unacknowledged journal entries survive a timeout. Two transport slots,
+one batch per conversation and fair batch election prevent one hot/stalled chat blocking another.
+Command ACK custody precedes later observations from that
 route. Reconnection restores eligible documents before creating new work; browser restart is
 a different lifetime from MV3 suspension (§2).
 
@@ -1629,17 +1644,20 @@ Foreign tools, native live prose, media and action controls remain native. When 
 closed Worked fold has one exact final outside it and no mounted interim prose, the companion stream
 projects recorded public interim text and local calls in canonical order before that final.
 Expanding restores native public prose and repartitions only the local calls, without duplicating
-interim or final text. Exact React-typed thought-notification rows in that same owned response may
-be hidden only while canonical local calls render; caption text is not identity, and proof loss,
-Overwrite Off or navigation restores them. Native web/image/download/code/result UI and response
-actions remain protected. Empty lifecycle groups leave no root or margin. The existing DOM coalescer
+interim or final text. Exact React-typed thought-notification rows in that same owned response
+may be hidden from the accepted Fiber scan even before a matching local call is recorded or
+mounted; caption text is not identity, and proof loss, Overwrite Off or navigation restores them.
+Native web/image/download/code/result UI and response actions remain protected.
+Empty lifecycle groups leave no root or margin. The existing DOM coalescer
 refreshes presentation anchors without waiting for the idle activity poll or granting turn/recovery authority.
 
 Opening a local tool disclosure reads one recorded call through paired `/activity/detail` using
 conversation, call id and canonical revision. Ordinary polling stays metadata-only. The store
 reads only already-hydrated activity under its session queue, rechecking current binding; it never
-opens another history, scans disk or resolves overflow assets. The bridge returns bounded stored
-redacted argument/result previews with binary payloads omitted and truthful process outcomes.
+opens another history, scans disk or resolves overflow assets. The detail row passes through the
+same turn-origin timeline projection as the corresponding activity list row. The bridge returns
+bounded stored redacted argument/result previews with binary payloads omitted and truthful process
+outcomes.
 Document, route and navigation epoch are checked around transport; a late response can only
 populate the currently connected disclosure for that same call/revision. A bounded document cache
 preserves open details across repaint and invalidates revised calls. Recording Off retains access
@@ -1753,7 +1771,14 @@ temporary protection. Normal conversation policy can take over. The record survi
 and protects foreground as well as background placement; it grants no new opening or Send.
 
 Revival first queries/elects exact existing tabs. Query failure is unknown state, not an empty
-tab list. An existing but not yet usable exact tab blocks replacement. Resume destination
+tab list. An existing but not yet usable exact tab blocks replacement. Parked prime history
+must not grant or refuse browser recovery. A waking worker qualifies for a missing-tab wake
+only with pending text for its exact run/conversation. An admitted revival inspects the page
+after its session read and rechecks command presence, no elected owner, no proven delivery,
+same revival text/conversation, binding, recovery setting, stop and user-departure fences
+before using `no-tab:wake:<commandId>`. App observation absence alone is not permission to
+bypass the extension's exact-tab scan or open twice. Explicit user close persists
+`browserRecoveryDismissedAt` until a later real page return. Resume destination
 election additionally obeys the continuation WAL (§15). `browserTabPolicy()` derives idle
 eligibility from existing app ownership, settled turns or sleeping workers, work timestamps
 and pending input/automation/continuation protection. Page presence never resets that clock.
@@ -1901,7 +1926,9 @@ awaiting-summary -> awaiting-chat -> claimed -> committing -> committed
    turn. Binding, policy and source proof are rechecked after reads; old/unscoped banners and
    manual Stop cannot grant the exception.
 2. **Ask for a brief safely.** Wait for running local tools, not the recorder's attribution
-   tail. The source-tool fence prevents work continuing on A after handoff. Mark send attempt
+   tail, and for exact native enclosing code-mode result receipts on automatic compaction.
+   A vanished DOM row, zero running local calls, or timing alone is not an answered receipt.
+   Missing receipt fails visibly before Stop/summary Send. The source-tool fence prevents work continuing on A after handoff. Mark send attempt
    before clicking; attempted/dispatched/sent checkpoints are not interchangeable. Retry a
    known pre-dispatch failure, but never click again merely because the receipt is missing.
 3. **Capture exact provenance.** Match the authored handoff request and assistant brief by
@@ -1967,11 +1994,16 @@ Destination proof requires the exact Project home, a different connected editor 
 turns. User interaction, cancellation or a foreign route revokes the attempt; no extra tab or
 second click compensates for a missing result.
 
-The brief includes the original task, accepted steering, current result, remaining checks and
-relevant durable ids. Linked project instructions and current executor settings still apply.
-Goal context can use a committed handoff as a provenance anchor; aborted/stale/legacy text is
-not one. A source reply obligation must be superseded when its work has moved, rather than
-mistaken for B's completed turn (§21 records the remaining ledger gap).
+The brief is compact operational state, not a transcript: target 1,500–3,000 tokens and never
+exceed 4,000. It preserves the final user requirements, verified current result, unresolved
+work, relevant durable ids and precise next actions while omitting repetition, raw tool
+transcripts and copied plans/specs. When Superpowers is active it names the exact skill plus
+spec, plan, worktree and `.superpowers/sdd/.../progress.md` paths and current task/fix round;
+the replacement reads those durable artifacts and verifies the ledger/git history instead of
+receiving duplicated content. Linked project instructions and current executor settings still
+apply. Goal context can use a committed handoff as a provenance anchor; aborted/stale/legacy
+text is not one. A source reply obligation must be superseded when its work has moved, rather
+than mistaken for B's completed turn (§21 records the remaining ledger gap).
 
 Legacy shadow repair requires exact old continuation proof. It may repair missing projections;
 it must not guess a new rebind, delete history or become the path for new continuations.

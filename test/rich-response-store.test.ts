@@ -484,7 +484,7 @@ describe('rich revisions of an existing canonical assistant shard', () => {
     expect(await upsertRichMessage(session.id, MESSAGE, rich('Stale'), origin(), originalRecordingRevision)).toBe('refused');
     expect(await fs.readdir(shards)).toEqual(names);
     expect(await fs.readFile(path.join(shards, names[0]!))).toEqual(originalBytes);
-    expect((await readEvents(session.id)).find(row => row.kind === 'assistant_message')).toEqual(first.event);
+    expect((await readEvents(session.id)).find(row => row.kind === 'assistant_message')).toEqual({ ...first.event, turnOrigin: null });
     expect(await getSession(session.id)).toMatchObject({
       events: originalSession?.events, estimatedTokens: originalSession?.estimatedTokens,
       contextTokens: originalSession?.contextTokens, lastAssistantFinalAt: originalSession?.lastAssistantFinalAt,
@@ -625,7 +625,7 @@ describe('rich revisions of an existing canonical assistant shard', () => {
       return realRename(oldPath, newPath);
     }) as typeof fs.rename);
     await expect(upsertRichMessage(session.id, MESSAGE, rich(), origin())).rejects.toThrow('simulated disk fault');
-    expect((await readEvents(session.id)).find(row => row.kind === 'assistant_message')).toEqual(first.event);
+    expect((await readEvents(session.id)).find(row => row.kind === 'assistant_message')).toEqual({ ...first.event, turnOrigin: null });
     fault.mockRestore();
     expect(await upsertRichMessage(session.id, MESSAGE, rich(), origin())).toBe('stored');
     expect((await readEvents(session.id)).find(row => row.kind === 'assistant_message')).toMatchObject({ rich: { revision: 1 } });

@@ -55,6 +55,16 @@ is retained with an exclusive-send regression: an unnamed resume keeps its dispa
 instead of reporting success or automatically resending after a transport banner. The original
 banner-driven resend and process-local retry counter were not incorporated.
 
+The 2026-09-19 ChatBBC reliability port adapts [@Maximapple](https://github.com/Maximapple)'s
+response-identity, Continue, browser-inspection, compaction-receipt, GVDB and worker-wake
+work from upstream [#297](https://github.com/totec448-spec/chat-on-steroids/pull/297),
+[#300](https://github.com/totec448-spec/chat-on-steroids/pull/300),
+[#310](https://github.com/totec448-spec/chat-on-steroids/pull/310),
+[#312](https://github.com/totec448-spec/chat-on-steroids/pull/312),
+[#313](https://github.com/totec448-spec/chat-on-steroids/pull/313) and
+[#316](https://github.com/totec448-spec/chat-on-steroids/pull/316), including co-authorship
+noted on those upstream commits. ChatBBC branding and concurrent local work were retained.
+
 ## Reports, review and proposed work
 
 [@raxy24](https://github.com/raxy24)'s report in

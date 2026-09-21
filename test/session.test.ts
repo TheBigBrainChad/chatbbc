@@ -46,6 +46,7 @@ import {
   pruneSessions,
   readAsset,
   readEvents,
+  readActivityEvents,
   readRecentEvents,
   readLatestUserMessage,
   turnHasMcpCall,
@@ -63,7 +64,7 @@ import {
   writeAsset
 } from '../src/main/session/store.js';
 import { summarizeToolCall } from '../src/main/session/summarize.js';
-import { HANDOFF_BRIEF_RULES, nativeHandoffPrompt } from '../src/main/session/handoff-prompt.js';
+import { nativeHandoffPrompt } from '../src/main/session/handoff-prompt.js';
 import {
   CHAT_ACTIVE_MS,
   CHAT_SILENCE_MS,
@@ -415,8 +416,11 @@ describe('session store', () => {
 
   it('finds an attachment beyond the 5,000-session maintenance scan cap', async () => {
     const seed = await createSession({ title: 'catalog seed', conversationId: null });
-    const seedSummary = await getSession(seed.id);
-    expect(seedSummary).not.toBeNull();
+    await flushSessions();
+    // Clone an actual persisted checkpoint, including its private version/watermark
+    // fields. A public summary is a legacy fixture and causes 5,001 real migrations.
+    const seedSummary = JSON.parse(await fs.readFile(path.join(sessionsRoot(), seed.id, 'meta.json'), 'utf8'));
+    const seedStat = await fs.stat(path.join(sessionsRoot(), seed.id, 'meta.json'));
     // Force the next lookup to rebuild from the durable catalog rather than the live seed.
     resetSessionStoreForTests();
 
@@ -425,7 +429,23 @@ describe('session store', () => {
     const targetId = names[names.length - 1] as string;
     const realReaddir = fs.readdir.bind(fs);
     const realReadFile = fs.readFile.bind(fs);
+    const realStat = fs.stat.bind(fs);
     const rootPath = sessionsRoot();
+    const virtualNames = new Set(names);
+    const virtualId = (file: string): string | null => {
+      const parts = path.relative(rootPath, file).split(path.sep);
+      return parts.length === 2 && virtualNames.has(parts[0]!) ? parts[0]! : null;
+    };
+    const statSpy = vi.spyOn(fs, 'stat').mockImplementation(
+      (async (target: Parameters<typeof fs.stat>[0], ...args: unknown[]) => {
+        const file = String(target);
+        if (virtualId(file)) {
+          if (path.basename(file) === 'meta.json') return seedStat;
+          throw Object.assign(new Error('synthetic catalog has no message history'), { code: 'ENOENT' });
+        }
+        return (realStat as (...callArgs: unknown[]) => ReturnType<typeof fs.stat>)(target, ...args);
+      }) as typeof fs.stat
+    );
     const readdirSpy = vi.spyOn(fs, 'readdir').mockImplementation(
       (async (target: Parameters<typeof fs.readdir>[0], ...args: unknown[]) => {
         if (String(target) === rootPath) return names;
@@ -435,8 +455,8 @@ describe('session store', () => {
     const readSpy = vi.spyOn(fs, 'readFile').mockImplementation(
       (async (target: Parameters<typeof fs.readFile>[0], ...args: unknown[]) => {
         const file = String(target);
-        const id = path.basename(path.dirname(file));
-        if (file.endsWith('meta.json') && id.startsWith('catalog-')) {
+        const id = virtualId(file);
+        if (path.basename(file) === 'meta.json' && id) {
           return JSON.stringify({
             ...seedSummary,
             id,
@@ -451,9 +471,13 @@ describe('session store', () => {
 
     try {
       expect((await findSessionByConversation(conversationId, { requireUnique: true }))?.id).toBe(targetId);
+      expect((await realReaddir(rootPath)).some(name => virtualNames.has(name))).toBe(false);
     } finally {
       readSpy.mockRestore();
       readdirSpy.mockRestore();
+      statSpy.mockRestore();
+      resetSessionStoreForTests();
+      await deleteSession(seed.id);
     }
   }, 90_000);
 
@@ -507,6 +531,108 @@ describe('session store', () => {
     const events = await readEvents(summary.id);
     expect(events.map((event) => event.seq)).toEqual([1, 2, 3, 4]);
     expect(events.map((event) => event.kind)).toEqual(kinds);
+  });
+
+  it.each([false, true])('keeps recovered replies in their original turn across bounded reads and legacy restart (%s)', async restart => {
+    const session = await createSession({ title: 'paged turn boundaries', conversationId: 'timeline-boundaries' });
+    const text = (value: string) => ({ text: value, chars: value.length, truncated: false });
+    await upsertMessageEvent(session.id, { kind: 'user_message', messageId: 'first-question', time: 90, source: 'extension', message: text('First question') });
+    const start = await appendEvent(session.id, { kind: 'turn_start', turnId: 'first', time: 100, source: 'extension' });
+    await appendEvent(session.id, { kind: 'progress', turnId: 'first', time: 120, source: 'app', message: text('First work') });
+    await appendEvent(session.id, { kind: 'turn_end', turnId: 'first', time: 180, source: 'extension', outcome: 'completed' });
+    await upsertMessageEvent(session.id, { kind: 'user_message', messageId: 'second-question', time: 200, source: 'extension', message: text('Second question') });
+    await appendEvent(session.id, { kind: 'turn_start', turnId: 'second', time: 210, source: 'extension' });
+    const work = await appendEvent(session.id, { kind: 'progress', turnId: 'second', time: 230, source: 'app', message: text('Second work') });
+    const recovered = await upsertMessageEvent(session.id, { kind: 'assistant_message', turnId: 'first', time: 290,
+      authoredAt: 150, messageId: 'first-reply', source: 'extension', message: text('Recovered first answer'), final: true });
+    await upsertMessageEvent(session.id, { kind: 'assistant_message', turnId: 'second', time: 280,
+      messageId: 'second-reply', source: 'extension', message: text('Second answer'), final: true });
+    await appendEvent(session.id, { kind: 'turn_end', turnId: 'second', time: 300, source: 'extension', outcome: 'completed' });
+    await flushSessions();
+    const folder = path.join(sessionsRoot(), session.id);
+    const journal = await fs.readFile(path.join(folder, 'events.jsonl'), 'utf8');
+    const before = await readEvents(session.id);
+    const coordinates = (event: SessionEvent) => ({ seq: event.seq, position: positionOf(event), time: event.time, turnId: event.turnId });
+    const original = before.map(coordinates);
+    if (restart) {
+      resetRecorderForTests(); resetSessionStoreForTests();
+      for (const name of ['meta.json', 'meta.backup.json']) {
+        const file = path.join(folder, name);
+        const metadata = JSON.parse(await fs.readFile(file, 'utf8'));
+        delete metadata.timelineTurns;
+        await fs.writeFile(file, JSON.stringify(metadata));
+      }
+    }
+    const page = await readRecentEvents(session.id, 4, { orderByOrigin: true });
+    expect(page[0]).toMatchObject({ kind: 'assistant_message', messageId: 'first-reply',
+      seq: recovered.event.seq, origin: recovered.event.origin, time: 290, authoredAt: 150, turnId: 'first', turnOrigin: start.seq });
+    expect(page[1]?.seq).toBe(work.seq);
+    const full = await readEvents(session.id);
+    expect(full.map(coordinates)).toEqual(original);
+    for (const row of full) {
+      const older = await readRecentEvents(session.id, 3, { before: positionOf(row) + 1, orderByOrigin: true });
+      const keys = new Set(older.map(event => event.seq));
+      expect(older.map(event => event.seq)).toEqual(full.filter(event => keys.has(event.seq)).map(event => event.seq));
+    }
+    expect((await getSession(session.id))?.activeTurnId).toBeNull();
+    expect((await getSession(session.id))?.timelineTurns?.first).toEqual({ origin: start.seq, time: 100,
+      endTime: 180, endOrigin: 4, questionId: 'first-question' });
+    expect(await fs.readFile(path.join(folder, 'events.jsonl'), 'utf8')).toBe(journal);
+  });
+
+  it.each([false, true])('keeps reloaded interim prose before later tools across every read path and restart (%s)', async restart => {
+    const session = await createSession({ title: 'native interim ordering', conversationId: 'interim-order' });
+    const working = '11111111-1111-4111-8111-111111111111';
+    const exchange = '22222222-2222-4222-8222-222222222222';
+    const parent = '33333333-3333-4333-8333-333333333333';
+    const text = (value: string) => ({ text: value, chars: value.length, truncated: false });
+    const start = await appendEvent(session.id, { kind: 'turn_start', source: 'extension', time: 100, turnId: 'working' });
+    await upsertMessageEvent(session.id, { kind: 'assistant_message', source: 'extension', time: 110,
+      messageId: `assistant:${parent}:${working}:${exchange}`, turnId: 'working', message: text('First update'), final: false });
+    const later = await appendEvent(session.id, { kind: 'tool_call', source: 'mcp', time: 150, turnId: 'working',
+      call: { callId: 'later-tool', tool: 'read', requestId: 'interim-request', conversationId: 'interim-order',
+        attribution: 'request_id', attributionMethod: 'request_id', args: text('{}'), result: text('ok'), outcome: 'ok', durationMs: 1,
+        summary: { kind: 'read', title: 'Later tool', tone: 'neutral' } } });
+    const interim = await upsertMessageEvent(session.id, { kind: 'assistant_message', source: 'extension', time: 140,
+      messageId: `assistant:${exchange}:${working}:${exchange}`, message: text('Second update'), final: false });
+    await flushSessions();
+    const folder = path.join(sessionsRoot(), session.id);
+    const journal = await fs.readFile(path.join(folder, 'events.jsonl'), 'utf8');
+    const shardName = createHash('sha256').update(`assistant_message\u0000${interim.event.messageId}`).digest('hex') + '.json';
+    const shard = await fs.readFile(path.join(folder, 'messages', shardName), 'utf8');
+    if (restart) resetSessionStoreForTests();
+    const full = await readEvents(session.id);
+    expect(full.map(row => row.seq)).toEqual([start.seq, 2, interim.event.seq, later.seq]);
+    for (const page of [
+      await readRecentEvents(session.id, 2, { orderByOrigin: true }),
+      await readRecentEvents(session.id, 2, { after: 2, orderByOrigin: true }),
+      await readEvents(session.id, { from: 3, limit: 2 }),
+      (await readActivityEvents(session.id, 3, 2)).events
+    ]) {
+      expect(page.map(row => row.seq)).toEqual([interim.event.seq, later.seq]);
+      expect(page[0]).toMatchObject({ origin: interim.event.origin, time: 140, turnOrigin: start.seq });
+      expect(page[0]?.turnId).toBeUndefined();
+    }
+    const summary = await getSession(session.id);
+    expect(summary?.activeTurnId).toBe('working');
+    expect(summary?.lastAssistantFinalAt).toBeNull();
+    expect(await fs.readFile(path.join(folder, 'events.jsonl'), 'utf8')).toBe(journal);
+    expect(await fs.readFile(path.join(folder, 'messages', shardName), 'utf8')).toBe(shard);
+  });
+
+  it('preserves the legacy authored position when a reload changes the provider timestamp for the same UUID', async () => {
+    const session = await createSession({ title: 'reload authored timestamp' });
+    const owner = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const providerMessageId = '11111111-2222-4333-8444-555555555555';
+    const message = { text: 'The recorded answer', chars: 19, truncated: false };
+    const first = await upsertMessageEvent(session.id, { kind: 'assistant_message', source: 'extension', final: true,
+      messageId: `assistant:${owner}:${owner}:1789662776481`, providerMessageId, time: 1789662900000, message });
+    const replay = await upsertMessageEvent(session.id, { kind: 'assistant_message', source: 'extension', final: true,
+      messageId: `assistant:${owner}:${owner}:1789662999999`, providerMessageId, time: 1789663000000,
+      authoredAt: 1789662999999, message }, { preferTime: true });
+    expect(replay.event).toMatchObject({ messageId: first.event.messageId, time: first.event.time,
+      origin: first.event.origin, authoredAt: 1789662776481 });
+    expect(await readEvents(session.id)).toHaveLength(1);
   });
 
   it('reorders late events only inside the durable turn that owns them', async () => {
@@ -2039,8 +2165,9 @@ describe('handoff storage', () => {
 
   it('finds the newest handoff even when its session is beyond the 5,000-folder maintenance cap', async () => {
     const seed = await createSession({ title: 'handoff catalog seed' });
-    const seedSummary = await getSession(seed.id);
-    expect(seedSummary).not.toBeNull();
+    await flushSessions();
+    const seedSummary = JSON.parse(await fs.readFile(path.join(sessionsRoot(), seed.id, 'meta.json'), 'utf8'));
+    const seedStat = await fs.stat(path.join(sessionsRoot(), seed.id, 'meta.json'));
     resetSessionStoreForTests();
 
     const names = Array.from({ length: 5001 }, (_, index) => `handoff-${String(index).padStart(5, '0')}`);
@@ -2048,7 +2175,23 @@ describe('handoff storage', () => {
     const handoffId = '2026-08-24-deadbeef';
     const realReaddir = fs.readdir.bind(fs);
     const realReadFile = fs.readFile.bind(fs);
+    const realStat = fs.stat.bind(fs);
     const rootPath = sessionsRoot();
+    const virtualNames = new Set(names);
+    const virtualId = (file: string): string | null => {
+      const parts = path.relative(rootPath, file).split(path.sep);
+      return parts.length === 2 && virtualNames.has(parts[0]!) ? parts[0]! : null;
+    };
+    const statSpy = vi.spyOn(fs, 'stat').mockImplementation(
+      (async (target: Parameters<typeof fs.stat>[0], ...args: unknown[]) => {
+        const file = String(target);
+        if (virtualId(file)) {
+          if (path.basename(file) === 'meta.json') return seedStat;
+          throw Object.assign(new Error('synthetic catalog has no message history'), { code: 'ENOENT' });
+        }
+        return (realStat as (...callArgs: unknown[]) => ReturnType<typeof fs.stat>)(target, ...args);
+      }) as typeof fs.stat
+    );
     const readdirSpy = vi.spyOn(fs, 'readdir').mockImplementation(
       (async (target: Parameters<typeof fs.readdir>[0], ...args: unknown[]) => {
         if (String(target) === rootPath) return names;
@@ -2058,8 +2201,8 @@ describe('handoff storage', () => {
     const readSpy = vi.spyOn(fs, 'readFile').mockImplementation(
       (async (target: Parameters<typeof fs.readFile>[0], ...args: unknown[]) => {
         const file = String(target);
-        const id = path.basename(path.dirname(file));
-        if (file.endsWith('meta.json') && id.startsWith('handoff-')) {
+        const id = virtualId(file);
+        if (path.basename(file) === 'meta.json' && id) {
           return JSON.stringify({
             ...seedSummary,
             id,
@@ -2069,7 +2212,7 @@ describe('handoff storage', () => {
             lastHandoffAt: id === targetId ? 20_000 : null
           });
         }
-        if (file.endsWith(`${path.sep}handoffs${path.sep}${handoffId}.json`)) {
+        if (file === path.join(rootPath, targetId, 'handoffs', `${handoffId}.json`)) {
           return JSON.stringify(handoff(targetId, handoffId, 20_000));
         }
         return (realReadFile as (...callArgs: unknown[]) => ReturnType<typeof fs.readFile>)(target, ...args);
@@ -2078,9 +2221,12 @@ describe('handoff storage', () => {
 
     try {
       expect((await latestHandoff())?.id).toBe(handoffId);
+      expect((await realReaddir(rootPath)).some(name => virtualNames.has(name))).toBe(false);
     } finally {
       readdirSpy.mockRestore();
       readSpy.mockRestore();
+      statSpy.mockRestore();
+      resetSessionStoreForTests();
       await deleteSession(seed.id);
     }
   }, 90_000);
@@ -2219,19 +2365,16 @@ describe('handoff storage', () => {
     expect(chunkText('short brief', 1000)).toEqual(['short brief']);
   });
 
-  it('asks for user-authoritative handoffs up to the documented 30k-token ceiling', () => {
-    const prompt = nativeHandoffPrompt();
-    expect(prompt).toContain(HANDOFF_BRIEF_RULES);
-    expect(prompt).toMatch(/user's messages as the highest-authority source/i);
-    expect(prompt).toMatch(/10,000[–-]30,000 tokens/i);
-    expect(prompt).toMatch(/~6,000-token brief is normally too short/i);
-    expect(prompt).toMatch(/Never exceed 30,000 tokens/i);
-    expect(prompt).toMatch(/lossless operational compression/i);
+  it('asks for a bounded artifact-driven operational handoff', () => {
+    const prompt = nativeHandoffPrompt('0123456789abcdef', false);
+    expect(prompt.length).toBeLessThanOrEqual(3_500);
+    expect(prompt).toMatch(/latest accepted requirements/i);
+    expect(prompt).toMatch(/1,500[–-]3,000 tokens/i);
+    expect(prompt).toMatch(/hard maximum 4,000/i);
+    expect(prompt).toMatch(/Superpowers/i);
     expect(prompt).toMatch(/failure.*root cause.*change.*verification/i);
-    expect(prompt).toMatch(/PLANNED \/ DECIDED/i);
-    expect(prompt).toMatch(/FAILED \/ UNRESOLVED/i);
-    expect(prompt).toMatch(/VERIFICATION/i);
-    expect(prompt).toMatch(/completed and verified/i);
+    expect(prompt).toMatch(/spec.*plan.*progress\.md/i);
+    expect(prompt).not.toMatch(/10,000[–-]30,000 tokens/i);
   });
 
   it('honors the tool-detail setting in the handoff brief without claiming to erase seen history', () => {
@@ -2437,6 +2580,21 @@ describe('canonical recorder 1.8', () => {
     const retry = await recordChatObservations(conversationId, [error]);
     expect(retry.stored).toBe(1);
     expect(await readEvents(retry.sessionId!, { kinds: ['chat_error'] })).toHaveLength(1);
+  });
+
+  it('coalesces the same transport notice with Retry button text across document turns', async () => {
+    const conversationId = 'conv-error-retry-label';
+    const error = { kind: 'chat_error' as const, time: 100_000,
+      text: 'Message delivery timed out. Please try again.', recoverable: true, turnId: 'original' };
+    const first = await recordChatObservations(conversationId, [
+      { kind: 'user_message', messageId: 'question', text: 'Build', time: 90_000, authoredNow: true },
+      { ...error, text: `${error.text} Retry` }, { ...error, time: 100_100, turnId: undefined }
+    ]);
+    await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests();
+    await recordChatObservations(conversationId, [{ ...error, time: 200_000, turnId: 'replacement' }]);
+    expect(await readEvents(first.sessionId!, { kinds: ['chat_error'] })).toHaveLength(1);
+    await recordChatObservations(conversationId, [{ ...error, time: 201_000, text: 'Connection interrupted' }]);
+    expect(await readEvents(first.sessionId!, { kinds: ['chat_error'] })).toHaveLength(2);
   });
 
   it('keeps one exact Thinking failed notice across reload/restart beyond the burst window', async () => {

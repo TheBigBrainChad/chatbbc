@@ -751,6 +751,19 @@
     const source = userMessageSource(message);
     return source !== null && sendText(source.text) === sendText(expected);
   }
+  /** An app-owned bootstrap may return escaped. Ordinary input authorization keeps
+   * matchesSubmittedUser; native message identity and document lifetime still own the receipt. */
+  function matchesSubmittedBootstrap(message, expected) {
+    if (matchesSubmittedUser(message, expected)) return true;
+    if (typeof expected !== 'string' || expected.length > 240000) return false;
+    const source = userMessageSource(message);
+    if (source === null) return false;
+    const actualMarker = markedAs(source.text), expectedMarker = expected.match(CONTINUATION_MARKER);
+    // A marker-only escape must not consume literal path/glob backslashes in the brief.
+    if (actualMarker && expectedMarker && actualMarker[1] === expectedMarker[1] && actualMarker[2] === expectedMarker[2] &&
+        sendText(source.text.slice(actualMarker[0].length)) === sendText(expected.slice(expectedMarker[0].length))) return true;
+    return sendText(unescapeMarkdown(source.text)) === sendText(expected);
+  }
   // A first fresh route may await authored evidence. A second route (including an
   // observed return to New Chat) revokes this send; text proof is not its lifetime.
   function submittedSendLifetime(target, startedEpoch = epoch) {
@@ -772,11 +785,25 @@
       return !revoked;
     };
   }
-  function sendSubmittedText(stillCurrent, clearAcceptedDraft = true, beforeSend = null, acceptUserReceipt = null) {
-    return CLF_DOM.send({ stillCurrent, clearAcceptedDraft, beforeSend, acceptUserReceipt, matchesUser: matchesSubmittedUser,
+  function sendSubmittedText(stillCurrent, clearAcceptedDraft = true, beforeSend = null, acceptUserReceipt = null,
+                             matchesUser = matchesSubmittedUser) {
+    return CLF_DOM.send({ stillCurrent, clearAcceptedDraft, beforeSend, acceptUserReceipt, matchesUser,
       observeEvidence: check => { pageViewChecks.add(check); return () => pageViewChecks.delete(check); } });
   }
   const GOAL_MARKER_INSTRUCTION = '\n\nFor this Goal session only: at the end of each final reply, write exactly one separate last line: [[COS_GOAL:COMPLETE]] if the entire requested task is finished, or [[COS_GOAL:CONTINUE]] if requested work remains. Do not claim completion for partial work. If user input is required, explain it and omit both markers.';
+  function matchesUserSendReceipt(message, receipt) {
+    if (!message || !receipt || (!desktopInputBusy && !commandAttempt && !receipt.accepted &&
+        Date.now() - receipt.at > USER_SEND_RECEIPT_MS)) return false;
+    const current = CLF_DOM.conversationId();
+    const acceptedIdentity = receipt.accepted?.messageId === message.id &&
+      receipt.accepted.conversationId === current && receipt.accepted.epoch === epoch;
+    const attachmentsMatch = receipt.text || (receipt.attachmentNames?.length &&
+      JSON.stringify(receipt.attachmentNames) === JSON.stringify((userMessageSource(message)?.attachments || []).map(file => file.name).sort()));
+    return (!receipt.conversationId || receipt.conversationId === current) &&
+      (!receipt.previousMessageId || receipt.previousMessageId !== message.id) && !!attachmentsMatch &&
+      (acceptedIdentity || matchesSubmittedUser(message, receipt.text));
+  }
+
   function rememberUserSend() {
     // Only the explicitly selected offline Goal backend changes the user prompt.
     const composer = CLF_DOM.composer();
@@ -1319,6 +1346,12 @@
         (!inFlight && watched?.handle !== handle && !wasDeferred)) return;
     const hint = pagePixelPrerequisites.get(key);
     if (!pagePixelHintCurrent(hint)) return;
+    // A second Chrome ticket for the same slot while its begin/join/encode is
+    // already running turns one IMG mutation into two receipts. Fiber restamp
+    // recovery still uses reason === 'scan' after the in-flight task finishes.
+    if (reason !== 'scan' && (pagePixelFlights.has(key) || pagePixelReady.has(key) ||
+        [...pagePixelTasks.values(), ...pagePixelActive]
+          .some(task => pagePixelKey(task.capture.hint) === key))) return;
     // A removed rich root has no current physical slot to acquire. Replacing
     // its IMG within the same still-mounted root remains eligible, but a
     // tombstoned root may not spend a new Chrome ticket on its old URL or ID.
@@ -2066,6 +2099,9 @@
     if (!open || generating || (userStopped && turnId === open)) return false;
     seedResumeBaseline();
     anchorAdoptedQuestion(questionId);
+    // The app's exact question already opened this response. A still-retained
+    // Send receipt in another document cannot open it a second time.
+    if (questionId) openedUserMessageId = questionId;
     generating = true;
     unwitnessedGeneration = true;
     turnId = open;
@@ -2316,7 +2352,7 @@
     fiberRows = new Map();
     fiberTurns = new Map();
     fiberScanToken = null;
-    fiberPresent = false;
+    fiberPresent = null;
   }
 
   const stoppedAppCommands = new Set();
@@ -2418,19 +2454,22 @@
    * whole point of this batch is that the local session log stops containing those.
    */
   function generationTurn(turns = CLF_DOM.turns()) {
+    const question = turns.findLastIndex(turn => turn.role === 'user');
+    const ownsQuestion = Boolean(openedUserMessageId && question >= 0 &&
+      CLF_DOM.messagesIn(turns[question]).some(message => message.role === 'user' && message.id === openedUserMessageId));
     // Hydration may remount an old answer with a new node after our baseline.
     // An adopted generation still belongs after the latest question; DOM novelty
     // above that boundary cannot establish or retain its assistant owner.
     if (unwitnessedGeneration) {
-      const question = turns.findLastIndex(turn => turn.role === 'user');
       if (question >= 0) turns = turns.slice(question + 1);
     }
-    if (genNode) {
-      const held = turnForNode(genNode, turns);
-      if (held) return held;
-      genNode = null;
-    }
     const latest = currentAssistantTurn(turns);
+    const heldTurn = genNode ? turnForNode(genNode, turns) : null;
+    // One question can publish interim and final prose in different sections.
+    // Keep the held section unless the exact same question proves a newer one
+    // can belong to this response; its novelty is still checked below.
+    if (heldTurn && (!ownsQuestion || heldTurn === latest)) return heldTurn;
+    if (!heldTurn) genNode = null;
     if (!latest) return null;
     // Any node of the logical turn, not just the first. ChatGPT splits one answer across
     // sibling sections, and a new sibling appended to a section that was already there is
@@ -2440,6 +2479,8 @@
       genNode = node;
       return latest;
     }
+    // Reordered or revised pre-Send history cannot replace a still-mounted owner.
+    if (heldTurn) return heldTurn;
     for (const held of priorMarks) {
       if (!latest.nodes && held.node !== latest.node) continue;
       if (latest.nodes && latest.nodes.indexOf(held.node) < 0) continue;
@@ -2667,21 +2708,12 @@
       if (message.id === openedUserMessageId) return false;
       const receipt = userSendReceipt;
       if (receipt) {
-        if (!desktopInputBusy && Date.now() - receipt.at > USER_SEND_RECEIPT_MS) {
+        if (!desktopInputBusy && !commandAttempt && !receipt.accepted && Date.now() - receipt.at > USER_SEND_RECEIPT_MS) {
           userSendReceipt = null;
         } else {
-          const conversationId = CLF_DOM.conversationId();
-          // A durable desktop ACK may precede the activity pull that releases transcript
-          // custody. Keep that exact send identity stronger than later Fiber text spelling.
-          const accepted = receipt.accepted;
-          const acceptedIdentity = accepted?.messageId === message.id &&
-            accepted.conversationId === conversationId && accepted.epoch === epoch;
-          const sameConversation = !receipt.conversationId || receipt.conversationId === conversationId;
-          const newIdentity = !receipt.previousMessageId || receipt.previousMessageId !== message.id;
-          const attachmentsMatch = receipt.text || (receipt.attachmentNames?.length &&
-            JSON.stringify(receipt.attachmentNames) === JSON.stringify((userMessageSource(message)?.attachments || []).map(file => file.name).sort()));
-          if (sameConversation && newIdentity && attachmentsMatch &&
-              (acceptedIdentity || matchesSubmittedUser(message, receipt.text))) {
+          // A verified bootstrap or durable desktop ACK may precede the activity pull
+          // that releases transcript custody. Reuse its exact native send identity.
+          if (matchesUserSendReceipt(message, receipt)) {
             userSendReceipt = null;
             return { messageId: message.id, baseline: receipt.baseline };
           }
@@ -2900,7 +2932,16 @@
         // Only the former owns a pending goal. Without that send receipt, carrying the goal here
         // would silently attach it to whichever sidebar chat happened to be opened next.
         conversationId = id;
-        void bindConversation(id);
+        // An id-less page can navigate into an existing running chat. Resolve
+        // its durable owner before observing Stop or its hydrated question, just
+        // as on boot and identified-chat navigation. Keep an opening's receipt;
+        // after this read it can still prove the genuinely new native send.
+        const submittedUser = CLF_DOM.messages().filter(userMessagePresent).at(-1);
+        resumeIdentityPending = !matchesUserSendReceipt(submittedUser, userSendReceipt);
+        const boundEpoch = epoch;
+        void bindConversation(id).then(() => {
+          if (alive && conversationId === id && epoch === boundEpoch) return pullActivity();
+        });
         if (abandonedOpening) {
           pendingObjective = '';
           pendingObjectiveMode = 'goal';
@@ -3164,7 +3205,11 @@
     const pendingSendEvidence = pageViewChecks.size > 0 && (desktopInputBusy ||
       userSendReceipt && Date.now() - userSendReceipt.at < USER_SEND_RECEIPT_MS);
     if (continuationJournalPending || generating || pendingSendEvidence) {
-      void refreshFiber();
+      // Overlapping Fiber is required while a scan is already awaiting a page-model
+      // reply: a MutationObserver tick can see a newer user question during that
+      // await and must open its own generation. Skip only while PAGE pixels are
+      // actually encoding so a restamp cannot mint a second Chrome ticket.
+      if (!pagePixelActive.size && !pagePixelTasks.size) void refreshFiber();
     } else if (fiberTerminalMessageId && nowGenerating) {
       const terminalTurn = currentAssistantTurn(observedTurns);
       void refreshFiber({
@@ -3679,7 +3724,7 @@
   let fiberScanToken = null;
   let fiberAsking = null;
   /** Off until the helper answers once, so a browser without it behaves exactly as before. */
-  let fiberPresent = false;
+  let fiberPresent = null; // Unknown until this document gets a reply or a definitive repair failure.
   /** Avoid turning a missing MAIN-world helper into one script injection per observer tick. */
   let fiberRepairAt = -Infinity;
   let fiberRepairing = null;
@@ -3960,7 +4005,15 @@
     }
     const keptImages = images.filter(image => !conflictingImages.has(`${image.messageId}\u0000${image.assetId}`));
     const endMessageId = cap(raw.endMessageId, 200);
-    if (kept.length === 0 && requests.length === 0 && keptMessages.length === 0 && keptActivities.length === 0 &&
+    const codeModeCalls = [], codeIds = new Set();
+    for (const entry of (Array.isArray(raw.codeModeCalls) ? raw.codeModeCalls : []).slice(0, FIBER_MAX_CALLS)) {
+      const messageId = cap(entry && entry.messageId, 200);
+      if (!messageId) continue;
+      if (codeIds.has(messageId)) return null;
+      codeIds.add(messageId);
+      codeModeCalls.push({ messageId, tool: 'functions.exec', requestId: cap(entry.requestId, 100), answered: entry.answered === true });
+    }
+    if (codeModeCalls.length === 0 && kept.length === 0 && requests.length === 0 && keptMessages.length === 0 && keptActivities.length === 0 &&
         keptThoughtNotifications.length === 0 && keptImages.length === 0 && !endMessageId) {
       return null;
     }
@@ -3971,6 +4024,7 @@
       conversationConflict: raw.conversationConflict === true,
       endMessageId,
       calls: kept,
+      codeModeCalls,
       requests,
       messages: keptMessages,
       activities: keptActivities,
@@ -4743,6 +4797,8 @@
     richScansActive++;
     let unansweredFiberAsk = false;
     try {
+      if (presentationOnly && (pagePixelActive.size || pagePixelTasks.size || pagePixelFlights.size))
+        return false;
     // A bound chat can briefly lose its /c/<id> route during React/router churn, and a real
     // navigation to a fresh composer has the exact same pathname until ChatGPT assigns the
     // new conversation id. While that identity is unresolved, fail closed: emitting Fiber
@@ -4794,6 +4850,9 @@
     // emitted that exact final with no owner. Capture the node + durable id before the await.
     // If the lifecycle moves meanwhile, localGenerationOf() below accepts the claim only while
     // finishGeneration's exact node/signature tombstone still proves the old ownership.
+    const requestedQuestionId = requestedLiveOwner
+      ? [...CLF_DOM.messages()].reverse().find(message => message.role === 'user')?.id || null
+      : null;
     let answer = await askFiber();
     if (answer === null) {
       // One missed reply is not proof the helper is gone: a busy main thread can outlive this
@@ -4811,6 +4870,8 @@
       const repair = fiberRepairing ? await fiberRepairing : null;
       if (repair && repair.ok === true) answer = await askFiber();
       if (answer === null) {
+        if (!alive || epoch !== askedEpoch || conversationId !== askedConversation ||
+            (askedConversation && CLF_DOM.conversationId() !== askedConversation)) return false;
         // `unknown_message` is compatibility with an older service worker during extension
         // update. It has not actually tested the helper, so preserve the last proof until the
         // update recovery path installs the matching worker. Every current worker returns a
@@ -4851,9 +4912,35 @@
     // actually owns, and its `data-clf-fiber-turn` stamp names the descriptor exactly even
     // when the virtualized renderer published no page turn id at all. The page-id match
     // stays as the fallback for a scan whose stamps have not been applied yet.
-    const exactOwner = requestedLiveOwner && localGenerationOf(requestedLiveOwner.pageTurn) !== requestedLiveOwner.localTurnId
-      ? null
-      : requestedOwner;
+    // React can remove the exact section between the MAIN-world snapshot and this reply.
+    // Losing the node from the live DOM must not erase a final that the captured scan still
+    // stamps to that section. The exception requires the *same* open generation and question,
+    // every captured section unmounted, and no replacement assistant mounted after the question.
+    // A newer question, regenerated answer or reused section therefore cannot inherit it.
+    const capturedNodes = requestedLiveOwner
+      ? requestedLiveOwner.pageTurn.nodes || [requestedLiveOwner.pageTurn.node] : [];
+    const capturedUnmounted = capturedNodes.length > 0 && capturedNodes.every(node => node && !node.isConnected);
+    const capturedUnmountedOwnerCurrent = () => {
+      if (!requestedLiveOwner || !requestedQuestionId || !capturedUnmounted ||
+          !generating || turnId !== requestedLiveOwner.localTurnId) return false;
+      const messages = CLF_DOM.messages();
+      if ([...messages].reverse().find(message => message.role === 'user')?.id !== requestedQuestionId) return false;
+      const turns = CLF_DOM.turns();
+      const question = turns.findLastIndex(turn => turn.role === 'user');
+      return question >= 0 && !turns.slice(question + 1).some(turn => turn.role === 'assistant');
+    };
+    const newerQuestion = requestedLiveOwner && requestedQuestionId &&
+      [...CLF_DOM.messages()].reverse().find(message => message.role === 'user')?.id !== requestedQuestionId;
+    const localOwner = requestedLiveOwner ? localGenerationOf(requestedLiveOwner.pageTurn) : null;
+    const sameGeneration = requestedLiveOwner && generating && turnId === requestedLiveOwner.localTurnId;
+    // A settled node/signature tombstone still admits a late revision for its historical turn.
+    // A live genNode alone does not: it may point at a section React has already removed.
+    const ownerStillValid = !requestedLiveOwner ||
+      (!sameGeneration && localOwner === requestedLiveOwner.localTurnId) ||
+      (sameGeneration && !newerQuestion && (capturedUnmounted
+        ? capturedUnmountedOwnerCurrent() && Boolean(stampedFiberTurn(requestedLiveOwner.pageTurn, answer.turns, answer.scanToken))
+        : localOwner === requestedLiveOwner.localTurnId));
+    const exactOwner = ownerStillValid ? requestedOwner : null;
     const ownedPageNode = exactOwner?.pageTurn || null;
     const ownedPageTurnId = exactOwner?.pageTurnId || null;
     let ownedPageTurn = stampedFiberTurn(ownedPageNode, answer.turns, answer.scanToken);
@@ -4956,6 +5043,10 @@
       else fiberTurns.set(turn.index, turn);
     }
     for (const [index, value] of fiberTurns) if (value === null) fiberTurns.delete(index);
+    // Apply the current live response's presentation before journal writes yield.
+    // Historical scans keep their caller's coalesced paint/viewport boundary;
+    // they must not repaint another response halfway through feed restoration.
+    if (requestedLiveOwner && generating && requestedLiveOwner.localTurnId === turnId) renderStreams();
     // An idle virtualized-history mount needs exact native placement, not a second recorder
     // observation. A previously recorded request id can resolve settledTurnOwner() and make an
     // old final look activeNow/Goal-eligible even though no generation is open. Stop after the
@@ -5241,7 +5332,7 @@
 
         const message = item.value;
         if (message.role === 'user') {
-          if (!message.attachments?.length && renderedUserTexts.get(message.messageId) === message.rawText) continue;
+          if (!message.createTime && !message.attachments?.length && renderedUserTexts.get(message.messageId) === message.rawText) continue;
           const key = occurrenceKey(message.messageId, message.rawText + (message.attachments?.length ? JSON.stringify(message.attachments) : ''));
           if (message.createTime) {
             if (userAuthoredTimesReported.get(key) === message.createTime) continue;
@@ -5256,7 +5347,7 @@
             messageId: message.messageId,
             text: message.rawText,
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
-            ...(message.createTime ? { time: message.createTime, authoredTime: true } : {})
+            ...(message.createTime ? { time: message.createTime, authoredTime: true, authoredAt: message.createTime } : {})
           }, fiberCapture);
           continue;
         }
@@ -5386,6 +5477,7 @@
           messageId: message.messageId,
           providerMessageId: message.rawMessageId,
           ...(rich ? { rich, fiberConversationId: askedConversation } : {}),
+          ...(message.createTime ? { authoredAt: message.createTime } : {}),
           turnId: localOwner || undefined,
           text: message.rawText,
           renderedHtml: message.renderedHtml,
@@ -5426,7 +5518,7 @@
       Boolean(answer.turns[activeTurnIndex]?.endMessageId)
     ) {
       fiberTerminalMessageId = answer.turns[activeTurnIndex].endMessageId;
-      const ended = generationTurn();
+      const ended = generationTurn() || (capturedUnmountedOwnerCurrent() ? exactOwner?.pageTurn : null);
       if (ended) {
         // Native completion resolves transport uncertainty even when its old
         // banner remains mounted; explicit user stop still wins in endOutcome.
@@ -5643,14 +5735,25 @@
    * turn-local and why sorting the whole feed by time would corrupt reloaded history.
    */
   function chronological(entries) {
-    const position = (entry) => (Number.isFinite(Number(entry && entry.origin)) ? Number(entry.origin) : entry.seq);
+    const position = (entry) => (typeof entry?.origin === 'number' && Number.isFinite(entry.origin) ? entry.origin : entry.seq);
+    const authoredTime = entry => {
+      if (Number.isFinite(entry.authoredAt) && entry.authoredAt > 0) return entry.authoredAt;
+      const id = entry.kind === 'assistant_message' && entry.messageId?.match(/^assistant:([a-f0-9-]{36})?:([a-f0-9-]{36})?:(\d{13})$/i);
+      return id && (id[1] || id[2]) ? Number(id[3]) : undefined;
+    };
     const bySeq = [...entries].sort((a, b) => position(a) - position(b) || a.seq - b.seq);
     const anchors = new Map();
     const ends = new Map();
     for (const entry of bySeq) {
+      // Apply newly proved response placement to resident rows of the exact same
+      // local turn, matching shared/chronology.ts without a second identity owner.
+      if (entry.turnId && Number.isFinite(entry.turnOrigin))
+        anchors.set(entry.turnId, Math.min(anchors.get(entry.turnId) ?? Infinity, entry.turnOrigin));
       if (entry.kind === 'turn_start' && entry.turnId && !anchors.has(entry.turnId)) {
         anchors.set(entry.turnId, position(entry));
       }
+    }
+    for (const entry of bySeq) {
       if (entry.kind === 'turn_end' && entry.turnId) {
         const anchor = anchors.get(entry.turnId);
         if (anchor !== undefined) ends.set(anchor, Math.max(ends.get(anchor) || 0, entry.time));
@@ -5672,7 +5775,7 @@
       return found;
     };
     const byTime = (a, b) => {
-      const apart = a.time - b.time;
+      const apart = (authoredTime(a) ?? a.time) - (authoredTime(b) ?? b.time);
       return Number.isFinite(apart) && apart !== 0 ? apart : position(a) - position(b) || a.seq - b.seq;
     };
     const groups = new Map();
@@ -5690,11 +5793,11 @@
         currentPosition = entryPosition;
       }
       let inferredAnchor;
-      if (!entry.turnId && activeAnchor !== undefined) {
+      if (entry.turnOrigin !== null && !entry.turnId && entry.kind !== 'user_message' && activeAnchor !== undefined) {
         const end = ends.get(activeAnchor);
         if (end === undefined || entry.time <= end) inferredAnchor = activeAnchor;
       }
-      const anchor = (entry.turnId ? anchors.get(entry.turnId) : inferredAnchor) ?? entryPosition;
+      const anchor = (entry.turnId ? anchors.get(entry.turnId) : undefined) ?? entry.turnOrigin ?? inferredAnchor ?? entryPosition;
       const held = groups.get(anchor);
       if (held) held.push(entry);
       else groups.set(anchor, [entry]);
@@ -5748,8 +5851,18 @@
     const groups = [];
     const byTurn = new Map();
     const timedRequestTools = [];
+    // Every page carries the recorded start of its exact turns. Retaining a tool or final
+    // must not depend on the start row still fitting inside the bounded feed.
+    for (const entry of entries) {
+      if (!entry.turnId || !Number.isFinite(entry.turnOrigin) || byTurn.has(entry.turnId)) continue;
+      const start = entries.find(row => row.kind === 'turn_start' && row.turnId === entry.turnId);
+      const group = { id: entry.turnId, entries: [], origin: entry.turnOrigin, startedAt: start?.time ?? Infinity };
+      groups.push(group); byTurn.set(entry.turnId, group);
+    }
     for (const entry of entries) {
       if (entry.kind === 'turn_start') {
+        const existing = entry.turnId ? byTurn.get(entry.turnId) : null;
+        if (existing) { existing.entries.push(entry); continue; }
         const group = { id: entry.turnId || `seq:${entry.seq}`, entries: [entry], startedAt: Number(entry.time) || 0 };
         groups.push(group);
         if (entry.turnId) byTurn.set(entry.turnId, group);
@@ -5787,27 +5900,9 @@
       if (owner) owner.entries.push(entry);
     }
 
-    // Same reading order as chronological(): the message that ended the turn closes it,
-    // whatever `create_time` says, because a turn cannot continue past its own last message.
-    const closing = (entries) => {
-      let found = null;
-      for (const entry of entries) {
-        if (entry.kind !== 'assistant_message') continue;
-        if (entry.final !== true && entry.state !== 'final') continue;
-        const at = Number.isFinite(Number(entry.origin)) ? Number(entry.origin) : entry.seq;
-        const held = found === null ? -Infinity : Number.isFinite(Number(found.origin)) ? Number(found.origin) : found.seq;
-        if (at > held) found = entry;
-      }
-      return found;
-    };
-    const rank = (entry, ends) =>
-      entry.kind === 'turn_start' ? -1 : entry.kind === 'turn_end' ? 1 : entry === ends ? 0.5 : 0;
+    // Keep the same order as the store and desktop, including late authored prose.
     for (const group of groups) {
-      const ends = closing(group.entries);
-      group.entries.sort(
-        (a, b) =>
-          rank(a, ends) - rank(b, ends) || (Number(a.time) || 0) - (Number(b.time) || 0) || a.seq - b.seq
-      );
+      group.entries = chronological(group.entries);
     }
     return groups;
   }
@@ -6402,7 +6497,7 @@
     else icon.textContent = entry.kind === 'chat_error' ? '!' : entry.kind === 'agent_message' ? '↔' : entry.kind === 'repair' ? '↻' : '';
     row.append(icon);
 
-    if (entry.agent) {
+    if (entry.agent && entry.agent !== 'prime') {
       const who = document.createElement('span');
       who.className = 'clf-agent';
       who.textContent = String(entry.agent).slice(0, 40);
@@ -6556,7 +6651,7 @@
         head.dataset.clfSignature = signature;
       }
       head.title = `${members.length} tool calls`;
-      reconcileStreamChildren(group.lastElementChild, members.reverse());
+      reconcileStreamChildren(group.lastElementChild, members);
       children.push(group); i = end;
     }
     reconcileStreamChildren(root, children);
@@ -6819,7 +6914,8 @@
   /**
    * Exact native assistant nodes divide chronology into independent adjacent gaps. A missing
    * middle anchor cannot make activity cross that boundary: each side mounts only from its
-   * own exact left or right neighbour. Native page_tool rows stay in ChatGPT exactly once.
+   * own exact left or right neighbour. Native results stay in ChatGPT; status captions
+   * are suppressed separately by the same presentation pass.
    */
   function activityGaps(rendered, nativeAnchors) {
     const authored = rendered.filter(entry => entry.kind === 'assistant_message');
@@ -6836,7 +6932,8 @@
       if (!presented.length) return;
       const leftPlacement = left ? nativeAnchors.get(left.seq) : null;
       const rightPlacement = right ? nativeAnchors.get(right.seq) : null;
-      if (leftPlacement) gaps.push({ key, entries: presented, ...leftPlacement, before: false });
+      if (leftPlacement) gaps.push({ key, entries: presented, ...leftPlacement, before: false,
+        interim: left.final !== true && left.state !== 'final' });
       else if (rightPlacement) gaps.push({ key, entries: presented, ...rightPlacement, before: true });
     };
     for (const entry of rendered) {
@@ -6852,74 +6949,91 @@
     return { chunks: gaps, anchors };
   }
 
-  /** Narrow exception for the reviewed closed Worked fold shape. */
+  /** Public progress must remain readable when the provider unmounts its closed activity
+   * fold, including an interrupted response that never produced a final answer. */
   function collapsedFoldPlacement(turn, rendered, nativeAnchors) {
     const fold = typeof CLF_DOM.collapsedActivityFold === 'function' ? CLF_DOM.collapsedActivityFold(turn) : null;
     if (!fold) return null;
     const finals = rendered.filter(entry => entry.kind === 'assistant_message' &&
       (entry.final === true || entry.state === 'final'));
-    if (finals.length !== 1) return null;
-    const finalPlacement = nativeAnchors.get(finals[0].seq);
-    if (!finalPlacement || finalPlacement.turn !== turn || fold.clip.contains(finalPlacement.anchor)) return null;
-    const order = fold.clip.compareDocumentPosition(finalPlacement.anchor);
-    if (!(order & Node.DOCUMENT_POSITION_FOLLOWING)) return null;
+    if (finals.length > 1) return null;
+    const finalPlacement = finals.length ? nativeAnchors.get(finals[0].seq) : null;
+    // A recorded final still needs its exact native renderer. Absence of a final is valid;
+    // losing the anchor of a known final is not permission to reconstruct or hide it.
+    if (finals.length && (!finalPlacement || finalPlacement.turn !== turn ||
+        fold.clip.contains(finalPlacement.anchor) ||
+        !(fold.clip.compareDocumentPosition(finalPlacement.anchor) & Node.DOCUMENT_POSITION_FOLLOWING))) return null;
     const nonFinalAuthored = rendered.filter(entry => entry.kind === 'assistant_message' &&
       entry !== finals[0] && entry.final !== true && entry.state !== 'final');
     // An expanded or transitioning fold with any exact public prose still belongs to ChatGPT's
     // native renderer. The text-only projection exists only for the stable closed shape where
-    // every non-final authored anchor is absent and the exact native final remains outside.
+    // every non-final authored anchor is absent. Any final remains in its native renderer.
     if (nonFinalAuthored.some(entry => nativeAnchors.get(entry.seq))) return null;
+    if (!finalPlacement && !nonFinalAuthored.length) return null;
     const entries = rendered.filter(entry =>
       PRESENTED_STREAM_KINDS.has(entry.kind) ||
       (entry.kind === 'assistant_message' && entry !== finals[0] && entry.final !== true &&
         entry.state !== 'final' && typeof entry.text === 'string' && entry.text.length > 0)
     );
-    if (!entries.length) return { chunks: [], anchors: [finalPlacement.anchor] };
+    const anchors = [fold.clip, ...(finalPlacement ? [finalPlacement.anchor] : [])];
+    if (!entries.length) return { chunks: [], anchors, fold };
+    const owner = finals[0] || nonFinalAuthored[0];
     return {
-      chunks: [{ key: `fold:${finals[0].messageId || finals[0].seq}`, entries, anchor: fold.clip, before: false }],
-      anchors: [fold.clip, finalPlacement.anchor]
+      chunks: [{ key: `fold:${owner.messageId || owner.seq}`, entries, anchor: fold.clip, before: false }],
+      anchors, fold
     };
   }
 
   /** Native rows are hidden only when Fiber proves this app's exact mounted request. */
   function coveredNativeBlocks(turn, chunks) {
-    const requests = new Set((chunks || []).flatMap(chunk => chunk.entries || [])
-      .filter(entry => entry.kind === 'tool_call' && entry.requestId)
-      .map(entry => entry.requestId));
-    if (!requests.size) return [];
+    const mounted = new Map();
+    const callKey = entry => `${entry.requestId}\u0000${entry.tool}`;
+    for (const entry of (chunks || []).flatMap(chunk => chunk.entries || [])) {
+      if (entry.kind !== 'tool_call' || !entry.requestId || !entry.tool || !entry.callId) continue;
+      const key = callKey(entry), ids = mounted.get(key) || new Set();
+      ids.add(entry.callId); mounted.set(key, ids);
+    }
+    if (!mounted.size) return [];
     const descriptor = fiberTurnFor(turn);
     if (!descriptor) return [];
     const callsByMessage = new Map();
+    const nativeCalls = new Map();
     for (const call of descriptor.calls || []) {
       if (!call?.messageId) continue;
       const held = callsByMessage.get(call.messageId) || [];
       held.push(call);
       callsByMessage.set(call.messageId, held);
+      if (call.answered === true && call.requestId && call.tool) {
+        const key = callKey(call), ids = nativeCalls.get(key) || new Set();
+        ids.add(call.messageId); nativeCalls.set(key, ids);
+      }
     }
     const covered = [];
     for (const block of CLF_DOM.toolBlocks(turn)) {
       const row = fiberFor(block);
       if (!row || row.answered !== true || !ourConnectorSeen(row) || !row.messageId) continue;
       const exact = callsByMessage.get(row.messageId) || [];
-      if (exact.length === 1 && exact[0].answered === true && exact[0].requestId && requests.has(exact[0].requestId)) covered.push(block);
+      if (exact.length !== 1 || exact[0].answered !== true || !exact[0].requestId || row.tool !== exact[0].tool) continue;
+      const key = callKey(exact[0]);
+      // request_id can cover several calls. Coverage must not spend one mounted
+      // read to hide another result from the same response before it is recorded.
+      if ((mounted.get(key)?.size || 0) >= (nativeCalls.get(key)?.size || Infinity)) covered.push(block);
     }
     return covered;
   }
 
-  /** Exact typed native thought notifications belonging to this proven response. */
-  function coveredThoughtNotifications(turn, chunks, websiteRender) {
-    // Response ownership alone is insufficient. At least one canonical local call must be in
-    // a chunk that this paint actually mounted; an unplaced call elsewhere in the response
-    // cannot make a progress-only root suppress the provider's only visible execution row.
-    if (!websiteRender || !(chunks || []).some(chunk =>
-      (chunk.entries || []).some(entry => entry.kind === 'tool_call'))) return [];
+  /** Display-only native status rows, independent of local call recording/placement. */
+  function nativeStatusRows(turn) {
     const descriptor = fiberTurnFor(turn);
-    if (!descriptor || !Array.isArray(descriptor.thoughtNotifications)) return [];
-    const ids = descriptor.thoughtNotifications
-      .filter(entry => entry?.kind === 'thought_notification' && entry.messageId)
+    if (!descriptor || descriptor.conversationId !== conversationId) return { summaries: [], thoughts: [] };
+    const summaries = CLF_DOM.activitySummaryRows(turn);
+    // Overwrite presents recorded calls instead of native thinking/status captions,
+    // including before the first call can be recorded or mounted. A status needs no copy;
+    // its exact current Fiber identity still separates it from authored prose/results.
+    const ids = (descriptor.thoughtNotifications || [])
+      .filter(entry => entry?.kind === 'thought_notification')
       .map(entry => entry.messageId);
-    if (!ids.length || typeof CLF_DOM.thoughtActivityRows !== 'function') return [];
-    return CLF_DOM.thoughtActivityRows(turn, fiberScanToken, descriptor.index, ids);
+    return { summaries, thoughts: ids.length ? CLF_DOM.thoughtActivityRows(turn, fiberScanToken, descriptor.index, ids) : [] };
   }
 
   function renderStreams() {
@@ -6936,7 +7050,14 @@
     // height underneath browser scroll anchoring and is the source of the live up/down jump.
     // Existing synthetic roots are frozen for the same reason: Fiber can fill in while the
     // gesture is active, but presentation waits until the reader has stopped moving.
-    if (enabled && presentationScrollActive()) return;
+    // A pending MAIN scan may already have restamped the DOM while its reply is
+    // still queued. Those stamps are not a contradiction of the previous frame.
+    // Its accepted result repaints above; Off always restores the native view.
+    if (enabled && (presentationScrollActive() || fiberAsking)) return;
+    const syncNativeActivity = (turn, covered = [], presentation = null) => {
+      const statuses = enabled ? nativeStatusRows(turn) : { summaries: [], thoughts: [] };
+      CLF_DOM.hideActivity(turn, covered, statuses.thoughts, statuses.summaries, presentation);
+    };
     const sourceTurns = typeof CLF_DOM.presentationTurns === 'function' ? CLF_DOM.presentationTurns() : CLF_DOM.turns();
     const viewportAnchor = presentationViewportAnchor(sourceTurns);
     // A stable `data-turn-id` is not required for presentation. ChatGPT transiently and, in
@@ -6960,7 +7081,7 @@
         if (!sections.some(node => node.dataset?.clfStreamKey === key)) continue;
         for (const node of sections) if (node.dataset?.clfStreamKey === key) delete node.dataset.clfStreamKey;
         CLF_DOM.replaceActivity(candidate, null, false);
-        CLF_DOM.hideActivity(candidate, []);
+        syncNativeActivity(candidate);
       }
     };
     for (let turnIndex = 0; turnIndex < assistantTurns.length; turnIndex++) {
@@ -7072,7 +7193,7 @@
       if (!enabled || identityConflict || ownerConflict || rootConflict) {
         releaseRoot(priorKey); releaseRoot(streamKey);
         CLF_DOM.replaceActivity(turn, null, false);
-        CLF_DOM.hideActivity(turn, []);
+        syncNativeActivity(turn);
         continue;
       }
       if (priorKey && priorKey !== streamKey) {
@@ -7088,7 +7209,7 @@
       if (!streamKey || !gaps) {
         releaseRoot(streamKey);
         CLF_DOM.replaceActivity(turn, null, false);
-        CLF_DOM.hideActivity(turn, []);
+        syncNativeActivity(turn);
         continue;
       }
       // React can move an already-owned request-only section across a newly mounted user row.
@@ -7101,7 +7222,7 @@
         // Root continuity is presentation identity, not continuing proof that a native
         // connector row is covered. Re-evaluate the current answered/app/request evidence on
         // every paint so an in-flight or restamped row becomes visible immediately.
-        CLF_DOM.hideActivity(turn, coveredNativeBlocks(turn, gaps), []);
+        syncNativeActivity(turn, coveredNativeBlocks(turn, gaps));
         painted.add(streamKey);
         continue;
       }
@@ -7119,7 +7240,7 @@
         streamRootsByKey.set(streamKey, record);
         for (const node of nodes) if (node.dataset) node.dataset.clfStreamKey = streamKey;
         CLF_DOM.replaceActivity(turn, null, true);
-        CLF_DOM.hideActivity(turn, []);
+        syncNativeActivity(turn, [], websiteRender ? placement : null);
         painted.add(streamKey);
         continue;
       }
@@ -7166,17 +7287,15 @@
       record.anchors = placement.anchors;
       for (const node of nodes) if (node.dataset) node.dataset.clfStreamKey = streamKey;
       CLF_DOM.replaceActivity(turn, null, true);
-      CLF_DOM.hideActivity(
-        turn,
-        coveredNativeBlocks(turn, gaps),
-        coveredThoughtNotifications(turn, gaps, websiteRender)
-      );
+      syncNativeActivity(turn, coveredNativeBlocks(turn, gaps), websiteRender ? placement : null);
       painted.add(streamKey);
     }
     for (const [key, record] of streamRootsByKey) {
       if (seenStreamKeys.has(key)) continue;
-      if (Date.now() - record.completeAt >= REPLACEMENT_GRACE_MS ||
-          ![...record.chunks.values(), ...record.anchors].some(node => node.isConnected)) releaseRoot(key);
+      // React can replace a section one paint before Fiber identifies its successor.
+      // Keep detached disclosure state for the existing bounded grace; reclaiming
+      // still requires exact call/message proof in remountedStreamRecord above.
+      if (!enabled || Date.now() - record.completeAt >= REPLACEMENT_GRACE_MS) releaseRoot(key);
     }
     renderRepairNotices(sourceTurns);
     restorePresentationViewport(viewportAnchor);
@@ -7250,7 +7369,13 @@
     const forEpoch = epoch;
     const current = () => alive && conversationId === forId && epoch === forEpoch;
     try {
-      const reply = await ask({ type: 'activity', conversationId, since });
+      const reply = await ask({
+        type: 'activity',
+        conversationId,
+        since,
+        // Initial/loading state is unknown; only a completed scan or repair can report health.
+        fiber: fiberPresent === null ? undefined : !fiberPresent ? 'absent' : fiberTurns.size === 0 ? 'empty' : 'ok'
+      });
       if (!reply || reply.ok !== true || !reply.data) {
         // Keep waiting only for failures that can genuinely mean "the local app/worker is
         // not reachable yet". A structured application refusal is an answer to the identity
@@ -7386,12 +7511,15 @@
       job = data.job || null;
       operationProgress = data.progress || null;
       pendingTools = Number.isFinite(Number(data.pendingTools)) ? Number(data.pendingTools) : 0;
-      // The generation this chat has open in the app, if any. Only ever *read* by
-      // resumeOpenTurn(), on the boot pull, and only to work out whether this document is
-      // standing in the middle of a turn a previous one opened. See adoptTurnId.
+      // The durable response can arrive after boot's empty/refused activity
+      // reply. Until this document has owned a turn, exact question proof may
+      // still restore it through this same feed, even after native completion.
       appActiveTurnId = typeof data.activeTurnId === 'string' && data.activeTurnId ? data.activeTurnId : null;
       if (!generating && pendingTools > 0 && appActiveTurnId === turnId && fiberSettled?.reason === 'thinking_failed') noteTurnProgress();
-      if (resumeIdentityPending) {
+      const recordedQuestionId = typeof data.recordedQuestionId === 'string' ? data.recordedQuestionId : null;
+      const lateAdoption = !generating && !turnId && genCount === 0 && !userStopped && !commandAttempt &&
+        recordedQuestionId && stopQuestionMatches(recordedQuestionId);
+      if (resumeIdentityPending || lateAdoption) {
         // Runtime activity can expire while the durable generation still owns
         // this question. Reload must retain that identity without turning the
         // expired activity projection into a new user send.
@@ -7402,7 +7530,7 @@
         const stopReady = !data.stopTurn || (data.stopTurn.turnId === recordedTurnId && stopQuestionMatches(data.stopTurn.userMessageId));
         if (!recordedTurnId || stopReady) {
           resumeIdentityPending = false;
-          if (recordedTurnId) adoptOpenTurn(recordedTurnId, data.stopTurn?.userMessageId ?? null);
+          if (recordedTurnId) adoptOpenTurn(recordedTurnId, data.stopTurn?.userMessageId ?? recordedQuestionId);
         }
       }
       tokens = Number.isFinite(Number(data.tokens)) ? Number(data.tokens) : 0;
@@ -9151,11 +9279,13 @@
     if (progress?.tools?.count > 0 && now - progress.tools.since >= 3000)
       return frame(progress.tools.count === 1 ? 'Waiting for a local tool to finish' : `Waiting for ${progress.tools.count} local tools to finish`);
     const workers = progress?.workers;
-    if (workers && (workers.active > 0 || workers.failed > 0)) {
+    // Failed workers remain in history and the agent panel. Only live workers
+    // explain this wait; a historical failure must not pin it across handoffs.
+    if (workers?.active > 0) {
       const summary = `${workers.finished} finished · ${workers.active} running${workers.failed ? ` · ${workers.failed} failed` : ''}`;
       // Running siblings are not proof that the prime is blocked on them.
-      return frame(workers.active === 1 ? `Worker still running: ${workers.names?.[0] || 'Worker'}` : workers.active > 1
-        ? `${workers.active} workers still running` : 'A worker needs attention', summary);
+      return frame(workers.active === 1 ? `Worker still running: ${workers.names?.[0] || 'Worker'}`
+        : `${workers.active} workers still running`, summary);
     }
     return input.generating ? frame('Still waiting for the current operation to complete') : null;
   }
@@ -9488,6 +9618,14 @@
     stagePanel.body.hidden = view.body === '';
   }
 
+  async function retireUnsentCompaction(forId, token, why, current) {
+    const retired = token ? await ask({ type: 'compact', conversationId: forId, token,
+      sourceLost: true, sourceError: why }).catch(() => null) : null;
+    if (!current()) return;
+    if (retired?.ok === true && retired.data?.aborted === true) job = retired.data.job || null;
+    else localError = `${why} The app has not yet confirmed that this failed request was closed.`;
+  }
+
   async function startCompact(automatic = false) {
     const forId = conversationId;
     const forEpoch = epoch;
@@ -9600,7 +9738,7 @@
     // summary of a machine state that had already moved on.
     // Automatic runs stop the turn exactly like a press does. They are *started* by a turn
     // being in flight, so refusing to interrupt one would refuse every automatic run.
-    const barrier = await stopAndSettle(forId, forEpoch, forRun, sameTurn);
+    const barrier = await stopAndSettle(forId, forEpoch, forRun, sameTurn, automatic);
     // Every await above can span an SPA navigation. `conversationId` is mutable global
     // state, so continuing after A -> B would otherwise post B to /compact and type A's
     // handoff instruction into B's composer. The new chat's reset already owns its UI state;
@@ -9611,6 +9749,8 @@
       nativeBusy = false;
       nativePhase = '';
       localError = barrier;
+      if (!automatic) await retireUnsentCompaction(forId, String(filed.data.token || ''), barrier, current);
+      if (!current()) return;
       renderControl();
       void pullActivity();
       return;
@@ -9646,7 +9786,7 @@
       void pullActivity();
       return;
     }
-    await runNativeCompaction(String(data.prompt), String(data.token || ''), forId, forEpoch, forRun);
+    await runNativeCompaction(String(data.prompt), String(data.token || ''), forId, forEpoch, forRun, sameTurn);
   }
 
   /**
@@ -9684,7 +9824,7 @@
    * not hear about it, and the handoff would describe a machine that no longer exists by
    * the time the fresh chat reads it.
    */
-  async function stopAndSettle(forId, forEpoch, forRun, sameTurn) {
+  async function stopAndSettle(forId, forEpoch, forRun, sameTurn, automatic) {
     const current = () =>
       alive &&
       nativeRun === forRun &&
@@ -9692,6 +9832,67 @@
       epoch === forEpoch &&
       CLF_DOM.conversationId() === forId && sameTurn();
     if (!forId || !current()) return 'This chat changed before compaction could start.';
+    if (automatic && CLF_DOM.generating()) {
+      // A local result can file the ticket before ChatGPT receives that result. Stopping
+      // here used to lose completed work from the brief. Require native receipt first;
+      // pendingTools === 0 only proves that execution on this machine has drained.
+      const awaitingResults = new Map();
+      const awaitingRequests = new Set();
+      const sourceNodes = new Set();
+      const received = () => {
+        const pageTurn = generationTurn();
+        const source = fiberTurnFor(pageTurn);
+        if (!source) return false;
+        for (const node of pageTurn.nodes || [pageTurn.node]) if (node) sourceNodes.add(node);
+        // The response may add a sibling while the parent result lands in its original
+        // section. Retain those exact nodes; fresh scan stamps still own every lookup.
+        const sources = new Set([source]);
+        for (const node of sourceNodes) {
+          const prior = fiberTurnForNode(node);
+          if (prior) sources.add(prior);
+        }
+        // Enclosing native calls retain their own message receipt even before any
+        // child path materializes, and are never reported as local MCP invocations.
+        const calls = [...sources].flatMap(turn => [...turn.calls, ...turn.codeModeCalls]);
+        const ids = new Set();
+        for (const call of calls) {
+          if (ids.has(call.messageId)) return false;
+          ids.add(call.messageId);
+        }
+        for (const turn of sources) {
+          // Request evidence can precede the first labelled connector row. It is only
+          // a pre-row fence; repeated calls sharing that id still need individual receipts.
+          for (const request of turn.requests) {
+            if (!calls.some(call => call.requestId === request.requestId)) awaitingRequests.add(request.requestId);
+          }
+        }
+        for (const call of calls) {
+          const pending = awaitingResults.get(call.messageId);
+          if (pending && (pending.tool !== call.tool ||
+              (pending.requestId && call.requestId && pending.requestId !== call.requestId))) return false;
+          if (call.answered) {
+            awaitingResults.delete(call.messageId);
+            if (call.requestId) awaitingRequests.delete(call.requestId);
+          } else if (!pending) awaitingResults.set(call.messageId, call);
+        }
+        // A missing row or a failed scan cannot acknowledge a call seen earlier.
+        return awaitingResults.size === 0 && awaitingRequests.size === 0;
+      };
+      received();
+      nativePhase = 'settling';
+      renderControl();
+      const ready = await waitUntil(async () => {
+        if (!current()) return true;
+        const count = await peekPendingTools(forId);
+        if (!current()) return true;
+        if (count !== 0) return false;
+        const fresh = await refreshFiber(null, true);
+        if (!current()) return true;
+        return fresh && received();
+      }, TOOL_SETTLE_MS);
+      if (!current()) return 'This chat changed while compaction was waiting for tool results.';
+      if (!ready) return 'ChatGPT has not confirmed receiving the latest tool results. Nothing was compacted.';
+    }
     // INTERRUPTING — stop the turn rather than wait it out. That is the whole request, by
     // hand or automatically: this happens because the turn is long, not because it is
     // nearly done.
@@ -9751,7 +9952,7 @@
   }
 
   /** Submits the marked source prompt after the app durably grants this exact Send. */
-  async function runNativeCompaction(prompt, token, forId = conversationId, forEpoch = epoch, forRun = nativeRun) {
+  async function runNativeCompaction(prompt, token, forId = conversationId, forEpoch = epoch, forRun = nativeRun, sameSource = () => true) {
     const current = () =>
       alive &&
       nativeRun === forRun &&
@@ -9772,17 +9973,10 @@
       // so the caller can retire this pre-Send ticket instead of scheduling the same refusal.
       // A manual press keeps its historical immediate-abort behaviour; the user is still present
       // and can retry it without leaving an invisible job behind.
-      if (!automaticTicket) {
-        job = null;
-        await ask({ type: 'compact', conversationId: forId, cancel: true }).catch(() => undefined);
-      } else if (retireAutomatic) {
-        // This is not the user-facing Cancel path. The bridge accepts sourceLost only while its
-        // durable checkpoint still proves no Send happened (`not-attempted` or
-        // `attempted-unresolved`). If another page crossed sourceDispatch meanwhile, this refuses
-        // and the ambiguous attempt remains alive rather than being cancelled underneath it.
-        const lost = await ask({ type: 'compact', conversationId: forId, token, sourceLost: true }).catch(() => null);
-        if (lost && lost.ok === true && lost.data && lost.data.aborted === true) job = null;
-        else localError = replyError(lost) || 'The blocked handoff could not be safely retired; it was not sent twice.';
+      if (!automaticTicket || retireAutomatic) {
+        // A late failure belongs to this exact pre-Send ticket, never to a newer
+        // manual retry. The durable guard refuses an already-dispatched request.
+        await retireUnsentCompaction(forId, token, why, current);
       }
       if (!current()) return;
       renderControl();
@@ -9797,13 +9991,30 @@
       nativePhase = 'prompting';
       renderControl();
       const squeeze = (value) => String(value || '').replace(/\s+/g, '');
+      const editable = () => {
+        const box = CLF_DOM.composer();
+        return box?.isConnected && CLF_DOM.composerVisible() && box.getAttribute('contenteditable') !== 'false' &&
+          box.getAttribute('aria-disabled') !== 'true' ? box : null;
+      };
+      // Activity can reach a reopened page before React mounts its editor. Use
+      // the existing DOM waiter; an unavailable host is not a provider rejection.
+      const ready = editable() || await waitPageView(editable, () => current() && sameSource(), INTERRUPT_WAIT_MS);
+      if (!current()) return;
+      if (!sameSource()) return void (await abandonBeforeSend('The chat changed while preparing the handoff. Nothing was sent.', true));
+      if (!ready) {
+        const reason = CLF_DOM.composer() ? 'composer_unavailable' : 'composer_missing';
+        return void (await abandonBeforeSend(`The ChatGPT message box is not ready (${reason}). Wait for the page to load and retry.`));
+      }
       const existing = CLF_DOM.composer();
       const occupiedByOtherDraft =
         Boolean(existing && (existing.textContent || '').trim()) &&
         squeeze(existing?.textContent) !== squeeze(prompt);
-      if (squeeze(existing?.textContent) !== squeeze(prompt) && !CLF_DOM.insertPrompt(prompt)) {
+      let insertionFailure = '';
+      if (squeeze(existing?.textContent) !== squeeze(prompt) && !CLF_DOM.insertPrompt(prompt, false, reason => { insertionFailure = reason; })) {
         return void (await abandonBeforeSend(
-          'ChatGPT would not accept the handoff instruction — clear the message box and try again.',
+          occupiedByOtherDraft
+            ? 'A draft is already in ChatGPT; clear the message box before requesting the handoff.'
+            : `The browser could not insert the handoff request (${insertionFailure || 'insertion_failed'}). Check that the message box is available and retry.`,
           // An occupied composer is durable state: ChatGPT restores drafts across reloads. Leaving
           // an automatic ticket open here makes every compaction pickup reload the same draft and
           // hit this same refusal forever. Retire only this provably pre-Send ticket; the draft
@@ -9814,6 +10025,10 @@
       }
       await Promise.resolve();
       if (!current()) return;
+      if (!sameSource()) {
+        CLF_DOM.clearPromptExact(prompt);
+        return void (await abandonBeforeSend('The chat changed while preparing the handoff. Nothing was sent.', true));
+      }
       const composer = CLF_DOM.composer();
       if (!composer || squeeze(composer.textContent) !== squeeze(prompt)) {
         return void (await abandonBeforeSend(
@@ -9834,30 +10049,35 @@
         renderControl();
         return;
       }
-      // The at-most-once cut, and the last thing before the click. Exactly one document takes
-      // this transition; past it the prompt may be with ChatGPT already — send() clicks first
-      // and only then watches for acceptance — so no page is ever offered it again.
-      const armed = await ask({ type: 'compact', conversationId: forId, token, sourceDispatch: true });
-      if (!current()) return;
-      if (!armed || armed.ok !== true || !armed.data || armed.data.armed !== true) {
+      if (!sameSource() || CLF_DOM.composer() !== composer || squeeze(composer.textContent) !== squeeze(prompt)) {
         CLF_DOM.clearPromptExact(prompt);
-        nativeBusy = false;
-        nativePhase = 'waiting';
-        pressedAt = 0;
-        // True of both answers this can get: a refusal because another page armed it first,
-        // and a lost reply. Neither one clicked anything here.
-        localError = 'Nothing was submitted: this handoff was not armed. Press it again.';
-        renderControl();
-        return;
+        return void (await abandonBeforeSend('The message box changed before the handoff could be sent. Its draft was preserved.', true));
       }
-      attemptCrossed = true;
       rememberUserSend();
-      if (!(await sendSubmittedText(current))) {
+      const sent = await sendSubmittedText(current, true, async stillSending => {
+        if (!stillSending() || !current() || !sameSource()) return false;
+        // Native Send readiness precedes this irreversible checkpoint. A disabled
+        // button timing out is still a provably unsent request. Once dispatched,
+        // a missing reply retains custody rather than granting another click.
+        attemptCrossed = true;
+        const armed = await ask({ type: 'compact', conversationId: forId, token, sourceDispatch: true });
+        if (!current()) return false;
+        if (!armed || armed.ok !== true || armed.data?.armed !== true) {
+          localError = 'Nothing was submitted here: the handoff send permission was not confirmed. The existing request will not be sent twice.';
+          return false;
+        }
+        return stillSending() && sameSource();
+      });
+      if (!current()) return;
+      if (!sent) {
         CLF_DOM.clearPromptExact(prompt);
+        if (!attemptCrossed) return void (await abandonBeforeSend(
+          'The handoff request was not submitted because the Send button or message box was not ready. Retry after the page is ready.'
+        ));
         nativeBusy = false;
         nativePhase = 'waiting';
         pressedAt = 0;
-        localError = 'The send result was ambiguous. Nothing will be sent twice; cancel explicitly if ChatGPT never accepted it.';
+        localError ||= 'The send result was ambiguous. Nothing will be sent twice; cancel explicitly if ChatGPT never accepted it.';
         renderControl();
         return;
       }
@@ -11409,11 +11629,14 @@
     }
     const selectionConfirmedAt = Date.now();
     const publishBootstrapSelection = (id) => {
-      if (!boot.model || CLF_DOM.conversationId() !== id) return;
+      if (CLF_DOM.conversationId() !== id) return;
+      // Accepted Send owns the first turn even when no model was explicitly
+      // selected and no further native mutation will wake a hidden document.
+      observe();
+      if (!boot.model) return;
       // The picker proved this selection before the new worker had a conversation.
       // Once Send supplies its identity, journal that proof through the ordinary
       // model-selection owner. The closed picker cannot rediscover it passively.
-      observe();
       if (conversationId === id) emit({ kind: 'model_selection', model: boot.model,
         ...(boot.reasoningEffort ? { reasoningEffort: boot.reasoningEffort } : {}), time: selectionConfirmedAt });
     };
@@ -11432,7 +11655,7 @@
       if (acknowledged?.ok !== true || acknowledged.data?.ok === false || !bootstrapDraft.current()) return;
       const receipt = await waitPageView(() => {
         const latest = CLF_DOM.messages().filter(message => message.role === 'user').at(-1);
-        return latest?.id !== priorBootstrapUser && matchesSubmittedUser(latest, boot.text);
+        return latest?.id !== priorBootstrapUser && matchesSubmittedBootstrap(latest, boot.text);
       }, () => !attempt?.cancelled && sendingBootstrap(), 15000);
       if (receipt) await bootstrapDraft.clear();
     };
@@ -11486,9 +11709,17 @@
       if (!found || (conversationId && conversationId !== found) ||
           (acceptedBootstrap && (acceptedBootstrap.conversationId !== found || acceptedBootstrap.epoch !== epoch))) return null;
       const message = CLF_DOM.messages().find(message => message.role === 'user' &&
-        matchesSubmittedUser(message, expectedText));
+        matchesSubmittedBootstrap(message, boot.text));
       if (!message || (acceptedBootstrap && acceptedBootstrap.messageId !== message.id)) return null;
       acceptedBootstrap ||= { conversationId: found, epoch, messageId: message.id };
+      // The command has proved the native user row it submitted. Spend that same
+      // proof on its local turn instead of comparing escaped bootstrap text again
+      // under ordinary-input rules. Retain the original pre-Send answer baseline.
+      const receipt = userSendReceipt;
+      if (receipt && receipt.text === sendText(boot.text) && receipt.previousMessageId !== message.id &&
+          (!receipt.conversationId || receipt.conversationId === found)) {
+        receipt.accepted = { messageId: message.id, conversationId: found, epoch };
+      }
       return found;
     };
     if (boot.type === 'resume') {
@@ -11516,7 +11747,10 @@
     // Record it before send() clicks so reportMessages can open B's turn immediately instead
     // of waiting until Fiber eventually exposes the first connector request.
     rememberUserSend();
-    if (!(await sendSubmittedText(() => !attempt?.cancelled && sendingBootstrap(), false))) {
+    // The bootstrap's own receipt, which allows for the composer's Markdown escaping — see
+    // matchesSubmittedBootstrap. Every other caller keeps the exact comparison.
+    if (!(await sendSubmittedText(() => !attempt?.cancelled && sendingBootstrap(), false, null, null,
+                                  matchesSubmittedBootstrap))) {
       // Once send() was invoked, a missing/cleared draft cannot prove that no click
       // happened. Only the exact pre-click check above may release the dispatch.
       if (boot.type === 'resume') {
@@ -11883,10 +12117,35 @@
     } finally { recoveryStopping = false; }
   }
 
+  // Continue may arrive before the browser journal's final reaches the app. Check the
+  // exact latest native answer locally as well, even when the composer already says Send.
+  async function recoveryPageUnfinished(safe) {
+    if (!safe()) return false;
+    const latest = CLF_DOM.turns().at(-1);
+    if (latest?.role === 'assistant') {
+      if (!await refreshFiber({ pageTurnId: latest.id, pageTurn: latest.node || latest.nodes?.[0] }) || !safe()) return false;
+      const current = CLF_DOM.turns().at(-1);
+      const native = current?.role === 'assistant' ? fiberTurnFor(current) : null;
+      if (!native) return false;
+      // A known native final vetoes Continue even while delivery to the app is pending.
+      if (native?.endMessageId) { await flush(); return false; }
+    }
+    return Boolean(await flush() && safe());
+  }
+
   async function inspectRepairPage(message) {
     const target = conversationId, forEpoch = epoch;
     const current = () => alive && target === message.conversationId && conversationId === target &&
       CLF_DOM.conversationId() === target && epoch === forEpoch;
+    // An exact compaction ticket may recover its own busy page. It still cannot
+    // discard a draft or cross a new user message while main is granting the claim.
+    if (message.draftOnly === true) {
+      const questionId = CLF_DOM.messages().filter(row => row.role === 'user').at(-1)?.id ?? null;
+      return { safe: current() && !desktopInputBusy &&
+        !(CLF_DOM.composer()?.textContent || '').trim() && !CLF_DOM.hasComposerAttachments() &&
+        (!message.expected || message.expected.questionId === questionId),
+        revision: turnProgressRevision, turnId, questionId };
+    }
     if (!current() || userStopped) return { safe: false };
     const source = currentAssistantTurn();
     if (source) await refreshFiber({ pageTurnId: source.id, pageTurn: source.node || source.nodes?.[0] });
@@ -11918,6 +12177,7 @@
         (!turnId || turnId === sourceTurn)));
     if (!onTarget()) return false;
     if (message.recovery && (!sourceUser || sourceUser !== message.recovery.questionId || userStopped)) return false;
+    if (message.recovery && !await recoveryPageUnfinished(onTarget)) return false;
     if (silencePickup && CLF_DOM.generating() && !await confirmedProviderTerminal()) {
       if (!onTarget()) return false;
       if (message.recovery?.stop === true) {
@@ -11938,7 +12198,7 @@
           input = claim?.data?.input;
           if (!input?.recovery || !safe()) return false;
           const permit = await ask({ type: 'desktop_input', id: input.id, owner: input.owner, conversationId: target, recoveryAction: 'stop' });
-          if (permit?.data?.ok !== true || !safe() || await confirmedProviderTerminal() || !safe()) return false;
+          if (permit?.data?.ok !== true || !safe() || !await recoveryPageUnfinished(safe) || !safe()) return false;
           if (!await stopAutomationGeneration(safe)) return false;
           if (generating) finishGeneration(currentAssistantTurn(), { outcome: 'interrupted', detail: 'Automatic Continue stopped an unchanged silent turn.' }, false);
           await flush();
@@ -12051,8 +12311,10 @@
       let receipt = null;
       if (!(await sendSubmittedText(sendingTarget, false, async sendCurrent => {
         // Preserve the outbox's revocable claim until the actual native Send is ready.
+        if (input.recovery && !await recoveryPageUnfinished(() => sendCurrent() && onTarget() && draft.current())) return false;
         const authorized = await ask({ type: 'desktop_input', id: input.id, owner: input.owner, conversationId: target, authorize: true });
         if (!sendCurrent() || authorized?.data?.ok !== true || !onTarget() || !draft.current()) return false;
+        if (input.recovery && !await recoveryPageUnfinished(() => sendCurrent() && onTarget() && draft.current())) return false;
         sendAttempted = true;
         return true;
       }, (user, conversation) => {
