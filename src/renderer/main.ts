@@ -102,7 +102,9 @@ const GROUPS: Group[] = [
   }
 ];
 
-let state: AppState | null = null;
+function presentedApp(): AppState | null {
+  return presentationStore.getState().app;
+}
 let acceptedGlassGeneration = -1;
 let pendingGlassGeneration: number | null = null;
 
@@ -381,6 +383,7 @@ function capInput(cap: Capability): HTMLInputElement {
 
 /** Refreshes counts, the tri-state switches, and what read-only mode has locked. */
 function paintGroups(): void {
+  const state = presentedApp();
   if (!state) return;
   const { readOnly } = state.config;
   const desktopSupported = state.platform?.desktopAutomation ?? true;
@@ -489,6 +492,7 @@ let settingsSaveQueue: Promise<void> = Promise.resolve();
 let requestedSettings: SettingsPatch | null = null;
 
 function save(over: { readOnly?: boolean; theme?: 'light' | 'dark'; appearance?: AppearanceSettings } = {}): Promise<void> {
+  const state = presentedApp();
   if (applying || !state) return Promise.resolve();
 
   const previous: AppState['config'] = requestedSettings
@@ -683,6 +687,7 @@ function captureRootRenameInput(input: HTMLInputElement, rename: RootRenameState
 
 function cancelRootRename(): void {
   rootRename = null;
+  const state = presentedApp();
   if (state) paintRoots(state.config.roots);
 }
 
@@ -709,7 +714,7 @@ async function commitRootRename(input: HTMLInputElement, rename: RootRenameState
 
   // Failure is retryable user input, not a reason to throw the draft away.
   rename.committing = false;
-  paintRoots(state?.config.roots ?? []);
+  paintRoots(presentedApp()?.config.roots ?? []);
 }
 
 function rootRow(root: AppState['config']['roots'][number]): HTMLElement {
@@ -763,7 +768,7 @@ function rootRow(root: AppState['config']['roots'][number]): HTMLElement {
       focused: true,
       committing: false
     };
-    paintRoots(state?.config.roots ?? []);
+    paintRoots(presentedApp()?.config.roots ?? []);
   });
 
   const remove = document.createElement('button');
@@ -960,6 +965,7 @@ function paintSetupProfiles(next: AppState): void {
 }
 
 async function changeSetupProfile(action: 'add' | 'select' | 'remove', id?: string): Promise<void> {
+  const state = presentedApp();
   if (!state || setupProfileBusy) return;
   const nameInput = $<HTMLInputElement>('setupProfileName');
   const name = nameInput.value.trim();
@@ -982,7 +988,8 @@ async function changeSetupProfile(action: 'add' | 'select' | 'remove', id?: stri
     apply(next);
   } finally {
     setupProfileBusy = false;
-    if (state) paintSetupProfiles(state);
+    const latest = presentedApp();
+    if (latest) paintSetupProfiles(latest);
   }
 }
 $('setupProfileAdd').addEventListener('click', () => {
@@ -993,6 +1000,7 @@ $('setupProfileCancel').addEventListener('click', () => $<HTMLDialogElement>('se
 $('setupProfileForm').addEventListener('submit', event => { event.preventDefault(); void changeSetupProfile('add'); });
 
 function paintSetupFields(): void {
+  const state = presentedApp();
   for (const id of ['tunnelId', 'apiKey']) {
     const input = $<HTMLInputElement>(id);
     const stored = id === 'apiKey' && state?.hasApiKey === true;
@@ -1003,14 +1011,13 @@ function paintSetupFields(): void {
 
 function apply(next: AppState): void {
   // An older key/status response must not restore a profile retired by a newer switch.
-  const acceptedEpoch = presentationStore.getState().app?.config.tunnel.profileEpoch ?? 0;
+  const previousState = presentationStore.getState().app;
+  const acceptedEpoch = previousState?.config.tunnel.profileEpoch ?? 0;
   if ((next.config.tunnel.profileEpoch ?? 0) < acceptedEpoch) return;
   const generation = presentationStore.getState().appGeneration + 1;
   presentationStore.dispatch({ type: 'appStateReceived', generation, state: next });
   if (presentationStore.getState().app !== next) return;
   applyPluginsState(next);
-  const previousState = state;
-  state = presentationStore.getState().app;
   applying = true;
   const { config, status } = next;
 
@@ -1430,6 +1437,7 @@ function facts(next: AppState): HTMLElement[] {
  * "verified 8s ago" keeps counting between reports instead of freezing.
  */
 function paintClock(): void {
+  const state = presentedApp();
   if (!state) return;
   const { status, bridge } = state;
   const running = isRunning(status.state);
@@ -1671,6 +1679,7 @@ async function dropFolders(event: DragEvent): Promise<void> {
 }
 
 async function toggleConnection(): Promise<void> {
+  const state = presentedApp();
   if (!state || state.status.state === 'disconnecting') return;
   // Mirrors the button label exactly, so a click always does what it says.
   const next = await run(isRunning(state.status.state) ? api.disconnect() : api.connect());
@@ -1731,6 +1740,7 @@ $('closeChecks').addEventListener('click', () => {
 });
 
 $('readOnlyBtn').addEventListener('click', () => {
+  const state = presentedApp();
   if (!state) return;
   const current = requestedSettings?.readOnly ?? state.config.readOnly;
   void save({ readOnly: !current });
@@ -1769,6 +1779,7 @@ window.addEventListener('drop', (event) => event.preventDefault());
 
 $('wizExpand').addEventListener('click', () => {
   showAllSteps = $('wizard').classList.contains('is-tidy');
+  const state = presentedApp();
   if (state) apply(state);
 });
 // Setup is no longer a destination of its own, so this card is the way in to the wizard.
@@ -1790,6 +1801,7 @@ function installUpdate(): void {
 $('updateInstall').addEventListener('click', installUpdate);
 $('installUpdate').addEventListener('click', installUpdate);
 $('headerConnect').addEventListener('click', async () => {
+  const state = presentedApp();
   if (!state) return;
   if (missingStep(state)) { showTab('setup'); return; }
   if (isRunning(state.status.state)) {
@@ -1828,13 +1840,13 @@ $('apiKey').addEventListener('blur', () => {
   const input = $<HTMLInputElement>('apiKey');
   const submitted = input.value;
   if (submitted === '') return;
-  const owner = state?.config.tunnel.profileId;
+  const owner = presentedApp()?.config.tunnel.profileId;
   setupKeySave = (async () => {
     const next = await run(api.setApiKey(submitted, owner));
     if (next) {
     // Do not erase a newer value typed while safeStorage/IPC was still resolving the previous
     // blur. On failure keep the submitted value too, so the user can retry instead of losing it.
-      if (state?.config.tunnel.profileId === owner) {
+      if (presentedApp()?.config.tunnel.profileId === owner) {
         if (input.value === submitted) input.value = '';
         apply(next);
       }
@@ -1845,7 +1857,7 @@ $('apiKey').addEventListener('blur', () => {
 });
 
 $('removeApiKey').addEventListener('click', async () => {
-  const next = await run(api.setApiKey('', state?.config.tunnel.profileId));
+  const next = await run(api.setApiKey('', presentedApp()?.config.tunnel.profileId));
   if (next) {
     apply(next);
     toast('API key removed');
@@ -1880,6 +1892,7 @@ document.addEventListener('keydown', (event) => {
 $('bridgeDownload').addEventListener('click', () => void run(api.downloadExtension()));
 $('updateExtension').addEventListener('click', () => {
   showAllSteps = true;
+  const state = presentedApp();
   if (state) apply(state);
   showTab('setup');
   step('browser').hidden = false;
@@ -1900,11 +1913,12 @@ initSidebarResize();
 initUsage();
 initPlugins(apply);
 initBrowserPreferences();
-initChat({ save: () => save(), state: () => state });
+initChat({ save: () => save(), state: () => presentationStore.getState().app });
 
 void (async () => {
   await refresh();
   // A first run has nothing set up, so open on the wizard rather than an empty Home.
+  const state = presentedApp();
   showTab(state && missingStep(state)?.step === 'folder' ? 'setup' : 'chat');
   const entries = await run(api.getLog());
   for (const entry of entries ?? []) addLogLine(entry);

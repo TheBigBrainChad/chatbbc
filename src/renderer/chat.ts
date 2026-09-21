@@ -129,7 +129,12 @@ let sessionPageLoading = false;
 /** True after the user has explicitly paged beyond the newest page. */
 let loadedOlderSessions = false;
 let activeId: string | null = null;
-let selectedId: string | null = null;
+function selectedId(): string | null {
+  return presentationStore.getState().selectedSessionId;
+}
+function selectionGeneration(): number {
+  return presentationStore.getState().selectionGeneration;
+}
 let newChatSelected = true;
 let selectedProjectId: string | null = null;
 let projects: LocalProject[] = [];
@@ -139,11 +144,15 @@ const projectVisibleCounts = new Map<string, number>();
 let workspaceTerminal: ReturnType<typeof createWorkspaceTerminal> | null = null;
 
 let sidebarOrder: ReturnType<typeof createSidebarOrder> | undefined;
-function draftKey(): string { return selectedId ?? (selectedProjectId ? `project:${selectedProjectId}` : 'new'); }
-let selectionGeneration = presentationStore.getState().selectionGeneration;
+function projectedDraftKey(): string {
+  const sessionId = presentationStore.getState().selectedSessionId;
+  return sessionId ?? (selectedProjectId ? `project:${selectedProjectId}` : 'new');
+}
+function draftKey(): string {
+  return presentationStore.getState().draft.key;
+}
 function advanceSelectionGeneration(): void {
   presentationStore.dispatch({ type: 'selectionGenerationAdvanced' });
-  selectionGeneration = presentationStore.getState().selectionGeneration;
 }
 function publishSelectedSession(sessionId: string | null): void {
   presentationStore.dispatch({
@@ -151,14 +160,15 @@ function publishSelectedSession(sessionId: string | null): void {
     sessionId,
     generation: presentationStore.getState().selectionGeneration
   });
-  selectedId = presentationStore.getState().selectedSessionId;
   syncDraftKey();
 }
 function syncDraftKey(): void {
-  const draft = presentationStore.getState().draft;
-  const key = draftKey();
-  if (draft.key === key) return;
-  presentationStore.dispatch({ type: 'draftOwnerChanged', key, generation: draft.generation });
+  const key = projectedDraftKey();
+  presentationStore.dispatch({
+    type: 'draftOwnerChanged',
+    key,
+    generation: presentationStore.getState().draft.generation
+  });
 }
 let selectionReportSequence = 0;
 let reportedSessionId: string | null = null;
@@ -167,7 +177,7 @@ let currentChatView = 'timeline';
 
 /** Presentation only. Main validates the sender, current window and session before witnessing. */
 function reportVisibleSelection(force = false): void {
-  const sessionId = visible && currentChatView === 'timeline' && !document.hidden ? selectedId : null;
+  const sessionId = visible && currentChatView === 'timeline' && !document.hidden ? selectedId() : null;
   if (!force && sessionId === reportedSessionId && acknowledgedUiSelection?.sessionId === sessionId) return;
   reportedSessionId = sessionId;
   acknowledgedUiSelection = null;
@@ -188,12 +198,13 @@ function composerDraftOwner(): ComposerDraftOwner {
 }
 function ownsComposerDraft(owner: ComposerDraftOwner): boolean {
   const draft = presentationStore.getState().draft;
-  return owner.key === draftKey() && owner.generation === draft.generation;
+  return owner.key === draft.key && owner.generation === draft.generation;
 }
 function replaceComposerDraft(): void {
+  const key = projectedDraftKey();
   presentationStore.dispatch({
     type: 'draftOwnerChanged',
-    key: draftKey(),
+    key,
     generation: presentationStore.getState().draft.generation + 1
   });
   skillPicker?.close();
@@ -212,7 +223,7 @@ const dismissedRecoveryNotices = new Map<string, string>();
 function authoredComposerText(): string { return skillPicker?.authoredText() ?? $<HTMLTextAreaElement>('chatInput').value; }
 function rememberDraft(): void {
   inputDrafts.set(draftKey(), authoredComposerText());
-  if (selectedId === null) newChatTasks.set(draftKey(), {
+  if (selectedId() === null) newChatTasks.set(draftKey(), {
     objective: $<HTMLTextAreaElement>('sessionObjective').value,
     automation: $<HTMLSelectElement>('chatAutomation').value,
     loopDelivery: $<HTMLSelectElement>('loopDelivery').value
@@ -230,7 +241,7 @@ function restoreDraft(): void {
   $('activeGoalRow').hidden = true; $('recoveryStatus').hidden = true;
   $<HTMLTextAreaElement>('chatInput').value = inputDrafts.get(draftKey()) ?? '';
   skillPicker?.restore();
-  const task = selectedId === null ? newChatTasks.get(draftKey()) : undefined;
+  const task = selectedId() === null ? newChatTasks.get(draftKey()) : undefined;
   const automation = $<HTMLSelectElement>('chatAutomation'); automation.value = task?.automation ?? 'off'; delete automation.dataset.edited;
   $<HTMLSelectElement>('loopDelivery').value = task?.loopDelivery ?? 'finish';
   $<HTMLTextAreaElement>('sessionObjective').value = task?.objective ?? '';
@@ -323,11 +334,11 @@ function clearSelectedSession(): void {
 
 async function deleteSession(id: string): Promise<void> {
   const done = await run(api.deleteSession(id));
-  if (done === null) { if (selectedId === id) reportVisibleSelection(true); return; }
+  if (done === null) { if (selectedId() === id) reportVisibleSelection(true); return; }
   sessions = sessions.filter((entry) => entry.id !== id);
   pressure.delete(id);
   sessionTotal = Math.max(0, sessionTotal - 1);
-  if (selectedId === id) {
+  if (selectedId() === id) {
     clearSelectedSession();
   }
   toast(t("Session deleted"));
@@ -340,7 +351,7 @@ async function loadSessions(): Promise<void> {
   const generation = ++sessionsLoadGeneration;
   const [list, catalog] = await Promise.all([run(api.listSessions({ limit: SESSION_PAGE_SIZE })), run(api.listProjects())]);
   if (!list || generation !== sessionsLoadGeneration) return;
-  const previouslySelected = sessions.find(row => row.id === selectedId);
+  const previouslySelected = sessions.find(row => row.id === selectedId());
   if (catalog) projects = catalog;
   // Once older pages have been requested, a hot refresh only replaces/updates the newest page.
   // Throwing the older rows away here would make scrolling history vanish every 400 ms while a
@@ -369,16 +380,17 @@ async function loadSessions(): Promise<void> {
   } else {
     pressure = new Map(list.pressure.map((entry) => [entry.id, entry]));
   }
-  if (selectedId !== null && !sessions.some((s) => s.id === selectedId)) {
+  const wanted = selectedId();
+  if (wanted !== null && !sessions.some((s) => s.id === wanted)) {
     // A bounded newest page cannot prove an older selected session was removed.
-    const wanted = selectedId, selection = selectionGeneration;
+    const selection = selectionGeneration();
     let resolved: SessionSummary | null | undefined;
     try {
       const reply = await api.getSession(wanted, { limit: 1 });
       if (reply.ok && reply.data.summary?.id === wanted) resolved = reply.data.summary;
       else if (!reply.ok && /session not found/i.test(reply.error)) resolved = null;
     } catch { /* A read error is unknown, never an authoritative deletion. */ }
-    if (generation !== sessionsLoadGeneration || selection !== selectionGeneration || selectedId !== wanted) return;
+    if (generation !== sessionsLoadGeneration || selection !== selectionGeneration() || selectedId() !== wanted) return;
     if (resolved === null) clearSelectedSession();
     else {
       // Preserve the selected row and title across pagination and transient read failures.
@@ -492,11 +504,11 @@ let finishGoalDraftView: GoalDraftPresentation | null = null;
 function paintGoalProgress(): void {
   let row = document.getElementById('goalLifecycle');
   if (!row) { row = el('div', 'queued-input'); row.id = 'goalLifecycle'; row.setAttribute('role', 'status'); $('activeGoalRow').before(row); }
-  const progress = goalProgress?.selection === selectionGeneration ? goalProgress : null;
+  const progress = goalProgress?.selection === selectionGeneration() ? goalProgress : null;
   const entry = progress?.inputId ? pendingComposerInputs.find(item => item.id === progress.inputId) : undefined;
-  const finishDraft = controlledSessionId === selectedId && controlledSelection === selectionGeneration ? finishGoalDraftView : null;
-  const draft = finishDraft ?? (controlledSessionId === selectedId && controlledSelection === selectionGeneration ? goalDraftView : null);
-  const wait = controlledSessionId === selectedId && controlledSelection === selectionGeneration ? goalWaitView : null;
+  const finishDraft = controlledSessionId === selectedId() && controlledSelection === selectionGeneration() ? finishGoalDraftView : null;
+  const draft = finishDraft ?? (controlledSessionId === selectedId() && controlledSelection === selectionGeneration() ? goalDraftView : null);
+  const wait = controlledSessionId === selectedId() && controlledSelection === selectionGeneration() ? goalWaitView : null;
   const off = $<HTMLSelectElement>('chatAutomation').value === 'off';
   if (off && !finishDraft) { row.hidden = true; row.replaceChildren(); row.setAttribute('aria-busy', 'false'); paintComposerStatusLine(); return; }
   let phase = progress?.phase ?? '';
@@ -540,7 +552,7 @@ let durationTimer: number | undefined;
 function paintActiveGoal(): void {
   const row = $('activeGoalRow');
   const mode = $<HTMLSelectElement>('chatAutomation').value;
-  row.hidden = !selectedId || mode === 'off';
+  row.hidden = !selectedId() || mode === 'off';
   if (row.hidden) { row.replaceChildren(); paintComposerStatusLine(); return; }
   const objective = $<HTMLTextAreaElement>('sessionObjective').value.trim();
   const label = el('span', 'queue-label', () => `${mode === 'loop' ? t("Loop") : t("Pursuing goal")}${objective ? ' · ' + objective : ''}`);
@@ -595,7 +607,7 @@ async function createTaskPlan(backend: 'api' | 'chatgpt'): Promise<void> {
   const input = $<HTMLTextAreaElement>('chatInput'), text = authoredComposerText().trim();
   const key = draftKey();
   cancelTaskPlan(key);
-  const sessionId = selectedId, projectId = selectedId ? sessions.find(row => row.id === selectedId)?.projectId ?? null : selectedProjectId;
+  const sessionId = selectedId(), projectId = selectedId() ? sessions.find(row => row.id === selectedId())?.projectId ?? null : selectedProjectId;
   const requestId = text ? crypto.randomUUID() : null;
   const plan: TaskPlanDraft = { text, requestId, stages: null, sending: false, progress: null, error: null };
   taskPlans.set(key, plan); paintTaskPlan();
@@ -657,7 +669,7 @@ function paintPreparedPlan(): void {
       if (plan.stages.length) { paintPreparedPlan(); paintDeliveryControls(deliveryHost); } else cancelTaskPlan();
     });
     edit.disabled = remove.disabled = field.disabled = plan.sending;
-    ui(heading, 'title', () => selectedId ? t("Queued at Session finish; edit or delete this checkpoint independently.") : index === 0 ? t("Send includes your complete request and the full plan. Later stages are queued as verification checkpoints.") : t("Included in the first message, then queued as a checkpoint at Session finish or after a completed answer when enabled."));
+    ui(heading, 'title', () => selectedId() ? t("Queued at Session finish; edit or delete this checkpoint independently.") : index === 0 ? t("Send includes your complete request and the full plan. Later stages are queued as verification checkpoints.") : t("Included in the first message, then queued as a checkpoint at Session finish or after a completed answer when enabled."));
     heading.append(label, text, edit, remove); row.append(heading, field, error); return row;
   }));
   paintComposerStatusLine();
@@ -665,8 +677,9 @@ function paintPreparedPlan(): void {
 async function sendPreparedPlan(): Promise<void> {
   const key = draftKey(), plan = currentPreparedPlan();
   if (!plan || plan.sending) return;
-  if (selectedId) {
-    await queuePreparedPlan(key, plan, selectedId, sessions.find(row => row.id === selectedId)?.projectId ?? null);
+  const sessionId = selectedId();
+  if (sessionId) {
+    await queuePreparedPlan(key, plan, sessionId, sessions.find(row => row.id === sessionId)?.projectId ?? null);
     return;
   }
   const tasks = plan.stages.map(stage => stage.trim());
@@ -729,7 +742,7 @@ function paintLoopDelivery(): void {
     !model || !isProModel(model.model, model.reasoningEffort);
 }
 function openingLoopDelivery(): boolean | undefined {
-  return selectedId === null ? $<HTMLSelectElement>('loopDelivery').value === 'after-turn' : undefined;
+  return selectedId() === null ? $<HTMLSelectElement>('loopDelivery').value === 'after-turn' : undefined;
 }
 function paintAutomationSwitch(): void {
   paintLoopDelivery();
@@ -750,11 +763,11 @@ function paintAutomationSwitch(): void {
   paintTaskActions();
 }
 async function refreshSessionControls(): Promise<void> {
-  const id = selectedId, generation = ++controlsGeneration;
+  const id = selectedId(), generation = ++controlsGeneration;
   const planHost = $('agentPlan');
   if (planHost.dataset.sessionId !== (id ?? '')) { renderAgentPlan(planHost, id, null); paintComposerStatusLine(); }
   const menu = $('sessionControls');
-  if (controlledSessionId !== id || controlledSelection !== selectionGeneration) {
+  if (controlledSessionId !== id || controlledSelection !== selectionGeneration()) {
     // Retire the previous selection's projection before awaiting the new owner's IPC.
     // Replace the translation binding too, so a locale refresh cannot revive its status.
     ui($('sessionControlStatus'), 'textContent', () => '');
@@ -768,7 +781,7 @@ async function refreshSessionControls(): Promise<void> {
     return; }
   const opening = pendingComposerInputs.find(row => row.opening && row.sessionId === id && ['queued', 'browser'].includes(row.state));
   if (!sessions.find(row => row.id === id)?.conversationId) {
-    controlledSessionId = id; controlledSelection = selectionGeneration; controlledTurnId = null;
+    controlledSessionId = id; controlledSelection = selectionGeneration(); controlledTurnId = null;
     controlledCanInject = false; controlledCanSendDirectly = false; controlledQueueAtFinish = false;
     controlledStopPending = false; controlledFinishWaiting = false;
     menu.hidden = false;
@@ -783,11 +796,11 @@ async function refreshSessionControls(): Promise<void> {
     return;
   }
   const controls = await run(api.getSessionControls(id));
-  if (generation !== controlsGeneration || id !== selectedId) return;
+  if (generation !== controlsGeneration || id !== selectedId()) return;
   renderAgentPlan(planHost, id, controls?.plan ?? null);
   paintComposerStatusLine();
   controlledSessionId = id;
-  controlledSelection = selectionGeneration;
+  controlledSelection = selectionGeneration();
   controlledTurnId = controls?.activeTurnId ?? null;
   goalDraftView = controls?.goalDraft ?? null;
   goalWaitView = controls?.goalWait ?? null;
@@ -825,7 +838,7 @@ async function refreshSessionControls(): Promise<void> {
 
 async function loadDetail(navigate = false, olderBefore?: number, newerFrom?: number): Promise<void> {
   const prepend = olderBefore !== undefined;
-  const wanted = selectedId;
+  const wanted = selectedId();
   if (wanted !== null && historyBefore !== null && detailFor === wanted && !navigate) { void refreshSessionControls(); paintDetail(); return; }
   const generation = ++detailLoadGeneration;
   void refreshSessionControls();
@@ -847,7 +860,7 @@ async function loadDetail(navigate = false, olderBefore?: number, newerFrom?: nu
   const detail = await run(
     api.getSession(wanted, newerFrom !== undefined ? { after: newerFrom, limit: MAX_TIMELINE_ROWS / 2 } : incremental ? { from: detailCursor!, limit: MAX_TIMELINE_ROWS } : { ...(olderBefore !== undefined ? { before: olderBefore } : historyBefore !== null ? { before: historyBefore } : {}), limit: prepend ? MAX_TIMELINE_ROWS / 2 : MAX_TIMELINE_ROWS })
   );
-  if (generation !== detailLoadGeneration || selectedId !== wanted) return;
+  if (generation !== detailLoadGeneration || selectedId() !== wanted) return;
   if (!detail) {
     // A failed destination read must not leave another chat displayed indefinitely.
     // run() already presents the read error; keep the destination empty and retryable.
@@ -895,18 +908,18 @@ async function loadDetail(navigate = false, olderBefore?: number, newerFrom?: nu
   void loadHandoff();
   // A burst can contain more than one renderer-sized page between coalesced notifications.
   // Drain it page by page rather than silently jumping the cursor or lifting the payload cap.
-  if (incremental && detail.events.length === MAX_TIMELINE_ROWS && selectedId === wanted) {
+  if (incremental && detail.events.length === MAX_TIMELINE_ROWS && selectedId() === wanted) {
     window.setTimeout(() => void loadDetail(), 0);
   }
 }
 
 async function loadHandoff(): Promise<void> {
-  const sessionId = selectedId;
+  const sessionId = selectedId();
   const generation = ++handoffLoadGeneration;
   const summary = sessions.find((s) => s.id === sessionId) ?? null;
   const wanted = summary?.lastHandoffId ?? null;
   if (wanted === null) {
-    if (generation !== handoffLoadGeneration || selectedId !== sessionId) return;
+    if (generation !== handoffLoadGeneration || selectedId() !== sessionId) return;
     handoff = null;
     handoffFor = null;
     paintHandoff();
@@ -914,7 +927,7 @@ async function loadHandoff(): Promise<void> {
   }
   if (handoffFor === wanted) return;
   const loaded = await run(api.getHandoff(summary!.id, wanted));
-  if (generation !== handoffLoadGeneration || selectedId !== sessionId) return;
+  if (generation !== handoffLoadGeneration || selectedId() !== sessionId) return;
   handoff = loaded ?? null;
   handoffFor = wanted;
   paintHandoff();
@@ -1230,8 +1243,8 @@ function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?:
   if (call.tool === 'view_image' && call.outcome === 'ok' && images.length === 0) {
     raw.append(el('p', 'meta', () => t("No image preview was retained in this recording.")));
   }
-  if (images.length && (context?.id || selectedId)) {
-    const id = context?.id ?? selectedId!, generation = selectionGeneration;
+  if (images.length && (context?.id || selectedId())) {
+    const id = context?.id ?? selectedId()!, generation = selectionGeneration();
     const attachments = el('div', 'tool-images');
     let loaded = false;
     const load = async () => {
@@ -1239,7 +1252,7 @@ function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?:
       loaded = true;
       for (const asset of images) {
         const data = await run(api.getSessionImage(id, asset.id));
-        if (context ? !context.current() : id !== selectedId || generation !== selectionGeneration) return;
+        if (context ? !context.current() : id !== selectedId() || generation !== selectionGeneration()) return;
         if (!data) { attachments.append(el('p', 'meta', () => t("Image unavailable"))); continue; }
         const image = document.createElement('img');
         image.src = data; image.alt = t("{0} result", [call.tool]); image.loading = 'lazy';
@@ -1309,7 +1322,7 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       const attachments = el('div', 'message-attachments');
       if (event.attachments?.length) attachments.append(...event.attachments.map(file => attachmentCard(file)));
       const assets = event.assets?.filter(asset => asset.mimeType === 'image/webp').slice(0, MAX_INPUT_IMAGES) ?? [];
-      const retained = retainedInputImages(event, context?.id ?? selectedId);
+      const retained = retainedInputImages(event, context?.id ?? selectedId());
       const preview = (data: string, retainedOnly = false, slot?: HTMLElement) => {
         const image = document.createElement('img');
         image.src = data; image.alt = t("User attachment"); image.loading = 'lazy';
@@ -1345,12 +1358,12 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
         receipt.append(icon(event.inputDelivery === 'offered' ? 'i-clock' : 'i-check'));
         box.append(receipt);
       }
-      if (assets.length && (context?.id || selectedId)) {
-        const id = context?.id ?? selectedId!, generation = selectionGeneration;
+      if (assets.length && (context?.id || selectedId())) {
+        const id = context?.id ?? selectedId()!, generation = selectionGeneration();
         void (async () => {
           for (const [index, asset] of assets.entries()) {
             const data = await run(api.getSessionImage(id, asset.id));
-            if (context ? !context.current() : id !== selectedId || generation !== selectionGeneration) return;
+            if (context ? !context.current() : id !== selectedId() || generation !== selectionGeneration()) return;
             const slot = slots[index]!;
             if (data) preview(data, false, slot);
             else if (retained[index]) preview(retained[index]!.dataUrl, true, slot);
@@ -1363,9 +1376,9 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
     case 'assistant_message': {
       const box = el('div', 'said');
       box.append(el('b', '', () => event.final ? 'ChatGPT' : t("ChatGPT (partial)")));
-      const id = context?.id ?? selectedId;
-      const generation = selectionGeneration;
-      const currentRichRow = () => context ? context.current() : selectedId === id && selectionGeneration === generation;
+      const id = context?.id ?? selectedId();
+      const generation = selectionGeneration();
+      const currentRichRow = () => context ? context.current() : selectedId() === id && selectionGeneration() === generation;
       box.append(event.rich ? renderRichResponse(event.rich, event.message.text, id ? {
         sessionId: id,
         media: event.richMedia ?? [],
@@ -1410,12 +1423,12 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       if (event.asset) frame.append(el('p', 'meta', () => t("Image preview is loading")));
       else unavailable();
       box.append(frame);
-      const id = context?.id ?? selectedId;
+      const id = context?.id ?? selectedId();
       if (event.asset && id) {
-        const generation = selectionGeneration;
+        const generation = selectionGeneration();
         void (async () => {
           const data = await run(api.getSessionImage(id, event.asset!.id));
-          if (context ? !context.current() : id !== selectedId || generation !== selectionGeneration) return;
+          if (context ? !context.current() : id !== selectedId() || generation !== selectionGeneration()) return;
           // Only the fixed local image reader's bounded bytes may become an IMG source.
           // A malformed IPC reply must never trigger a remote image request or paint a
           // different MIME under this exact canonical generated-image asset.
@@ -1487,13 +1500,13 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       avatar.dataset.color = String([...worker].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 6);
       avatar.setAttribute('aria-hidden', 'true');
       summary.append(avatar, el('span', '', () => communicationTitle(event)));
-      const communicationKey = `agent:${context?.id ?? selectedId}:${event.seq}`;
+      const communicationKey = `agent:${context?.id ?? selectedId()}:${event.seq}`;
       box.open = openTools.has(communicationKey);
       box.addEventListener('toggle', () => { if (box.open) openTools.add(communicationKey); else openTools.delete(communicationKey); });
       box.append(summary);
       box.append(textBlock('msg', event.message.text, event.message.truncated, event.message.chars));
       if (!context) {
-        const matches = sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId && entry.origin.agentId === worker);
+        const matches = sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId() && entry.origin.agentId === worker);
         if (matches.length === 1) {
           const open = el('button', 'btn agent-chat-open'); open.setAttribute('type', 'button');
           ui(open, 'aria-label', () => t("Open {0} chat", [worker]));
@@ -1527,7 +1540,7 @@ function eventRow(event: SessionEvent): HTMLElement {
   time.textContent = clockTime(event.time);
   time.title = new Date(event.time).toLocaleString();
   const body = el('div', 'ev-body');
-  const currentWorker = sessions.find(session => session.id === selectedId)?.origin;
+  const currentWorker = sessions.find(session => session.id === selectedId())?.origin;
   if (event.agent && event.agent !== 'prime' && !(currentWorker?.kind === 'worker' && currentWorker.agentId === event.agent)) {
     body.append(el('span', 'chip', event.agent));
   }
@@ -1565,9 +1578,9 @@ function paintAgentFilter(): void {
   // change showed the next session's timeline as empty with no chip lit to explain why —
   // and agent ids repeat between runs, so it could also silently hide half of one. The
   // same guard catches an agent that simply is not in this session's events.
-  if (filterFor !== selectedId) {
+  if (filterFor !== selectedId()) {
     agentFilter = null;
-    filterFor = selectedId;
+    filterFor = selectedId();
   } else if (agentFilter !== null && agentFilter !== UNATTRIBUTED && !named.includes(agentFilter)) {
     agentFilter = null;
   }
@@ -1994,7 +2007,7 @@ function itemSignature(item: TimelineItem): string {
       parts.push(JSON.stringify(body));
       // Bytes are immutable for an accepted input. Queue arrival must repaint a
       // canonical row even if its recorded revision did not change.
-      parts.push(...retainedInputImages(event, selectedId).map(image => `${image.name}:${image.dataUrl.length}`));
+      parts.push(...retainedInputImages(event, selectedId()).map(image => `${image.name}:${image.dataUrl.length}`));
       break;
     }
     case 'progress':
@@ -2051,7 +2064,7 @@ function itemKey(item: TimelineItem): string {
 const toolGroups = new Map<string, HTMLDetailsElement>();
 /** Keep retained scroll containers mounted: rebuilding a feed must not restart
  * disclosure animations or detach a result while the user is scrolling it. */
-function groupToolRows(rows: HTMLElement[], scope = selectedId, groups = toolGroups): HTMLElement[] {
+function groupToolRows(rows: HTMLElement[], scope = selectedId(), groups = toolGroups): HTMLElement[] {
   const grouped: HTMLElement[] = [], retained = new Set<string>();
   for (let i = 0; i < rows.length;) {
     if (!rows[i]!.matches('.ev-tool_call, .ev-page_tool, .ev-agent_message')) { grouped.push(rows[i++]!); continue; }
@@ -2126,8 +2139,8 @@ function composerSessionSelection(summary: SessionSummary | null | undefined) {
 }
 function paintDetail(followBottom = historyBefore === null): void {
   paintStateLine();
-  const summary = sessions.find((s) => s.id === selectedId) ?? null;
-  applyComposerSessionModel(selectedId ? `${selectedId}:${selectionGeneration}` : null, composerSessionSelection(summary) ?? null);
+  const summary = sessions.find((s) => s.id === selectedId()) ?? null;
+  applyComposerSessionModel(selectedId() ? `${selectedId()}:${selectionGeneration()}` : null, composerSessionSelection(summary) ?? null);
   const config = deps.state()?.config;
   if (config) paintContextMeter(summary, config, confirmedComposerModel());
   const project = selectedLocalProject(sessionHost);
@@ -2140,7 +2153,7 @@ function paintDetail(followBottom = historyBefore === null): void {
   // Selection retires data/control ownership immediately, but the last painted rows
   // remain inert until the destination arrives. Queue/status repaints must not turn
   // this short loading interval into the New Chat welcome screen.
-  if (selectedId !== null && detailFor !== selectedId) {
+  if (selectedId() !== null && detailFor !== selectedId()) {
     $('inputQueue').setAttribute('inert', '');
     $('timelineEmpty').hidden = true;
     $('chatFoot').hidden = true;
@@ -2165,7 +2178,7 @@ function paintDetail(followBottom = historyBefore === null): void {
   const oldest = shown.length ? Math.min(...shown.map(event => event.time)) : 0;
   const newest = shown.length ? Math.max(...shown.map(event => event.time)) : 0;
   const retiredInputs = pendingComposerInputs.filter(entry => historicalAutomaticInput(entry) &&
-    (entry.sessionId ?? entry.deliveredSessionId) === selectedId && !inputNotices().has(entry.id) &&
+    (entry.sessionId ?? entry.deliveredSessionId) === selectedId() && !inputNotices().has(entry.id) &&
     agentFilter === null && entry.createdAt >= oldest && (historyBefore === null || entry.createdAt <= newest))
     .sort((a, b) => a.createdAt - b.createdAt);
   const appendRetiredInputs = (until: number) => {
@@ -2256,7 +2269,7 @@ function paintDetail(followBottom = historyBefore === null): void {
     : withSpineSegments(groupImageRows(groupToolRows(timelineRows)), spine));
   retireStaleRichImageViewer();
   paintPendingInputs(deliveryHost);
-  $('timelineEmpty').hidden = selectedId !== null || timelineRows.length > 0 || $('inputQueue').childElementCount > 0;
+  $('timelineEmpty').hidden = selectedId() !== null || timelineRows.length > 0 || $('inputQueue').childElementCount > 0;
   restoreViewport();
   restoreRichFocus?.();
 
@@ -2283,7 +2296,7 @@ function paintDetail(followBottom = historyBefore === null): void {
   }
   $('chatFoot').textContent = facts.join(' · ');
   $('chatFoot').hidden = !deps.state()?.config.ui.developerMode;
-  $('chatFoot').classList.toggle('is-warn', pressureOf(pressure, selectedId ?? '')?.level === 'huge');
+  $('chatFoot').classList.toggle('is-warn', pressureOf(pressure, selectedId() ?? '')?.level === 'huge');
 }
 
 // -------------------------------------------------------------------- handoff
@@ -2319,10 +2332,10 @@ function paintHandoff(): void {
 /** The live deadline takes precedence over the existing dismissible repair receipt. */
 function paintRecoveryStatus(): boolean {
   const host = $('recoveryStatus');
-  const countdowns = selectedId && controlledSessionId === selectedId && controlledSelection === selectionGeneration ? controlledRecovery : [];
+  const countdowns = selectedId() && controlledSessionId === selectedId() && controlledSelection === selectionGeneration() ? controlledRecovery : [];
   if (renderRecoveryCountdowns(host, countdowns)) { paintComposerStatusLine(); return true; }
-  const recovery = detailFor === selectedId ? [...events].reverse().find(event => event.source === 'app' && event.kind === 'progress' && event.progressId?.startsWith('browser-repair:')) : undefined;
-  const sessionId = selectedId;
+  const recovery = detailFor === selectedId() ? [...events].reverse().find(event => event.source === 'app' && event.kind === 'progress' && event.progressId?.startsWith('browser-repair:')) : undefined;
+  const sessionId = selectedId();
   const revision = recovery?.kind === 'progress' ? JSON.stringify([recovery.progressId, recovery.time, recovery.message.text]) : '';
   // Newer questions retire this live notice; the original receipt stays in history.
   const advanced = recovery && events.some(event => positionOf(event) > positionOf(recovery) &&
@@ -2354,7 +2367,7 @@ function paintStateLine(): void {
   // Running state and timer ownership cannot depend on a translated label.
   note.classList.toggle('is-working', working === true);
   const recovering = paintRecoveryStatus();
-  const goalWaiting = controlledSessionId === selectedId && controlledSelection === selectionGeneration && !!goalWaitView;
+  const goalWaiting = controlledSessionId === selectedId() && controlledSelection === selectionGeneration() && !!goalWaitView;
   if (goalWaiting) paintGoalProgress();
   if (visible && (ticking || recovering || goalWaiting)) durationTimer = window.setTimeout(paintStateLine, 1000);
   repaintBadges(sessionHost);
@@ -2363,9 +2376,9 @@ function paintStateLine(): void {
 
 function stateLine(): { text: string; tone: '' | 'is-live' | 'is-bad'; working?: boolean; ticking?: boolean } {
   if (!deps.state()?.config.ui.developerMode) {
-    const summary = sessions.find(entry => entry.id === selectedId);
-    if (!summary || detailFor !== selectedId) return { text: '', tone: '' };
-    const active = controlledSessionId === selectedId && controlledSelection === selectionGeneration ? controlledTurnId : null;
+    const summary = sessions.find(entry => entry.id === selectedId());
+    if (!summary || detailFor !== selectedId()) return { text: '', tone: '' };
+    const active = controlledSessionId === selectedId() && controlledSelection === selectionGeneration() ? controlledTurnId : null;
     const lastBoundary = [...events].reverse().find(event => event.kind === 'turn_start' || event.kind === 'turn_end');
     const turnId = active ?? lastBoundary?.turnId;
     if (!turnId) return { text: '', tone: '' };
@@ -2381,7 +2394,7 @@ function stateLine(): { text: string; tone: '' | 'is-live' | 'is-bad'; working?:
   // connector carrying nothing that identifies its caller, so work driven from the phone,
   // from another browser or from another machine can only be recorded as what it is:
   // real, complete, and not placeable in any chat this app can observe.
-  const selected = sessions.find((entry) => entry.id === selectedId) ?? null;
+  const selected = sessions.find((entry) => entry.id === selectedId()) ?? null;
   if (selected && selected.conversationId === null) {
     return {
       text: t("Work this app could not place in a chat — driven from another device, or with no ChatGPT tab open"),
@@ -2932,8 +2945,8 @@ const CHAT_INPUTS = [
 /** Writes app state into this panel's controls. Called from the renderer's apply(). */
 export function chatApply(state: AppState, previous?: Config): void {
   const { config, bridge } = state;
-  if (visible && selectedId) void refreshSessionControls();
-  paintContextMeter(sessions.find(session => session.id === selectedId) ?? null, config, confirmedComposerModel());
+  if (visible && selectedId()) void refreshSessionControls();
+  paintContextMeter(sessions.find(session => session.id === selectedId()) ?? null, config, confirmedComposerModel());
   applyChatModels(config, previous);
 
   applyChatChecked($<HTMLInputElement>('sessRecord'), config.sessions.record, previous?.sessions.record);
@@ -2990,7 +3003,7 @@ export function chatApply(state: AppState, previous?: Config): void {
 export function chatVisible(next: boolean): void {
   if (visible === next) return;
   visible = next;
-  reportVisibleSelection(next && selectedId !== null);
+  reportVisibleSelection(next && selectedId() !== null);
   if (next) void refreshAll();
   else {
     window.clearTimeout(toolActivityTimer);
@@ -3025,23 +3038,23 @@ function scheduleReload(): void {
 /** Local admission moves the draft; a native receipt alone may mark it sent. */
 
 async function stopCurrentTurn(): Promise<void> {
-  const id = selectedId, turnId = controlledTurnId, generation = selectionGeneration;
+  const id = selectedId(), turnId = controlledTurnId, generation = selectionGeneration();
   if (!id || controlledSessionId !== id || controlledSelection !== generation || !turnId || controlledStopPending) return;
   controlledStopPending = true; paintDeliveryControls(deliveryHost);
   try { await run(api.stopSessionTurn(id, turnId)); }
-  finally { if (selectedId === id && selectionGeneration === generation) { controlledStopPending = false; void refreshSessionControls(); } }
+  finally { if (selectedId() === id && selectionGeneration() === generation) { controlledStopPending = false; void refreshSessionControls(); } }
 }
 let composerDiscoveryGeneration = 0;
 async function sendComposer(delivery?: 'finish', plan?: string[], planObjective?: string): Promise<boolean | void> {
   const input = $<HTMLTextAreaElement>('chatInput');
   const key = draftKey();
-  const projectId = selectedId ? sessions.find(row => row.id === selectedId)?.projectId ?? null : selectedProjectId;
+  const projectId = selectedId() ? sessions.find(row => row.id === selectedId())?.projectId ?? null : selectedProjectId;
   const images = imageDrafts.get(key) ?? [];
   const text = plan?.[0] ?? (authoredComposerText().trim() || (images.length ? 'Please look at the attached files.' : ''));
   if ($<HTMLButtonElement>('chatSend').disabled) return;
   if (!text) {
-    const target = selectedId, selection = selectionGeneration;
-    const sameSelection = () => selectedId === target && selectionGeneration === selection;
+    const target = selectedId(), selection = selectionGeneration();
+    const sameSelection = () => selectedId() === target && selectionGeneration() === selection;
     await refreshSessionControls();
     if (!sameSelection()) return;
     // An actual turn takes precedence over queued follow-ups. Stop never silently
@@ -3068,24 +3081,24 @@ async function sendComposer(delivery?: 'finish', plan?: string[], planObjective?
     return;
   }
   const discoveryGeneration = ++composerDiscoveryGeneration;
-  const discoverySelection = selectionGeneration, discoverySession = selectedId, discoveryDraft = authoredComposerText();
+  const discoverySelection = selectionGeneration(), discoverySession = selectedId(), discoveryDraft = authoredComposerText();
   const modelSettings = confirmedComposerModel() ?? await ensureComposerModel();
   // Discovery can outlive navigation or draft edits. Only the latest unchanged
   // authored send may continue; a second click must never send the same text twice.
-  if (discoveryGeneration !== composerDiscoveryGeneration || discoverySelection !== selectionGeneration || discoverySession !== selectedId ||
+  if (discoveryGeneration !== composerDiscoveryGeneration || discoverySelection !== selectionGeneration() || discoverySession !== selectedId() ||
       authoredComposerText() !== discoveryDraft || (imageDrafts.get(key) ?? []).some((image, index) => image !== images[index]) ||
       (imageDrafts.get(key)?.length ?? 0) !== images.length) return false;
   if (!modelSettings) { toast(t("Model discovery could not confirm your selection. Choose an available model and thinking effort, then send again.")); return false; }
-  const sessionId = selectedId;
-  const generation = selectionGeneration;
+  const sessionId = selectedId();
+  const generation = selectionGeneration();
   const chosenMode = delivery ?? $<HTMLSelectElement>('sendMode').value;
-  const mode = chosenMode === 'tool' ? 'auto' : chosenMode === 'after-turn' && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledQueueAtFinish ? 'finish' : chosenMode;
+  const mode = chosenMode === 'tool' ? 'auto' : chosenMode === 'after-turn' && controlledSessionId === selectedId() && controlledSelection === selectionGeneration() && controlledQueueAtFinish ? 'finish' : chosenMode;
   const dueAt = Date.now();
   const id = crypto.randomUUID();
   const authoredDraft = authoredComposerText();
   const attachmentPayload = { images: images.filter((file): file is InputImage => 'dataUrl' in file), attachments: images.filter((file): file is InputAttachment => 'id' in file),
     ...(chosenMode === 'tool' && !plan ? { delivery: 'tool' as const } : {}),
-    ...(mode === 'auto' && !plan && selectedId && controlledSessionId === selectedId && controlledSelection === generation &&
+    ...(mode === 'auto' && !plan && selectedId() && controlledSessionId === selectedId() && controlledSelection === generation &&
       controlledCanInject && images.some(file => 'id' in file) && injectableAttachments(images) ? { attachmentDelivery: 'tool' as const } : {}) };
   const objective = plan ? planObjective : mode === 'finish' ? undefined : $<HTMLTextAreaElement>('sessionObjective').value.trim() || undefined;
   const authoredSource = plan ? 'objective' as const : 'text' as const;
@@ -3110,7 +3123,7 @@ async function sendComposer(delivery?: 'finish', plan?: string[], planObjective?
         await adoptAcceptedOpening(deliveryHost, retained);
         return true;
       }
-      if (selectedId === sessionId && selectionGeneration === generation && !authoredComposerText()) {
+      if (selectedId() === sessionId && selectionGeneration() === generation && !authoredComposerText()) {
         inputDrafts.set(key, authoredDraft); input.value = authoredDraft; skillPicker?.restore();
       }
       else if (!inputDrafts.get(key)) inputDrafts.set(key, authoredDraft);
@@ -3123,10 +3136,10 @@ async function sendComposer(delivery?: 'finish', plan?: string[], planObjective?
     // that durable row visible while the next listing crosses the process boundary.
     inputQueueGeneration++;
     pendingComposerInputs = [...pendingComposerInputs.filter(row => row.id !== result.id), result];
-    if (sessionId === null && selectionGeneration === generation && pendingNewInput?.id === id && result.automation &&
+    if (sessionId === null && selectionGeneration() === generation && pendingNewInput?.id === id && result.automation &&
         ($<HTMLSelectElement>('chatAutomation').value !== result.automation || openingLoopDelivery() !== result.loopAfterTurn))
       await run(api.setInputAutomation(result.id, $<HTMLSelectElement>('chatAutomation').value as InputAutomation, openingLoopDelivery()));
-    if (sessionId === null && selectionGeneration === generation) {
+    if (sessionId === null && selectionGeneration() === generation) {
       pendingNewInput = { id: result.id, generation };
       await adoptAcceptedOpening(deliveryHost, result);
     }
@@ -3174,7 +3187,7 @@ function showView(name: string): void {
 
 function selectSession(id: string): void {
   retireRichImageViewer();
-  const ownerChanged = id !== selectedId;
+  const ownerChanged = id !== selectedId();
   rememberDraft();
   advanceSelectionGeneration(); replaceComposerDraft();
   inputQueueGeneration++;
@@ -3183,7 +3196,7 @@ function selectSession(id: string): void {
   publishSelectedSession(id);
   reportVisibleSelection(true);
   const selected = sessions.find(row => row.id === id);
-  applyComposerSessionModel(`${id}:${selectionGeneration}`, composerSessionSelection(selected) ?? null);
+  applyComposerSessionModel(`${id}:${selectionGeneration()}`, composerSessionSelection(selected) ?? null);
   const parent = selected?.origin?.kind === 'worker' ? selected.origin.fromSessionId : null;
   if (parent) expandedWorkers.add(parent);
   selectedProjectId = projectGroup(projects, parent ? sessions.find(row => row.id === parent)?.projectId : selected?.projectId);
@@ -3245,13 +3258,13 @@ function selectNewChat(projectId: string | null = null): void {
 const sessionHost: SessionListHost = {
   sessions: () => sessions,
   projects: () => projects,
-  selectedId: () => selectedId,
+  selectedId: () => selectedId(),
   sidebarOrder: () => sidebarOrder,
   expandedWorkers,
   expandedProjects,
   projectVisibleCounts,
   paint: () => ({
-    selectedId, activeId, blockedChats, swarm,
+    selectedId: selectedId(), activeId, blockedChats, swarm,
     unattributedBlocked: () => unattributedBlocked(deps.state()),
     actions: sessionActions
   }),
@@ -3272,8 +3285,8 @@ const sessionActions: SessionRowActions = {
 
 /** The outbox's read-and-call surface, live for the same reason as the sidebar's. */
 const deliveryHost: DeliveryHost = {
-  selectedId: () => selectedId,
-  selectionGeneration: () => selectionGeneration,
+  selectedId: () => selectedId(),
+  selectionGeneration: () => selectionGeneration(),
   controlledSessionId: () => controlledSessionId,
   controlledTurnId: () => controlledTurnId,
   controlledSelection: () => controlledSelection,
@@ -3319,7 +3332,7 @@ const deliveryHost: DeliveryHost = {
  * project terminal — belong to this file, so the list asks for the re-point rather than doing it.
  */
 function updatePanels(): void {
-  agentPanel?.update(selectedId, sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId && selectedId !== null));
+  agentPanel?.update(selectedId(), sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId() && selectedId() !== null));
   filePanel?.update(selectedLocalProject(sessionHost));
   workspaceTerminal?.update(selectedLocalProject(sessionHost));
   // The Skills page lists what this session's project can see, and its scope is the same object
@@ -3334,7 +3347,7 @@ function updatePanels(): void {
 
 /** The Skills page's scope, kept in step with the composer picker's own. */
 function skillsLibraryScope(): { sessionId: string | null; projectId: string | null } {
-  return { sessionId: selectedId, projectId: selectedLocalProject(sessionHost)?.id ?? selectedProjectId };
+  return { sessionId: selectedId(), projectId: selectedLocalProject(sessionHost)?.id ?? selectedProjectId };
 }
 
 /**
@@ -3344,7 +3357,7 @@ function skillsLibraryScope(): { sessionId: string | null; projectId: string | n
  * this file's detail state, so the outbox asks rather than keeping a second copy of it.
  */
 function transcriptOwns(entry: InputEntry): boolean {
-  return detailFor === selectedId && !!(events.some(event =>
+  return detailFor === selectedId() && !!(events.some(event =>
     event.kind === 'user_message' && (event.inputId === entry.id ||
       event.messageId === (entry.messageId ?? `input:${entry.id}`))) ||
     // History owns committed off-page rows. Keep only receipts newer than our loaded
@@ -3379,10 +3392,10 @@ async function removeProject(id: string): Promise<void> {
   projects = projects.map(row => row.id === id ? removed : row);
   expandedProjects.delete(id); projectVisibleCounts.delete(id);
   if (selectedProjectId === id) {
-    if (!selectedId) {
+    if (!selectedId()) {
       const oldKey = draftKey();
       const authoredDraft = authoredComposerText();
-      selectedProjectId = null; advanceSelectionGeneration(); replaceComposerDraft();
+      selectedProjectId = null; syncDraftKey(); advanceSelectionGeneration(); replaceComposerDraft();
       reportVisibleSelection(true);
       // Keep the visible draft and its attachments while moving to unfiled.
       inputDrafts.set(draftKey(), authoredDraft); inputDrafts.delete(oldKey); newChatTasks.delete(oldKey);
@@ -3441,7 +3454,7 @@ export function initChat(next: Deps): void {
   initChatModels(() => {
     paintLoopDelivery();
     const config = deps.state()?.config;
-    if (config) paintContextMeter(sessions.find(session => session.id === selectedId) ?? null, config, confirmedComposerModel());
+    if (config) paintContextMeter(sessions.find(session => session.id === selectedId()) ?? null, config, confirmedComposerModel());
   });
   $('queueAtFinish').addEventListener('click', () => {
     if ($('queueAtFinish').hidden) return;
@@ -3469,7 +3482,7 @@ export function initChat(next: Deps): void {
     cancelGoalRequest();
     if (select.value === 'off') goalDraftView = null;
     select.dataset.edited = 'true'; paintAutomationSwitch();
-    const id = selectedId, generation = selectionGeneration;
+    const id = selectedId(), generation = selectionGeneration();
     const mode = select.value as InputAutomation;
     const opening = id && pendingComposerInputs.find(row => row.sessionId === id && row.opening && !row.deliveredAt && ['queued', 'browser'].includes(row.state));
     if (opening) {
@@ -3487,12 +3500,12 @@ export function initChat(next: Deps): void {
     try { await run(api.setSessionAutomation(id, mode)); }
     finally {
       select.disabled = false;
-      if (id === selectedId && generation === selectionGeneration) { delete select.dataset.edited; void refreshSessionControls(); }
+      if (id === selectedId() && generation === selectionGeneration()) { delete select.dataset.edited; void refreshSessionControls(); }
       paintAutomationSwitch();
     }
   });
   $('loopDelivery').addEventListener('change', async () => {
-    const id = selectedId, generation = selectionGeneration;
+    const id = selectedId(), generation = selectionGeneration();
     const select = $<HTMLSelectElement>('loopDelivery');
     const opening = id && pendingComposerInputs.find(row => row.sessionId === id && row.opening && !row.deliveredAt && ['queued', 'browser'].includes(row.state));
     if (opening) {
@@ -3512,21 +3525,21 @@ export function initChat(next: Deps): void {
     try { await run(api.setSessionAutomation(id, 'loop', select.value === 'after-turn')); }
     finally {
       select.disabled = false;
-      if (id === selectedId && generation === selectionGeneration) void refreshSessionControls();
+      if (id === selectedId() && generation === selectionGeneration()) void refreshSessionControls();
     }
   });
   $('sessionObjective').addEventListener('input', () => { cancelGoalRequest(); goalIntentGeneration++; $('sessionObjective').dataset.edited = 'true'; delete $('sessionObjective').dataset.saved; paintTaskActions(); });
   $('sessionObjectiveMode').addEventListener('change', () => { cancelGoalRequest(); goalIntentGeneration++; $('sessionObjective').dataset.edited = 'true'; delete $('sessionObjective').dataset.saved; paintTaskActions(); });
   for (const buttonId of ['saveSessionObjective'] as const) {
     $(buttonId).addEventListener('click', async () => {
-      const id = selectedId;
+      const id = selectedId();
       const objective = $<HTMLTextAreaElement>('sessionObjective');
       if (!id) {
         const draft = objective.value, mode = $<HTMLSelectElement>('sessionObjectiveMode').value as 'goal' | 'loop';
         if (!draft.trim()) return;
         const settings = confirmedComposerModel();
         if (!settings) { toast('Reload model choices and select an available model and thinking effort before sending.'); return; }
-        const selection = selectionGeneration, intent = goalIntentGeneration, requestId = crypto.randomUUID();
+        const selection = selectionGeneration(), intent = goalIntentGeneration, requestId = crypto.randomUUID();
         const projectId = selectedProjectId;
         const { model, reasoningEffort } = settings;
         const automation = $<HTMLSelectElement>('chatAutomation');
@@ -3534,7 +3547,7 @@ export function initChat(next: Deps): void {
         automation.dataset.edited = 'true'; paintAutomationSwitch();
         goalProgress = { requestId, selection, phase: 'preparing', text: '' };
         const button = $<HTMLButtonElement>(buttonId); button.dataset.busy = 'true'; paintTaskActions(); paintGoalProgress();
-        const current = () => selectedId === null && selectionGeneration === selection && goalIntentGeneration === intent && objective.value === draft && automation.value === mode;
+        const current = () => selectedId() === null && selectionGeneration() === selection && goalIntentGeneration === intent && objective.value === draft && automation.value === mode;
         try {
           const result = await api.draftGoalOpening(draft.trim(), mode, requestId);
           const opening = result.ok ? result.data : null;
@@ -3552,7 +3565,7 @@ export function initChat(next: Deps): void {
             if (accepted) { inputQueueGeneration++; pendingComposerInputs = [...pendingComposerInputs.filter(row => row.id !== inputId), accepted];
               // Off may arrive while sendInput is still validating/enqueuing, before
               // the outbox row exists. Reconcile that same pending intent after acceptance.
-              if (selectionGeneration === selection && pendingNewInput?.id === inputId &&
+              if (selectionGeneration() === selection && pendingNewInput?.id === inputId &&
                   (automation.value !== mode || openingLoopDelivery() !== entry.loopAfterTurn))
                 await run(api.setInputAutomation(inputId, automation.value as InputAutomation, openingLoopDelivery()));
               await adoptAcceptedOpening(deliveryHost, accepted);
@@ -3563,7 +3576,7 @@ export function initChat(next: Deps): void {
         return;
       }
       if (objective.dataset.sessionId !== id) return;
-      const selection = selectionGeneration, draft = objective.value;
+      const selection = selectionGeneration(), draft = objective.value;
       const text = objective.value.trim();
       if (!text) return;
       const mode = $<HTMLSelectElement>('sessionObjectiveMode').value as 'goal' | 'loop';
@@ -3572,20 +3585,20 @@ export function initChat(next: Deps): void {
       try {
         const saved = await run(api.setSessionObjective(id, text, mode));
         if (goalProgress?.requestId === requestId) { goalProgress.phase = saved ? 'saved' : 'failed'; if (!saved) goalProgress.error = 'Task could not be saved'; paintGoalProgress(); }
-        if (saved && selectedId === id && selectionGeneration === selection && objective.value === draft &&
+        if (saved && selectedId() === id && selectionGeneration() === selection && objective.value === draft &&
             $<HTMLSelectElement>('sessionObjectiveMode').value === mode) { delete objective.dataset.edited; objective.dataset.saved = objective.value; }
       } finally {
         delete button.dataset.busy; paintTaskActions();
-        if (selectedId === id) void refreshSessionControls();
+        if (selectedId() === id) void refreshSessionControls();
       }
     });
   }
   for (const [buttonId, cancel] of [['compactSession', false], ['cancelCompaction', true]] as const) {
     $(buttonId).addEventListener('click', async () => {
-      const id = selectedId; if (!id) return;
+      const id = selectedId(); if (!id) return;
       const button = $<HTMLButtonElement>(buttonId); button.disabled = true;
       try { await run(cancel ? api.cancelSessionCompaction(id) : api.compactSession(id)); }
-      finally { button.disabled = false; if (selectedId === id) void refreshSessionControls(); }
+      finally { button.disabled = false; if (selectedId() === id) void refreshSessionControls(); }
     });
   }
   const appendImages = (owner: ComposerDraftOwner, chosen: InputAttachment[] | null | undefined): boolean => {
@@ -3623,7 +3636,7 @@ export function initChat(next: Deps): void {
   skillPicker = initSkills({ input: $<HTMLTextAreaElement>('chatInput'), host: $('skillPicker'),
     openButton: $('composerSkills'), addButton: $('composerAddSkill'),
     selectedHost: $('composerSelectedSkills'), owner: () => `${draftKey()}:${presentationStore.getState().draft.generation}`,
-    scope: () => ({ sessionId: selectedId, projectId: selectedLocalProject(sessionHost)?.id ?? selectedProjectId }),
+    scope: () => ({ sessionId: selectedId(), projectId: selectedLocalProject(sessionHost)?.id ?? selectedProjectId }),
     draft: () => inputDrafts.get(draftKey()), saveDraft: text => inputDrafts.set(draftKey(), text),
     list: scope => api.skillLibrary(scope), command: name => {
       if (name === 'plan') { $('createPlan').click(); return; }
@@ -3644,14 +3657,14 @@ export function initChat(next: Deps): void {
   // Settings should not pay for the scan.
   skillsLibraryScopeKey = JSON.stringify(skillsLibraryScope());
   $('generateFinishGoal').addEventListener('click', async () => {
-    const button = $<HTMLButtonElement>('generateFinishGoal'), id = selectedId, turnId = controlledTurnId;
-    if (!id || !turnId || button.hidden || button.disabled || controlledSessionId !== id || controlledSelection !== selectionGeneration) return;
+    const button = $<HTMLButtonElement>('generateFinishGoal'), id = selectedId(), turnId = controlledTurnId;
+    if (!id || !turnId || button.hidden || button.disabled || controlledSessionId !== id || controlledSelection !== selectionGeneration()) return;
     const owner = `${id}:${turnId}`;
     button.dataset.busy = owner; paintDeliveryControls(deliveryHost);
     try { await run(api.generateFinishGoal(id, turnId)); }
     finally {
       if (button.dataset.busy === owner) delete button.dataset.busy;
-      if (selectedId === id) void refreshSessionControls();
+      if (selectedId() === id) void refreshSessionControls();
       else paintDeliveryControls(deliveryHost);
     }
   });
@@ -3692,7 +3705,7 @@ export function initChat(next: Deps): void {
   $('addProject').addEventListener('click', async event => {
     event.preventDefault();
     const button = $<HTMLButtonElement>('addProject'); button.disabled = true;
-    const generation = selectionGeneration;
+    const generation = selectionGeneration();
     try {
       const project = await run(api.addProject());
       if (!project) return;
@@ -3701,7 +3714,7 @@ export function initChat(next: Deps): void {
       ++sessionsLoadGeneration;
       projects = [...projects.filter(row => row.id !== project.id), project];
       expandedProjects.add(project.id);
-      if (generation === selectionGeneration) selectNewChat(project.id); else paintSessions(sessionHost);
+      if (generation === selectionGeneration()) selectNewChat(project.id); else paintSessions(sessionHost);
     } finally { button.disabled = false; }
   });
   $('settingsSearch').addEventListener('input', () => applySettingsFilter());
@@ -3731,7 +3744,7 @@ export function initChat(next: Deps): void {
 
   $('sessionList').addEventListener('click', (event) => {
     const row = (event.target as HTMLElement).closest<HTMLElement>('[data-id]');
-    if (!row?.dataset.id || row.dataset.id === selectedId) return;
+    if (!row?.dataset.id || row.dataset.id === selectedId()) return;
     pendingNewInput = null;
     selectSession(row.dataset.id);
   });
@@ -3745,7 +3758,7 @@ export function initChat(next: Deps): void {
   let historyIntent: string | null = null;
   let historyDirection = 0;
   const loadAtEdge = () => {
-    if (!historyIntent || historyIntent !== selectedId || historyLoading || !selectedId || detailFor !== selectedId) return;
+    if (!historyIntent || historyIntent !== selectedId() || historyLoading || !selectedId() || detailFor !== selectedId()) return;
     const older = historyDirection < 0 && historyPane.scrollTop <= 80;
     const newer = historyDirection > 0 && historyBefore !== null && historyPane.scrollHeight - historyPane.clientHeight - historyPane.scrollTop <= 80;
     if (!older && !newer) return;
@@ -3763,12 +3776,12 @@ export function initChat(next: Deps): void {
     historyLoading = true;
     void loadDetail(true, before).finally(() => { historyLoading = false; });
   };
-  historyPane.addEventListener('wheel', event => { historyIntent = selectedId; historyDirection = Math.sign(event.deltaY); loadAtEdge(); }, { passive: true });
+  historyPane.addEventListener('wheel', event => { historyIntent = selectedId(); historyDirection = Math.sign(event.deltaY); loadAtEdge(); }, { passive: true });
   let pointerScrollTop: number | null = null;
   historyPane.addEventListener('pointerdown', () => { pointerScrollTop = historyPane.scrollTop; });
   window.addEventListener('pointerup', () => { pointerScrollTop = null; });
   historyPane.addEventListener('keydown', event => {
-    historyIntent = selectedId;
+    historyIntent = selectedId();
     historyDirection = ['ArrowUp', 'PageUp', 'Home'].includes(event.key) ? -1 : ['ArrowDown', 'PageDown', 'End'].includes(event.key) ? 1 : 0;
     loadAtEdge();
   });
@@ -3776,7 +3789,7 @@ export function initChat(next: Deps): void {
     if (pointerScrollTop !== null) {
       historyDirection = Math.sign(historyPane.scrollTop - pointerScrollTop);
       pointerScrollTop = historyPane.scrollTop;
-      historyIntent = selectedId;
+      historyIntent = selectedId();
     }
     loadAtEdge();
   }, { passive: true });
@@ -3847,7 +3860,7 @@ export function initChat(next: Deps): void {
 
   api.onSessionChanged(scheduleReload);
   api.onTaskProgress(progress => {
-    if (!goalProgress || progress.requestId !== goalProgress.requestId || goalProgress.selection !== selectionGeneration) return;
+    if (!goalProgress || progress.requestId !== goalProgress.requestId || goalProgress.selection !== selectionGeneration()) return;
     Object.assign(goalProgress, progress); paintGoalProgress();
   });
   api.onSwarmChanged(paintSwarm);
