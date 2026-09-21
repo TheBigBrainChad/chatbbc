@@ -12,6 +12,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { afterEach, expect, it, vi } from 'vitest';
+import { defaultAppearance } from '../src/shared/appearance.js';
 import { DEFAULT_GOAL_MODEL, DEFAULT_GOAL_SYSTEM_PROMPT } from '../src/shared/goal.js';
 import { BROWSER_READ_TOOLS, BROWSER_WRITE_TOOLS } from '../src/shared/browser-control.js';
 import { readRendererStyles } from './helpers.js';
@@ -71,7 +72,8 @@ it('does not overwrite a focused dirty settings field on an unsolicited state pu
     resolvedBinary: null,
     bundledTunnelVersion: null,
     bridge: { running: true, port: 8765, paired: false, present: false, lastSeenAt: null, extensionVersion: null },
-    update: { current: '2.0.2', latest: null, stage: 'idle', error: null, checkedAt: null }
+    update: { current: '2.0.2', latest: null, stage: 'idle', error: null, checkedAt: null },
+    omarchy: { generation: 0, theme: null, diagnostic: null }
   };
   const ok = (data: any) => Promise.resolve({ ok: true, data });
   const api: any = new Proxy({
@@ -227,7 +229,8 @@ it('serializes settings intent so rapid toggles and later UI changes cannot undo
     resolvedBinary: null,
     bundledTunnelVersion: null,
     bridge: { running: true, port: 8765, paired: false, present: false, lastSeenAt: null, extensionVersion: null },
-    update: { current: '2.0.2', latest: null, stage: 'idle', error: null, checkedAt: null }
+    update: { current: '2.0.2', latest: null, stage: 'idle', error: null, checkedAt: null },
+    omarchy: { generation: 0, theme: null, diagnostic: null }
   });
   let current = appState(baseConfig);
   const calls: any[] = [];
@@ -379,6 +382,7 @@ async function mountChat(
     bundledTunnelVersion: null,
     bridge: { running: true, port: 8765, paired: false, present: false, lastSeenAt: null, extensionVersion: null },
     update: { current: '2.0.2', latest: null, stage: 'idle', error: null, checkedAt: null },
+    omarchy: { generation: 0, theme: null, diagnostic: null },
     ...overrides
   };
   let listener: (next: any) => void = () => undefined;
@@ -436,6 +440,48 @@ async function mountChat(
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+it('applies only the newest live theme without erasing a focused dirty HEX field', async () => {
+  const retry = vi.fn(() => Promise.resolve({ ok: true as const, data: null }));
+  const mounted = await mountChat({}, [], { retryOmarchyTheme: retry });
+  const appearance = { ...defaultAppearance(), followDesktop: true };
+  const first = {
+    name: 'First', mode: 'dark' as const, background: '#111c18', accent: '#509475',
+    sidebar: '#23372b', green: '#549e6a', red: '#ff5345', fontFamily: null
+  };
+  mounted.state.config.ui.appearance = appearance;
+  mounted.push({ ...mounted.state, omarchy: { generation: 1, theme: first, diagnostic: null } });
+
+  const hex = mounted.window.document.getElementById('appearance-accent-hex') as HTMLInputElement;
+  hex.focus();
+  hex.value = '#b9';
+  hex.dispatchEvent(new mounted.window.Event('input', { bubbles: true }));
+
+  const second = {
+    ...first,
+    name: 'Second',
+    background: '#101218',
+    accent: '#b99aff',
+    sidebar: '#171925'
+  };
+  mounted.push({ ...mounted.state, omarchy: { generation: 2, theme: second, diagnostic: null } });
+  expect(hex.value).toBe('#b9');
+  expect(mounted.window.document.activeElement).toBe(hex);
+  expect(mounted.window.document.documentElement.style.getPropertyValue('--page')).toBe('#101218');
+  expect(mounted.window.document.getElementById('appearanceDesktopName')!.textContent).toBe('Second');
+
+  mounted.push({ ...mounted.state, omarchy: { generation: 1, theme: first, diagnostic: null } });
+  expect(mounted.window.document.documentElement.style.getPropertyValue('--page')).toBe('#101218');
+  expect(mounted.window.document.getElementById('appearanceDesktopName')!.textContent).toBe('Second');
+
+  const diagnostic = 'ChatBBC could not read the latest Omarchy theme. The last valid theme or built-in palette remains active.';
+  mounted.push({ ...mounted.state, omarchy: { generation: 2, theme: second, diagnostic } });
+  const retryButton = mounted.window.document.getElementById('appearanceRefreshDesktop') as HTMLButtonElement;
+  expect(mounted.window.document.getElementById('appearanceDesktopStatus')!.textContent).toBe(diagnostic);
+  expect(retryButton.hidden).toBe(false);
+  retryButton.click();
+  expect(retry).toHaveBeenCalledOnce();
+});
 
 const projectSidebarFixture = () => {
   const project = { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', name: 'Collapsed project', path: 'C:\\repo', createdAt: 1 };

@@ -1,5 +1,5 @@
 import type { ReasoningEffort } from './session.js';
-import type { OmarchyTheme } from '../main/omarchy-theme.js';
+import type { OmarchyThemeState } from '../main/omarchy-theme.js';
 import { WINDOWS_COMPUTER_READ_METHODS, WINDOWS_COMPUTER_INPUT_METHODS } from './windows-computer.js';
 import { BROWSER_READ_TOOLS, BROWSER_WRITE_TOOLS } from './browser-control.js';
 /** Types shared between the main process and the renderer. No runtime logic here. */
@@ -654,10 +654,10 @@ export interface AppState {
   /** Present only on macOS once the in-process native backend has reported its live TCC state. */
   desktopAccess?: MacOSDesktopAccessStatus | null;
   /**
-   * The live Omarchy theme, or null when this machine has none. Presentation only: the
-   * renderer resolves a followed theme's palette and chrome font from here.
+   * The generation-safe main-process Omarchy snapshot. Presentation only: the renderer
+   * resolves a followed theme's palette and chrome font from `theme`.
    */
-  omarchy?: OmarchyTheme | null;
+  omarchy: OmarchyThemeState;
 }
 
 export const DEFAULT_CAPABILITIES: Capabilities = {

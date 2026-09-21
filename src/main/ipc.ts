@@ -20,7 +20,11 @@ import { validateInputImages } from './session/input-images.js';
 import { stageInputAttachment, type AttachmentSource } from './session/input-attachments.js';
 import { recordDeliveredInput, recordedInputImage } from './session/input-history.js';
 import { UI_BASE_ZOOM, titleBarOverlayForTheme, windowBackgroundForTheme } from './window-layout.js';
-import { readOmarchyTheme } from './omarchy-theme.js';
+import {
+  currentOmarchyThemeState,
+  onOmarchyThemeChange,
+  retryOmarchyThemeObservation
+} from './omarchy-theme.js';
 import { usageOverview } from './session/usage.js';
 import { inputArgs, listInputs, editQueuedInput, reorderQueuedInputs, setInputAutomation, configureInputDelivery, pausedBrowserHelpers, cancelFinishInputs } from './session/input.js';
 import { draftOpeningMessage, onGoalChange, nativeGoalFailure } from './goal.js';
@@ -394,9 +398,7 @@ async function buildState(): Promise<AppState> {
     bridge: await bridgeStatus(),
     update: updateStatus(),
     desktopAccess: getMacOSDesktopAccess(),
-    // Read on every state snapshot: this is how a theme change on the desktop reaches the
-    // running app, and how the renderer sees it. Bounded and never throws.
-    omarchy: readOmarchyTheme()
+    omarchy: currentOmarchyThemeState()
   };
 }
 
@@ -601,6 +603,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     logInfo('renderer state ready');
     return state;
   });
+  handle('omarchy:retry', async () => retryOmarchyThemeObservation());
 
   handle('settings:save', async (payload) => {
     const request = settingsSave.parse(payload);
@@ -620,7 +623,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     // system theme until restart (and startup still defaulted to system before index.ts applies it).
     // A followed desktop theme resolves to its own mode and palette, so the native chrome tracks
     // what the renderer actually paints rather than the saved manual colours.
-    const liveTheme = readOmarchyTheme(), chromeTheme = effectiveTheme(next.ui, liveTheme);
+    const liveTheme = currentOmarchyThemeState().theme, chromeTheme = effectiveTheme(next.ui, liveTheme);
     nativeTheme.themeSource = chromeTheme;
     if (process.platform === 'win32') {
       getWindow()?.setTitleBarOverlay(titleBarOverlayForTheme(chromeTheme, effectiveAppearance(next.ui, liveTheme)));
@@ -1402,6 +1405,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   };
   onStatusChange(pushState);
   onBridgeChange(pushState);
+  onOmarchyThemeChange(pushState);
   // Draft stages belong to session controls; state:changed only refreshes settings.
   onGoalChange(() => push('session:changed'));
   handle('tasks:cancel', async payload => cancelTaskRequest(z.object({ requestId: z.string().uuid() }).parse(payload).requestId));

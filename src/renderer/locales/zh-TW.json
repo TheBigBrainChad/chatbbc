@@ -1400,6 +1400,7 @@
   "Use the live Omarchy theme's own colors and terminal font. Your saved colors are kept and return when this is off. Detected:": "使用目前 Omarchy 主題自帶的色彩與終端字型。你儲存的色彩會保留，關閉此項後還原。已偵測到：",
   "none": "無",
   "Desktop theme": "桌面主題",
-  "The desktop theme is read when ChatBBC starts or when settings are saved. Refresh to pick up a theme you changed just now.": "桌面主題會在 ChatBBC 啟動或儲存設定時讀取。重新整理以取得你剛剛更換的主題。",
-  "Refresh from desktop": "從桌面重新整理"
+  "Theme changes sync automatically while ChatBBC is open.": "ChatBBC 開啟期間，主題變更會自動同步。",
+  "ChatBBC could not read the latest Omarchy theme. The last valid theme or built-in palette remains active.": "ChatBBC 無法讀取最新的 Omarchy 主題。將繼續使用上一個有效主題或內建配色。",
+  "Retry desktop theme": "重試桌面主題"
 }

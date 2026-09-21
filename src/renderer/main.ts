@@ -53,7 +53,10 @@ initSetupGuide();
 // Escape the translucent sidebar's backdrop-filter containing block.
 document.body.append($('connectionPopover'));
 const connectionAdvanced = initConnectionAdvanced();
-const appearance = initAppearance(patch => { void save(patch); }, () => { void refresh(); });
+const appearance = initAppearance(
+  patch => { void save(patch); },
+  () => { void run(api.retryOmarchyTheme()); }
+);
 
 /** Same shape the platform uses; mirrored here only to grey out step 2 until it is valid. */
 const TUNNEL_ID_PATTERN = /^tunnel_[0-9a-f]{32}$/;

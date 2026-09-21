@@ -13,6 +13,7 @@ import type { LocalProject } from '../shared/projects.js';
 import type { ProjectDirectoryListing, ProjectFileMutationResult, ProjectFilePreview, ProjectFileSaveResult, ProjectFilesChanged } from '../shared/project-files.js';
 import type { SkillSummary, SkillLibraryPage, SkillsDraftScope, SkillState } from '../shared/skills.js';
 import type { PluginSnapshot, PluginInstallRequest, PluginConfigPatch } from '../shared/plugins.js';
+import type { OmarchyThemeState } from '../main/omarchy-theme.js';
 /**
  * The entire renderer-facing API.
  *
@@ -137,6 +138,7 @@ const api = {
   attachText: (text: string) => call<InputAttachment>('sessions:attachText', { text }),
   getUsage: () => call<UsageOverview>('usage:get'),
   getState: () => call<AppState>('state:get'),
+  retryOmarchyTheme: () => call<OmarchyThemeState>('omarchy:retry'),
   saveSettings: (patch: SettingsPatch, base: SettingsPatch) => call<AppState>('settings:save', { patch, base }),
   addRoot: () => call<AppState>('roots:add'),
   /** A folder dropped on the window; only the preload can learn a dropped File's path. */

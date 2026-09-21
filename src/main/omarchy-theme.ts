@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync, watch as watchFs, type FSWatcher } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { mixColor } from '../shared/appearance.js';
@@ -12,6 +12,22 @@ export interface OmarchyTheme {
   green: string;
   red: string;
   fontFamily: string | null;
+}
+
+export interface OmarchyThemeState {
+  generation: number;
+  theme: OmarchyTheme | null;
+  diagnostic: string | null;
+}
+
+type WatchFactory = (directory: string, listener: () => void) => FSWatcher;
+
+export interface OmarchyThemeObservationOptions {
+  home?: string;
+  debounceMs?: number;
+  onChange?: (state: OmarchyThemeState) => void;
+  /** Dependency seam for deterministic watcher tests; the app always uses node:fs. */
+  watchFactory?: WatchFactory;
 }
 
 /** Bounded: a theme file is a few hundred bytes; anything larger is not one. */
@@ -37,7 +53,7 @@ function field(text: string, key: string): string | null {
 /**
  * Read the theme Omarchy materialises for the running desktop.
  *
- * `omarchy-theme-set` writes these two paths itself, so this is the documented
+ * `omarchy-theme-set` writes these materialized paths itself, so this is the documented
  * hand-off point rather than a guess at the user's config layout. Returns null
  * for every failure — no Omarchy, missing file, unreadable, oversized, unparseable
  * or a value that is not an #rrggbb colour. The caller falls back; nothing here
@@ -75,4 +91,174 @@ export function readOmarchyTheme(home: string = os.homedir()): OmarchyTheme | nu
   } catch {
     return null;
   }
+}
+
+const THEME_DIAGNOSTIC =
+  'ChatBBC could not read the latest Omarchy theme. The last valid theme or built-in palette remains active.';
+const DEFAULT_DEBOUNCE_MS = 75;
+const themeListeners = new Set<(state: OmarchyThemeState) => void>();
+let themeState: OmarchyThemeState = { generation: 0, theme: null, diagnostic: null };
+let activeObservation: OmarchyThemeObservation | null = null;
+let stopActiveObservation: (() => void) | null = null;
+
+function sameTheme(left: OmarchyTheme | null, right: OmarchyTheme | null): boolean {
+  return left === right || Boolean(left && right
+    && left.name === right.name
+    && left.mode === right.mode
+    && left.background === right.background
+    && left.accent === right.accent
+    && left.sidebar === right.sidebar
+    && left.green === right.green
+    && left.red === right.red
+    && left.fontFamily === right.fontFamily);
+}
+
+function publishThemeState(next: OmarchyThemeState): void {
+  themeState = next;
+  for (const listener of themeListeners) listener(next);
+}
+
+function existingDirectory(candidate: string, floor: string): string | null {
+  let current = candidate;
+  for (;;) {
+    try {
+      if (statSync(current, { throwIfNoEntry: false })?.isDirectory()) return current;
+    } catch {
+      // Keep walking toward the supplied home. A single unreadable path must not stop startup.
+    }
+    if (current === floor) return null;
+    const parent = path.dirname(current);
+    if (parent === current || !current.startsWith(`${floor}${path.sep}`)) return null;
+    current = parent;
+  }
+}
+
+class OmarchyThemeObservation {
+  private readonly watchers = new Map<string, FSWatcher>();
+  private timer: NodeJS.Timeout | undefined;
+  private stopped = false;
+
+  constructor(
+    private readonly home: string,
+    private readonly debounceMs: number,
+    private readonly watchFactory: WatchFactory
+  ) {}
+
+  start(): void {
+    this.read(false);
+    this.arm();
+  }
+
+  retry(): void {
+    if (!this.stopped) this.read(true);
+  }
+
+  stop(): void {
+    if (this.stopped) return;
+    this.stopped = true;
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    for (const watcher of this.watchers.values()) watcher.close();
+    this.watchers.clear();
+  }
+
+  private schedule = (): void => {
+    if (this.stopped) return;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.read(true);
+    }, this.debounceMs);
+  };
+
+  private read(notify: boolean): void {
+    if (this.stopped) return;
+    const candidate = readOmarchyTheme(this.home);
+    if (candidate === null) {
+      if (themeState.diagnostic !== THEME_DIAGNOSTIC) {
+        const next = { ...themeState, diagnostic: THEME_DIAGNOSTIC };
+        if (notify) publishThemeState(next);
+        else themeState = next;
+      }
+      this.arm();
+      return;
+    }
+
+    const changed = !sameTheme(themeState.theme, candidate);
+    if (changed || themeState.diagnostic !== null) {
+      const next = {
+        generation: themeState.generation + (changed ? 1 : 0),
+        theme: changed ? candidate : themeState.theme,
+        diagnostic: null
+      };
+      if (notify) publishThemeState(next);
+      else themeState = next;
+    }
+    this.arm();
+  }
+
+  private arm(): void {
+    if (this.stopped) return;
+    const current = path.join(this.home, '.local/state/omarchy/current');
+    const theme = path.join(current, 'theme');
+    const parent = existingDirectory(current, this.home);
+    const themeDirectory = existingDirectory(theme, current);
+    const desired = new Set([parent, themeDirectory].filter((entry): entry is string => entry !== null));
+
+    for (const [directory, watcher] of this.watchers) {
+      if (desired.has(directory)) continue;
+      watcher.close();
+      this.watchers.delete(directory);
+    }
+    for (const directory of desired) {
+      if (this.watchers.has(directory)) continue;
+      try {
+        const watcher = this.watchFactory(directory, this.schedule);
+        watcher.on?.('error', this.schedule);
+        this.watchers.set(directory, watcher);
+      } catch {
+        // A rename can remove a directory between stat and watch. Its stable parent remains armed.
+      }
+    }
+  }
+}
+
+export function currentOmarchyThemeState(): OmarchyThemeState {
+  return themeState;
+}
+
+export function onOmarchyThemeChange(listener: (state: OmarchyThemeState) => void): () => void {
+  themeListeners.add(listener);
+  return () => { themeListeners.delete(listener); };
+}
+
+export function retryOmarchyThemeObservation(): OmarchyThemeState {
+  activeObservation?.retry();
+  return themeState;
+}
+
+export function startOmarchyThemeObservation(options: OmarchyThemeObservationOptions = {}): () => void {
+  stopActiveObservation?.();
+  const home = options.home ?? os.homedir();
+  themeState = { generation: 0, theme: null, diagnostic: null };
+  const observation = new OmarchyThemeObservation(
+    home,
+    options.debounceMs ?? DEFAULT_DEBOUNCE_MS,
+    options.watchFactory ?? ((directory, listener) => watchFs(directory, { persistent: false }, listener))
+  );
+  activeObservation = observation;
+  if (options.onChange) themeListeners.add(options.onChange);
+  observation.start();
+
+  let stopped = false;
+  const stop = (): void => {
+    if (stopped) return;
+    stopped = true;
+    if (options.onChange) themeListeners.delete(options.onChange);
+    observation.stop();
+    if (activeObservation === observation) activeObservation = null;
+    if (stopActiveObservation === stop) stopActiveObservation = null;
+  };
+  stopActiveObservation = stop;
+  return stop;
 }

@@ -67,7 +67,11 @@ import {
 import { runShutdownSequence } from './shutdown.js';
 import { applyStagedUpdate, startUpdateChecks } from './update.js';
 import { UI_BASE_ZOOM, windowLayoutForWorkArea, titleBarOverlayForTheme, windowBackgroundForTheme } from './window-layout.js';
-import { readOmarchyTheme } from './omarchy-theme.js';
+import {
+  currentOmarchyThemeState,
+  onOmarchyThemeChange,
+  startOmarchyThemeObservation
+} from './omarchy-theme.js';
 import { effectiveAppearance, effectiveTheme } from '../shared/appearance.js';
 import type { AppearanceSettings } from '../shared/appearance.js';
 import { openInPreferredBrowser } from './browser.js';
@@ -95,6 +99,8 @@ let quitting = false;
 let shutdownStarted = false;
 let shutdownComplete = false;
 const usageWarmup = new AbortController();
+let stopOmarchyObservation: (() => void) | null = null;
+let stopOmarchyChromeSync: (() => void) | null = null;
 
 // One instance only: two copies would fight over the tunnel and the config file.
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -114,8 +120,16 @@ if (!hasSingleInstanceLock) {
  * dialogs must not disagree with the page painted beside them.
  */
 function nativeChromeTheme(): { theme: 'light' | 'dark'; appearance: AppearanceSettings } {
-  const omarchy = readOmarchyTheme(), ui = getConfig().ui;
+  const omarchy = currentOmarchyThemeState().theme, ui = getConfig().ui;
   return { theme: effectiveTheme(ui, omarchy), appearance: effectiveAppearance(ui, omarchy) };
+}
+
+function refreshNativeChromeTheme(): void {
+  const chrome = nativeChromeTheme();
+  nativeTheme.themeSource = chrome.theme;
+  if (!window || window.isDestroyed()) return;
+  if (process.platform === 'win32') window.setTitleBarOverlay(titleBarOverlayForTheme(chrome.theme, chrome.appearance));
+  window.setBackgroundColor(windowBackgroundForTheme(chrome.theme, chrome.appearance));
 }
 
 function createWindow(): void {
@@ -347,11 +361,11 @@ void app.whenReady().then(async () => {
   if (windowActivation.isDisabled()) return;
   try { applyLoginStartup(app, getConfig().ui.startAtLogin === true); }
   catch (error) { logWarn(`Windows login startup: ${error instanceof Error ? error.message : String(error)}`); }
-  // The renderer has its own explicit light/dark palette, so native chrome must follow the same
-  // user choice instead of Electron's default `system` theme. On macOS this controls the window
-  // frame, application menus and OS dialogs; on Linux/Windows it covers Electron-native UI.
-  // A followed desktop theme supplies that answer instead of the saved manual one.
-  nativeTheme.themeSource = nativeChromeTheme().theme;
+  // The main process owns one coalesced desktop-theme observer for the process lifetime.
+  // Renderer state publication subscribes to the same generation-safe snapshot in ipc.ts.
+  stopOmarchyChromeSync = onOmarchyThemeChange(refreshNativeChromeTheme);
+  stopOmarchyObservation = startOmarchyThemeObservation();
+  refreshNativeChromeTheme();
   const savedGoalObjectives = await readDurable<GoalObjectivesSnapshot>(GOAL_OBJECTIVES_STATE);
   if (windowActivation.isDisabled()) return;
   restoreGoalObjectives(savedGoalObjectives);
@@ -523,6 +537,10 @@ app.on('will-quit', (event) => {
   stopInputStartup();
   tray?.destroy();
   tray = null;
+  stopOmarchyChromeSync?.();
+  stopOmarchyChromeSync = null;
+  stopOmarchyObservation?.();
+  stopOmarchyObservation = null;
 
   void runShutdownSequence(
     [

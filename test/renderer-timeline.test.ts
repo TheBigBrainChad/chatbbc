@@ -190,7 +190,8 @@ async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers
     resolvedBinary: null,
     bundledTunnelVersion: null,
     bridge: { running: true, port: 8765, paired: false, present: false, lastSeenAt: null, extensionVersion: null },
-    update: { current: '2.0.3', latest: null, stage: 'idle', error: null, checkedAt: null }
+    update: { current: '2.0.3', latest: null, stage: 'idle', error: null, checkedAt: null },
+    omarchy: { generation: 0, theme: null, diagnostic: null }
   };
   const ok = (data: any) => Promise.resolve({ ok: true, data });
   const live = { events: [...events], inputs: [] as InputEntry[], sent: [] as InputArgs[], automation: 'off', controlCalls: [] as Array<{ id: string; action: string }>, compacting: false, finishHeld: true,
