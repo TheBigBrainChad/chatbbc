@@ -38,8 +38,7 @@ const atmospheric = (diagnostic: string | null): GlassSupport =>
     diagnostic
   };
 
-const runGlassCommand: GlassCommandRunner = (file, args, options) => {
-  const { promise, resolve, reject } = Promise.withResolvers<string>();
+const runGlassCommand: GlassCommandRunner = (file, args, options) => new Promise((resolve, reject) => {
   execFile(file, [...args], {
     encoding: 'utf8',
     timeout: options.timeout,
@@ -47,8 +46,7 @@ const runGlassCommand: GlassCommandRunner = (file, args, options) => {
     env: options.env,
     windowsHide: true
   }, (error, stdout) => error ? reject(error) : resolve(stdout));
-  return promise;
-};
+});
 
 /**
  * Observe compositor support without changing compositor or user configuration. Native glass is
