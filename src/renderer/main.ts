@@ -8,6 +8,7 @@ import { initConnectionAdvanced } from './connection-popover.js';
 import { initSetupGuide } from './setup-guide.js';
 import { initAppearance } from './appearance.js';
 import { presentationStore } from './presentation-store.js';
+import { createAppShell } from './app-shell.js';
 import { initPet } from './pet.js';
 import type { AppearanceSettings } from '../shared/appearance.js';
 /**
@@ -1914,6 +1915,25 @@ initUsage();
 initPlugins(apply);
 initBrowserPreferences();
 initChat({ save: () => save(), state: () => presentationStore.getState().app });
+
+createAppShell({
+  store: presentationStore,
+  roots: {
+    rail: $('globalRail'),
+    navigator: $('chatNavigator'),
+    stage: $('conversationStage'),
+    workbench: $('contextWorkbench')
+  }
+});
+$('globalRail').addEventListener('click', (event) => {
+  const destination = (event.target as HTMLElement).closest<HTMLElement>('[data-destination]')?.dataset.destination;
+  if (destination === 'usage') showTab('usage');
+  else if (destination === 'settings') showTab('workspace');
+  else if (
+    (destination === 'chats' || destination === 'files' || destination === 'agents')
+    && document.querySelector<HTMLElement>('.app')?.dataset.screen !== 'chat'
+  ) showTab('chat');
+});
 
 void (async () => {
   await refresh();

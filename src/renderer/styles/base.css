@@ -252,15 +252,26 @@ code {
 /* Explicit tracks for the titlebar, header, stacked notices and scrolling workspace.
    Only the workspace grows; showing a notice must not create an implicit content row. */
 .app {
+  --rail-width: 92px;
+  --workbench-track: 0px;
   height: 100%; display: grid;
-  grid-template-columns: min(var(--sidebar-width, var(--sidebar-default, 248px)), 50vw) minmax(0, 1fr);
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-columns: var(--rail-width) min(var(--sidebar-width, var(--sidebar-default, 248px)), 50vw) minmax(0, 1fr) var(--workbench-track);
+  grid-template-rows: auto minmax(0, 1fr);
   background: var(--page);
+  container-type: inline-size;
+  container-name: studio;
 }
-.app > header { grid-column: 2; grid-row: 2; }
-.app > .notices { grid-column: 2; grid-row: 3; min-width: 0; }
+#globalRail { grid-column: 1; grid-row: 2; min-width: 0; min-height: 0; }
+#chatNavigator { grid-column: 2; grid-row: 2; min-width: 0; min-height: 0; }
+#conversationStage {
+  grid-column: 3; grid-row: 2; min-width: 0; min-height: 0;
+  display: grid; grid-template-rows: auto auto minmax(0, 1fr);
+}
+#contextWorkbench { grid-column: 4; grid-row: 2; min-width: 0; min-height: 0; }
+#conversationStage > header { grid-row: 1; min-width: 0; }
+#conversationStage > .notices { grid-row: 2; min-width: 0; }
+#conversationStage > main { grid-row: 3; min-width: 0; min-height: 0; }
 .app[data-screen='settings'] #pluginRefreshReminder { display: none; }
-.app > main { grid-column: 2; grid-row: 4; min-width: 0; }
 /* One static wash behind the chat, reduced to 20% of its previous contrast. */
 :root[data-theme='dark'] .app[data-screen='chat'] {
   background: radial-gradient(ellipse at 12% 38%,
@@ -296,7 +307,9 @@ code {
 .view-menu-items .btn { display: flex; width: 100%; gap: 10px; padding: 9px 10px; border-radius: 0; }
 .view-menu-items kbd { margin-left: auto; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
 .view-menu-items hr { border: 0; border-top: 1px solid var(--line); margin: 5px 0; }
-.app.is-sidebar-collapsed { grid-template-columns: 0 minmax(0, 1fr); }
+.app.is-sidebar-collapsed {
+  grid-template-columns: var(--rail-width, 92px) 0 minmax(0, 1fr) var(--workbench-track, 0px);
+}
 .app.is-sidebar-collapsed .sidebar { display: none; }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

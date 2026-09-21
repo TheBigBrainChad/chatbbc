@@ -562,3 +562,147 @@ describe('the window as a whole', () => {
     expect(rule('.scroll')).toContain('overflow: hidden auto');
   });
 });
+
+describe('the adaptive studio shell', () => {
+  async function shellModule() {
+    return import('../src/renderer/app-shell.js');
+  }
+
+  async function storeModule() {
+    return import('../src/renderer/presentation-store.js');
+  }
+
+  function resize(width: number): void {
+    const view = document.defaultView!;
+    Object.defineProperty(view, 'innerWidth', { configurable: true, value: width });
+    view.dispatchEvent(new view.Event('resize'));
+  }
+
+  async function mountShell() {
+    const { createAppShell } = await shellModule();
+    const { createPresentationStore, initialPresentationState } = await storeModule();
+    const store = createPresentationStore(initialPresentationState());
+    let work = document.getElementById('workPanel');
+    if (!work) {
+      work = document.createElement('section');
+      work.id = 'workPanel';
+      document.querySelector('[data-panel="chat"]')!.append(work);
+    }
+    const shell = createAppShell({
+      document,
+      store,
+      roots: {
+        rail: document.getElementById('globalRail')!,
+        navigator: document.getElementById('chatNavigator')!,
+        stage: document.getElementById('conversationStage')!,
+        workbench: document.getElementById('contextWorkbench')!
+      }
+    });
+    return { shell, store };
+  }
+
+  it('declares collapse priority as workbench overlay, navigator drawer, then compact rail', () => {
+    const workbench = css.indexOf('@container studio (max-width: 1099px)');
+    const navigator = css.indexOf('@container studio (max-width: 779px)');
+    const rail = css.indexOf('@container studio (max-width: 559px)');
+    expect(workbench, 'workbench overlay container').toBeGreaterThan(-1);
+    expect(navigator, 'navigator drawer container').toBeGreaterThan(workbench);
+    expect(rail, 'compact rail container').toBeGreaterThan(navigator);
+    expect(css.indexOf('@media (max-width: 1099px)')).toBeGreaterThan(-1);
+    expect(css.indexOf('@media (max-width: 779px)')).toBeGreaterThan(css.indexOf('@media (max-width: 1099px)'));
+    expect(css.indexOf('@media (max-width: 559px)')).toBeGreaterThan(css.indexOf('@media (max-width: 779px)'));
+    expect(rule('.composer')).toContain('max-width: 860px');
+  });
+
+  it('mounts one chat-centric four-zone shell without duplicating feature roots', async () => {
+    const { shell } = await mountShell();
+    expect(document.querySelectorAll('#globalRail, #chatNavigator, #conversationStage, #contextWorkbench')).toHaveLength(4);
+    for (const id of ['sessionList', 'timeline', 'composer', 'workPanel'])
+      expect(document.querySelectorAll(`#${id}`), id).toHaveLength(1);
+    expect(shell.stage.contains(document.querySelector('#timeline'))).toBe(true);
+    expect(shell.stage.contains(document.querySelector('#composer'))).toBe(true);
+    expect(shell.navigator.contains(document.querySelector('#sessionList'))).toBe(true);
+    expect(shell.workbench.contains(document.querySelector('#workPanel'))).toBe(true);
+    expect(shell.rail.id).toBe('globalRail');
+    shell.dispose();
+  });
+
+  it('collapses the workbench, then the navigator, then the rail while the stage stays mounted', async () => {
+    const { shell } = await mountShell();
+    const app = document.querySelector<HTMLElement>('.app')!;
+    const stage = shell.stage;
+    const composer = document.getElementById('composer')!;
+    resize(1400);
+    expect(app.dataset.collapse).toBe('wide');
+    resize(1000);
+    expect(app.dataset.collapse).toBe('workbench');
+    resize(700);
+    expect(app.dataset.collapse).toBe('navigator');
+    resize(480);
+    expect(app.dataset.collapse).toBe('rail');
+    expect(document.getElementById('conversationStage')).toBe(stage);
+    expect(stage.contains(document.getElementById('timeline'))).toBe(true);
+    expect(stage.contains(composer)).toBe(true);
+    const composerWidth = composer.style.width;
+    shell.setWorkbenchOpen(true);
+    shell.setWorkbenchOpen(false);
+    expect(composer.style.width).toBe(composerWidth);
+    expect(document.getElementById('conversationStage')).toBe(stage);
+    shell.dispose();
+  });
+
+  it('Escape closes only the topmost drawer or overlay and returns focus to its trigger', async () => {
+    const { shell } = await mountShell();
+    const view = document.defaultView!;
+    const app = document.querySelector<HTMLElement>('.app')!;
+    const chats = document.querySelector<HTMLButtonElement>('[data-destination="chats"]')!;
+    const files = document.querySelector<HTMLButtonElement>('[data-destination="files"]')!;
+    const escape = () => document.dispatchEvent(new view.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+
+    resize(1400);
+    shell.setWorkbenchOpen(true);
+    expect(app.dataset.workbenchOpen).toBe('true');
+    escape();
+    expect(app.dataset.workbenchOpen).toBe('true');
+
+    resize(480);
+    chats.focus();
+    chats.click();
+    expect(app.dataset.navigatorOpen).toBe('true');
+    files.focus();
+    files.click();
+    expect(app.dataset.workbenchOpen).toBe('true');
+    escape();
+    expect(app.dataset.workbenchOpen).toBe('false');
+    expect(app.dataset.navigatorOpen).toBe('true');
+    expect(document.activeElement).toBe(files);
+    escape();
+    expect(app.dataset.navigatorOpen).toBe('false');
+    expect(app.dataset.workbenchOpen).toBe('false');
+    expect(document.activeElement).toBe(chats);
+    escape();
+    expect(app.dataset.navigatorOpen).toBe('false');
+    expect(document.activeElement).toBe(chats);
+    shell.dispose();
+  });
+
+  it('projects a destination without mutating the session or app ledger', async () => {
+    const { shell, store } = await mountShell();
+    shell.setDestination('files');
+    expect(store.getState().selectedSessionId).toBeNull();
+    expect(store.getState().app).toBeNull();
+    expect(store.getState().shell.workbench).toEqual({ open: true, tab: 'files' });
+    expect(document.querySelector('[data-destination="files"]')!.getAttribute('aria-current')).toBe('page');
+    shell.setDestination('agents');
+    expect(store.getState().shell.workbench).toEqual({ open: true, tab: 'agents' });
+    expect(store.getState().selectionGeneration).toBe(0);
+    shell.setDestination('usage');
+    expect(store.getState().shell.workbench).toEqual({ open: true, tab: 'agents' });
+    expect(document.querySelector('[data-destination="usage"]')!.getAttribute('aria-current')).toBe('page');
+    expect(document.querySelector('[data-destination="chats"]')!.hasAttribute('aria-current')).toBe(false);
+    shell.setDestination('settings');
+    expect(store.getState().appGeneration).toBe(0);
+    expect(shell.stage.contains(document.getElementById('timeline'))).toBe(true);
+    shell.dispose();
+  });
+});

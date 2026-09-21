@@ -15,6 +15,11 @@ app.whenReady().then(async () => {
   // order, which is also cascade order, so this sees the same rules the renderer applies.
   const sheets = ['base', 'shell', 'transcript', 'composer', 'panels', 'pages', 'dialogs'];
   const css = sheets.map(name => fs.readFileSync(path.join(__dirname, '../src/renderer/styles', `${name}.css`), 'utf8')).join('\n');
+  assert.match(css, /@container studio \(max-width: 1099px\)/);
+  assert.match(css, /@container studio \(max-width: 779px\)/);
+  assert.match(css, /@container studio \(max-width: 559px\)/);
+  assert.match(css, /max-width: 860px/);
+  assert.match(css, /100% - 800px/);
   await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`<style>${css}</style>
     <div id="fixture"><div id="chatBody" class="scroll"><div class="view" data-view="timeline">
     <div id="timeline"><button class="timeline-window-note" hidden>Back to latest</button>

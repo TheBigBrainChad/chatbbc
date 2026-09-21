@@ -613,8 +613,8 @@ main {
 
 
 .app[data-screen='settings'] :is(#chatTitle, #chatProjectContext) { display: none; }
-.app > header .power { padding: 6px 10px; min-height: 32px; border-radius: 0; font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); font-weight: 500; }
-.app > header .live { font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); font-weight: 400; }
+#conversationStage > header .power { padding: 6px 10px; min-height: 32px; border-radius: 0; font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); font-weight: 500; }
+#conversationStage > header .live { font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); font-weight: 400; }
 
 /* ------------------------------------------------------- session list */
 
@@ -650,9 +650,9 @@ main {
 .app[data-screen='settings'] .panel.is-active, .app[data-screen='settings'] [data-view='settings']:not([hidden]) { animation: surface-in 160ms ease-out; }
 
 /* The workspace shell follows the observed Codex chat/settings hierarchy. */
-.app > header { min-height: 48px; border-bottom: 0; padding: 8px 24px; }
-.app > header > .mark, .app > header > .title { display: none; }
-.app[data-screen='settings'] > header, .app[data-screen='library'] > header { display: none; }
+#conversationStage > header { min-height: 48px; border-bottom: 0; padding: 8px 24px; }
+#conversationStage > header > .mark, #conversationStage > header > .title { display: none; }
+.app[data-screen='settings'] #conversationStage > header, .app[data-screen='library'] #conversationStage > header { display: none; }
 .app[data-screen='settings'] .is-session > h2,
 .app[data-screen='settings'] .is-session > .subhead,
 .app[data-screen='settings'] #chatFoot { display: none; }
@@ -693,3 +693,91 @@ main {
 .connection-runtime > summary { cursor: pointer; color: var(--soft); padding: 4px 0; font-family: var(--ui-font-mono); font-size: calc(10.5px * var(--text-scale, 1)); }
 .connect-prompt { background: var(--red); color: white; border: 0; padding: 8px 18px; font-weight: 600; }
 .connect-prompt[hidden] { display: none; }
+
+/* ------------------------------------------------------- adaptive studio */
+
+#globalRail {
+  display: flex; flex-direction: column; gap: 4px; padding: 8px 6px;
+  background: var(--glass-high, var(--sunk)); color: var(--ink);
+  border-inline-end: 1px solid var(--hairline, var(--line));
+}
+#globalRail [data-destination] {
+  display: flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px;
+  padding: 6px 4px; border: 0; border-radius: 0; background: transparent;
+  color: var(--ink-muted, var(--soft)); font-family: var(--ui-font-mono);
+  font-size: calc(11px * var(--text-scale, 1)); line-height: 1.2; text-align: center; cursor: pointer;
+}
+#globalRail [data-destination][aria-current='page'] { background: var(--hover); color: var(--ink); }
+#globalRail [data-destination]:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
+#chatNavigator { display: flex; flex-direction: column; position: relative; }
+#chatNavigator > .sidebar { flex: 1 1 auto; width: 100%; min-height: 0; grid-column: auto; grid-row: auto; }
+#contextWorkbench {
+  display: flex; flex-direction: column; background: var(--glass-high, var(--page));
+  border-inline-start: 1px solid var(--hairline, var(--line));
+}
+#contextWorkbench > .work-panel { flex: 1 1 auto; width: 100%; min-height: 0; grid-column: auto; grid-row: auto; border-left: 0; }
+.app[data-workbench-open='false'] #contextWorkbench { visibility: hidden; pointer-events: none; }
+.app[data-workbench-open='true'][data-collapse='wide'] {
+  --workbench-track: min(var(--workbench-width, var(--work-panel-width, 360px)), 42vw);
+}
+/* The chat column no longer reserves a second track: the workbench region owns that width. */
+#conversationStage [data-panel='chat'].has-work-panel,
+#conversationStage [data-panel='chat'].has-agent-panel,
+#conversationStage [data-panel='chat'].has-file-panel { grid-template-columns: minmax(0, 1fr); }
+.app[data-screen='settings'] #conversationStage .has-work-panel > .is-session { display: flex; }
+
+/* Collapse priority: workbench overlay, then navigator drawer, then compact rail. */
+@container studio (max-width: 1099px) {
+  #contextWorkbench {
+    position: fixed; z-index: 40; inset-block: env(titlebar-area-height, 28px) 0; inset-inline-end: 0;
+    width: min(var(--workbench-width, 360px), 92vw); box-shadow: 0 18px 48px var(--shadow);
+  }
+}
+@container studio (max-width: 779px) {
+  #chatNavigator {
+    position: fixed; z-index: 30; inset-block: env(titlebar-area-height, 28px) 0; inset-inline-start: var(--rail-width, 92px);
+    width: min(var(--sidebar-width, var(--sidebar-default, 248px)), 86vw);
+    transform: translateX(-105%); background: var(--glass-high, var(--sunk)); box-shadow: 0 18px 48px var(--shadow);
+  }
+  .app[data-navigator-open='true'] #chatNavigator { transform: none; }
+}
+@container studio (max-width: 559px) {
+  #globalRail { flex-direction: row; border-inline-end: 0; border-block-start: 1px solid var(--hairline, var(--line)); }
+  #globalRail [data-destination] { flex: 1 1 0; }
+  #chatNavigator { inset-inline-start: 0; inset-block-end: 52px; }
+}
+@media (max-width: 1099px) {
+  .app { --workbench-track: 0px; }
+  #contextWorkbench {
+    position: fixed; z-index: 40; inset-block: env(titlebar-area-height, 28px) 0; inset-inline-end: 0;
+    width: min(var(--workbench-width, 360px), 92vw); box-shadow: 0 18px 48px var(--shadow);
+  }
+}
+@media (max-width: 779px) {
+  .app { grid-template-columns: var(--rail-width, 92px) 0 minmax(0, 1fr) 0px; }
+  #chatNavigator {
+    position: fixed; z-index: 30; inset-block: env(titlebar-area-height, 28px) 0; inset-inline-start: var(--rail-width, 92px);
+    width: min(var(--sidebar-width, var(--sidebar-default, 248px)), 86vw);
+    transform: translateX(-105%); background: var(--glass-high, var(--sunk)); box-shadow: 0 18px 48px var(--shadow);
+  }
+  .app[data-navigator-open='true'] #chatNavigator { transform: none; }
+}
+@media (max-width: 559px) {
+  .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; }
+  #globalRail { grid-column: 1; grid-row: 3; flex-direction: row; border-inline-end: 0; border-block-start: 1px solid var(--hairline, var(--line)); }
+  #globalRail [data-destination] { flex: 1 1 0; }
+  #conversationStage, #chatNavigator, #contextWorkbench { grid-column: 1; grid-row: 2; }
+  #chatNavigator { inset-inline-start: 0; inset-block-end: 52px; }
+}
+.app[data-collapse='navigator'] { grid-template-columns: var(--rail-width, 92px) 0 minmax(0, 1fr) 0px; }
+.app[data-collapse='rail'] { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; }
+.app[data-collapse='rail'] #globalRail { grid-column: 1; grid-row: 3; flex-direction: row; }
+.app[data-collapse='rail'] #conversationStage,
+.app[data-collapse='rail'] #chatNavigator,
+.app[data-collapse='rail'] #contextWorkbench { grid-column: 1; grid-row: 2; }
+@media (max-width: 850px) {
+  #conversationStage > header .live em { display: none; }
+  #conversationStage .has-work-panel > .is-session,
+  #conversationStage .has-agent-panel > .is-session,
+  #conversationStage .has-file-panel > .is-session { display: grid; }
+}

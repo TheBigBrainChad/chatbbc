@@ -80,7 +80,7 @@
       </defs>
     </svg>
 
-    <div class="app" data-screen="chat">
+    <div class="app" id="appShell" data-screen="chat" data-workbench-open="false" data-navigator-open="false">
       <div class="app-topbar">
         <button class="btn" id="sidebarToggle" type="button" aria-label="Toggle sidebar" aria-controls="sidebar" aria-expanded="true" title="Toggle sidebar (Ctrl+B)"><svg class="ico" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M9 4v16" /></svg></button>
         <details class="view-menu" id="viewMenu"><summary>View</summary><div class="view-menu-items">
@@ -91,6 +91,14 @@
           <button class="btn" id="zoomActualSize" type="button">Actual Size <span id="zoomReset">100%</span><kbd>Ctrl+0</kbd></button>
         </div></details>
       </div>
+      <div id="globalRail" role="toolbar" aria-label="Workspace" aria-orientation="vertical">
+        <button type="button" data-destination="chats" aria-current="page" tabindex="0">Chats</button>
+        <button type="button" data-destination="files" tabindex="-1">Files</button>
+        <button type="button" data-destination="agents" tabindex="-1">Agents</button>
+        <button type="button" data-destination="usage" tabindex="-1">Usage</button>
+        <button type="button" data-destination="settings" tabindex="-1">Settings</button>
+      </div>
+      <aside id="chatNavigator">
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-resize" id="sidebarResize" role="separator" tabindex="0" aria-label="Chat list width" aria-orientation="vertical" aria-controls="sidebar" title="Drag to resize · Double-click to reset"></div>
         <div class="sidebar-brand"><span class="mark"><svg class="ico" viewBox="0 0 24 24"><use href="#i-mark" /></svg></span><strong>ChatBBC</strong></div>
@@ -210,6 +218,8 @@
           </div>
         </div>
       </aside>
+      </aside>
+      <div id="conversationStage">
       <!-- ------------------------------------------------------------ header -->
       <header>
         <span id="chatTitle">New chat</span>
@@ -1093,6 +1103,8 @@
           </section>
         </section>
       </main>
+      </div>
+      <aside id="contextWorkbench"></aside>
 
       <!-- --------------------------------------------------------------- nav -->
 
