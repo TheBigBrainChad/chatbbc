@@ -2165,3 +2165,83 @@ describe('Stop IPC exact session and turn authority', () => {
     expect(await invoke({ id: missing.id, expectedTurnId: 'ipc-stop-one' })).toMatchObject({ ok: false, error: 'session_not_recorded' });
   });
 });
+
+describe('glass navigation acknowledgement', () => {
+  it('publishes the current generation and rejects stale or foreign renderer readiness', async () => {
+    const appearancePainted = vi.fn((generation: number) => generation === 9);
+    const sender = { send: vi.fn() };
+    currentWindow = {
+      setBackgroundColor: vi.fn(),
+      setTitleBarOverlay: vi.fn(),
+      isDestroyed: () => false,
+      webContents: sender
+    };
+    registerIpc(
+      () => currentWindow as any,
+      () => undefined,
+      {
+        glassSupport: () => ({ mode: 'hyprland-blur', transparent: true, diagnostic: null }),
+        glassGeneration: () => 9,
+        appearancePainted,
+        updateBackground: () => undefined
+      }
+    );
+
+    const stateReply = await handlers.get('state:get')!(null, undefined) as any;
+    expect(stateReply).toMatchObject({
+      ok: true,
+      data: {
+        glass: { mode: 'hyprland-blur', transparent: true, diagnostic: null },
+        glassGeneration: 9
+      }
+    });
+
+    const acknowledge = handlers.get('glass:appearanceReady')!;
+    expect(await acknowledge({ sender }, { generation: 8 })).toMatchObject({ ok: false });
+    expect(await acknowledge({ sender: {} }, { generation: 9 })).toMatchObject({ ok: false });
+    expect(await acknowledge({ sender }, { generation: 9 })).toEqual({ ok: true, data: true });
+    expect(appearancePainted.mock.calls).toEqual([[8], [9]]);
+  });
+
+  it('keeps the new document backing after a delayed old acknowledgement following reload', async () => {
+    const { createGlassBackingHandshake } = await import('../src/main/window-glass.js');
+    const colors: string[] = [];
+    const handshake = createGlassBackingHandshake(
+      { setBackgroundColor: color => colors.push(color) },
+      { mode: 'hyprland-blur', transparent: true, diagnostic: null },
+      '#181818'
+    );
+    const sender = { send: vi.fn() };
+    currentWindow = {
+      setBackgroundColor: vi.fn(),
+      setTitleBarOverlay: vi.fn(),
+      isDestroyed: () => false,
+      webContents: sender
+    };
+    registerIpc(
+      () => currentWindow as never,
+      () => undefined,
+      {
+        glassSupport: () => ({ mode: 'hyprland-blur', transparent: true, diagnostic: null }),
+        glassGeneration: () => handshake.generation(),
+        appearancePainted: generation => handshake.appearancePainted(generation),
+        updateBackground: background => handshake.updateBackground(background)
+      }
+    );
+
+    const acknowledge = handlers.get('glass:appearanceReady');
+    expect(acknowledge).toBeTypeOf('function');
+    const oldGeneration = handshake.loading('#181818');
+    handshake.didFinishLoad();
+    expect(await acknowledge!({ sender }, { generation: oldGeneration })).toEqual({ ok: true, data: true });
+    expect(colors.at(-1)).toBe('#00000000');
+
+    const reloadedGeneration = handshake.loading('#f4f4f5');
+    handshake.didFinishLoad();
+    expect(colors.at(-1)).toBe('#f4f4f5');
+    expect(await acknowledge!({ sender }, { generation: oldGeneration })).toMatchObject({ ok: false });
+    expect(colors.at(-1)).toBe('#f4f4f5');
+    expect(await acknowledge!({ sender }, { generation: reloadedGeneration })).toEqual({ ok: true, data: true });
+    expect(colors.at(-1)).toBe('#00000000');
+  });
+});

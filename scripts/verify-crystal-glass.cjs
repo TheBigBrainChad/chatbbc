@@ -1,4 +1,5 @@
 // Real Electron/Chromium acceptance for the production Crystal glass owner and renderer CSS.
+// Backing release goes through the production preload, AppState generation, and IPC handler.
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
 const fs = require('node:fs');
@@ -27,6 +28,10 @@ app.on('window-all-closed', () => {});
 
 
 app.whenReady().then(async () => {
+  const deadline = setTimeout(() => {
+    console.error('Crystal glass smoke exceeded 120 seconds');
+    app.exit(1);
+  }, 120_000);
   const { createServer } = await import('vite');
   const server = await createServer({
     configFile: false,
@@ -54,10 +59,16 @@ app.whenReady().then(async () => {
 <aside class="sidebar"><strong>Workspace</strong></aside><main><section class="card"><h1>Readable glass</h1><button id="hit">Hit target</button></section></main></div>
 <script type="module">
   import { applyAppearance } from '/src/renderer/appearance.ts';
-  window.applyGlassMode = async mode => {
-    applyAppearance('dark', undefined, null, { mode });
+  window.applyGlassMode = async () => {
+    const state = await window.api.getState();
+    if (!state.ok) throw new Error(state.error || 'glass state unavailable');
+    const generation = state.data.glassGeneration;
+    if (!Number.isInteger(generation) || generation < 0) throw new Error('AppState is missing glassGeneration');
+    applyAppearance('dark', undefined, null, { mode: state.data.glass.mode });
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    window.appearancePainted = true;
+    const ack = await window.api.appearanceReady(generation);
+    if (!ack.ok) throw new Error(ack.error || 'appearance acknowledgement rejected');
+    window.appliedGlassGeneration = generation;
   };
   window.fixtureLoaded = true;
 </script></body></html>`);
@@ -68,6 +79,65 @@ app.whenReady().then(async () => {
   await server.listen();
 
   const glass = await server.ssrLoadModule('/src/main/window-glass.ts');
+  const preload = path.join(output, 'preload.cjs');
+  const bridgeFile = path.join(output, 'bridge.cjs');
+  const esbuild = require('esbuild');
+  esbuild.buildSync({
+    entryPoints: [path.join(root, 'src/preload/index.ts')],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    outfile: preload,
+    packages: 'external',
+    external: ['electron'],
+    logLevel: 'warning'
+  });
+  esbuild.buildSync({
+    stdin: {
+      contents: [
+        `export { registerIpc } from ${JSON.stringify(path.join(root, 'src/main/ipc.ts'))};`,
+        `export { initConfigPath, loadConfig } from ${JSON.stringify(path.join(root, 'src/main/config.ts'))};`,
+        `export { initSecretsPath } from ${JSON.stringify(path.join(root, 'src/main/secrets.ts'))};`,
+        `export { initSessionStore } from ${JSON.stringify(path.join(root, 'src/main/session/store.ts'))};`,
+        `export { initDurableStore } from ${JSON.stringify(path.join(root, 'src/main/durable.ts'))};`
+      ].join('\n'),
+      loader: 'ts',
+      resolveDir: root,
+      sourcefile: 'glass-smoke-bridge.ts'
+    },
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    outfile: bridgeFile,
+    packages: 'external',
+    external: ['electron'],
+    logLevel: 'warning'
+  });
+  const bridge = require(bridgeFile);
+  const runtime = path.join(output, 'runtime');
+  fs.mkdirSync(runtime, { recursive: true });
+  bridge.initConfigPath(runtime);
+  bridge.initSecretsPath(runtime);
+  bridge.initSessionStore(runtime);
+  bridge.initDurableStore(runtime);
+  await bridge.loadConfig();
+  let activeWindow = null;
+  let activeSupport = { mode: 'atmospheric', transparent: false, diagnostic: null };
+  let activeHandshake = glass.createGlassBackingHandshake(
+    { setBackgroundColor() {} },
+    activeSupport,
+    '#181818'
+  );
+  const stopIpc = bridge.registerIpc(
+    () => activeWindow,
+    () => {},
+    {
+      glassSupport: () => activeSupport,
+      glassGeneration: () => activeHandshake.generation(),
+      appearancePainted: generation => activeHandshake.appearancePainted(generation),
+      updateBackground: background => activeHandshake.updateBackground(background)
+    }
+  );
   const baseUrl = server.resolvedUrls.local[0];
   const results = [];
   let captureLimit = process.platform === 'linux' && Boolean(process.env.WAYLAND_DISPLAY)
@@ -115,6 +185,7 @@ app.whenReady().then(async () => {
       backgroundColor: '#181818',
       ...projected,
       webPreferences: {
+        preload,
         sandbox: true,
         contextIsolation: true,
         nodeIntegration: false,
@@ -129,8 +200,15 @@ app.whenReady().then(async () => {
     const handshake = glass.createGlassBackingHandshake({
       setBackgroundColor(color) { backing.push(color); nativeSetBackgroundColor(color); }
     }, support, '#181818');
-    win.webContents.on('did-start-loading', () => handshake.loading('#181818'));
-    win.webContents.on('did-finish-load', () => handshake.didFinishLoad());
+    activeWindow = win;
+    activeSupport = support;
+    activeHandshake = handshake;
+    win.webContents.on('did-start-loading', () => {
+      if (activeWindow === win) activeHandshake.loading('#181818');
+    });
+    win.webContents.on('did-finish-load', () => {
+      if (activeWindow === win) activeHandshake.didFinishLoad();
+    });
 
     try {
       trace(`${name}: loading`);
@@ -146,8 +224,9 @@ app.whenReady().then(async () => {
       trace(`${name}: first capture`);
       await capture(win, `${name}-first-paint.png`);
 
-      await win.webContents.executeJavaScript(`window.applyGlassMode(${JSON.stringify(support.mode)})`);
-      handshake.appearancePainted();
+      await win.webContents.executeJavaScript('window.applyGlassMode()');
+      const appliedGeneration = await win.webContents.executeJavaScript('window.appliedGlassGeneration');
+      assert.equal(appliedGeneration, handshake.generation(), `${name}: acknowledgement must echo the published generation`);
       trace(`${name}: appearance applied`);
       const painted = await geometry(win);
       assert.equal(painted.mode, support.mode);
@@ -171,12 +250,18 @@ app.whenReady().then(async () => {
       assert.notEqual(reloadFirst.targetBackground, 'rgba(0, 0, 0, 0)');
       trace(`${name}: reloaded`);
       assert.equal(backing.at(-1), '#181818', `${name}: reload backing must wait for appearance`);
-      await win.webContents.executeJavaScript(`window.applyGlassMode(${JSON.stringify(support.mode)})`);
-      handshake.appearancePainted();
+      const stale = await win.webContents.executeJavaScript(`window.api.appearanceReady(${JSON.stringify(appliedGeneration)})`);
+      assert.equal(stale.ok, false, `${name}: a delayed old-document acknowledgement must be rejected`);
+      assert.equal(backing.at(-1), '#181818', `${name}: a stale acknowledgement must not release the reloaded backing`);
+      await win.webContents.executeJavaScript('window.applyGlassMode()');
+      const reloadGeneration = await win.webContents.executeJavaScript('window.appliedGlassGeneration');
+      assert.equal(reloadGeneration, handshake.generation(), `${name}: reload acknowledgement must echo the new generation`);
+      assert.notEqual(reloadGeneration, appliedGeneration, `${name}: reload must issue a new generation`);
       const reloadPainted = await geometry(win);
       trace(`${name}: reload appearance applied`);
       assert.deepEqual(reloadPainted.app, painted.app, `${name}: reload must preserve layout`);
       assert.deepEqual(reloadPainted.target, painted.target, `${name}: reload must preserve target layout`);
+      assert.equal(backing.at(-1), support.transparent ? '#00000000' : '#181818');
 
       results.push({
         name,
@@ -188,6 +273,7 @@ app.whenReady().then(async () => {
       });
       trace(`${name}: complete`);
     } finally {
+      if (activeWindow === win) activeWindow = null;
       win.destroy();
     }
   }
@@ -207,7 +293,9 @@ app.whenReady().then(async () => {
     console.log(`Crystal glass Electron checks passed: 2 modes, readable first paint/reload, hit testing, zero layout delta. ${output}`);
     console.log(`Compositor limit: ${report.compositorLimit}`);
   } finally {
+    clearTimeout(deadline);
     if (captureLimit) console.log(`Capture limit: ${captureLimit}`);
+    if (typeof stopIpc === 'function') stopIpc();
     await server.close();
     app.quit();
   }

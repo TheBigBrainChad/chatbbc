@@ -102,18 +102,25 @@ const GROUPS: Group[] = [
 ];
 
 let state: AppState | null = null;
-let appearanceReady = false;
-let appearanceReadyPending = false;
+let acceptedGlassGeneration = -1;
+let pendingGlassGeneration: number | null = null;
 
-/** Release the native boot backing only after this document has completed a rendered frame. */
-function acknowledgeAppearancePaint(): void {
-  if (appearanceReady || appearanceReadyPending) return;
-  appearanceReadyPending = true;
+/** Release native backing only for the generation this document actually painted. */
+function acknowledgeAppearancePaint(generation: number | undefined): void {
+  if (!Number.isInteger(generation) || generation === undefined || generation < 0) return;
+  if (generation <= acceptedGlassGeneration || acceptedGlassGeneration >= 0) return;
+  if (pendingGlassGeneration !== null && generation < pendingGlassGeneration) return;
+  if (pendingGlassGeneration === generation) return;
+  const paintedGeneration = generation;
+  pendingGlassGeneration = paintedGeneration;
   window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-    void api.appearanceReady().then(result => {
-      appearanceReadyPending = false;
-      appearanceReady = result.ok;
-    }, () => { appearanceReadyPending = false; });
+    if (pendingGlassGeneration !== paintedGeneration) return;
+    void api.appearanceReady(paintedGeneration).then(result => {
+      if (pendingGlassGeneration === paintedGeneration) pendingGlassGeneration = null;
+      if (result.ok) acceptedGlassGeneration = paintedGeneration;
+    }, () => {
+      if (pendingGlassGeneration === paintedGeneration) pendingGlassGeneration = null;
+    });
   }));
 }
 /** Guards against saving while we are writing values into the controls. */
@@ -1013,7 +1020,7 @@ function apply(next: AppState): void {
   // ---- theme
   const appearanceUi = requestedSettings?.ui ?? config.ui;
   appearance.apply(appearanceUi, next.omarchy, next.glass);
-  acknowledgeAppearancePaint();
+  acknowledgeAppearancePaint(next.glassGeneration);
 
   const headerConnect = $<HTMLButtonElement>('headerConnect');
   const wasVisible = !headerConnect.hidden;

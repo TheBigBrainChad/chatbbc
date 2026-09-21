@@ -104,17 +104,36 @@ describe('native backing handshake', () => {
     const colors: string[] = [];
     const handshake = createGlassBackingHandshake({ setBackgroundColor: color => colors.push(color) }, supported, '#181818');
 
+    const firstGeneration = handshake.generation();
     expect(colors).toEqual(['#181818']);
-    handshake.appearancePainted();
+    expect(handshake.appearancePainted(firstGeneration)).toBe(true);
     expect(colors).toEqual(['#181818']);
     handshake.didFinishLoad();
     expect(colors).toEqual(['#181818', '#00000000']);
 
-    handshake.loading('#f4f4f5');
+    const reloadGeneration = handshake.loading('#f4f4f5');
+    expect(reloadGeneration).toBeGreaterThan(firstGeneration);
     expect(colors.at(-1)).toBe('#f4f4f5');
     handshake.didFinishLoad();
     expect(colors.at(-1)).toBe('#f4f4f5');
-    handshake.appearancePainted();
+    expect(handshake.appearancePainted(reloadGeneration)).toBe(true);
+    expect(colors.at(-1)).toBe('#00000000');
+  });
+
+  it('rejects a delayed old-document appearance acknowledgement after reload starts', () => {
+    const colors: string[] = [];
+    const handshake = createGlassBackingHandshake({ setBackgroundColor: color => colors.push(color) }, supported, '#181818');
+    const oldGeneration = handshake.loading();
+    handshake.didFinishLoad();
+
+    const newGeneration = handshake.loading('#f4f4f5');
+    expect(handshake.appearancePainted(oldGeneration)).toBe(false);
+    handshake.didFinishLoad();
+    expect(colors.at(-1)).toBe('#f4f4f5');
+    expect(handshake.appearancePainted(oldGeneration)).toBe(false);
+    expect(colors.at(-1)).toBe('#f4f4f5');
+
+    expect(handshake.appearancePainted(newGeneration)).toBe(true);
     expect(colors.at(-1)).toBe('#00000000');
   });
 
@@ -122,8 +141,9 @@ describe('native backing handshake', () => {
     const colors: string[] = [];
     const handshake = createGlassBackingHandshake({ setBackgroundColor: color => colors.push(color) }, atmospheric, '#181818');
 
+    const generation = handshake.generation();
     handshake.didFinishLoad();
-    handshake.appearancePainted();
+    handshake.appearancePainted(generation);
     handshake.loading('#f4f4f5');
     expect(colors).toEqual(['#181818', '#f4f4f5']);
   });

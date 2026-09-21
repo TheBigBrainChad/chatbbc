@@ -666,6 +666,8 @@ export interface AppState {
   omarchy: OmarchyThemeState;
   /** Truthful native-compositor support; atmospheric is the readable in-window fallback. */
   glass: GlassSupport;
+  /** Main-issued document generation that must be echoed before transparent backing releases. */
+  glassGeneration: number;
 }
 
 export const DEFAULT_CAPABILITIES: Capabilities = {

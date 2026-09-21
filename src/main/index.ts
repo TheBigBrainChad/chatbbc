@@ -502,7 +502,8 @@ void app.whenReady().then(async () => {
     },
     {
       glassSupport: () => glassSupport,
-      appearancePainted: () => windowGlassBacking?.appearancePainted(),
+      glassGeneration: () => windowGlassBacking?.generation() ?? 0,
+      appearancePainted: generation => windowGlassBacking?.appearancePainted(generation) ?? false,
       updateBackground: background => windowGlassBacking?.updateBackground(background)
     }
   );

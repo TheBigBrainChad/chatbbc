@@ -483,6 +483,23 @@ it('applies only the newest live theme without erasing a focused dirty HEX field
   expect(retry).toHaveBeenCalledOnce();
 });
 
+it('echoes only the generation this document painted when releasing native glass', async () => {
+  const appearanceReady = vi.fn(async () => ({ ok: true, data: true }));
+  const mounted = await mountChat({
+    glass: { mode: 'hyprland-blur', transparent: true, diagnostic: null },
+    glassGeneration: 4
+  }, [], { appearanceReady });
+  const frames = () => new Promise(resolve => {
+    mounted.window.requestAnimationFrame(() => mounted.window.requestAnimationFrame(resolve));
+  });
+  await frames();
+  expect(appearanceReady).toHaveBeenCalledExactlyOnceWith(4);
+
+  mounted.push({ ...mounted.state, glassGeneration: 9 });
+  await frames();
+  expect(appearanceReady).toHaveBeenCalledExactlyOnceWith(4);
+});
+
 const projectSidebarFixture = () => {
   const project = { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', name: 'Collapsed project', path: 'C:\\repo', createdAt: 1 };
   const session = { id: 'project-session', title: 'Project task', conversationId: 'chat-project', chatIds: ['chat-project'],

@@ -92,3 +92,14 @@ it('exposes a fixed read-only PAGE eligibility request without browser, URL, or 
   expect(api.retryRichImage).toBeUndefined();
   expect(api.richAction).toBeUndefined();
 });
+
+it('carries the main-issued glass navigation generation through the fixed readiness channel', async () => {
+  vi.resetModules();
+  invoke.mockReset().mockResolvedValue({ ok: true, data: true });
+  expose.mockClear();
+  await import('../src/preload/index.js');
+  const api = expose.mock.calls[0]![1];
+
+  expect(await api.appearanceReady(17)).toEqual({ ok: true, data: true });
+  expect(invoke).toHaveBeenCalledExactlyOnceWith('glass:appearanceReady', { generation: 17 });
+});

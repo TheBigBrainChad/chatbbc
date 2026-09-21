@@ -383,7 +383,7 @@ function resolvedBinary(config: Config): string | null {
   return null;
 }
 
-async function buildState(glass: GlassSupport): Promise<AppState> {
+async function buildState(glass: GlassSupport, glassGeneration: number): Promise<AppState> {
   const config = getConfig();
   return {
     config,
@@ -400,7 +400,8 @@ async function buildState(glass: GlassSupport): Promise<AppState> {
     update: updateStatus(),
     desktopAccess: getMacOSDesktopAccess(),
     omarchy: currentOmarchyThemeState(),
-    glass
+    glass,
+    glassGeneration
   };
 }
 
@@ -425,7 +426,8 @@ function handle<T>(channel: string, fn: (payload: unknown) => Promise<T>): void 
 
 interface IpcAppearanceBridge {
   glassSupport(): GlassSupport;
-  appearancePainted(): void;
+  glassGeneration(): number;
+  appearancePainted(generation: number): boolean;
   updateBackground(background: string): void;
 }
 
@@ -435,7 +437,10 @@ export function registerIpc(
   quitToInstall: () => void,
   appearance?: IpcAppearanceBridge
 ): () => void {
-  const currentState = (): Promise<AppState> => buildState(appearance?.glassSupport() ?? DEFAULT_GLASS_SUPPORT);
+  const currentState = (): Promise<AppState> => buildState(
+    appearance?.glassSupport() ?? DEFAULT_GLASS_SUPPORT,
+    appearance?.glassGeneration() ?? 0
+  );
   registerWorkspaceTerminalIpc(getWindow);
   const uiSelection = registerUiSelection(getWindow);
   // This channel must keep Electron's actual event: the ordinary handle() discards sender proof.
@@ -617,12 +622,16 @@ export function registerIpc(
     logInfo('renderer state ready');
     return state;
   });
-  ipcMain.handle('glass:appearanceReady', (event) => {
+  ipcMain.handle('glass:appearanceReady', (event, payload: unknown) => {
     const target = getWindow();
     if (!target || target.isDestroyed() || target.webContents !== event.sender) {
       return { ok: false as const, error: 'The window is no longer current' };
     }
-    appearance?.appearancePainted();
+    const request = z.object({ generation: z.number().int().nonnegative() }).strict().safeParse(payload);
+    if (!request.success) return { ok: false as const, error: 'Invalid input' };
+    if (!appearance?.appearancePainted(request.data.generation)) {
+      return { ok: false as const, error: 'The appearance acknowledgement is stale' };
+    }
     return { ok: true as const, data: true };
   });
   handle('omarchy:retry', async () => retryOmarchyThemeObservation());

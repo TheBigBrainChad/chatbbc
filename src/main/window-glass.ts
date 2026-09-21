@@ -108,12 +108,14 @@ interface GlassBackingTarget {
 }
 
 export interface GlassBackingHandshake {
-  /** A navigation/reload started; restore a readable backing until this document paints. */
-  loading(background?: string): void;
+  /** Current navigation generation, published with AppState and echoed by the renderer. */
+  generation(): number;
+  /** A navigation/reload started; restore a readable backing and issue its generation. */
+  loading(background?: string): number;
   /** Electron finished loading the current document. */
   didFinishLoad(): void;
-  /** The renderer applied its complete appearance and glass-mode projection. */
-  appearancePainted(): void;
+  /** Accept only the current document's complete appearance projection. */
+  appearancePainted(generation: number): boolean;
   /** Keep a not-yet-released backing synchronized with a live theme change. */
   updateBackground(background: string): void;
 }
@@ -132,6 +134,7 @@ export function createGlassBackingHandshake(
   let loaded = false;
   let painted = false;
   let released = false;
+  let navigationGeneration = 0;
 
   const apply = (): void => {
     if (!support.transparent) return;
@@ -146,15 +149,23 @@ export function createGlassBackingHandshake(
 
   target.setBackgroundColor(background);
   return {
+    generation() { return navigationGeneration; },
     loading(nextBackground) {
+      navigationGeneration += 1;
       if (nextBackground) background = nextBackground;
       loaded = false;
       painted = false;
       target.setBackgroundColor(background);
       released = false;
+      return navigationGeneration;
     },
     didFinishLoad() { loaded = true; apply(); },
-    appearancePainted() { painted = true; apply(); },
+    appearancePainted(generation) {
+      if (generation !== navigationGeneration) return false;
+      painted = true;
+      apply();
+      return true;
+    },
     updateBackground(nextBackground) {
       background = nextBackground;
       if (!released) target.setBackgroundColor(background);
