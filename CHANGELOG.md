@@ -9,6 +9,38 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## [2.1.19] — bounded rich capture
+
+### Added
+
+- **Bounded rich-answer capture.** The companion records a semantic tree for supported
+  ChatGPT answers, including PAGE media with complete custody before an available preview.
+  Queue overflow recaptures the last same slot; a failed pending image witness retires its
+  lease. Saved previews open in a dormant local viewer.
+- **Recording Off keeps already-committed observation prefix.** Page and native image
+  evidence, in-switch finals, and accepted observation rows survive Off without minting a
+  later generation's pixels into the earlier recording.
+- **Read-only rich action status and retry eligibility.** Native choice/Continue remain
+  inert: production `begin`/`elect`/`arm` stay unregistered until a trusted app gesture and
+  exact original-page postcondition exist.
+
+### Changed
+
+- **Bridge protocol 17.** Protocol 16 added bounded rich observations; 17 adds
+  pre-observation recording generations and positional journal admission. Reload the
+  companion shipped with this app. A 2.1.18 companion is refused with 426.
+- **Linux DEB prefers `libasound2t64` over `libasound2`** so Ubuntu 24.04 does not bind
+  Electron to the ABI-incompatible OSS4 ALSA provider.
+- **The reviewed GVDB corresponding-source archive is tracked** so a clean checkout can
+  reproduce the native-source package.
+
+### Notes
+
+- Signed-in companion pairing, provider-generated single/gallery/image-only pixels, native
+  choice/Continue postconditions, and installed raster/accessibility remain unverified.
+  Unproved families stay explicitly unsupported.
+- ChatBBC identity is unchanged. Reload the extension after updating the app.
+
 ## [2.1.18] — reliable recovery and browser control
 
 ### Fixed

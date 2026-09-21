@@ -12,7 +12,7 @@
  * extension does nothing" into a diagnosable mismatch.
  */
 
-export const APP_VERSION = '2.1.18';
+export const APP_VERSION = '2.1.19';
 
 /**
  * The app's own name, in two spellings that different peers need.
@@ -91,5 +91,5 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
 // supply the paired envelope.
 // 17 — authenticated, pre-observation recording generations and a positional journal envelope
 // suppress old/unknown rows after Recording Off→On, including retries. A 16 peer cannot safely
-// exchange this wire shape. The release/package version is deliberately unchanged here.
+// exchange this wire shape. ChatBBC 2.1.19 is the first release that ships this protocol.
 export const BRIDGE_PROTOCOL = 17;
