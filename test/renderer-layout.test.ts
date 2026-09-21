@@ -16,7 +16,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { filterSettingsSections } from '../src/renderer/dom.js';
 import { readRendererStyles } from './helpers.js';
 import { sessionWorkingAt } from '../src/shared/session-activity.js';
@@ -704,5 +704,80 @@ describe('the adaptive studio shell', () => {
     expect(store.getState().appGeneration).toBe(0);
     expect(shell.stage.contains(document.getElementById('timeline'))).toBe(true);
     shell.dispose();
+  });
+
+  it('uses an explicit workbench width above 42vw as the docked track', () => {
+    const block = rule(".app[data-workbench-open='true'][data-collapse='wide']");
+    expect(block).toContain('--workbench-track: var(--workbench-width, 42vw)');
+    expect(block).not.toContain('min(');
+  });
+
+  it('opens #workPanel when Files is chosen', async () => {
+    const html = await fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'index.html'), 'utf8');
+    const dom = new JSDOM(html, { url: 'https://cos.local/', pretendToBeVisual: true });
+    const view = dom.window;
+    const project = { id: 'proj-1', name: 'Demo', path: '/tmp/demo', createdAt: 1 };
+    const page = { sessions: [], nextCursor: null, total: 0, activeId: null, blocked: [], pressure: [] };
+    const api = new Proxy({}, {
+      get(_target, prop) {
+        const name = String(prop);
+        return () => {
+          if (name.startsWith('on')) return () => {};
+          if (name === 'listSessions') return Promise.resolve({ ok: true, data: page });
+          if (name === 'listProjects') return Promise.resolve({ ok: true, data: [project] });
+          return Promise.resolve({ ok: true, data: null });
+        };
+      }
+    });
+    Object.defineProperty(view, 'api', { configurable: true, value: api });
+    class ResizeObserverStub { observe(): void {} unobserve(): void {} disconnect(): void {} }
+    view.ResizeObserver = ResizeObserverStub;
+    vi.stubGlobal('window', view);
+    vi.stubGlobal('document', view.document);
+    vi.stubGlobal('HTMLElement', view.HTMLElement);
+    vi.stubGlobal('SVGElement', view.SVGElement);
+    vi.stubGlobal('localStorage', view.localStorage);
+    vi.stubGlobal('MutationObserver', view.MutationObserver);
+    vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+    vi.stubGlobal('Node', view.Node);
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1; });
+    try {
+      const { initChat, chatVisible } = await import('../src/renderer/chat.js');
+      const { createAppShell } = await import('../src/renderer/app-shell.js');
+      const { presentationStore } = await import('../src/renderer/presentation-store.js');
+      initChat({ save: async () => {}, state: () => null });
+      chatVisible(true);
+      let projectButton: HTMLButtonElement | null = null;
+      const started = Date.now();
+      while (Date.now() - started < 2000) {
+        projectButton = view.document.querySelector<HTMLButtonElement>('[data-new-project]');
+        if (projectButton) break;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      expect(projectButton, 'a project must be selected before Files can show its pane').not.toBeNull();
+      projectButton!.click();
+      expect(view.document.getElementById('filePanelToggle')!.hidden).toBe(false);
+      const shell = createAppShell({
+        document: view.document,
+        store: presentationStore,
+        roots: {
+          rail: view.document.getElementById('globalRail')!,
+          navigator: view.document.getElementById('chatNavigator')!,
+          stage: view.document.getElementById('conversationStage')!,
+          workbench: view.document.getElementById('contextWorkbench')!
+        }
+      });
+      const panel = view.document.getElementById('workPanel')!;
+      expect(panel.hidden).toBe(true);
+      view.document.querySelector<HTMLButtonElement>('[data-destination="files"]')!.click();
+      expect(view.document.querySelector('.app')!.getAttribute('data-workbench-open')).toBe('true');
+      expect(panel.hidden, 'Files leaves #workPanel hidden').toBe(false);
+      shell.setWorkbenchOpen(false);
+      expect(panel.hidden).toBe(true);
+      shell.dispose();
+    } finally {
+      view.close();
+      vi.unstubAllGlobals();
+    }
   });
 });

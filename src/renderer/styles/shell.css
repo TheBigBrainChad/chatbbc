@@ -718,7 +718,7 @@ main {
 #contextWorkbench > .work-panel { flex: 1 1 auto; width: 100%; min-height: 0; grid-column: auto; grid-row: auto; border-left: 0; }
 .app[data-workbench-open='false'] #contextWorkbench { visibility: hidden; pointer-events: none; }
 .app[data-workbench-open='true'][data-collapse='wide'] {
-  --workbench-track: min(var(--workbench-width, var(--work-panel-width, 360px)), 42vw);
+  --workbench-track: var(--workbench-width, 42vw);
 }
 /* The chat column no longer reserves a second track: the workbench region owns that width. */
 #conversationStage [data-panel='chat'].has-work-panel,

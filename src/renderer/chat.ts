@@ -3411,6 +3411,33 @@ async function removeProject(id: string): Promise<void> {
   toast('Project removed; conversations kept');
 }
 
+
+/**
+ * The rail writes which workbench tab is open. The pane owner is the only one that can show it.
+ *
+ * `refresh()` reports the result, including a close whose tab becomes null. That report is a new
+ * store value, so this listener ignores the report it caused and does nothing when the pane is
+ * already in the requested state. WorkPanel has show and toggle, not hide.
+ */
+function followShellWorkbench(work: NonNullable<typeof workPanel>): void {
+  let applying = false;
+  presentationStore.subscribe(state => state.shell.workbench, workbench => {
+    if (applying) return;
+    applying = true;
+    try {
+      if (workbench.open && workbench.tab) {
+        work.show(workbench.tab);
+        return;
+      }
+      if (work.panel.hidden) return;
+      const tab = work.panel.querySelector<HTMLElement>('[data-work-tab][aria-selected="true"]')?.dataset.workTab;
+      if (tab === 'files' || tab === 'agents' || tab === 'terminal') work.toggle(tab);
+    } finally {
+      applying = false;
+    }
+  });
+}
+
 export function initChat(next: Deps): void {
   sidebarOrder = createSidebarOrder($('sessionList'), () => sessions
     .filter(entry => (entry.conversationId || entry.origin?.kind === 'desktop') && entry.origin?.kind !== 'worker')
@@ -3434,6 +3461,7 @@ export function initChat(next: Deps): void {
     host: workHost,
     onChange: presentation => presentationStore.dispatch({ type: 'workbenchChanged', open: presentation.open, tab: presentation.tab })
   });
+  followShellWorkbench(work);
   agentPanel = createAgentPanel({
     host: workHost, toggle: agentToggle,
     onShow: () => filePanel?.hide(),
