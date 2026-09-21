@@ -191,7 +191,7 @@ body {
 }
 
 body {
-  background: var(--page);
+  background: transparent;
   color: var(--ink);
   font: calc(14px * var(--text-scale, 1))/1.5 var(--ui-font, var(--ui-font-prose));
   letter-spacing: -0.004em;
@@ -268,6 +268,22 @@ code {
     color-mix(in srgb, #1a1b1c 20%, var(--page)) 32%, var(--page) 78%);
 }
 :root[data-theme='dark'] .app[data-screen='chat'] .card.is-session { background: transparent; }
+/* The compositor answer changes only the backing material, never geometry or hit testing. */
+:root[data-glass-mode='atmospheric'] .app {
+  background: var(--canvas-atmosphere);
+}
+:root[data-glass-mode='hyprland-blur'] .app {
+  background: var(--glass-low);
+}
+:root[data-glass-mode='transparent'] .app {
+  background: var(--glass-low);
+}
+:root[data-glass-mode='atmospheric'][data-theme] .app[data-screen='chat'] {
+  background: var(--canvas-atmosphere);
+}
+:root:is([data-glass-mode='hyprland-blur'], [data-glass-mode='transparent'])[data-theme] .app[data-screen='chat'] {
+  background: var(--glass-low);
+}
 .app-topbar { position: relative; z-index: 130; grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; gap: 6px; height: env(titlebar-area-height, 28px); padding: 0 10px; padding-right: max(10px, calc(100vw - env(titlebar-area-width, 100vw))); background: var(--page); -webkit-app-region: drag; }
 
 .app-topbar > .btn, .view-menu { -webkit-app-region: no-drag; height: 100%; }

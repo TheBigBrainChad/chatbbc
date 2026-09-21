@@ -102,6 +102,20 @@ const GROUPS: Group[] = [
 ];
 
 let state: AppState | null = null;
+let appearanceReady = false;
+let appearanceReadyPending = false;
+
+/** Release the native boot backing only after this document has completed a rendered frame. */
+function acknowledgeAppearancePaint(): void {
+  if (appearanceReady || appearanceReadyPending) return;
+  appearanceReadyPending = true;
+  window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+    void api.appearanceReady().then(result => {
+      appearanceReadyPending = false;
+      appearanceReady = result.ok;
+    }, () => { appearanceReadyPending = false; });
+  }));
+}
 /** Guards against saving while we are writing values into the controls. */
 let applying = false;
 
@@ -998,7 +1012,8 @@ function apply(next: AppState): void {
 
   // ---- theme
   const appearanceUi = requestedSettings?.ui ?? config.ui;
-  appearance.apply(appearanceUi, next.omarchy);
+  appearance.apply(appearanceUi, next.omarchy, next.glass);
+  acknowledgeAppearancePaint();
 
   const headerConnect = $<HTMLButtonElement>('headerConnect');
   const wasVisible = !headerConnect.hidden;

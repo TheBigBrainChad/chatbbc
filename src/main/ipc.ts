@@ -25,6 +25,7 @@ import {
   onOmarchyThemeChange,
   retryOmarchyThemeObservation
 } from './omarchy-theme.js';
+import { DEFAULT_GLASS_SUPPORT, type GlassSupport } from './window-glass.js';
 import { usageOverview } from './session/usage.js';
 import { inputArgs, listInputs, editQueuedInput, reorderQueuedInputs, setInputAutomation, configureInputDelivery, pausedBrowserHelpers, cancelFinishInputs } from './session/input.js';
 import { draftOpeningMessage, onGoalChange, nativeGoalFailure } from './goal.js';
@@ -382,7 +383,7 @@ function resolvedBinary(config: Config): string | null {
   return null;
 }
 
-async function buildState(): Promise<AppState> {
+async function buildState(glass: GlassSupport): Promise<AppState> {
   const config = getConfig();
   return {
     config,
@@ -398,7 +399,8 @@ async function buildState(): Promise<AppState> {
     bridge: await bridgeStatus(),
     update: updateStatus(),
     desktopAccess: getMacOSDesktopAccess(),
-    omarchy: currentOmarchyThemeState()
+    omarchy: currentOmarchyThemeState(),
+    glass
   };
 }
 
@@ -421,7 +423,19 @@ function handle<T>(channel: string, fn: (payload: unknown) => Promise<T>): void 
   });
 }
 
-export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall: () => void): () => void {
+interface IpcAppearanceBridge {
+  glassSupport(): GlassSupport;
+  appearancePainted(): void;
+  updateBackground(background: string): void;
+}
+
+
+export function registerIpc(
+  getWindow: () => BrowserWindow | null,
+  quitToInstall: () => void,
+  appearance?: IpcAppearanceBridge
+): () => void {
+  const currentState = (): Promise<AppState> => buildState(appearance?.glassSupport() ?? DEFAULT_GLASS_SUPPORT);
   registerWorkspaceTerminalIpc(getWindow);
   const uiSelection = registerUiSelection(getWindow);
   // This channel must keep Electron's actual event: the ordinary handle() discards sender proof.
@@ -591,17 +605,25 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       try { if (request.action === 'remove') await setSecret(setupApiKeySlot(request.id), ''); }
       finally { await applySettings(); }
     });
-    return buildState();
+    return currentState();
   });
   registerPluginIpc(handle, getWindow);
   handle('usage:get', () => usageOverview());
   handle('state:get', async () => {
-    const state = await buildState();
+    const state = await currentState();
     // Native package smoke uses this as the end-to-end renderer readiness barrier. Unlike
     // `did-finish-load`, it can only happen after the renderer's first IPC request has completed
     // secure-storage availability/decryption probes and the rest of the initial state snapshot.
     logInfo('renderer state ready');
     return state;
+  });
+  ipcMain.handle('glass:appearanceReady', (event) => {
+    const target = getWindow();
+    if (!target || target.isDestroyed() || target.webContents !== event.sender) {
+      return { ok: false as const, error: 'The window is no longer current' };
+    }
+    appearance?.appearancePainted();
+    return { ok: true as const, data: true };
   });
   handle('omarchy:retry', async () => retryOmarchyThemeObservation());
 
@@ -628,11 +650,11 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     if (process.platform === 'win32') {
       getWindow()?.setTitleBarOverlay(titleBarOverlayForTheme(chromeTheme, effectiveAppearance(next.ui, liveTheme)));
     }
-    // BrowserWindow's native backing color is fixed at construction unless updated explicitly.
-    // Keep it in lock-step too: the default macOS application menu exposes Reload, and after a
-    // live theme switch an old opposite background otherwise flashes behind the renderer while it
-    // paints again. This is also the color Electron shows during any later renderer reload/failure.
-    getWindow()?.setBackgroundColor(windowBackgroundForTheme(chromeTheme, effectiveAppearance(next.ui, liveTheme)));
+    // Keep reload/startup backing readable until the renderer has painted this palette. Once the
+    // transparent handshake releases it, a live palette update stays in the renderer layers.
+    const background = windowBackgroundForTheme(chromeTheme, effectiveAppearance(next.ui, liveTheme));
+    if (appearance) appearance.updateBackground(background);
+    else getWindow()?.setBackgroundColor(background);
     if (
       before.goal.enabled !== next.goal.enabled ||
       // The mode is authority too: a draft started as a gate must not be typed after the user
@@ -705,7 +727,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     }
     if (authorityPersistError) throw authorityPersistError;
     if (loginStartupError) throw loginStartupError;
-    return buildState();
+    return currentState();
   });
 
   /** Approves one folder by path. The picker dialog and the drop zone both end here. */
@@ -718,7 +740,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       return { ...config, roots: [...config.roots, { name, path: real }] };
     });
     logInfo(`approved folder /${addedName}`);
-    return buildState();
+    return currentState();
   };
 
   handle('roots:add', async () => {
@@ -728,7 +750,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       title: 'Approve a folder for ChatGPT',
       properties: ['openDirectory']
     });
-    if (result.canceled || !result.filePaths[0]) return buildState();
+    if (result.canceled || !result.filePaths[0]) return currentState();
     return approveRoot(result.filePaths[0]);
   });
 
@@ -808,7 +830,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     forgetWorkspaceRoot(name);
     projectFileWatches.close();
     logInfo(`removed folder /${name}`);
-    return buildState();
+    return currentState();
   });
 
   handle('roots:rename', async (payload) => {
@@ -827,7 +849,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       };
     });
     renameWorkspaceRoot(name, newName);
-    return buildState();
+    return currentState();
   });
 
   const projectFileId = z.string().uuid();
@@ -921,7 +943,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     if (key === activeGoalKey) retireGoalDrafts();
     const what = key === 'openRouterApiKey' ? 'openrouter key' : key === 'customProviderApiKey' ? 'custom provider key' : 'api key';
     logInfo(value.trim() === '' ? `${what} cleared` : `${what} stored`);
-    return buildState();
+    return currentState();
   });
 
   /**
@@ -944,7 +966,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       properties: ['openFile'],
       ...(process.platform === 'win32' ? { filters: [{ name: 'Programs', extensions: ['exe'] }] } : {})
     });
-    if (result.canceled || !result.filePaths[0]) return buildState();
+    if (result.canceled || !result.filePaths[0]) return currentState();
     await updateConfig((config) => ({
       ...config,
       tunnel: { ...config.tunnel, binaryPath: result.filePaths[0]! }
@@ -953,23 +975,23 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     // Apply it immediately when connected rather than saving a path the running child never
     // uses until some unrelated future reconnect.
     await applySettings();
-    return buildState();
+    return currentState();
   });
 
   handle('connection:connect', async () => {
     await connect();
-    return buildState();
+    return currentState();
   });
 
   handle('connection:disconnect', async () => {
     await disconnect();
-    return buildState();
+    return currentState();
   });
 
   handle('diagnostics:run', async () => runDiagnostics());
   handle('desktop:requestAccessibility', async () => {
     await refreshMacOSDesktopAccess({ promptAccessibility: true });
-    return buildState();
+    return currentState();
   });
 
   handle('log:get', async () => getLog());
@@ -1260,7 +1282,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
 
   handle('bridge:unpair', async () => {
     await unpair();
-    return buildState();
+    return currentState();
   });
 
   handle('bridge:diagnostics', async () => companionDiagnostics());
@@ -1398,7 +1420,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   let statePushGeneration = 0;
   const pushState = (): void => {
     const generation = ++statePushGeneration;
-    void buildState().then((state) => {
+    void currentState().then((state) => {
       if (generation !== statePushGeneration) return;
       push('state:changed', state);
     });

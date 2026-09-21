@@ -632,6 +632,12 @@ export function browserExtensionRequired(_config: Pick<Config, 'sessions' | 'mul
   return true;
 }
 
+export interface GlassSupport {
+  mode: 'hyprland-blur' | 'transparent' | 'atmospheric';
+  transparent: boolean;
+  diagnostic: string | null;
+}
+
 export interface AppState {
   config: Config;
   status: ConnectionStatus;
@@ -658,6 +664,8 @@ export interface AppState {
    * resolves a followed theme's palette and chrome font from `theme`.
    */
   omarchy: OmarchyThemeState;
+  /** Truthful native-compositor support; atmospheric is the readable in-window fallback. */
+  glass: GlassSupport;
 }
 
 export const DEFAULT_CAPABILITIES: Capabilities = {

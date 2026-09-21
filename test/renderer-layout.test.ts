@@ -515,6 +515,13 @@ describe('the window as a whole', () => {
     expect(rule("[data-panel='workspace']")).toContain('overflow-y: auto');
   });
 
+  it('keeps every glass mode readable and hit-testable', () => {
+    expect(rule(":root[data-glass-mode='atmospheric'] .app")).toContain('background: var(--canvas-atmosphere)');
+    expect(rule(":root[data-glass-mode='hyprland-blur'] .app")).toContain('background: var(--glass-low)');
+    expect(rule(":root[data-glass-mode='transparent'] .app")).toContain('background: var(--glass-low)');
+    expect(css).not.toMatch(/(?:html|body|\\.app)[^{]*\\{[^}]*pointer-events:\\s*none/);
+  });
+
   /**
    * Two panels each had a `#agentFilter`. `getElementById` only ever returns the first, so
    * the Activity panel's filter was unreachable and two modules bound handlers to the same

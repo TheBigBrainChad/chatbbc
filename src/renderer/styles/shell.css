@@ -10,6 +10,21 @@
   background: linear-gradient(155deg, color-mix(in srgb, var(--sidebar-color) 72%, transparent), color-mix(in srgb, var(--sidebar-color) 94%, transparent));
   backdrop-filter: blur(22px) saturate(125%);
 }
+/* Native glass keeps every surface present and interactive; only its material becomes translucent. */
+:root:is([data-glass-mode='hyprland-blur'], [data-glass-mode='transparent'])
+  :is(.sidebar, .app-topbar, .connection-popover) {
+  background: var(--glass-high);
+  backdrop-filter: blur(22px) saturate(125%);
+}
+:root:is([data-glass-mode='hyprland-blur'], [data-glass-mode='transparent']) .card {
+  background: var(--glass-medium);
+  border-color: var(--hairline);
+  box-shadow: 0 12px 34px var(--shadow);
+}
+:root:is([data-glass-mode='hyprland-blur'], [data-glass-mode='transparent']) .card.is-session {
+  background: transparent;
+  box-shadow: none;
+}
 .sidebar-resize { position: absolute; z-index: 5; top: 0; bottom: 0; right: -4px; width: 8px; cursor: col-resize; touch-action: none; }
 .sidebar-resize:hover, .sidebar-resize:focus-visible, .app.is-resizing-sidebar .sidebar-resize { background: linear-gradient(to bottom, transparent 18px, var(--accent-edge) 36px, transparent 88%) center / 1px 100% no-repeat; outline: none; }
 .app.is-resizing-sidebar, .app.is-resizing-sidebar * { cursor: col-resize !important; user-select: none !important; }

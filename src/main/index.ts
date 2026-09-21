@@ -88,12 +88,22 @@ import { trayGuidArgsForPlatform, trayImageSpec } from './tray-image.js';
 import { browserWindowIconPath } from './window-icon.js';
 import { editContextMenuTemplate } from './edit-context-menu.js';
 import { APP_TITLE } from './version.js';
+import {
+  createGlassBackingHandshake,
+  DEFAULT_GLASS_SUPPORT,
+  detectGlassSupport,
+  windowGlassOptions,
+  type GlassBackingHandshake,
+  type GlassSupport
+} from './window-glass.js';
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
 const RETIRED_WORKERS_STATE = 'retired-workers';
 
 let window: BrowserWindow | null = null;
+let glassSupport: GlassSupport = DEFAULT_GLASS_SUPPORT;
+let windowGlassBacking: GlassBackingHandshake | null = null;
 let tray: Tray | null = null;
 let quitting = false;
 let shutdownStarted = false;
@@ -130,7 +140,9 @@ function refreshNativeChromeTheme(): void {
   nativeTheme.themeSource = chrome.theme;
   if (!window || window.isDestroyed()) return;
   if (process.platform === 'win32') window.setTitleBarOverlay(titleBarOverlayForTheme(chrome.theme, chrome.appearance));
-  window.setBackgroundColor(windowBackgroundForTheme(chrome.theme, chrome.appearance));
+  const background = windowBackgroundForTheme(chrome.theme, chrome.appearance);
+  if (windowGlassBacking) windowGlassBacking.updateBackground(background);
+  else window.setBackgroundColor(background);
 }
 
 function createWindow(): void {
@@ -148,8 +160,11 @@ function createWindow(): void {
       titleBarStyle: 'hidden' as const,
       titleBarOverlay: titleBarOverlayForTheme(chrome.theme, chrome.appearance)
     } : {}),
-    // Painted before the renderer loads, so a dark window never flashes white.
+    // Atmospheric/legacy windows retain this readable palette backing. Transparent-capable
+    // windows receive their constructor-only flags here, then the handshake below holds this
+    // same readable color until both Electron and the renderer finish the first complete paint.
     backgroundColor: windowBackgroundForTheme(chrome.theme, chrome.appearance),
+    ...windowGlassOptions(process.platform, process.env, glassSupport),
     title: APP_TITLE,
     webPreferences: {
       zoomFactor: UI_BASE_ZOOM,
@@ -162,6 +177,11 @@ function createWindow(): void {
       webSecurity: true
     }
   });
+  windowGlassBacking = createGlassBackingHandshake(
+    window,
+    glassSupport,
+    windowBackgroundForTheme(chrome.theme, chrome.appearance)
+  );
 
   if (process.platform === 'win32') window.removeMenu();
 
@@ -183,9 +203,16 @@ function createWindow(): void {
     }
   });
 
-  // A renderer that fails to load leaves a blank window with no other clue, so
-  // record it where the diagnostics panel can show it.
-  window.webContents.on('did-finish-load', () => logInfo('window loaded'));
+  // Reload/startup restores a readable native backing until this document finishes loading and
+  // its first complete appearance paint acknowledges the same navigation through IPC.
+  window.webContents.on('did-start-loading', () => {
+    const current = nativeChromeTheme();
+    windowGlassBacking?.loading(windowBackgroundForTheme(current.theme, current.appearance));
+  });
+  window.webContents.on('did-finish-load', () => {
+    windowGlassBacking?.didFinishLoad();
+    logInfo('window loaded');
+  });
   window.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown' || input.key !== 'F11' || input.isAutoRepeat) return;
     event.preventDefault();
@@ -224,6 +251,7 @@ function createWindow(): void {
   // the rest of the process, so the renderer pushes and the tray's Open both aimed at a
   // corpse. Dropping it is what makes those paths take their existing null branch.
   window.on('closed', () => {
+    windowGlassBacking = null;
     window = null;
   });
 
@@ -358,6 +386,8 @@ void app.whenReady().then(async () => {
   await restoreChatModels();
   if (windowActivation.isDisabled()) return;
   await loadConfig();
+  glassSupport = await detectGlassSupport({ platform: process.platform, env: process.env });
+  if (glassSupport.diagnostic) logInfo(glassSupport.diagnostic);
   await pluginManager.initialize(userData);
   if (windowActivation.isDisabled()) return;
   try { applyLoginStartup(app, getConfig().ui.startAtLogin === true); }
@@ -469,6 +499,11 @@ void app.whenReady().then(async () => {
     () => {
       quitting = true;
       app.quit();
+    },
+    {
+      glassSupport: () => glassSupport,
+      appearancePainted: () => windowGlassBacking?.appearancePainted(),
+      updateBackground: background => windowGlassBacking?.updateBackground(background)
     }
   );
   windowActivation.enable();

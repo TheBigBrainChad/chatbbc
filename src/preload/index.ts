@@ -138,6 +138,7 @@ const api = {
   attachText: (text: string) => call<InputAttachment>('sessions:attachText', { text }),
   getUsage: () => call<UsageOverview>('usage:get'),
   getState: () => call<AppState>('state:get'),
+  appearanceReady: () => call<boolean>('glass:appearanceReady'),
   retryOmarchyTheme: () => call<OmarchyThemeState>('omarchy:retry'),
   saveSettings: (patch: SettingsPatch, base: SettingsPatch) => call<AppState>('settings:save', { patch, base }),
   addRoot: () => call<AppState>('roots:add'),

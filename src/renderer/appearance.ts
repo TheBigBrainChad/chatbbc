@@ -3,7 +3,7 @@ import {
   monoChain, paletteTokens, type AppearanceSettings, type AppearanceTheme
 } from '../shared/appearance.js';
 import type { OmarchyTheme, OmarchyThemeState } from '../main/omarchy-theme.js';
-import type { UiPrefs } from '../shared/types.js';
+import type { GlassSupport, UiPrefs } from '../shared/types.js';
 import { $ } from './dom.js';
 import { ui, t } from './i18n.js';
 
@@ -29,13 +29,14 @@ function tokens(element: HTMLElement, values: Record<string, string>): void {
  * With follow off or no theme this is exactly the manual palette it always was.
  */
 export function applyAppearance(theme: AppearanceTheme, settings?: AppearanceSettings,
-  omarchy?: OmarchyTheme | null): void {
+  omarchy?: OmarchyTheme | null, glass?: Pick<GlassSupport, 'mode'>): void {
   const ui = { theme, appearance: settings ?? defaultAppearance() };
   const followed = followedTheme(ui, omarchy ?? null);
   const value = effectiveAppearance(ui, omarchy ?? null), resolved = effectiveTheme(ui, omarchy ?? null);
   const palette = value[resolved], root = document.documentElement;
   root.dataset.theme = resolved;
   root.dataset.translucentSidebar = String(value.translucentSidebar);
+  root.dataset.glassMode = glass?.mode ?? 'atmospheric';
   tokens(root, paletteTokens(palette.background, palette.accent, palette.contrast, value.status));
   root.style.setProperty('--text-scale', String(value.fontSize / 14));
   if (value.font === 'system') root.style.removeProperty('--ui-font');
@@ -46,8 +47,8 @@ export function applyAppearance(theme: AppearanceTheme, settings?: AppearanceSet
   // palette is untouched.
   root.style.setProperty('--ui-font-mono', monoChain(followed));
   root.style.setProperty('--sidebar-color', palette.sidebar);
-  // Glass is composed inside the window: a colored backdrop and translucent layer.
-  // No native transparent window, desktop capture, or platform permission is needed.
+  // Component translucency is always token-derived. The root glass mode below decides whether
+  // those layers reveal native compositor content or the readable in-window atmosphere.
   const sidebarBackground = value.translucentSidebar ? mixColor(palette.sidebar, palette.background, .13) : palette.sidebar;
   for (const element of document.querySelectorAll<HTMLElement>('.sidebar, .app-topbar, .appearance-preview-sidebar, .connection-popover')) {
     // Same status palette as the page, or the sidebar's green/red would disagree with the
@@ -68,17 +69,18 @@ export function applyAppearance(theme: AppearanceTheme, settings?: AppearanceSet
 export function initAppearance(
   save: (patch: { theme?: AppearanceTheme; appearance?: AppearanceSettings }) => void,
   retryDesktop?: () => void
-): { apply(ui: UiPrefs, omarchy: OmarchyThemeState): void } {
+): { apply(ui: UiPrefs, omarchy: OmarchyThemeState, glass?: GlassSupport): void } {
   const panel = $('appearancePanel');
   let theme: AppearanceTheme = 'dark';
   let current = defaultAppearance();
   let live: OmarchyTheme | null = null;
   let diagnostic: string | null = null;
   let observedGeneration = -1;
+  let glassMode: GlassSupport['mode'] = 'atmospheric';
   let editing = false;
   const colorKeys = ['accent', 'background', 'sidebar'] as const;
   function paint(): void {
-    applyAppearance(theme, current, live);
+    applyAppearance(theme, current, live, { mode: glassMode });
     $<HTMLSelectElement>('appearanceTheme').value = theme;
     $<HTMLSelectElement>('appearanceFont').value = current.font;
     $<HTMLInputElement>('appearanceSize').value = String(current.fontSize);
@@ -148,12 +150,13 @@ export function initAppearance(
     editing = false; current = defaultAppearance(); paint(); save({ appearance: current });
   });
   $('appearanceRefreshDesktop').addEventListener('click', () => retryDesktop?.());
-  return { apply(ui, omarchy) {
+  return { apply(ui, omarchy, glass) {
     if (omarchy.generation >= observedGeneration) {
       observedGeneration = omarchy.generation;
       live = omarchy.theme;
       diagnostic = omarchy.diagnostic;
     }
+    glassMode = glass?.mode ?? 'atmospheric';
     if (!editing) {
       theme = ui.theme;
       current = ui.appearance ?? defaultAppearance();
