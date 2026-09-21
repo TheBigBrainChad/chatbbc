@@ -80,6 +80,10 @@ function readableTint(color: string, background: string, ratio: number): string 
   return ink;
 }
 
+function alpha(hex: string, value: number): string {
+  return `${hex}${Math.round(Math.max(0, Math.min(1, value)) * 255).toString(16).padStart(2, '0')}`;
+}
+
 /**
  * A followed desktop theme's own status roles. Absent roles keep the app's own colours,
  * so a theme that names only some of them still produces a complete, readable palette.
@@ -92,6 +96,7 @@ export interface StatusPalette {
 export function paletteTokens(background: string, accent: string, contrast: number,
   status?: StatusPalette): Record<string, string> {
   const ink = readableInk(background), c = contrast / 100;
+  const glassReadable = mixColor(background, ink, .07 + .09 * c);
   const card = mixColor(background, ink, .025 + .06 * c);
   const hover = mixColor(background, ink, .055 + .07 * c);
   const green = status?.green ?? '#258552', red = status?.red ?? '#d44545';
@@ -114,7 +119,17 @@ export function paletteTokens(background: string, accent: string, contrast: numb
     '--cyan': readableTint(status?.cyan ?? '#2DD5B7', card, 4.5),
     '--magenta': readableTint(status?.magenta ?? '#D2689C', card, 4.5),
     '--yellow': readableTint(status?.yellow ?? '#E5C736', card, 4.5),
-    '--ice': readableTint(status?.ice ?? '#ACD4CF', card, 4.5)
+    '--ice': readableTint(status?.ice ?? '#ACD4CF', card, 4.5),
+    '--canvas': background, '--canvas-atmosphere': mixColor(background, accent, .08),
+    '--glass-low': alpha(mixColor(background, accent, .04), .54),
+    '--glass-medium': alpha(mixColor(background, accent, .07), .68),
+    '--glass-high': alpha(mixColor(background, accent, .10), .82),
+    '--glass-readable': glassReadable,
+    '--ink-muted': readableTint(mixColor(background, ink, .58), glassReadable, 4.5),
+    '--ink-on-accent': readableInk(accent), '--accent-readable': readableTint(accent, background, 4.5),
+    '--accent-glow': alpha(accent, .34), '--hairline': alpha(ink, .14),
+    '--shadow': alpha('#000000', readableInk(background) === '#ffffff' ? .42 : .18),
+    '--scrim': alpha('#000000', .55)
   };
 }
 

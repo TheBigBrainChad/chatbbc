@@ -26,6 +26,21 @@
 
 
 :root {
+  /* Crystal semantic surfaces. Legacy aliases remain below until the workspace cutover. */
+  --canvas: #f4f4f5;
+  --canvas-atmosphere: #e6e9ee;
+  --glass-low: #edeff18a;
+  --glass-medium: #e8ebefad;
+  --glass-high: #e3e7ecd1;
+  --glass-readable: #d9d9da;
+  --ink-muted: #5c5c5d;
+  --ink-on-accent: #ffffff;
+  --accent-readable: #486f9d;
+  --accent-glow: #486f9d57;
+  --hairline: #00000024;
+  --shadow: #0000002e;
+  --scrim: #0000008c;
+
   --page: #f4f4f5;
   --card: #fff;
   --ink: #0c0c0e;
@@ -103,6 +118,20 @@
  * colour used anywhere below is correct in both themes without a second rule.
  */
 :root[data-theme='dark'] {
+  --canvas: #181818;
+  --canvas-atmosphere: #242629;
+  --glass-low: #1e1f218a;
+  --glass-medium: #232527ad;
+  --glass-high: #272a2dd1;
+  --glass-readable: #353535;
+  --ink-muted: #9e9e9e;
+  --ink-on-accent: #000000;
+  --accent-readable: #b0cbed;
+  --accent-glow: #b0cbed57;
+  --hairline: #ffffff24;
+  --shadow: #0000006b;
+  --scrim: #0000008c;
+
   /* Neutral charcoal sampled from Codex; the sidebar supplies the subtle colour. */
   --page: #181818;
   --card: #262725;
