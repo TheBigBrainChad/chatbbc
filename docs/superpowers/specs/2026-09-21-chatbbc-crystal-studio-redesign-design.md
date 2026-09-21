@@ -1,7 +1,7 @@
 # ChatBBC Crystal Studio redesign — design
 
 **Date:** 2026-09-21
-**Status:** design sections approved in brainstorming; written specification awaiting final user review
+**Status:** approved in brainstorming; implementation plan suite ready for review
 **Supersedes:** [`2026-09-18-chatbbc-omarchy-redesign-design.md`](./2026-09-18-chatbbc-omarchy-redesign-design.md)
 
 ## 1. Purpose
