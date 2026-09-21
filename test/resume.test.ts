@@ -32,7 +32,7 @@ vi.mock('electron', () => ({
   shell: {}
 }));
 
-const { defaultConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
+const { defaultConfig, initConfigPath, loadConfig, recordingGenerationGrant, saveConfig } = await import('../src/main/config.js');
 const { initSecretsPath, setSecret } = await import('../src/main/secrets.js');
 const { bridgePort, pendingCommands, resetBridgeForTests, resumeJobFor, setBrowserOpener, startBridge, stopBridge } =
   await import('../src/main/bridge.js');
@@ -65,7 +65,12 @@ function request(
   options: { body?: unknown; auth?: string | null } = {}
 ): Promise<{ status: number; body: any }> {
   const url = new URL(path, base);
-  const payload = options.body === undefined ? null : JSON.stringify(options.body);
+  const body = path === '/events' && options.body && typeof options.body === 'object' &&
+    !Array.isArray(options.body) && Array.isArray((options.body as Record<string, unknown>).events) &&
+    !Object.hasOwn(options.body, 'recordingGenerations')
+    ? { ...options.body, recordingGenerations: (options.body as { events: unknown[] }).events.map(() => recordingGenerationGrant()) }
+    : options.body;
+  const payload = body === undefined ? null : JSON.stringify(body);
   // Every route past /hello, /pair included, refuses a caller that does not declare the
   // protocol it speaks. The shipped extension always sends this; a test that omitted it was
   // failing pairing with 426 and then reading every later 401 as a bridge bug.
@@ -151,6 +156,7 @@ beforeAll(async () => {
   initSecretsPath(dir);
   initSessionStore(dir);
   initDurableStore(dir);
+  await loadConfig();
   const baseConfig = defaultConfig();
   await saveConfig({ ...baseConfig, sessions: { ...baseConfig.sessions, record: true } });
   const port = await startBridge();

@@ -26,12 +26,15 @@ import {
 import { upsertMessageEvent } from '../src/main/session/store.js';
 import type { SessionEvent, SessionSummary } from '../src/shared/session.js';
 import { makeTempDir, removeTempDir } from './helpers.js';
+import { initConfigPath, loadConfig } from '../src/main/config.js';
 
 let dir = '';
 let dom: JSDOM | null = null;
 
 beforeEach(async () => {
   dir = await makeTempDir('clf-session-list-');
+  initConfigPath(dir);
+  await loadConfig();
   initSessionStore(dir);
 });
 

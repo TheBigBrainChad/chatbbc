@@ -39,9 +39,10 @@ for (const arch of arches) {
     path.join('node_modules', 'electron-builder', 'out', 'cli', 'cli.js'),
     PLATFORM_INFO[platform].builderFlag,
     `--${arch}`,
+    '--config', path.join(root, 'scripts/target-builder-config.cjs'),
     '--publish',
     'never'
   ];
   if (dirOnly) builderArgs.push('--dir');
-  run(node, builderArgs, { ...process.env, COS_PACKAGE_ARCH: arch });
+  run(node, builderArgs, { ...process.env, COS_PACKAGE_PLATFORM: platform, COS_PACKAGE_ARCH: arch });
 }

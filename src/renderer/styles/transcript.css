@@ -343,6 +343,72 @@
   vertical-align: top;
 }
 
+/* Static, schema-validated assistant layout. Never render authored CSS or provider markup. */
+.msg.rich-response {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+}
+.rich-layout { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.rich-response > * + *, .rich-layout > * + * { margin-block-start: 10px; }
+.rich-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: start; }
+.rich-row > * { flex: 1 1 12rem; min-width: 0; margin-block-start: 0 !important; }
+.rich-column { display: flex; flex-direction: column; gap: 10px; }
+.rich-column > * { margin-block-start: 0 !important; }
+.rich-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: 12px; }
+.rich-grid > * { min-width: 0; margin-block-start: 0 !important; }
+.rich-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 14px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--card); }
+.rich-card > * { min-width: 0; margin-block-start: 0 !important; }
+.rich-list { padding-inline-start: 1.5em; }
+.rich-list > li { min-width: 0; }
+.rich-list > li > * { margin: 0; }
+.rich-body, .rich-caption, .rich-heading { margin: 0; overflow-wrap: anywhere; }
+.rich-body { white-space: pre-wrap; font-family: var(--ui-font, var(--ui-font-prose)); }
+.rich-heading { font-weight: 650; font-size: 1.2em; line-height: 1.3; }
+.rich-caption { color: var(--soft); font-size: .85em; }
+.rich-code { min-width: 0; max-width: 100%; margin: 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: isolate;
+  font-family: var(--ui-font-mono); font-size: .9em; background: var(--wash); border: 1px solid var(--line); }
+.rich-code code { font: inherit; white-space: inherit; overflow-wrap: inherit; }
+.rich-table, .rich-diagram { min-width: 0; max-width: 100%; overflow-x: auto; padding: 9px; border: 1px solid var(--line); background: var(--sunk); }
+.rich-table-content { display: grid; grid-template-columns: minmax(0, 1fr); width: max-content; min-width: 100%; }
+.rich-table-row { display: flex; min-width: max-content; }
+.rich-table-cell { min-width: 10rem; flex: 1 1 0; padding: 7px; border: 1px solid var(--line); }
+.rich-table-cell > * { margin: 0; }
+.rich-diagram > .rich-row { min-width: max-content; flex-wrap: nowrap; }
+.rich-diagram > .rich-row > * { min-width: 10rem; }
+.rich-image-slot { display: grid; place-items: center; width: min(100%, 32rem); min-height: 6rem; max-height: 17rem;
+  padding: 12px; overflow: hidden; border: 1px solid var(--line); background: var(--wash); color: var(--soft); text-align: center; }
+.rich-image-slot > img { display: block; max-width: 100%; max-height: 12rem; object-fit: contain; }
+.rich-image-slot > span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.rich-image-slot > button { max-width: 100%; min-width: 0; padding: 7px 10px; border: 1px solid var(--edge); border-radius: var(--r-sm);
+  background: var(--card); color: var(--ink); font: inherit; cursor: pointer; }
+.rich-image-slot > button:focus-visible, .rich-image-viewer button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.rich-image-viewer { box-sizing: border-box; width: fit-content; max-width: min(96vw, 1700px); max-height: 96dvh; margin: auto; padding: 16px;
+  overflow: auto; border: 1px solid var(--edge); border-radius: var(--r-md); background: var(--card); color: var(--ink); }
+.rich-image-viewer::backdrop { background: #0009; }
+.rich-image-viewer h2 { margin: 0 0 12px; font: inherit; font-weight: 650; }
+.rich-image-viewer button { display: block; margin: 0 0 12px auto; padding: 7px 12px; border: 1px solid var(--edge); background: var(--page);
+  color: var(--ink); font: inherit; cursor: pointer; }
+.rich-image-viewer img { display: block; width: auto; height: auto; max-width: min(100%, var(--rich-preview-width));
+  max-height: min(calc(96dvh - 10rem), var(--rich-preview-height)); object-fit: contain; margin-inline: auto; }
+.rich-image-viewer p { margin: 12px 0 0; color: var(--soft); font-size: .85em; text-align: center; }
+.rich-control { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+  padding: 7px 10px; color: var(--soft); border: 1px solid var(--line); background: var(--sunk); }
+.rich-control.rich-selectable { border-color: var(--edge); color: var(--ink); }
+.rich-control.rich-selectable.is-selected { border-color: var(--accent); background: var(--accent-wash); }
+.rich-control-state { font-size: .8em; font-family: var(--ui-font-mono); color: var(--soft); }
+.rich-control button, .rich-control input, .rich-control select { max-width: 100%; min-width: 0; font: inherit; color: var(--soft); background: var(--card); border: 1px solid var(--line); padding: 6px 10px; cursor: not-allowed; }
+.rich-control label { display: grid; gap: 6px; min-width: 0; }
+.rich-response :is([tabindex='0'], summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.rich-unavailable { border: 1px solid var(--line); background: var(--sunk); padding: 12px; }
+.rich-unavailable-label { margin: 0 0 8px; color: var(--soft); }
+.rich-source > summary { cursor: pointer; color: var(--accent); font-family: var(--ui-font-mono); font-size: .86em; }
+.rich-source > pre { margin: 10px 0 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: plaintext;
+  font-family: var(--ui-font-mono); font-size: .86em; background: var(--wash); border: 1px solid var(--line); }
+
 .cut {
   color: var(--faint);
   font-style: italic;

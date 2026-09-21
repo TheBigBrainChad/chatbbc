@@ -7,6 +7,7 @@ import {
   flushDurable,
   initDurableStore,
   readDurable,
+  readDurableStrict,
   resetDurableForTests,
   writeDurableNow,
   writeDurableSoon,
@@ -19,6 +20,61 @@ afterEach(async () => {
   vi.restoreAllMocks();
   resetDurableForTests();
   for (const dir of cleanup.splice(0)) await fs.rm(dir, { recursive: true, force: true });
+});
+
+describe('strict read boundary for one-shot custody', () => {
+  it('distinguishes an uninitialized root, an unhealthy missing state directory, and proven file absence', async () => {
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'unavailable', reason: 'uninitialized' });
+    const directory = await tempStore();
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'unavailable', reason: 'storage' });
+    await fs.symlink(directory, path.join(directory, 'state'));
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'unavailable', reason: 'storage' });
+    await fs.rm(path.join(directory, 'state'));
+    await fs.mkdir(path.join(directory, 'state'));
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'absent' });
+    await writeDurableNow('rich-actions', { version: 1 });
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'valid', value: { version: 1 } });
+    expect(await readDurableStrict('not-present')).toEqual({ kind: 'absent' });
+  });
+
+  it('refuses malformed, oversized, symlinked and unreadable custody files without rewriting them', async () => {
+    const directory = await tempStore();
+    const state = path.join(directory, 'state');
+    await fs.mkdir(state);
+    const file = path.join(state, 'rich-actions.json');
+    await fs.writeFile(file, '{bad');
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'unavailable', reason: 'corrupt' });
+    await fs.writeFile(file, Buffer.from([0x7b, 0x22, 0xff, 0x22, 0x3a, 0x31, 0x7d]));
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'unavailable', reason: 'corrupt' });
+    await fs.writeFile(file, ' '.repeat(512 * 1024 + 1));
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'unavailable', reason: 'oversized' });
+    await fs.rm(file);
+    const outside = path.join(directory, 'outside.json');
+    await fs.writeFile(outside, '{"version":1}');
+    await fs.symlink(outside, file);
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'unavailable', reason: 'storage' });
+    await fs.rm(file);
+    // Replace the parent between its initial lstat and the file open. A no-follow
+    // final-component check alone does not protect against a swapped directory.
+    await fs.writeFile(file, '{"version":1}');
+    await fs.writeFile(path.join(directory, 'rich-actions.json'), '{"version":99}');
+    const realOpen = fs.open.bind(fs);
+    const swapped = vi.spyOn(fs, 'open').mockImplementationOnce(async (...args) => {
+      await fs.rename(state, `${state}-old`);
+      await fs.symlink(path.dirname(outside), state);
+      return realOpen(...args);
+    });
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'unavailable', reason: 'storage' });
+    swapped.mockRestore();
+    await fs.rm(state);
+    await fs.rename(`${state}-old`, state);
+    await fs.writeFile(file, '{"version":1}');
+    const blocked = vi.spyOn(fs, 'open').mockRejectedValueOnce(
+      Object.assign(new Error('denied'), { code: 'EACCES' }));
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'unavailable', reason: 'storage' });
+    blocked.mockRestore();
+    expect(await fs.readFile(file, 'utf8')).toBe('{"version":1}');
+  });
 });
 
 async function tempStore(): Promise<string> {
@@ -118,6 +174,52 @@ describe('durable state commit boundary', () => {
     rename.mockRestore();
     await flushDurable();
     await expect(readDurable('probe')).resolves.toEqual({ generation: 1 });
+  });
+
+  it('never retries a failed no-retry checkpoint after reporting rejection', async () => {
+    await tempStore();
+    await writeDurableNow('rich-actions', { generation: 1 });
+    const rejected = vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('checkpoint refused'));
+    await expect(writeDurableNow('rich-actions', { generation: 2 }, { retryOnFailure: false }))
+      .rejects.toThrow('checkpoint refused');
+    rejected.mockRestore();
+    await flushDurable();
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'valid', value: { generation: 1 } });
+  });
+
+  it('does not cancel a newer generation when a no-retry checkpoint fails', async () => {
+    await tempStore();
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const rejected = vi.spyOn(fs, 'rename').mockImplementationOnce(async () => {
+      entered();
+      await gate;
+      throw new Error('older checkpoint refused');
+    });
+    const first = writeDurableNow('rich-actions', { generation: 1 }, { retryOnFailure: false });
+    await waiting;
+    writeDurableSoon('rich-actions', { generation: 2 });
+    release();
+    await expect(first).rejects.toThrow('older checkpoint refused');
+    rejected.mockRestore();
+    await flushDurable();
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'valid', value: { generation: 2 } });
+  });
+
+  it('does not erase an ambiguous successful rename or retry it after a lost checkpoint ACK', async () => {
+    await tempStore();
+    const original = fs.rename.bind(fs);
+    const renamed = vi.spyOn(fs, 'rename').mockImplementationOnce(async (source, target) => {
+      await original(source, target);
+      throw new Error('checkpoint ACK lost');
+    });
+    await expect(writeDurableNow('rich-actions', { generation: 1 }, { retryOnFailure: false }))
+      .rejects.toThrow('checkpoint ACK lost');
+    renamed.mockRestore();
+    await flushDurable();
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'valid', value: { generation: 1 } });
   });
 
   it('never lets an older in-flight generation erase a newer pending value', async () => {

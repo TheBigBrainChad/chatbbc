@@ -789,6 +789,42 @@ it('saves the ChatGPT browser choice from its settings control and restores it o
   expect(browser.value).toBe('chrome');
 });
 
+it('renders and saves recording preference without changing it on an unrelated Settings save', async () => {
+  const mounted = await mountChat();
+  const w = mounted.window;
+  const recording = w.document.getElementById('sessRecord') as HTMLInputElement;
+  expect(recording).toBeInstanceOf(w.HTMLInputElement);
+  expect(recording.type).toBe('checkbox');
+  expect(recording.checked).toBe(true);
+
+  const off = structuredClone(mounted.state);
+  off.config.sessions.record = false;
+  mounted.push(off);
+  expect(recording.checked).toBe(false);
+  const background = w.document.getElementById('backgroundChats') as HTMLInputElement;
+  background.checked = !background.checked;
+  background.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1));
+  expect(mounted.calls[0].sessions).toMatchObject({ record: false, retainDays: 0 });
+
+  recording.checked = true;
+  recording.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(2));
+  expect(mounted.calls[1].sessions).toMatchObject({ record: true, retainDays: 0 });
+});
+
+it('keeps a focused unsaved recording toggle through an unrelated state push', async () => {
+  const mounted = await mountChat();
+  const recording = mounted.window.document.getElementById('sessRecord') as HTMLInputElement;
+  recording.focus();
+  recording.checked = false;
+  mounted.push(structuredClone(mounted.state));
+  expect(recording.checked).toBe(false);
+  recording.blur();
+  mounted.push(structuredClone(mounted.state));
+  expect(recording.checked).toBe(true);
+});
+
 it('shows the current host Desktop tools without rebuilding permission controls on state pushes', async () => {
   const mounted = await mountChat({
     platform: { family: 'windows', name: 'Windows', desktopAutomation: true }
@@ -1070,7 +1106,7 @@ it('keeps folder access discoverable after setup and navigates without granting 
   expect(mounted.calls).toEqual([]);
 });
 
-it('always requires the live browser because recording is an invariant', async () => {
+it('still requires the live browser when recording and multi-agent are off', async () => {
   const mounted = await mountChat({
     hasApiKey: true,
     status: {
@@ -1112,8 +1148,7 @@ it('always requires the live browser because recording is an invariant', async (
   expect(browserStep.classList.contains('is-done')).toBe(true);
   expect(doc.getElementById('bridgeState')!.textContent).toContain('Connected.');
 
-  // Even a legacy/hand-built renderer snapshot cannot turn recording off. Main normalizes this
-  // shape before publication; the renderer's setup predicate still fails closed if it sees one.
+  // Recording Off is a saved preference; it does not independently disable the shared bridge.
   const browserFree = structuredClone(live) as any;
   browserFree.config.sessions.record = false;
   browserFree.config.multiAgent.enabled = false;
@@ -1122,6 +1157,7 @@ it('always requires the live browser because recording is an invariant', async (
   browserFree.config.goal.enabled = true;
   browserFree.bridge = { running: false, port: null, paired: true, present: false, lastSeenAt: Date.now() };
   mounted.push(browserFree);
+  expect((doc.getElementById('sessRecord') as HTMLInputElement).checked).toBe(false);
   expect(browserStep.hidden).toBe(false);
   expect(browserStep.classList.contains('is-current')).toBe(true);
   expect(doc.getElementById('wizard')!.classList.contains('is-tidy')).toBe(false);

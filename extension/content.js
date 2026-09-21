@@ -358,6 +358,10 @@
   const nativeImageCaptures = new Map();
   /** Source-ordered, document-local preview work. Metadata is emitted independently first. */
   const nativeImageCaptureQueue = new Map();
+  // Metadata remains independently recordable when all pending preview slots are full.
+  // A subsequent exact Fiber observation may enqueue the deferred tuple once work drains.
+  const MAX_PENDING_NATIVE_IMAGE_CAPTURES = 64;
+  // This counts physical encoders even across SPA resets: clearing it cannot cancel toBlob.
   const nativeImageCaptureActiveTasks = new Set();
 
   let generating = false;
@@ -1098,6 +1102,498 @@
   }
 
   let documentReady = null;
+  const RECORDING_GENERATION = /^[A-Za-z0-9_-]{43}$/;
+  /** Authenticated worker issuance is bound to this registered document/SPA epoch.
+   * This is an admission snapshot, not a DOM provenance or action grant. */
+  let recordingGrant = null;
+  let recordingGrantRefresh = null;
+  // Main starts its 60s lifetime before the worker/content round-trip. Retire locally
+  // earlier so even a delayed successful response cannot treat an expired ticket as live.
+  const RICH_CAPTURE_TTL_MS = 55_000;
+  // This bounds the asynchronous prefetch itself; the canonical Fiber scan never awaits it.
+  const RICH_CAPTURE_BEGIN_TIMEOUT_MS = 1_250;
+  let richCaptureReady = null;
+  let richCaptureFlight = null;
+  let richCaptureWanted = null;
+  let richCaptureNoHint = null;
+  let richScansActive = 0;
+  let richRescanScheduled = false;
+  // Isolated-world-only minted row seals. A Fiber/page body cannot manufacture
+  // one by echoing a ticket, and the test-hook emit path has no issuing authority.
+  const issuedRichSeals = new WeakSet();
+  // PAGE pixels are optional late observations, never part of the canonical
+  // assistant/prose queue. Hints exist only after an exact rich row was sealed
+  // and actually admitted to the local queue. One ticket belongs to one slot.
+  const pagePixelHints = new Map();
+  const pagePixelAttempts = new Map();
+  // A refused begin retains the exact structural intent until a real worker
+  // status or source mutation wakes it. Never spin on an offline endpoint.
+  const pagePixelDeferred = new Set();
+  const pagePixelFlights = new Map();
+  const pagePixelReady = new Map();
+  const pagePixelTasks = new Map();
+  const pagePixelActive = new Set();
+  const issuedPixelSeals = new WeakSet();
+  // An exact structural queue object becomes a pixel prerequisite only after the
+  // worker durably accepts THAT object, not after some unrelated flush succeeds.
+  const durableRichRows = new WeakSet();
+  // Last *actually sealed* structural row for each slot. The exact object is
+  // retained only until navigation/Off/stop or bounded eviction; its worker ACK
+  // alone makes a later source mutation eligible for a new purpose-bound ticket.
+  const pagePixelPrerequisites = new Map();
+  const pagePixelSources = new Map();
+  // At most one recovery ticket per unchanged physical IMG after an unrelated
+  // Fiber restamp. A scan storm cannot indefinitely re-ticket the same pixels.
+  const pagePixelScanRearmed = new Map();
+  // A second restamp keeps the *private* physical source observer until the next
+  // genuinely fresh worker status. An IMG pointer alone cannot detect an
+  // intervening A→B→A source mutation or exact parent/slot replacement.
+  const pagePixelDeferredWitness = new Map();
+  const durablePixelRows = new WeakSet();
+  const MAX_PAGE_PIXEL_SLOTS = 64;
+  const MAX_PAGE_PIXEL_ENCODERS = 2;
+  const PAGE_PIXEL_TTL_MS = 45_000; // short of worker's 50s and main's 60s
+  let pagePixelRescanScheduled = false;
+  let pagePixelPumpScheduled = false;
+
+  function acquisitionGrant() {
+    return recordingGrant && recordingGrant.epoch === epoch &&
+      // The initial document registers before ChatGPT assigns the first route.
+      // Its Chrome-issued grant is document/SPA scoped, not a conversation claim.
+      (recordingGrant.conversationId === null || recordingGrant.conversationId === conversationId)
+      ? recordingGrant : null;
+  }
+
+  function installRecordingGrant(reply, heldEpoch, heldConversation) {
+    if (!alive || epoch !== heldEpoch || conversationId !== heldConversation) return null;
+    const generation = reply?.recordingGeneration;
+    const previous = recordingGrant;
+    recordingGrant = reply?.ok === true && typeof generation === 'string' && RECORDING_GENERATION.test(generation)
+      ? Object.freeze({ generation, epoch: heldEpoch, conversationId: heldConversation }) : null;
+    // Registration can precede the first concrete /c/id route. A later
+    // Chrome-attested issuance of the SAME document/SPA/G promotes null to
+    // that exact route; it does not retire its source watchers or pending
+    // pixel begin. Contradictory positive ownership still clears everything.
+    const sameDocumentGrant = recordingGrant &&
+      recordingGrant.generation === previous?.generation &&
+      recordingGrant.epoch === previous?.epoch &&
+      (recordingGrant.conversationId === previous?.conversationId ||
+        (previous?.conversationId === null && recordingGrant.conversationId === heldConversation));
+    if (previous && !sameDocumentGrant) clearPagePixels();
+    if (recordingGrant && heldConversation) prefetchRichCapture(recordingGrant, heldConversation, heldEpoch);
+    return recordingGrant;
+  }
+
+  /** Refresh authorizes only subsequent captures; queued/in-flight rows keep their old token. */
+  function refreshRecordingGeneration() {
+    if (recordingGrantRefresh) return recordingGrantRefresh;
+    const heldEpoch = epoch;
+    const heldConversation = conversationId;
+    const work = ask({ type: 'recording_generation' },
+      () => alive && epoch === heldEpoch && conversationId === heldConversation)
+      .then(reply => installRecordingGrant(reply, heldEpoch, heldConversation))
+      .catch(() => null);
+    const tracked = work.finally(() => { if (recordingGrantRefresh === tracked) recordingGrantRefresh = null; });
+    recordingGrantRefresh = tracked;
+    return recordingGrantRefresh;
+  }
+
+  /** A fixed pre-scan request through the registered Chrome sender. The service worker
+   * attests the browser document; main supplies the *existing* durable session/binding.
+   * This ticket never grants a click, creates a canonical row, or enters an event body yet. */
+  async function acquireRichCapture(grant, heldConversation, heldEpoch) {
+    if (!grant || !heldConversation || epoch !== heldEpoch || conversationId !== heldConversation ||
+        CLF_DOM.conversationId() !== heldConversation || acquisitionGrant()?.generation !== grant.generation) return null;
+    // A sleeping/reconnecting worker must not withhold independently recordable authored
+    // prose. The deadline retires this prefetch; its late reply is ignored, never adopted
+    // by a later scan or refreshed into a new generation.
+    const request = ask({ type: 'rich_capture_begin', conversationId: heldConversation,
+      recordingGeneration: grant.generation }, () => alive && epoch === heldEpoch &&
+        conversationId === heldConversation && CLF_DOM.conversationId() === heldConversation &&
+        acquisitionGrant()?.generation === grant.generation);
+    const reply = await new Promise(resolve => {
+      let finished = false;
+      let deadline = null;
+      const finish = value => {
+        if (finished) return;
+        finished = true;
+        cancelLater(deadline);
+        resolve(value);
+      };
+      deadline = later(() => finish(null), RICH_CAPTURE_BEGIN_TIMEOUT_MS);
+      void request.then(finish, () => finish(null));
+    });
+    const capture = reply?.ok === true ? reply.capture : null;
+    if (!capture || typeof capture !== 'object' || Array.isArray(capture) ||
+        typeof capture.captureId !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(capture.captureId) ||
+        typeof capture.sessionId !== 'string' || !/^[a-z0-9_-]{1,128}$/i.test(capture.sessionId) ||
+        !Number.isSafeInteger(capture.bindingRevision) || capture.bindingRevision < 0 ||
+        typeof capture.documentId !== 'string' || !/^[a-z0-9_-]{1,128}$/i.test(capture.documentId) ||
+        !Number.isSafeInteger(capture.documentGeneration) || capture.documentGeneration < 1 ||
+        capture.conversationId !== heldConversation || capture.spaEpoch !== heldEpoch ||
+        capture.recordingGeneration !== grant.generation ||
+        !alive || epoch !== heldEpoch || conversationId !== heldConversation ||
+        CLF_DOM.conversationId() !== heldConversation || acquisitionGrant()?.generation !== grant.generation) return null;
+    return Object.freeze({ ...capture, grant, acquiredAt: Date.now() });
+  }
+
+  function richCaptureCurrent(capture, grant, heldConversation, heldEpoch) {
+    // A status poll may reissue the *same* G for the unchanged registered document/SPA.
+    // That creates a new grant object without changing issuance authority; compare its
+    // immutable route/epoch/generation, then recheck the current registered grant below.
+    return capture && capture.grant?.generation === grant.generation &&
+      capture.grant?.epoch === heldEpoch && acquisitionGrant()?.generation === grant.generation &&
+      capture.conversationId === heldConversation && capture.spaEpoch === heldEpoch &&
+      capture.recordingGeneration === grant.generation &&
+      Date.now() >= capture.acquiredAt && Date.now() - capture.acquiredAt < RICH_CAPTURE_TTL_MS &&
+      alive && epoch === heldEpoch && conversationId === heldConversation &&
+      CLF_DOM.conversationId() === heldConversation;
+  }
+
+  /** Bind one already-issued ticket to this scan's exact DOM/Fiber row. The
+   * semantic tree is still only candidate data; the worker will separately
+   * attest Chrome sender, original document incarnation and this opaque ID. */
+  function sealRichRow(capture, grant, heldConversation, heldEpoch, scanToken, message, turn, rich) {
+    if (!rich || !richCaptureCurrent(capture, grant, heldConversation, heldEpoch) ||
+        typeof scanToken !== 'string' || !/^[a-z0-9_-]{1,64}$/i.test(scanToken) ||
+        fiberScanToken !== scanToken || turn.conversationId !== heldConversation ||
+        rich.conversationId !== heldConversation || rich.messageId !== message.messageId ||
+        rich.providerMessageId !== message.rawMessageId ||
+        !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(message.rawMessageId || '') ||
+        !document.querySelector(`section[data-testid^="conversation-turn"][data-clf-fiber-turn="${scanToken}:${turn.index}"]`))
+      return null;
+    const seal = Object.freeze({ captureId: capture.captureId, scanToken,
+      messageId: message.messageId, providerMessageId: message.rawMessageId });
+    issuedRichSeals.add(seal);
+    return seal;
+  }
+
+  /** A page-model hint may request one additional fresh scan; it never grants a rich tree.
+   * Do not scan every ordinary chat again merely because its prefetch succeeded: that delayed
+   * the activity/Goal owner and created a feedback loop with the DOM observer. */
+  function scheduleRichRescan(grant, heldConversation, heldEpoch) {
+    if (richRescanScheduled || richScansActive || pagePixelReady.size ||
+        pagePixelTasks.size || pagePixelActive.size || !richCaptureWanted ||
+        richCaptureWanted.epoch !== heldEpoch ||
+        richCaptureWanted.conversationId !== heldConversation ||
+        richCaptureWanted.generation !== grant.generation ||
+        !richCaptureCurrent(richCaptureReady, grant, heldConversation, heldEpoch)) return;
+    richRescanScheduled = true;
+    const capture = richCaptureReady;
+    later(() => {
+      richRescanScheduled = false;
+      if (richScansActive || pagePixelReady.size || pagePixelTasks.size ||
+          pagePixelActive.size || richCaptureReady !== capture ||
+          !richCaptureCurrent(capture, grant, heldConversation, heldEpoch)) return;
+      // This is a new full Fiber/DOM observation. The old page-controlled hint does not
+      // supply its scan token, provider pair or root to the new scan.
+      richCaptureWanted = null;
+      void refreshFiber().then(() => flush()).catch(() => undefined);
+    }, 0);
+  }
+
+  /** Prepare one possible rich scan without moving canonical Fiber observation's start.
+   * Unknown/new sessions still receive prose; a successful ticket is consumed by at most
+   * one subsequent scan and never retroactively authorizes the scan already in flight. */
+  function prefetchRichCapture(grant, heldConversation, heldEpoch) {
+    if (!grant || !heldConversation || !alive || epoch !== heldEpoch ||
+        conversationId !== heldConversation || CLF_DOM.conversationId() !== heldConversation ||
+        acquisitionGrant()?.generation !== grant.generation) return;
+    if (richCaptureNoHint && !richCaptureWanted &&
+        richCaptureNoHint.epoch === heldEpoch &&
+        richCaptureNoHint.conversationId === heldConversation &&
+        richCaptureNoHint.generation === grant.generation) return;
+    if (richCaptureCurrent(richCaptureReady, grant, heldConversation, heldEpoch)) return;
+    if (richCaptureFlight && richCaptureFlight.epoch === heldEpoch &&
+        richCaptureFlight.conversationId === heldConversation &&
+        richCaptureFlight.generation === grant.generation) return;
+    const flight = { epoch: heldEpoch, conversationId: heldConversation, generation: grant.generation };
+    richCaptureFlight = flight;
+    void acquireRichCapture(grant, heldConversation, heldEpoch).then(capture => {
+      if (richCaptureFlight !== flight) return;
+      richCaptureFlight = null;
+      if (!richCaptureCurrent(capture, grant, heldConversation, heldEpoch)) return;
+      richCaptureReady = capture;
+      scheduleRichRescan(grant, heldConversation, heldEpoch);
+    }, () => {
+      if (richCaptureFlight === flight) richCaptureFlight = null;
+    });
+  }
+
+  const pagePixelKey = hint => [hint.conversationId, hint.epoch, hint.generation,
+    hint.messageId, hint.providerMessageId, hint.mediaId, hint.nodeId].join('\u0000');
+
+  function pagePixelHintCurrent(hint) {
+    const grant = acquisitionGrant();
+    return Boolean(hint && alive && epoch === hint.epoch &&
+      conversationId === hint.conversationId && CLF_DOM.conversationId() === hint.conversationId &&
+      grant?.generation === hint.generation && grant.epoch === hint.epoch &&
+      (grant.conversationId === null || grant.conversationId === hint.conversationId));
+  }
+
+  function rearmPagePixelSource(key, handle, reason, image) {
+    const watched = pagePixelSources.get(key);
+    if (watched?.handle === handle) pagePixelSources.delete(key);
+    const deferredWitness = pagePixelDeferredWitness.get(key);
+    const wasDeferred = deferredWitness?.handle === handle;
+    if (wasDeferred) {
+      pagePixelDeferredWitness.delete(key);
+      pagePixelDeferred.delete(key);
+    }
+    const inFlight = [...pagePixelTasks.values(), ...pagePixelActive]
+      .some(task => task.handle === handle);
+    if (!['source', 'detached', 'scan'].includes(reason) ||
+        (!inFlight && watched?.handle !== handle && !wasDeferred)) return;
+    const hint = pagePixelPrerequisites.get(key);
+    if (!pagePixelHintCurrent(hint)) return;
+    // A second Chrome ticket for the same slot while its begin/join/encode is
+    // already running turns one IMG mutation into two receipts. Fiber restamp
+    // recovery still uses reason === 'scan' after the in-flight task finishes.
+    if (reason !== 'scan' && (pagePixelFlights.has(key) || pagePixelReady.has(key) ||
+        [...pagePixelTasks.values(), ...pagePixelActive]
+          .some(task => pagePixelKey(task.capture.hint) === key))) return;
+    // A removed rich root has no current physical slot to acquire. Replacing
+    // its IMG within the same still-mounted root remains eligible, but a
+    // tombstoned root may not spend a new Chrome ticket on its old URL or ID.
+    const currentRoot = CLF_DOM.richRootFor(hint.messageId, hint.providerMessageId);
+    if (!currentRoot?.isConnected || !currentRoot.querySelector('img')) return;
+    if (reason === 'scan' && (!image?.isConnected ||
+        !currentRoot.contains(image) ||
+        !durableRichRows.has(hint.structuralEntry))) return;
+    if (reason !== 'scan') pagePixelScanRearmed.delete(key);
+    pagePixelAttempts.delete(key);
+    pagePixelDeferred.delete(key);
+    // The source changed *before* load. Retire A only through a fresh Chrome
+    // ticket, exact Fiber/DOM rejoin and a journalled pending receipt. The old
+    // image is merely the mutation signal and supplies no target authority.
+    if (pagePixelPrerequisites.get(key) !== hint || pagePixelHints.size >= MAX_PAGE_PIXEL_SLOTS) return;
+    pagePixelHints.set(key, hint);
+    pumpPagePixelBegins();
+  }
+
+  function wakeLoadedPagePixelSource(key, handle) {
+    const watched = pagePixelSources.get(key);
+    if (!watched || watched.handle !== handle || !watched.pendingEntry || watched.loadQueued ||
+        !durablePixelRows.has(watched.pendingEntry) ||
+        !CLF_DOM.richImageSourceStable(handle) ||
+        !pagePixelHintCurrent(watched.hint) ||
+        !durableRichRows.has(watched.hint.structuralEntry)) return;
+    const image = watched.image;
+    if (image.complete !== true || image.naturalWidth < 1 || image.naturalHeight < 1 ||
+        image.currentSrc !== image.src) return;
+    if (!pagePixelHints.has(key) && !pagePixelFlights.has(key) && !pagePixelReady.has(key) &&
+        pagePixelHints.size < MAX_PAGE_PIXEL_SLOTS) {
+      watched.loadQueued = true;
+      pagePixelAttempts.delete(key);
+      pagePixelDeferred.delete(key);
+      pagePixelHints.set(key, watched.hint);
+      pumpPagePixelBegins();
+    }
+  }
+
+  function pagePixelCurrent(capture) {
+    const hint = capture?.hint;
+    const grant = acquisitionGrant();
+    return Boolean(hint && capture.purpose === 'page_pixel' &&
+      capture.conversationId === hint.conversationId && capture.spaEpoch === hint.epoch &&
+      capture.recordingGeneration === hint.generation &&
+      capture.messageId === hint.messageId && capture.providerMessageId === hint.providerMessageId &&
+      capture.mediaId === hint.mediaId && capture.nodeId === hint.nodeId &&
+      grant?.epoch === hint.epoch && grant?.generation === hint.generation &&
+      (grant.conversationId === null || grant.conversationId === hint.conversationId) &&
+      alive && epoch === hint.epoch && conversationId === hint.conversationId &&
+      CLF_DOM.conversationId() === hint.conversationId &&
+      Number.isSafeInteger(capture.acquiredAt) && Date.now() >= capture.acquiredAt &&
+      Date.now() - capture.acquiredAt < PAGE_PIXEL_TTL_MS);
+  }
+
+  /** An already sealed structural image slot is ONLY an issuance hint. Its old
+   * stamp, DOM or ticket never authenticates the subsequent independent scan. */
+  function rememberPagePixelHints(rich, signature, grant, structuralEntry) {
+    if (!rich || rich.status !== 'available' || !Array.isArray(rich.nodes) ||
+        !structuralEntry?.richSeal ||
+        !grant || !acquisitionGrant() || grant.generation !== acquisitionGrant().generation ||
+        rich.conversationId !== conversationId) return;
+    const pending = [...rich.nodes];
+    let inspected = 0;
+    while (pending.length && inspected++ < 1024) {
+      const node = pending.pop();
+      if (!node || typeof node !== 'object') return;
+      if (node.kind === 'group' || node.kind === 'control') {
+        if (!Array.isArray(node.children) || node.children.length + pending.length + inspected > 1024) return;
+        for (let index = node.children.length - 1; index >= 0; index--) pending.push(node.children[index]);
+      }
+      if (node.kind !== 'image' || typeof node.id !== 'string' ||
+          node.mediaId !== `media-${node.id}`) continue;
+      const hint = Object.freeze({ epoch: grant.epoch, generation: grant.generation,
+        conversationId: rich.conversationId, messageId: rich.messageId,
+        providerMessageId: rich.providerMessageId, mediaId: node.mediaId,
+        nodeId: node.id, signature, structuralEntry });
+      const key = pagePixelKey(hint);
+      // Slots beyond the 64-image observer budget are unsupported for this
+      // document. Retain all existing tracked slots so a later source mutation
+      // cannot silently change an available pixel with no observer attached.
+      if (!pagePixelPrerequisites.has(key) && pagePixelPrerequisites.size >= MAX_PAGE_PIXEL_SLOTS) continue;
+      pagePixelPrerequisites.delete(key);
+      pagePixelPrerequisites.set(key, hint);
+      const watched = pagePixelSources.get(key);
+      const stable = watched ? CLF_DOM.richImageSourceStable(watched.handle) : null;
+      if (stable && watched.source.sourceIncarnation === stable.sourceIncarnation) {
+        // A text/control change cannot turn identical physical pixels into a
+        // new source. Retain the available slot and update only its ACK prerequisite.
+        pagePixelHints.delete(key);
+        watched.hint = hint;
+        if (watched.pendingEntry) wakeLoadedPagePixelSource(key, watched.handle);
+        continue;
+      }
+      const earlier = pagePixelHints.get(key);
+      // A same-receipt structural coalesce may replace the old page queue
+      // object before its first ACK. That orphan is not proof of durability;
+      // let the *new* exact queued object take its place instead of stranding
+      // this slot behind a hint that can never become eligible.
+      if (earlier && !durableRichRows.has(earlier.structuralEntry) &&
+          !queue.includes(earlier.structuralEntry)) pagePixelHints.delete(key);
+      if (pagePixelHints.size >= MAX_PAGE_PIXEL_SLOTS) continue;
+      if (!pagePixelHints.has(key) && !pagePixelFlights.has(key) &&
+          !pagePixelReady.has(key) && pagePixelAttempts.get(key) !== signature) pagePixelHints.set(key, hint);
+    }
+    // The eventual durable ACK marks the specific structural entry. A flush
+    // promise already in flight may have captured an older batch that did not
+    // include this row; its success must never start the pixel begin.
+    void flush();
+  }
+
+  async function acquirePagePixelCapture(hint) {
+    if (!hint || !alive || epoch !== hint.epoch || conversationId !== hint.conversationId ||
+        CLF_DOM.conversationId() !== hint.conversationId ||
+        acquisitionGrant()?.generation !== hint.generation) return null;
+    const grant = acquisitionGrant();
+    const current = () => alive && epoch === hint.epoch && conversationId === hint.conversationId &&
+      CLF_DOM.conversationId() === hint.conversationId &&
+      acquisitionGrant()?.generation === hint.generation;
+    // ask() injects the current navigationEpoch after registered Chrome sender
+    // admission. The target has no session, source URL, revision or action claim.
+    const request = ask({ type: 'rich_pixel_begin', conversationId: hint.conversationId,
+      messageId: hint.messageId, providerMessageId: hint.providerMessageId,
+      mediaId: hint.mediaId, nodeId: hint.nodeId, recordingGeneration: hint.generation }, current);
+    const reply = await new Promise(resolve => {
+      let done = false;
+      const deadline = later(() => finish(null), RICH_CAPTURE_BEGIN_TIMEOUT_MS);
+      const finish = value => {
+        if (done) return;
+        done = true;
+        cancelLater(deadline);
+        resolve(value);
+      };
+      void request.then(finish, () => finish(null));
+    });
+    const capture = reply?.ok === true ? reply.capture : null;
+    if (!current() || !capture || typeof capture !== 'object' || Array.isArray(capture) ||
+        capture.purpose !== 'page_pixel' ||
+        typeof capture.captureId !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(capture.captureId) ||
+        typeof capture.sessionId !== 'string' || !/^[a-z0-9_-]{1,128}$/i.test(capture.sessionId) ||
+        !Number.isSafeInteger(capture.bindingRevision) || capture.bindingRevision < 0 ||
+        !Number.isSafeInteger(capture.richRevision) || capture.richRevision < 1 ||
+        !Number.isSafeInteger(capture.slotVersion) || capture.slotVersion < 0 ||
+        typeof capture.documentId !== 'string' || !/^[a-z0-9_-]{1,128}$/i.test(capture.documentId) ||
+        !Number.isSafeInteger(capture.documentGeneration) || capture.documentGeneration < 1 ||
+        capture.spaEpoch !== hint.epoch || capture.recordingGeneration !== hint.generation ||
+        ['conversationId', 'messageId', 'providerMessageId', 'mediaId', 'nodeId']
+          .some(key => capture[key] !== hint[key]) ||
+        !((capture.sourceIncarnation === null && capture.sourceSequence === null) ||
+          (typeof capture.sourceIncarnation === 'string' &&
+            /^src_[a-f0-9]{32}_[a-z0-9]{1,11}$/.test(capture.sourceIncarnation) &&
+            Number.isSafeInteger(capture.sourceSequence) && capture.sourceSequence > 0))) return null;
+    return Object.freeze({ ...capture, hint, grant, acquiredAt: Date.now() });
+  }
+
+  function schedulePagePixelRescan() {
+    if (pagePixelRescanScheduled || richScansActive || pagePixelTasks.size ||
+        pagePixelActive.size || !pagePixelReady.size) return;
+    pagePixelRescanScheduled = true;
+    later(() => {
+      pagePixelRescanScheduled = false;
+      if (richScansActive || pagePixelTasks.size || pagePixelActive.size) return;
+      for (const [key, capture] of pagePixelReady) {
+        if (!pagePixelCurrent(capture)) pagePixelReady.delete(key);
+      }
+      if (pagePixelReady.size) {
+        // The earlier structurally sealed hint does not supply this scan's
+        // Fiber frame. Its fresh token, row and IMG are checked separately.
+        void refreshFiber().then(() => flush()).catch(() => undefined);
+      }
+    }, 0);
+  }
+
+  function pumpPagePixelBegins() {
+    if (!alive || pagePixelPumpScheduled) return;
+    pagePixelPumpScheduled = true;
+    later(() => {
+      pagePixelPumpScheduled = false;
+      while (pagePixelFlights.size + pagePixelReady.size < MAX_PAGE_PIXEL_ENCODERS && pagePixelHints.size) {
+        const eligible = [...pagePixelHints].find(([key, hint]) =>
+          !pagePixelDeferred.has(key) && durableRichRows.has(hint.structuralEntry));
+        if (!eligible) break;
+        const [key, hint] = eligible;
+        pagePixelHints.delete(key);
+        if (pagePixelAttempts.get(key) === hint.signature ||
+            epoch !== hint.epoch || conversationId !== hint.conversationId ||
+            acquisitionGrant()?.generation !== hint.generation) continue;
+        pagePixelAttempts.set(key, hint.signature);
+        while (pagePixelAttempts.size > MAX_PAGE_PIXEL_SLOTS * 2)
+          pagePixelAttempts.delete(pagePixelAttempts.keys().next().value);
+        const flight = Object.freeze({ hint });
+        pagePixelFlights.set(key, flight);
+        void acquirePagePixelCapture(hint).then(capture => {
+          if (pagePixelFlights.get(key) !== flight) return;
+          pagePixelFlights.delete(key);
+          if (pagePixelCurrent(capture)) {
+            pagePixelReady.set(key, capture);
+            schedulePagePixelRescan();
+          } else if (pagePixelHintCurrent(hint) && pagePixelPrerequisites.get(key) === hint) {
+            const watched = pagePixelSources.get(key);
+            if (watched?.pendingEntry) watched.loadQueued = false;
+            pagePixelAttempts.delete(key);
+            pagePixelDeferred.add(key);
+            pagePixelHints.set(key, hint);
+          }
+          pumpPagePixelBegins();
+        }, () => {
+          if (pagePixelFlights.get(key) === flight) {
+            pagePixelFlights.delete(key);
+            if (pagePixelHintCurrent(hint) && pagePixelPrerequisites.get(key) === hint) {
+              const watched = pagePixelSources.get(key);
+              if (watched?.pendingEntry) watched.loadQueued = false;
+              pagePixelAttempts.delete(key);
+              pagePixelDeferred.add(key);
+              pagePixelHints.set(key, hint);
+            }
+          }
+          pumpPagePixelBegins();
+        });
+      }
+    }, 0);
+  }
+
+  function clearPagePixels() {
+    pagePixelHints.clear();
+    pagePixelAttempts.clear();
+    pagePixelDeferred.clear();
+    pagePixelFlights.clear();
+    pagePixelReady.clear();
+    pagePixelPrerequisites.clear();
+    pagePixelScanRearmed.clear();
+    for (const deferred of pagePixelDeferredWitness.values())
+      CLF_DOM.releaseRichImageSource(deferred.handle);
+    pagePixelDeferredWitness.clear();
+    for (const source of pagePixelSources.values()) CLF_DOM.releaseRichImageSource(source.handle);
+    pagePixelSources.clear();
+    for (const task of pagePixelTasks.values()) CLF_DOM.releaseRichImageSource(task.handle);
+    pagePixelTasks.clear();
+    // A pending toBlob cannot be cancelled; its physical slot stays occupied
+    // until finally, but its source is already terminally retired here.
+    for (const task of pagePixelActive) CLF_DOM.releaseRichImageSource(task.handle);
+  }
 
   async function sendToWorker(message) {
     if (!alive) return null;
@@ -1116,7 +1612,14 @@
     // any observation or mutation. This is what lets the worker retain a terminal tombstone
     // across external navigation and still admit the genuinely new page, without accepting
     // delayed IPC from the dead one merely because both share a numeric tab id.
-    if (!documentReady) documentReady = sendToWorker({ type: 'register_document', navigationEpoch: epoch });
+    if (!documentReady) {
+      const registeredEpoch = epoch;
+      const registeredConversation = conversationId;
+      documentReady = sendToWorker({ type: 'register_document', navigationEpoch: registeredEpoch }).then(reply => {
+        installRecordingGrant(reply, registeredEpoch, registeredConversation);
+        return reply;
+      });
+    }
     const registered = await documentReady;
     if (!registered || registered.ok !== true) {
       // A sleeping/reloading service worker is transient. Keep the document unregistered
@@ -1156,14 +1659,65 @@
    * whole batch with whatever is current then files A's messages into B's history —
    * silently, permanently, and with no way to tell afterwards which entries were real.
    */
-  function emit(observation) {
-    if (temporaryPlannerPage()) return;
+  function emit(observation, capture = acquisitionGrant(), richSeal = null, pixelSeal = null) {
+    const refused = { proseQueued: false, richQueued: false, pixelQueued: false };
+    if (temporaryPlannerPage()) return refused;
+    if (!capture || capture.epoch !== epoch ||
+        (capture.conversationId !== null && capture.conversationId !== conversationId)) return refused;
     const bounded = { ...observation };
+    // A MAIN-world event can neither supply nor overwrite this outer issuance.
+    delete bounded.recordingGeneration;
+    delete bounded.captureGeneration;
+    delete bounded.generation;
+    delete bounded.richCapture;
+    delete bounded.richOrigin;
+    delete bounded.captureId;
+    delete bounded.scanToken;
+    delete bounded.richSeal;
+    delete bounded.pixelSeal;
+    delete bounded.pixelReceipt;
+    delete bounded.sourceIncarnation;
+    delete bounded.sourceSequence;
+    // A ticket is not itself a row receipt. Only the exact, isolated-world
+    // scan seal minted after DOM/Fiber revalidation can carry optional rich.
+    const admittedSeal = bounded.rich && richSeal && issuedRichSeals.has(richSeal) &&
+      richSeal.messageId === bounded.messageId &&
+      richSeal.providerMessageId === bounded.providerMessageId
+      ? richSeal : null;
+    if (bounded.rich && !admittedSeal) delete bounded.rich;
+    if (observation.rich && !bounded.rich && observation.text === undefined &&
+        observation.renderedHtml === undefined) return refused;
+    // A raw page/test-hook event cannot claim image bytes, source identity or a
+    // worker receipt. Only the exact isolated-world WeakSet-issued pixel seal
+    // can enter the *outer* queue, never the model-authored event body.
+    const admittedPixel = bounded.kind === 'rich_media' && pixelSeal && issuedPixelSeals.has(pixelSeal) &&
+      pixelSeal.messageId === bounded.messageId &&
+      pixelSeal.providerMessageId === bounded.providerMessageId &&
+      pixelSeal.mediaId === bounded.mediaId && pixelSeal.nodeId === bounded.nodeId &&
+      pixelSeal.status === bounded.status &&
+      (bounded.status !== 'available' ||
+        (pixelSeal.pixelBytes === bounded.pixelBytes && pixelSeal.pixelSha256 === bounded.pixelSha256))
+      ? pixelSeal : null;
+    if (bounded.kind === 'rich_media' && !admittedPixel) return refused;
     // One browser observation must fit the bridge's bounded HTTP body even when JavaScript
     // character counts badly understate UTF-8 (emoji/CJK). Share one byte budget between
     // prose and rendered HTML; otherwise a single 413 can never be halved and blocks every
     // later observation for this conversation.
+    // Prose is canonical; optional rich structure spends the *same* bounded
+    // observation envelope, not a second 128 KiB allocation on top of it.
+    // Leave a fixed allowance for the event/route JSON fields and UTF-8 framing.
     let wireBudget = 400 * 1024;
+    if (bounded.rich) {
+      const richBytes = utf8Bytes(JSON.stringify(bounded.rich));
+      const proseBytes = typeof bounded.text === 'string' ? utf8Bytes(bounded.text) : 0;
+      if (richBytes > 131072 || richBytes + proseBytes + 4096 > wireBudget) {
+        const rich = bounded.rich;
+        bounded.rich = { version: 1, status: 'unavailable', reason: 'oversized',
+          conversationId: rich.conversationId, messageId: rich.messageId,
+          providerMessageId: rich.providerMessageId, revision: 0, accessibleText: '', nodes: [] };
+      }
+      wireBudget = Math.max(0, wireBudget - utf8Bytes(JSON.stringify(bounded.rich)) - 4096);
+    }
     const takeUtf8 = (value, budget) => {
       if (typeof value !== 'string') return value;
       if (utf8Bytes(value) <= budget) return value;
@@ -1194,21 +1748,58 @@
       conversationId,
       agent,
       agentCommandId,
+      recordingGeneration: capture.generation,
+      recordingNavigationEpoch: capture.epoch,
+      ...(admittedSeal ? { richSeal: admittedSeal } : {}),
+      ...(admittedPixel ? { pixelSeal: admittedPixel } : {}),
       event: { time: Date.now(), ...bounded }
     };
     // Streaming canonical messages replace their older unsent snapshot. Keeping every
     // revision multiplies one growing answer into quadratic memory during an outage.
     const messageId = typeof queued.event.messageId === 'string' ? queued.event.messageId : '';
     if (queued.event.kind === 'assistant_message' && messageId) {
-      const prior = queue.findIndex(
-        (entry) =>
+      // A sealed but undelivered rich observation is immutable custody. A later
+      // unsealed state/prose revision, or an independently ticketed rich scan,
+      // must not replace it. Coalesce only within the same exact receipt class;
+      // in particular, search past a preserved sealed row for the newest
+      // independently queued unsealed prose revision.
+      const prior = queue.findLastIndex(
+        (entry) => {
+          const sameReceipt = entry.richSeal && queued.richSeal
+            ? ['captureId', 'scanToken', 'messageId', 'providerMessageId'].every(key =>
+              entry.richSeal[key] === queued.richSeal[key])
+            : !entry.richSeal && !queued.richSeal &&
+              entry.event?.providerMessageId === queued.event.providerMessageId;
+          return sameReceipt &&
           !queueGapKeys.has(entry) &&
           entry.conversationId === queued.conversationId &&
           entry.agent === queued.agent &&
+          entry.recordingGeneration === queued.recordingGeneration &&
+          entry.recordingNavigationEpoch === queued.recordingNavigationEpoch &&
           entry.event?.kind === 'assistant_message' &&
-          entry.event?.messageId === messageId
+          entry.event?.messageId === messageId;
+        }
       );
-      if (prior >= 0) removeQueueEntry(prior);
+      if (prior >= 0) {
+        // A rich-only revision can supersede the unsent projection, but it must not
+        // erase the original authored prose from this queue before the journal sees
+        // either. Merge only the *same* raw provider owner; a reminted provider ID
+        // is not permission to transplant an older answer into the new snapshot.
+        const previous = queue[prior]?.event;
+        const sameSeal = Boolean(queued.richSeal && queue[prior]?.richSeal);
+        let preservePrevious = false;
+        if (queued.event.rich && queued.event.text === undefined && previous?.text !== undefined &&
+            previous.providerMessageId === queued.event.providerMessageId && sameSeal) {
+          const merged = { ...previous, rich: queued.event.rich };
+          // Two individually bounded observations need not fit into one combined
+          // observation. Keep both in order rather than manufacture a 413 gap.
+          if (utf8Bytes(JSON.stringify(merged)) + 4096 <= 400 * 1024) queued.event = merged;
+          else preservePrevious = true;
+        }
+        // Do not let a newly claimed raw provider UUID erase the original unsent
+        // authored bytes. Separate entries let main reject that unresolved owner.
+        if (!preservePrevious) removeQueueEntry(prior);
+      }
     }
     queue.push(queued);
     observed.events += 1;
@@ -1226,7 +1817,69 @@
       const index = queue.findIndex((entry) => !queueGapKeys.has(entry));
       if (index < 0) break;
       const dropped = removeQueueEntry(index);
-      const key = `${dropped.conversationId || ''}\u0000${dropped.agent || ''}\u0000${dropped.agentCommandId || ''}`;
+      // An unjournalled preview cannot remain marked available in this page's
+      // disposable cache: the exact original tuple/G must be eligible to encode
+      // again on a fresh observed scan. Never retire a neighboring generation.
+      if (dropped.event?.kind === 'native_image' && dropped.event.previewStatus === 'available' &&
+          typeof dropped.event.previewDataUrl === 'string') {
+        const captureKey = `${dropped.conversationId || ''}\u0000${dropped.event.messageId || ''}\u0000${dropped.event.providerAssetId || ''}\u0000${dropped.recordingGeneration || ''}`;
+        if (nativeImageCaptures.get(captureKey)?.status === 'available') nativeImageCaptures.delete(captureKey);
+      }
+      if ((dropped.event?.kind === 'rich_media') &&
+          (dropped.event.status === 'pending' || dropped.event.status === 'available') &&
+          dropped.pixelSeal) {
+        const sameSlot = entry => entry.event?.kind === 'rich_media' &&
+          entry.conversationId === dropped.conversationId &&
+          entry.recordingGeneration === dropped.recordingGeneration &&
+          entry.event.messageId === dropped.event.messageId &&
+          entry.event.providerMessageId === dropped.event.providerMessageId &&
+          entry.event.mediaId === dropped.event.mediaId &&
+          entry.event.nodeId === dropped.event.nodeId;
+        // A later same-slot receipt is still the unjournalled original. Recapture
+        // only when this was the last page-owned row for that exact image slot.
+        if (!queue.some(sameSlot)) {
+          const matchesSlot = hint => hint &&
+            hint.conversationId === dropped.conversationId &&
+            hint.generation === dropped.recordingGeneration &&
+            hint.messageId === dropped.event.messageId &&
+            hint.providerMessageId === dropped.event.providerMessageId &&
+            hint.mediaId === dropped.event.mediaId &&
+            hint.nodeId === dropped.event.nodeId;
+          const requeue = (sourceKey, hint) => {
+            if (pagePixelHintCurrent(hint) &&
+                (pagePixelHints.has(sourceKey) || pagePixelHints.size < MAX_PAGE_PIXEL_SLOTS)) {
+              pagePixelHints.set(sourceKey, hint);
+              pumpPagePixelBegins();
+            }
+          };
+          for (const [sourceKey, watched] of [...pagePixelSources]) {
+            const hint = pagePixelPrerequisites.get(sourceKey) || watched.hint;
+            if (!matchesSlot(hint)) continue;
+            const deferred = pagePixelDeferredWitness.get(sourceKey);
+            pagePixelSources.delete(sourceKey);
+            CLF_DOM.releaseRichImageSource(watched.handle);
+            if (deferred) CLF_DOM.releaseRichImageSource(deferred.handle);
+            pagePixelAttempts.delete(sourceKey);
+            pagePixelScanRearmed.delete(sourceKey);
+            pagePixelDeferred.delete(sourceKey);
+            pagePixelDeferredWitness.delete(sourceKey);
+            requeue(sourceKey, hint);
+          }
+          // A twice-restamped digest can park its observer only in the deferred
+          // map. Last-slot overflow must still retire that 64-slot lease.
+          for (const [sourceKey, deferred] of [...pagePixelDeferredWitness]) {
+            const hint = pagePixelPrerequisites.get(sourceKey);
+            if (!matchesSlot(hint)) continue;
+            CLF_DOM.releaseRichImageSource(deferred.handle);
+            pagePixelDeferredWitness.delete(sourceKey);
+            pagePixelDeferred.delete(sourceKey);
+            pagePixelScanRearmed.delete(sourceKey);
+            pagePixelAttempts.delete(sourceKey);
+            requeue(sourceKey, hint);
+          }
+        }
+      }
+      const key = `${dropped.conversationId || ''}\u0000${dropped.agent || ''}\u0000${dropped.agentCommandId || ''}\u0000${dropped.recordingGeneration || ''}\u0000${dropped.recordingNavigationEpoch}`;
       let held = queueGaps.get(key);
       if (!held) {
         held = {
@@ -1234,6 +1887,8 @@
             conversationId: dropped.conversationId,
             agent: dropped.agent,
             agentCommandId: dropped.agentCommandId,
+            recordingGeneration: dropped.recordingGeneration,
+            recordingNavigationEpoch: dropped.recordingNavigationEpoch,
             event: {
               time: dropped.event.time,
               kind: 'chat_error',
@@ -1259,6 +1914,13 @@
         'because the page-local queue hit its count or byte budget. This part of the history is incomplete.';
       accountQueueEntry(held.entry);
     }
+    return queue.includes(queued)
+      ? { proseQueued: typeof queued.event.text === 'string', richQueued: Boolean(queued.event.rich && queued.richSeal),
+        ...(queued.event.rich && queued.richSeal ? { richEntry: queued } : {}),
+        pixelQueued: Boolean(queued.event.kind === 'rich_media' && queued.pixelSeal),
+        ...(queued.event.kind === 'rich_media' && queued.pixelSeal ? { pixelEntry: queued } : {}),
+        nativeQueued: queued.event.kind === 'native_image' && queued.event.previewStatus === 'available' }
+      : refused;
   }
 
   /**
@@ -1307,12 +1969,19 @@
       if (reply && reply.ok === true && (reply.durable === true || reply.pending === 0)) {
         retireBoundProjectInput(projectInput, reply.projectBound);
         for (const entry of batch) {
+          if (entry.richSeal && issuedRichSeals.has(entry.richSeal)) durableRichRows.add(entry);
+          if (entry.pixelSeal && issuedPixelSeals.has(entry.pixelSeal)) durablePixelRows.add(entry);
           if (entry?.event?.kind !== 'tool_evidence') continue;
           for (const call of entry.event.calls || []) traceStage(call && call.requestId, 'queued');
         }
         const sent = new Set(batch);
         for (let index = queue.length - 1; index >= 0; index--) {
           if (sent.has(queue[index])) removeQueueEntry(index);
+        }
+        if (batch.some(entry => durableRichRows.has(entry)) && pagePixelHints.size) pumpPagePixelBegins();
+        for (const [key, watched] of pagePixelSources) {
+          if (watched.pendingEntry && durablePixelRows.has(watched.pendingEntry))
+            wakeLoadedPagePixelSource(key, watched.handle);
         }
         return true;
       }
@@ -1667,7 +2336,9 @@
     nativeImagesReported.clear();
     nativeImageCaptures.clear();
     nativeImageCaptureQueue.clear();
-    nativeImageCaptureActiveTasks.clear();
+    clearPagePixels();
+    // Previous SPA's pending toBlob callbacks still consume physical encoder
+    // slots until their own finally retires them; no new route may borrow those.
     callsReported.clear();
     requestOwnersConfirmed.clear();
     pendingStreamOrigins.clear();
@@ -2223,6 +2894,13 @@
         retireVisible(turnsNow());
         epoch++;
         conversationId = id;
+        recordingGrant = null;
+        recordingGrantRefresh = null;
+        richCaptureReady = null;
+        richCaptureFlight = null;
+        richCaptureWanted = null;
+        richCaptureNoHint = null;
+        documentReady = null;
         // The worker identity belongs to the conversation the bootstrap created, not to this
         // tab. On 2026-09-02 the user pressed New chat in worker-3's tab and typed their own
         // message: every event of that chat went out labelled worker-3 with the worker's
@@ -2325,6 +3003,15 @@
       void flush();
       return;
     }
+
+    // Native page playback/control still works without an issued grant. Do not
+    // read persistence transcripts or advance dedupe baselines until registration
+    // and authenticated issuance are complete for this exact document/SPA epoch.
+    if (!acquisitionGrant()) {
+      void refreshRecordingGeneration();
+      return;
+    }
+    if (id) prefetchRichCapture(acquisitionGrant(), id, epoch);
 
     // Every section on screen, not just the assistant's: this is the record of what this
     // script watched while on this conversation, and it is the whole basis on which
@@ -2518,7 +3205,11 @@
     const pendingSendEvidence = pageViewChecks.size > 0 && (desktopInputBusy ||
       userSendReceipt && Date.now() - userSendReceipt.at < USER_SEND_RECEIPT_MS);
     if (continuationJournalPending || generating || pendingSendEvidence) {
-      void refreshFiber();
+      // Overlapping Fiber is required while a scan is already awaiting a page-model
+      // reply: a MutationObserver tick can see a newer user question during that
+      // await and must open its own generation. Skip only while PAGE pixels are
+      // actually encoding so a restamp cannot mint a second Chrome ticket.
+      if (!pagePixelActive.size && !pagePixelTasks.size) void refreshFiber();
     } else if (fiberTerminalMessageId && nowGenerating) {
       const terminalTurn = currentAssistantTurn(observedTurns);
       void refreshFiber({
@@ -3010,6 +3701,7 @@
   // 11: adds exact typed thought-notification ids and ephemeral DOM stamps for selective
   //     presentation suppression. Caption text and per-call adjacency remain non-authority.
   // 12: adds exact provider-message/sediment generated-image descriptors and DOM pixel stamps.
+  // 13: adds a boolean exact DIL root join and one ephemeral root stamp (no React props).
   const FIBER_VERSION = 13;
   const FIBER_TIMEOUT_MS = 1500;
   const FIBER_MAX_ROWS = 400;
@@ -3192,11 +3884,16 @@
       const renderedHtml =
         typeof entry.renderedHtml === 'string' && entry.renderedHtml.length <= 120_000 ? entry.renderedHtml : '';
       if (!rawText && !renderedHtml && !attachments.length &&
-          !(entry.role === 'assistant' && entry.rawMessageId && entry.rawMessageId === raw.endMessageId)) continue;
+          !(entry.role === 'assistant' && entry.rawMessageId && entry.rawMessageId === raw.endMessageId) &&
+          !(entry.role === 'assistant' && entry.richRoot === true &&
+            /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(entry.rawMessageId || ''))) continue;
       const message = {
         messageId,
         rawMessageId: cap(entry.rawMessageId, 200),
         role: entry.role === 'user' ? 'user' : 'assistant',
+        ...(entry.role === 'assistant' && entry.richRoot === true &&
+          /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(entry.rawMessageId || '')
+          ? { richRoot: true } : {}),
         stable: entry.stable === true,
         order:
           Number.isInteger(entry.order) && entry.order >= 0 && entry.order < FIBER_MAX_MESSAGES * 4
@@ -3221,7 +3918,9 @@
         continue;
       }
       const prior = messages[priorAt];
-      if (prior.rawText === rawText && prior.renderedHtml === renderedHtml && JSON.stringify(prior.attachments || []) === JSON.stringify(attachments)) {
+      if (prior.rawText === rawText && prior.renderedHtml === renderedHtml && JSON.stringify(prior.attachments || []) === JSON.stringify(attachments) &&
+          (!(prior.richRoot || message.richRoot) ||
+            (prior.rawMessageId === message.rawMessageId && prior.richRoot === message.richRoot))) {
         if (message.stable) prior.stable = true;
         continue;
       }
@@ -3336,6 +4035,361 @@
 
   const nativeImageKey = image => `${image.messageId}\u0000${image.assetId}`;
 
+  /**
+   * An ephemeral, *inert* semantic snapshot. MAIN proved the exact Fiber/DOM pair
+   * synchronously during this scan; before reading rendered nodes, check the original
+   * scan token, concrete route, section and raw/logical pair again. This is NOT Chrome
+   * MessageSender evidence and cannot cross the recorder's live admission fence.
+   */
+  function richSnapshot(message, turn, heldConversation, heldEpoch, scanToken) {
+    if (message.richRoot !== true || epoch !== heldEpoch || conversationId !== heldConversation ||
+        !heldConversation || CLF_DOM.conversationId() !== heldConversation || fiberScanToken !== scanToken ||
+        !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(message.rawMessageId || '')) return null;
+    const expected = `${scanToken}:${turn.index}:${encodeURIComponent(message.messageId)}:${encodeURIComponent(message.rawMessageId)}`;
+    const root = CLF_DOM.richRootFor(message.messageId, message.rawMessageId);
+    if (!root || root.getAttribute('data-clf-fiber-rich') !== expected ||
+        root.closest('section[data-testid^="conversation-turn"]')?.getAttribute('data-clf-fiber-turn') !==
+          `${scanToken}:${turn.index}`) return null;
+    const nodes = CLF_DOM.captureRichRoot(root);
+    if (epoch !== heldEpoch || conversationId !== heldConversation || CLF_DOM.conversationId() !== heldConversation ||
+        !root.isConnected || root.getAttribute('data-clf-fiber-rich') !== expected ||
+        CLF_DOM.richRootFor(message.messageId, message.rawMessageId) !== root) return null;
+    const unavailable = reason => ({ version: 1, status: 'unavailable', reason,
+      conversationId: heldConversation, messageId: message.messageId,
+      providerMessageId: message.rawMessageId, revision: 0, accessibleText: '', nodes: [] });
+    if (!nodes) return unavailable(CLF_DOM.richCaptureReason(root));
+    // Read only text already admitted into the semantic tree. Provider model source and
+    // raw root.textContent can include hidden component source or irrelevant chrome.
+    const textParts = [];
+    const collect = entries => {
+      for (const node of entries) {
+        if (node.kind === 'text' && node.text) textParts.push(node.text);
+        else if (node.kind === 'control' && node.label) textParts.push(node.label);
+        if (node.children) collect(node.children);
+      }
+    };
+    collect(nodes);
+    const accessibleText = textParts.join(' ').trim();
+    if (utf8Bytes(accessibleText) > 32768) return unavailable('oversized');
+    const rich = { version: 1, status: 'available', reason: null,
+      conversationId: heldConversation, messageId: message.messageId,
+      providerMessageId: message.rawMessageId, revision: 0, accessibleText, nodes };
+    return utf8Bytes(JSON.stringify(rich)) <= 131072 ? rich : unavailable('oversized');
+  }
+
+  /**
+   * A previously authenticated-in-this-document presentation can be retired on a
+   * subsequent exact page-model scan. Without that prior proof, an absent or forged
+   * richRoot flag must never mint a new rich view, even an unavailable one. This is
+   * only page-local display evidence; it is not authenticated Chrome sender proof.
+   */
+  function missingRichSnapshot(message, turn, prior, heldConversation, heldEpoch, scanToken) {
+    if (!prior?.richOwner || prior.richOwner.epoch !== heldEpoch ||
+        prior.richOwner.conversationId !== heldConversation ||
+        prior.richOwner.providerMessageId !== message.rawMessageId ||
+        prior.richOwner.messageId !== message.messageId ||
+        epoch !== heldEpoch || conversationId !== heldConversation ||
+        !heldConversation || CLF_DOM.conversationId() !== heldConversation ||
+        fiberScanToken !== scanToken || turn.conversationId !== heldConversation ||
+        !document.querySelector(`section[data-testid^="conversation-turn"][data-clf-fiber-turn="${scanToken}:${turn.index}"]`)) return null;
+    return { version: 1, status: 'unavailable', reason: 'ambiguous',
+      conversationId: heldConversation, messageId: message.messageId,
+      providerMessageId: message.rawMessageId, revision: 0, accessibleText: '', nodes: [] };
+  }
+
+  /** One fresh Fiber frame joins an independently pre-issued pixel ticket to an
+   * already sealed structural image hint. The old structural frame is never
+   * reused, and neither the hint nor the page chooses durable rich/slot versions. */
+  function preparePagePixelTask(capture, message, turn, rich, grant, scanToken) {
+    if (!pagePixelCurrent(capture) || !grant || grant.generation !== capture.recordingGeneration ||
+        !rich || rich.status !== 'available' || message.richRoot !== true ||
+        rich.conversationId !== capture.conversationId ||
+        rich.messageId !== capture.messageId || rich.providerMessageId !== capture.providerMessageId ||
+        message.messageId !== capture.messageId || message.rawMessageId !== capture.providerMessageId ||
+        turn.conversationId !== capture.conversationId ||
+        !/^[a-z0-9_-]{1,64}$/i.test(scanToken || '') || fiberScanToken !== scanToken ||
+        pagePixelTasks.size >= MAX_PAGE_PIXEL_SLOTS) return;
+    const expectedStamp = `${scanToken}:${turn.index}:${encodeURIComponent(capture.messageId)}:${encodeURIComponent(capture.providerMessageId)}`;
+    const root = CLF_DOM.richRootFor(capture.messageId, capture.providerMessageId);
+    if (!root || root.getAttribute('data-clf-fiber-rich') !== expectedStamp || isStale(root) ||
+        root.closest('section[data-testid^="conversation-turn"]')?.getAttribute('data-clf-fiber-turn') !==
+          `${scanToken}:${turn.index}`) return;
+    const stillCurrent = () => pagePixelCurrent(capture) && fiberScanToken === scanToken &&
+      root.getAttribute('data-clf-fiber-rich') === expectedStamp && !isStale(root);
+    const resolved = CLF_DOM.resolveRichImage(root, rich, capture.nodeId, capture.mediaId,
+      expectedStamp, stillCurrent);
+    if (!resolved || resolved.root !== root) return;
+    const key = pagePixelKey(capture.hint);
+    const watched = pagePixelSources.get(key);
+    // A pending-only B already has a source incarnation. Wait for its exact
+    // positional receipt's durable ACK, then rebind that same physical IMG to
+    // this independently issued ticket/scan; minting C would falsify B's CAS.
+    if (watched?.pendingEntry && !durablePixelRows.has(watched.pendingEntry)) return;
+    const onRetire = (reason, retired) => rearmPagePixelSource(key, retired, reason, resolved.image);
+    const handle = watched?.pendingEntry
+      ? CLF_DOM.rebindLoadedRichImageSource(watched.handle, root, rich,
+          capture.nodeId, capture.mediaId, expectedStamp, stillCurrent)
+      : CLF_DOM.beginRichImageSource(root, rich, capture.nodeId, capture.mediaId,
+          expectedStamp, stillCurrent, onRetire) ||
+        CLF_DOM.beginPendingRichImageSource(root, rich, capture.nodeId, capture.mediaId,
+          expectedStamp, stillCurrent, onRetire,
+          retired => wakeLoadedPagePixelSource(key, retired));
+    if (!handle) return;
+    const pendingOnly = Boolean(CLF_DOM.richImagePendingWitness(handle));
+    const source = pendingOnly ? CLF_DOM.richImagePendingWitness(handle) :
+      CLF_DOM.richImageSourceWitness(handle);
+    const samePending = watched?.pendingEntry && watched.handle === handle &&
+      source?.sourceSequence === capture.sourceSequence &&
+      source?.sourceIncarnation === capture.sourceIncarnation;
+    if (!source || (capture.sourceSequence !== null &&
+        source.sourceSequence <= capture.sourceSequence && !samePending) ||
+        (capture.sourceIncarnation !== null &&
+          source.sourceIncarnation === capture.sourceIncarnation && !samePending)) {
+      if (watched?.handle !== handle) CLF_DOM.releaseRichImageSource(handle);
+      return;
+    }
+    const task = { capture, root, rich, handle, source, image: resolved.image, pendingOnly,
+      originalRow: root.closest('[data-message-id]'),
+      originalTurn: root.closest('section[data-testid^="conversation-turn"]'),
+      expectedStamp, scanToken, stillCurrent };
+    if (!task.originalRow?.isConnected || !task.originalTurn?.isConnected ||
+        !pagePixelTaskCurrent(task)) {
+      CLF_DOM.releaseRichImageSource(handle);
+      return;
+    }
+    pagePixelTasks.set(capture.captureId, task);
+  }
+
+  function pagePixelTaskCurrent(task) {
+    if (!pagePixelCurrent(task.capture) || !task.stillCurrent() ||
+        fiberScanToken !== task.scanToken || !task.root.isConnected ||
+        task.root.closest('[data-message-id]') !== task.originalRow ||
+        task.root.closest('section[data-testid^="conversation-turn"]') !== task.originalTurn ||
+        !task.originalRow?.isConnected || !task.originalTurn?.isConnected ||
+        task.root.getAttribute('data-clf-fiber-rich') !== task.expectedStamp) return false;
+    const current = CLF_DOM.resolveRichImage(task.root, task.rich, task.capture.nodeId,
+      task.capture.mediaId, task.expectedStamp, task.stillCurrent);
+    if (!current || current.image !== task.image || current.root !== task.root) return false;
+    const source = task.pendingOnly ? CLF_DOM.richImagePendingWitness(task.handle) :
+      CLF_DOM.richImageSourceWitness(task.handle);
+    return Boolean(source && source.sourceSequence === task.source.sourceSequence &&
+      source.sourceIncarnation === task.source.sourceIncarnation);
+  }
+
+  /** Seal fields derive only from the original ticket, exact *new* Fiber scan
+   * and surviving source handle, never from a page event or returned Blob. */
+  function emitPagePixel(task, status, payload = {}) {
+    if (!pagePixelTaskCurrent(task)) return false;
+    const { capture, scanToken, expectedStamp, source } = task;
+    const pixelBytes = status === 'available' ? payload.pixelBytes : null;
+    const pixelSha256 = status === 'available' ? payload.pixelSha256 : null;
+    const seal = Object.freeze({ captureId: capture.captureId, scanToken,
+      messageId: capture.messageId, providerMessageId: capture.providerMessageId,
+      mediaId: capture.mediaId, nodeId: capture.nodeId, rootStamp: expectedStamp,
+      sourceIncarnation: source.sourceIncarnation, sourceSequence: source.sourceSequence,
+      status, pixelBytes, pixelSha256 });
+    issuedPixelSeals.add(seal);
+    const queued = emit({ kind: 'rich_media', messageId: capture.messageId,
+      providerMessageId: capture.providerMessageId, mediaId: capture.mediaId,
+      nodeId: capture.nodeId, status, ...payload },
+    capture.grant, null, seal);
+    if (status === 'pending' && task.pendingOnly && queued.pixelQueued)
+      task.pendingEntry = queued.pixelEntry;
+    return queued.pixelQueued === true;
+  }
+
+  function retainPagePixelSource(task) {
+    if (!pagePixelTaskCurrent(task)) return;
+    const key = pagePixelKey(task.capture.hint);
+    const hint = pagePixelPrerequisites.get(key);
+    if (!hint || !pagePixelHintCurrent(hint) || !durableRichRows.has(hint.structuralEntry)) return;
+    const previous = pagePixelSources.get(key);
+    if (previous && previous.handle !== task.handle)
+      CLF_DOM.releaseRichImageSource(previous.handle);
+    pagePixelSources.delete(key);
+    pagePixelSources.set(key, { handle: task.handle, source: task.source, hint,
+      image: task.image, pendingEntry: task.pendingOnly ? task.pendingEntry : null,
+      loadQueued: false });
+    if (!task.pendingOnly) pagePixelScanRearmed.delete(key);
+    while (pagePixelSources.size > MAX_PAGE_PIXEL_SLOTS) {
+      const oldest = pagePixelSources.keys().next().value;
+      const retired = pagePixelSources.get(oldest);
+      pagePixelSources.delete(oldest);
+      if (retired) CLF_DOM.releaseRichImageSource(retired.handle);
+    }
+  }
+
+  /** A canvas callback, arrayBuffer or digest may never prolong a dead source
+   * forever or hold an encoder slot. Timeouts are refusals, not fake pixels. */
+  function boundedPagePixelAwait(promise) {
+    return new Promise(resolve => {
+      let done = false;
+      const finish = value => {
+        if (done) return;
+        done = true;
+        cancelLater(deadline);
+        resolve(value);
+      };
+      const deadline = later(() => finish(null), 10_000);
+      void Promise.resolve(promise).then(finish, () => finish(null));
+    });
+  }
+
+  async function capturePagePixel(task) {
+    const { image, handle } = task;
+    try {
+      if (!pagePixelTaskCurrent(task)) return;
+      if (task.pendingOnly) {
+        // No canvas, URL, synthetic duration or unavailable verdict for an IMG
+        // still loading (or errored). The trusted pending row itself retires A.
+        if (emitPagePixel(task, 'pending')) {
+          retainPagePixelSource(task);
+          void flush();
+        }
+        return;
+      }
+      const sourceWidth = image.naturalWidth, sourceHeight = image.naturalHeight;
+      if (!Number.isSafeInteger(sourceWidth) || !Number.isSafeInteger(sourceHeight) ||
+          sourceWidth < 1 || sourceHeight < 1 || sourceWidth * sourceHeight > 30_000_000) return;
+      // The worker journals this independent pending row before any asset row.
+      // Do not wait for its ACK here: an optional pixel cannot block canonical
+      // prose, and recorder serializes pending→available on its own shard.
+      if (!emitPagePixel(task, 'pending')) return;
+      void flush();
+      const canvas = document.createElement('canvas');
+      let bytes = null, width = 0, height = 0;
+      let failure = 'invalid';
+      for (const attempt of [{ longest: 1600, quality: 0.8 },
+        { longest: 1200, quality: 0.7 }, { longest: 800, quality: 0.6 }]) {
+        if (!pagePixelTaskCurrent(task)) return;
+        const scale = Math.min(1, attempt.longest / Math.max(sourceWidth, sourceHeight));
+        const w = Math.max(1, Math.round(sourceWidth * scale));
+        const h = Math.max(1, Math.round(sourceHeight * scale));
+        if (w > 1600 || h > 1600 || w * h > 2_560_000) { failure = 'oversized'; break; }
+        canvas.width = w; canvas.height = h;
+        const context = canvas.getContext('2d');
+        if (!context || typeof canvas.toBlob !== 'function') break;
+        if (!pagePixelTaskCurrent(task)) return;
+        context.drawImage(image, 0, 0, w, h);
+        if (!pagePixelTaskCurrent(task)) return;
+        const blob = await boundedPagePixelAwait(new Promise(resolve =>
+          canvas.toBlob(resolve, 'image/webp', attempt.quality)));
+        if (!pagePixelTaskCurrent(task)) return;
+        if (!blob || blob.type !== 'image/webp' || !Number.isSafeInteger(blob.size) || blob.size < 1 ||
+            typeof blob.arrayBuffer !== 'function') break;
+        if (blob.size > 384_000) { failure = 'oversized'; continue; }
+        const buffer = await boundedPagePixelAwait(blob.arrayBuffer());
+        if (!pagePixelTaskCurrent(task)) return;
+        if (Object.prototype.toString.call(buffer) !== '[object ArrayBuffer]' ||
+            buffer.byteLength !== blob.size ||
+            buffer.byteLength < 12 || buffer.byteLength > 384_000) break;
+        const candidate = new Uint8Array(buffer);
+        if (String.fromCharCode(...candidate.subarray(0, 4)) !== 'RIFF' ||
+            String.fromCharCode(...candidate.subarray(8, 12)) !== 'WEBP') break;
+        bytes = candidate; width = w; height = h;
+        break;
+      }
+      if (!pagePixelTaskCurrent(task)) return;
+      if (!bytes) {
+        if (emitPagePixel(task, 'unavailable', { reason: failure })) retainPagePixelSource(task);
+        void flush();
+        return;
+      }
+      if (!crypto?.subtle?.digest) {
+        if (emitPagePixel(task, 'unavailable', { reason: 'unsupported' })) retainPagePixelSource(task);
+        void flush();
+        return;
+      }
+      const digest = await boundedPagePixelAwait(crypto.subtle.digest('SHA-256', bytes));
+      if (!pagePixelTaskCurrent(task)) return;
+      if (Object.prototype.toString.call(digest) !== '[object ArrayBuffer]' || digest.byteLength !== 32) return;
+      const pixelSha256 = Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('');
+      let binary = '';
+      for (let index = 0; index < bytes.length; index += 0x8000)
+        binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+      const previewDataUrl = `data:image/webp;base64,${btoa(binary)}`;
+      if (!pagePixelTaskCurrent(task)) return;
+      if (previewDataUrl.length > 512_100) {
+        if (emitPagePixel(task, 'unavailable', { reason: 'oversized' })) retainPagePixelSource(task);
+      } else {
+        if (emitPagePixel(task, 'available', { previewDataUrl, previewWidth: width,
+          previewHeight: height, pixelBytes: bytes.length, pixelSha256 })) retainPagePixelSource(task);
+      }
+      void flush();
+    } catch (error) {
+      // Taint is a real browser refusal only while the *same* incarnation
+      // remains proved. A changed source produces no unavailable claim.
+      if (pagePixelTaskCurrent(task)) {
+        const reason = error?.name === 'SecurityError' ? 'tainted' : 'invalid';
+        if (emitPagePixel(task, 'unavailable', { reason })) retainPagePixelSource(task);
+        void flush();
+      }
+    } finally {
+      const key = pagePixelKey(task.capture.hint);
+      if (pagePixelSources.get(key)?.handle !== handle) {
+        const hint = pagePixelPrerequisites.get(key);
+        // A separate legitimate Fiber scan can restamp this still-connected
+        // physical IMG while its digest runs. The old ticket MUST NOT publish
+        // after pagePixelTaskCurrent fails, but silently dropping its handle
+        // strands a committed pending source forever. The observer's exact
+        // physical parent/index witness is still checked here; only a NEW
+        // purpose-scoped ticket plus fresh Fiber/DOM scan may recover pixels.
+        const scanChanged = fiberScanToken !== task.scanToken ||
+          task.root.getAttribute('data-clf-fiber-rich') !== task.expectedStamp;
+        const samePhysicalSlot = task.root.isConnected && task.image.isConnected &&
+          task.root.contains(task.image) &&
+          task.root.closest('[data-message-id]') === task.originalRow &&
+          task.root.closest('section[data-testid^="conversation-turn"]') === task.originalTurn &&
+          CLF_DOM.richRootFor(task.capture.messageId, task.capture.providerMessageId) === task.root &&
+          Boolean(CLF_DOM.richImageSourceStable(handle));
+        if (scanChanged && samePhysicalSlot && pagePixelHintCurrent(hint) &&
+            durableRichRows.has(hint.structuralEntry)) {
+          if (pagePixelScanRearmed.get(key) !== task.image) {
+            pagePixelScanRearmed.set(key, task.image);
+            CLF_DOM.releaseRichImageSource(handle, 'scan');
+          } else {
+            // A busy renderer may restamp even the ONE fresh scan recovery.
+            // Don't retry immediately and create a self-sustaining ticket loop,
+            // but don't permanently strand this already pending exact source.
+            // Only a later independent connected+paired worker status may wake
+            // another separately authenticated ticket after revalidation.
+            if (pagePixelHints.has(key) || pagePixelHints.size < MAX_PAGE_PIXEL_SLOTS) {
+              pagePixelHints.set(key, hint);
+              pagePixelDeferred.add(key);
+              // Preserve the exact observer rather than its URL or a bare IMG
+              // pointer. No stale scan may use this handle to publish pixels;
+              // status only asks whether the original source still exists.
+              pagePixelDeferredWitness.set(key, {
+                handle, root: task.root, image: task.image,
+                row: task.originalRow, turn: task.originalTurn, source: task.source
+              });
+            } else {
+              CLF_DOM.releaseRichImageSource(handle);
+            }
+          }
+        } else CLF_DOM.releaseRichImageSource(handle);
+      }
+    }
+  }
+
+  function pumpPagePixelTasks() {
+    while (pagePixelActive.size < MAX_PAGE_PIXEL_ENCODERS && pagePixelTasks.size) {
+      const [id, task] = pagePixelTasks.entries().next().value;
+      pagePixelTasks.delete(id);
+      pagePixelActive.add(task);
+      void capturePagePixel(task).finally(() => {
+        pagePixelActive.delete(task);
+        pumpPagePixelTasks();
+        if (!pagePixelActive.size && !pagePixelTasks.size) {
+          schedulePagePixelRescan();
+          const grant = acquisitionGrant();
+          if (grant && richCaptureWanted && richCaptureReady)
+            scheduleRichRescan(grant, conversationId, epoch);
+        }
+      });
+    }
+  }
+
   function nativeImageNode(image) {
     if (!fiberPresent || !fiberScanToken) return null;
     const suffix = `:${encodeURIComponent(image.messageId)}:${encodeURIComponent(image.assetId)}`;
@@ -3368,17 +4422,17 @@
     return found[0] || null;
   }
 
-  function nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation) {
+  function nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation, capture) {
     if (epoch !== heldEpoch || conversationId !== heldConversation) return false;
     const reported = nativeImagesReported.get(nativeImageKey(image));
     const owner = observation.turnId || '';
     return Boolean(reported && !reported.conflicted && reported.owner === owner &&
       reported.signature === `${owner}\u0000${image.providerRole}\u0000${image.providerChannel || ''}\u0000${image.providerStatus || ''}\u0000${image.width || ''}\u0000${image.height || ''}` &&
-      key === `${heldConversation || ''}\u0000${nativeImageKey(image)}`);
+      key === `${heldConversation || ''}\u0000${nativeImageKey(image)}\u0000${capture?.generation || ''}`);
   }
 
-  function nativeImageUnavailable(key, image, observation, reason, fingerprint, heldEpoch, heldConversation) {
-    if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation)) return;
+  function nativeImageUnavailable(key, image, observation, reason, fingerprint, heldEpoch, heldConversation, capture) {
+    if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation, capture)) return;
     const prior = nativeImageCaptures.get(key);
     const sameFingerprint = prior?.fingerprint === fingerprint || Boolean(
       prior?.fingerprint?.node && fingerprint?.node && prior.fingerprint.node === fingerprint.node &&
@@ -3391,25 +4445,27 @@
       providerRole: image.providerRole, ...(image.providerChannel ? { providerChannel: image.providerChannel } : {}),
       ...(image.providerStatus ? { providerStatus: image.providerStatus } : {}),
       ...(image.width ? { width: image.width } : {}), ...(image.height ? { height: image.height } : {}),
-      previewStatus: 'unavailable', previewError: reason });
+      previewStatus: 'unavailable', previewError: reason }, capture);
     void flush();
   }
 
   /** Captures one already-rendered native image without fetching or retaining its signed URL. */
   async function captureNativeImage(task) {
-    const { key, image, observation, heldEpoch, heldConversation } = task;
-    if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation)) return;
+    const { key, image, observation, heldEpoch, heldConversation, capture } = task;
+    if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation, capture)) return;
+    if (!capture || capture.epoch !== heldEpoch ||
+        (capture.conversationId !== null && capture.conversationId !== heldConversation)) return;
     const node = nativeImageNode(image);
-    if (!node) return nativeImageUnavailable(key, image, observation, 'ambiguous', 'missing', heldEpoch, heldConversation);
+    if (!node) return nativeImageUnavailable(key, image, observation, 'ambiguous', 'missing', heldEpoch, heldConversation, capture);
     const sourceWidth = node.naturalWidth;
     const sourceHeight = node.naturalHeight;
     const sourceUrl = node.currentSrc || node.src;
     const fingerprint = { node, sourceWidth, sourceHeight, complete: node.complete === true, sourceUrl };
     if (!fingerprint.complete || !Number.isInteger(sourceWidth) || !Number.isInteger(sourceHeight) || sourceWidth <= 0 || sourceHeight <= 0) {
-      return nativeImageUnavailable(key, image, observation, 'not_loaded', fingerprint, heldEpoch, heldConversation);
+      return nativeImageUnavailable(key, image, observation, 'not_loaded', fingerprint, heldEpoch, heldConversation, capture);
     }
     if (sourceWidth * sourceHeight > 30_000_000) {
-      return nativeImageUnavailable(key, image, observation, 'oversized', fingerprint, heldEpoch, heldConversation);
+      return nativeImageUnavailable(key, image, observation, 'oversized', fingerprint, heldEpoch, heldConversation, capture);
     }
     const prior = nativeImageCaptures.get(key);
     if (prior?.status === 'available' || prior?.status === 'pending' ||
@@ -3418,51 +4474,71 @@
           prior.fingerprint.complete === fingerprint.complete && prior.fingerprint.sourceUrl === sourceUrl)) return;
     const pendingCapture = { status: 'pending', fingerprint, task };
     nativeImageCaptures.set(key, pendingCapture);
-    const scale = Math.min(1, 1600 / Math.max(sourceWidth, sourceHeight));
-    const width = Math.max(1, Math.round(sourceWidth * scale));
-    const height = Math.max(1, Math.round(sourceHeight * scale));
-    if (width * height > 2_560_000) {
-      return nativeImageUnavailable(key, image, observation, 'oversized', fingerprint, heldEpoch, heldConversation);
-    }
+    const stillExact = () => nativeImageCaptures.get(key) === pendingCapture &&
+      nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation, capture) &&
+      nativeImageNode(image) === node && node.complete === true &&
+      node.naturalWidth === sourceWidth && node.naturalHeight === sourceHeight &&
+      (node.currentSrc || node.src) === sourceUrl;
+    const retireStale = () => {
+      if (nativeImageCaptures.get(key) === pendingCapture) nativeImageCaptures.delete(key);
+    };
     try {
+      // A loaded, exactly owned image can produce a WebP slightly above the wire
+      // limit at a fixed quality. Try a small, bounded series of progressively
+      // cheaper previews before reporting oversized; no network fetch or source
+      // identity changes, and only the actual final preview dimensions are saved.
+      const encodings = [
+        { longest: 1600, quality: 0.8 },
+        { longest: 1200, quality: 0.7 },
+        { longest: 800, quality: 0.6 }
+      ];
       const canvas = document.createElement('canvas');
-      canvas.width = width; canvas.height = height;
-      const context = canvas.getContext('2d');
-      if (!context) throw new Error('tainted');
-      context.drawImage(node, 0, 0, width, height);
-      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/webp', 0.8));
-      if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation) || nativeImageNode(image) !== node ||
-          !node.complete || node.naturalWidth !== sourceWidth || node.naturalHeight !== sourceHeight || (node.currentSrc || node.src) !== sourceUrl) {
-        if (nativeImageCaptures.get(key) === pendingCapture) nativeImageCaptures.delete(key);
-        return;
+      let blob = null;
+      let width = 0;
+      let height = 0;
+      for (const attempt of encodings) {
+        if (!stillExact()) { retireStale(); return; }
+        const scale = Math.min(1, attempt.longest / Math.max(sourceWidth, sourceHeight));
+        const candidateWidth = Math.max(1, Math.round(sourceWidth * scale));
+        const candidateHeight = Math.max(1, Math.round(sourceHeight * scale));
+        if (candidateWidth * candidateHeight > 2_560_000) throw new Error('oversized');
+        canvas.width = candidateWidth; canvas.height = candidateHeight;
+        const context = canvas.getContext('2d');
+        if (!context || typeof canvas.toBlob !== 'function') throw new Error('invalid');
+        context.drawImage(node, 0, 0, candidateWidth, candidateHeight);
+        const encoded = await new Promise(resolve => canvas.toBlob(resolve, 'image/webp', attempt.quality));
+        if (!stillExact()) { retireStale(); return; }
+        if (!encoded) throw new Error('invalid');
+        if (encoded.type !== 'image/webp' || !Number.isSafeInteger(encoded.size) || encoded.size <= 0)
+          throw new Error('invalid');
+        if (encoded.size > 384_000) continue; // Never materialize oversized bytes.
+        blob = encoded;
+        width = candidateWidth; height = candidateHeight;
+        break;
       }
-      if (!blob) throw new Error('tainted');
-      if (blob.type !== 'image/webp' || blob.size <= 0 || blob.size > 384_000) throw new Error('oversized');
+      if (!blob) throw new Error('oversized');
+      if (typeof blob.arrayBuffer !== 'function') throw new Error('invalid');
       const bytes = new Uint8Array(await blob.arrayBuffer());
-      if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation) || nativeImageNode(image) !== node ||
-          !node.complete || node.naturalWidth !== sourceWidth || node.naturalHeight !== sourceHeight || (node.currentSrc || node.src) !== sourceUrl) {
-        if (nativeImageCaptures.get(key) === pendingCapture) nativeImageCaptures.delete(key);
-        return;
-      }
+      if (!stillExact()) { retireStale(); return; }
+      if (bytes.length !== blob.size) throw new Error('invalid');
+      if (bytes.length > 384_000) throw new Error('oversized');
       let binary = '';
       for (let at = 0; at < bytes.length; at += 0x8000) binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
       const previewDataUrl = `data:image/webp;base64,${btoa(binary)}`;
       if (previewDataUrl.length > 512_100) throw new Error('oversized');
-      emit({ ...observation, kind: 'native_image', messageId: image.messageId, providerAssetId: image.assetId,
+      const admitted = emit({ ...observation, kind: 'native_image', messageId: image.messageId, providerAssetId: image.assetId,
         providerRole: image.providerRole, ...(image.providerChannel ? { providerChannel: image.providerChannel } : {}),
         ...(image.providerStatus ? { providerStatus: image.providerStatus } : {}),
         ...(image.width ? { width: image.width } : {}), ...(image.height ? { height: image.height } : {}),
-        previewStatus: 'available', previewWidth: width, previewHeight: height, previewDataUrl });
-      nativeImageCaptures.set(key, { status: 'available', fingerprint });
+        previewStatus: 'available', previewWidth: width, previewHeight: height, previewDataUrl }, capture);
+      if (admitted.nativeQueued) nativeImageCaptures.set(key, { status: 'available', fingerprint });
+      else retireStale();
       void flush();
     } catch (error) {
-      if (!nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation) || nativeImageNode(image) !== node ||
-          !node.complete || node.naturalWidth !== sourceWidth || node.naturalHeight !== sourceHeight || (node.currentSrc || node.src) !== sourceUrl) {
-        if (nativeImageCaptures.get(key) === pendingCapture) nativeImageCaptures.delete(key);
-        return;
-      }
-      const reason = String(error?.message || error) === 'oversized' ? 'oversized' : 'tainted';
-      nativeImageUnavailable(key, image, observation, reason, fingerprint, heldEpoch, heldConversation);
+      if (!stillExact()) { retireStale(); return; }
+      const reason = String(error?.message || error) === 'oversized' ? 'oversized'
+        : error?.name === 'SecurityError' || String(error?.message || error) === 'tainted' ? 'tainted' : 'invalid';
+      nativeImageUnavailable(key, image, observation, reason, fingerprint, heldEpoch, heldConversation, capture);
     }
   }
 
@@ -3478,16 +4554,22 @@
     }
   }
 
-  function queueNativeImageCapture(image, observation) {
+  function queueNativeImageCapture(image, observation, capture) {
+    if (!capture) return;
     const heldConversation = conversationId;
-    const key = `${heldConversation || ''}\u0000${nativeImageKey(image)}`;
+    // G0's pending image must not block a genuinely acquired G2 pixel capture.
+    // Both tasks retain their independent, immutable admission through toBlob.
+    const key = `${heldConversation || ''}\u0000${nativeImageKey(image)}\u0000${capture.generation}`;
     const prior = nativeImageCaptures.get(key);
     if (prior?.status === 'available' || prior?.status === 'pending') {
       nativeImageCaptures.delete(key); nativeImageCaptures.set(key, prior);
       return;
     }
     if (nativeImageCaptureQueue.has(key)) return;
-    nativeImageCaptureQueue.set(key, { key, image, observation, heldEpoch: epoch, heldConversation });
+    // Never allocate an unbounded backlog behind two stalled canvas callbacks.
+    // No cache entry is minted for a deferred tuple, so a later exact scan can retry.
+    if (nativeImageCaptureQueue.size >= MAX_PENDING_NATIVE_IMAGE_CAPTURES) return;
+    nativeImageCaptureQueue.set(key, { key, image, observation, capture, heldEpoch: epoch, heldConversation });
     pumpNativeImageCaptures();
   }
 
@@ -3712,6 +4794,11 @@
     }
   }
   async function refreshFiber(settled = null, presentationOnly = false) {
+    richScansActive++;
+    let unansweredFiberAsk = false;
+    try {
+      if (presentationOnly && (pagePixelActive.size || pagePixelTasks.size || pagePixelFlights.size))
+        return false;
     // A bound chat can briefly lose its /c/<id> route during React/router churn, and a real
     // navigation to a fresh composer has the exact same pathname until ChatGPT assigns the
     // new conversation id. While that identity is unresolved, fail closed: emitting Fiber
@@ -3719,22 +4806,53 @@
     // A. A fresh, never-bound composer still scans normally because `conversationId` is null.
     const routeConversation = CLF_DOM.conversationId();
     if (conversationId && routeConversation !== conversationId) return false;
+    const fiberCapture = acquisitionGrant();
+    if (!fiberCapture) {
+      void refreshRecordingGeneration();
+      return false;
+    }
     // The page-context round-trip can settle after ChatGPT navigates this tab. Capture the
     // logical chat before crossing that async boundary so an answer read from chat A can
     // never be emitted under chat B's conversation id.
     const askedEpoch = epoch;
     const askedConversation = conversationId;
+    // A generation owner is a physical node/tombstone at the moment this scan starts.
+    // Taking it after any awaited capture issuance could borrow the newer turn's owner.
+    const requestedLiveOwner = !settled ? currentGenerationOwner() : null;
+    const requestedOwner = settled || requestedLiveOwner;
+    // Consume only an ALREADY ISSUED capture for this exact scan. The initial ordinary
+    // Fiber read remains timely for canonical text/Goal when no durable session exists or
+    // the worker is unreachable. In that case no richSnapshot traversal occurs; acquisition
+    // may complete later and schedule a separate fresh scan, never adopt the older stamp.
+    const richCapture = !presentationOnly &&
+      richCaptureCurrent(richCaptureReady, fiberCapture, askedConversation, askedEpoch)
+      ? richCaptureReady : null;
+    // Pixel tickets were independently issued BEFORE this scan and are consumed
+    // once. A late successful begin cannot be retrofitted onto this Fiber frame.
+    const pixelCaptures = [];
+    if (!presentationOnly) {
+      for (const [key, capture] of pagePixelReady) {
+        pagePixelReady.delete(key);
+        if (pagePixelCurrent(capture)) pixelCaptures.push(capture);
+      }
+      if (pixelCaptures.length && pagePixelHints.size) pumpPagePixelBegins();
+    }
+    if (!presentationOnly) richCaptureReady = null;
+    if (richCapture) richCaptureWanted = null;
+    // A pixel-only follow-up already owns its independent ticket. Starting a
+    // structural prefetch here can restamp the root during toBlob and starve
+    // pixels, while adding no canonical evidence this scan has not yet read.
+    if (!richCapture && !presentationOnly && !pixelCaptures.length)
+      prefetchRichCapture(fiberCapture, askedConversation, askedEpoch);
     // A page-model scan belongs to the generation that requested it, not to whichever one is
     // current when its asynchronous reply returns. Live 2026-08-31: an old final answered after
     // a follow-up had opened the next generation; reading mutable `generating`/`turnId` below
     // emitted that exact final with no owner. Capture the node + durable id before the await.
     // If the lifecycle moves meanwhile, localGenerationOf() below accepts the claim only while
     // finishGeneration's exact node/signature tombstone still proves the old ownership.
-    const requestedLiveOwner = !settled ? currentGenerationOwner() : null;
     const requestedQuestionId = requestedLiveOwner
       ? [...CLF_DOM.messages()].reverse().find(message => message.role === 'user')?.id || null
       : null;
-    const requestedOwner = settled || requestedLiveOwner;
     let answer = await askFiber();
     if (answer === null) {
       // One missed reply is not proof the helper is gone: a busy main thread can outlive this
@@ -3764,6 +4882,17 @@
           fiberTurns = new Map();
           fiberScanToken = null;
         }
+        // Tickets were taken at the start of this scan. An unanswered ask must
+        // not retire them: overflow recapture (and any in-flight begin) still
+        // owns the exact original issuance until a Fiber frame can join it.
+        for (const capture of pixelCaptures) {
+          const hint = capture?.hint;
+          if (!hint || !pagePixelCurrent(capture)) continue;
+          const key = pagePixelKey(hint);
+          if (!pagePixelReady.has(key)) pagePixelReady.set(key, capture);
+        }
+        pixelCaptures.length = 0;
+        unansweredFiberAsk = true;
         return false;
       }
     }
@@ -4046,7 +5175,7 @@
             concreteConversation(turn.conversationId) !== askedConversation
           ) ? { fiberConversationId: turn.conversationId } : {}),
           calls: fresh
-        });
+        }, fiberCapture);
       }
     }
     // What the settle window is waiting for, decided from the scan itself rather than from a
@@ -4163,15 +5292,16 @@
             ...(historical ? { time: image.createTime, authoredTime: true } : {})
           };
           const signature = `${owner}\u0000${image.providerRole}\u0000${image.providerChannel || ''}\u0000${image.providerStatus || ''}\u0000${image.width || ''}\u0000${image.height || ''}`;
-          if (prior?.signature !== signature) {
+          if (prior?.signature !== signature || prior.generation !== fiberCapture.generation) {
             nativeImagesReported.delete(key);
-            nativeImagesReported.set(key, { signature, owner, conflicted: ownerConflict });
+            nativeImagesReported.set(key, { signature, owner, conflicted: ownerConflict,
+              generation: fiberCapture.generation });
             emit({ ...observation, kind: 'native_image', messageId: image.messageId,
               providerAssetId: image.assetId, providerRole: image.providerRole,
               ...(image.providerChannel ? { providerChannel: image.providerChannel } : {}),
               ...(image.providerStatus ? { providerStatus: image.providerStatus } : {}),
               ...(image.width ? { width: image.width } : {}), ...(image.height ? { height: image.height } : {}),
-              previewStatus: 'pending' });
+              previewStatus: 'pending' }, fiberCapture);
           } else {
             // LRU touch. The bounded cache can then discard rows outside the currently
             // scanned history without repeatedly reminting visible metadata.
@@ -4179,7 +5309,7 @@
           }
           // Each tuple captures independently. The helper itself fences route/epoch and exact
           // current Fiber ownership after every await, so one slow image cannot overwrite another.
-          if (image.providerStatus === 'finished_successfully') queueNativeImageCapture(image, observation);
+          if (image.providerStatus === 'finished_successfully') queueNativeImageCapture(image, observation, fiberCapture);
           continue;
         }
         if (item.type === 'activity') {
@@ -4196,7 +5326,7 @@
             messageId: activity.messageId,
             activeNow: generating && owner === turnId && previous === undefined && freshPublication,
             turnId: localOwner || undefined
-          });
+          }, fiberCapture);
           continue;
         }
 
@@ -4218,7 +5348,7 @@
             text: message.rawText,
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
             ...(message.createTime ? { time: message.createTime, authoredTime: true, authoredAt: message.createTime } : {})
-          });
+          }, fiberCapture);
           continue;
         }
         // `endMessageId` identifies the one public assistant message that actually ended the
@@ -4252,6 +5382,34 @@
           priorMessage?.conflicted || (localOwner && priorMessage?.owner && priorMessage.owner !== localOwner)
         );
         let owner = ownerConflict ? '' : localOwner || (priorMessage && priorMessage.owner) || '';
+        const rich = richCaptureCurrent(richCapture, fiberCapture, askedConversation, askedEpoch) &&
+          !ownerConflict && concreteConversation(turn.conversationId) === askedConversation
+          ? richSnapshot(message, turn, askedConversation, askedEpoch, answer.scanToken) ||
+            missingRichSnapshot(message, turn, priorMessage, askedConversation, askedEpoch, answer.scanToken)
+          : null;
+        const richSeal = rich ? sealRichRow(richCapture, fiberCapture, askedConversation,
+          askedEpoch, answer.scanToken, message, turn, rich) : null;
+        // A prior *queued and sealed* rich image only hints which target the
+        // separately pre-issued pixel ticket named. Reacquire the entire exact
+        // image/tree under this NEW Fiber scan even when the structural rich
+        // ticket has already been consumed and prose is unchanged.
+        for (const capture of pixelCaptures) {
+          if (capture.messageId !== message.messageId ||
+              capture.providerMessageId !== message.rawMessageId ||
+              capture.conversationId !== askedConversation) continue;
+          const pixelRich = rich?.status === 'available' ? rich :
+            richSnapshot(message, turn, askedConversation, askedEpoch, answer.scanToken);
+          if (pixelRich?.status === 'available') {
+            preparePagePixelTask(capture, message, turn, pixelRich, fiberCapture, answer.scanToken);
+          }
+        }
+        // A page-controlled Fiber reply may claim richRoot:true without any current
+        // stamped, exact DOM association. Its empty nonterminal assistant descriptor
+        // alone must never mint a canonical text row or a rich-only revision.
+        if (!message.rawText && !message.renderedHtml && !message.attachments?.length &&
+            !exactTerminal && !rich) continue;
+        const richSignature = richSeal ? JSON.stringify(rich) : null;
+        const richChanged = richSignature !== null && richSignature !== priorMessage?.richSignature;
         // Ownership may strengthen after an earlier scan saw the message before its DOM turn
         // was bound. It may never weaken merely because a concurrent later scan has no local
         // claim: that was the 2026-08-31 final-without-turnId race. A contradictory positive
@@ -4259,16 +5417,66 @@
         const signature =
           `${state}\u0000${message.rawText}\u0000${message.renderedHtml}\u0000${owner}` +
           `\u0000${message.createTime || ''}\u0000${message.rawMessageId || ''}`;
-        if (priorMessage?.signature === signature) continue;
-        messagesReported.set(message.messageId, { signature, owner, conflicted: ownerConflict, text: message.rawText });
-        if (state === 'streaming' && owner && priorMessage?.text !== message.rawText && freshPublication) noteTurnProgress(owner);
+        // An unchanged Fiber descriptor is the same previously acquired prose.
+        // A fresh grant permits a newly observed rich presentation, but cannot
+        // turn old G0 text into newly authored G2 text merely by rescanning it.
+        const sameProse = priorMessage?.signature === signature;
+        const sameCaptureGeneration = priorMessage?.generation === fiberCapture.generation;
+        if (sameProse && !richChanged) continue;
+        // Only *actually queued* rich is eligible for dedupe. Refused seals and
+        // page-queue eviction cannot permanently poison a later fresh recapture.
+        const reportQueued = result => {
+          if (!result?.proseQueued && !result?.richQueued) return false;
+          messagesReported.delete(message.messageId);
+          messagesReported.set(message.messageId, {
+            signature: result.proseQueued ? signature : priorMessage?.signature ?? signature,
+            owner, conflicted: ownerConflict,
+            text: result.proseQueued ? message.rawText : priorMessage?.text ?? message.rawText,
+            generation: result.proseQueued ? fiberCapture.generation : priorMessage?.generation ?? fiberCapture.generation,
+            richSignature: result.richQueued ? richSignature :
+              (sameCaptureGeneration ? priorMessage?.richSignature : null) ?? null,
+            richOwner: result.richQueued && rich?.status === 'available'
+              ? { epoch: askedEpoch, conversationId: askedConversation,
+                messageId: message.messageId, providerMessageId: message.rawMessageId }
+              : (sameCaptureGeneration ? priorMessage?.richOwner : null) ?? null
+          });
+          if (result.richQueued && richSignature) {
+            if (rich?.status === 'available') rememberPagePixelHints(rich, richSignature, fiberCapture, result.richEntry);
+            let retained = 0;
+            for (const state of messagesReported.values()) if (state.richSignature) retained += 1;
+            if (retained > 64) for (const state of messagesReported.values()) {
+              if (!state.richSignature) continue;
+              delete state.richSignature;
+              if (--retained <= 64) break;
+            }
+          }
+          return true;
+        };
+        // A zero-prose nonterminal DIL answer has a real native provider identity,
+        // but no authored text to create a canonical transcript row. Emit *only*
+        // presentation evidence: the bridge marks this rich-only, and the recorder
+        // refuses it until an existing owner and capture-time Chrome proof exist.
+        // No empty text, synthetic progress, activity, finality, or Goal tick.
+        if (!message.rawText && !message.renderedHtml && rich && !exactTerminal) {
+          reportQueued(emit({ kind: 'assistant_message', messageId: message.messageId,
+            providerMessageId: message.rawMessageId, fiberConversationId: askedConversation, rich }, fiberCapture, richSeal));
+          continue;
+        }
+        // Hydration or native state changed, not authored prose/model work. Never emit
+        // text, activity, final/Goal or a second logical message for this revision.
+        if (sameProse) {
+          reportQueued(emit({ kind: 'assistant_message', messageId: message.messageId,
+            providerMessageId: message.rawMessageId, fiberConversationId: askedConversation, rich }, fiberCapture, richSeal));
+          continue;
+        }
         const liveAssistant =
           Boolean(localOwner) ||
           (generating && (index === activeTurnIndex || (activeTurnIndex < 0 && index === answer.turns.length - 1)));
-        emit({
+        const queued = emit({
           kind: 'assistant_message',
           messageId: message.messageId,
           providerMessageId: message.rawMessageId,
+          ...(rich ? { rich, fiberConversationId: askedConversation } : {}),
           ...(message.createTime ? { authoredAt: message.createTime } : {}),
           turnId: localOwner || undefined,
           text: message.rawText,
@@ -4286,8 +5494,11 @@
               marked.kind === 'HANDOFF' && marked.answer === turn))
             ? { goalEligible: true }
             : {})
-        });
-        if (state === 'final' && localOwner && notePresentation(message.messageId, message.rawText)) {
+        }, fiberCapture, richSeal);
+        reportQueued(queued);
+        if (queued.proseQueued && state === 'streaming' && owner &&
+            priorMessage?.text !== message.rawText && freshPublication) noteTurnProgress(owner);
+        if (queued.proseQueued && state === 'final' && localOwner && notePresentation(message.messageId, message.rawText)) {
           // The page has produced a newer exact revision than the app-owned renderer can
           // possibly hold. Reuse the one activity scheduler and bring its next pass forward;
           // the exact feed acknowledgement below releases this obligation, and its own deadline
@@ -4338,7 +5549,37 @@
     // therefore be the last producer after that flush has already finished. Transfer its
     // canonical revisions now instead of waiting for visibilitychange or the next timer.
     void flush();
+    if (pagePixelTasks.size) later(pumpPagePixelTasks, 0);
+    // A richRoot boolean is only a bounded page-model hint for whether to run one MORE
+    // scan, never a claim of document/session/row authority. The new scan still needs its
+    // own independently issued ticket and exact fresh Fiber/DOM join before any rich walk.
+    if (!presentationOnly && askedConversation) {
+      const hasRichHint = answer.turns.some(turn => turn.conversationId === askedConversation &&
+        turn.messages?.some(message => message.role === 'assistant' &&
+          (message.richRoot === true || messagesReported.get(message.messageId)?.richOwner?.epoch === askedEpoch)));
+      if (hasRichHint) {
+        richCaptureNoHint = null;
+        if (!richCapture && !pixelCaptures.length) {
+          richCaptureWanted = { epoch: askedEpoch, conversationId: askedConversation,
+            generation: fiberCapture.generation };
+          prefetchRichCapture(fiberCapture, askedConversation, askedEpoch);
+          scheduleRichRescan(fiberCapture, askedConversation, askedEpoch);
+        }
+      } else {
+        richCaptureWanted = null;
+        richCaptureNoHint = { epoch: askedEpoch, conversationId: askedConversation,
+          generation: fiberCapture.generation };
+      }
+    }
     return true;
+    } finally {
+      richScansActive--;
+      if (!richScansActive && richCaptureWanted && richCaptureReady) {
+        const grant = acquisitionGrant();
+        if (grant) scheduleRichRescan(grant, conversationId, epoch);
+      }
+      if (!richScansActive && !unansweredFiberAsk) schedulePagePixelRescan();
+    }
   }
 
   /** What the page says about this block, or null. */
@@ -9774,6 +11015,13 @@
   // -------------------------------------------------------------- commands
 
   async function checkStatus() {
+    // Status is a connection report, NOT document/SPA/G-bound evidence. An old
+    // A request can resolve after A→B→A and must not wake a freshly deferred
+    // source belonging to the returned A (nor after Recording Off→On).
+    const statusEpoch = epoch;
+    const statusConversation = conversationId;
+    const statusRoute = CLF_DOM.conversationId();
+    const statusGeneration = acquisitionGrant()?.generation || null;
     const reply = await ask({ type: 'status' });
     if (reply) {
       status = {
@@ -9782,6 +11030,74 @@
         disconnected: reply.disconnected === true
       };
     }
+    // A failed pixel begin is an unspent source-change intent. Only this real
+    // worker status response (or another IMG mutation) wakes a bounded retry;
+    // a failed promise's own completion must never create a hot retry loop.
+    const sameStatusOwner = alive && statusGeneration &&
+      statusConversation === statusRoute && epoch === statusEpoch &&
+      conversationId === statusConversation && CLF_DOM.conversationId() === statusRoute &&
+      acquisitionGrant()?.generation === statusGeneration;
+    if (sameStatusOwner && reply?.connected === true && reply?.paired === true && pagePixelDeferred.size) {
+      for (const key of pagePixelDeferred) {
+        const hint = pagePixelPrerequisites.get(key);
+        const deferred = pagePixelDeferredWitness.get(key);
+        if (!hint || !pagePixelHintCurrent(hint) ||
+            hint.generation !== statusGeneration || !durableRichRows.has(hint.structuralEntry)) continue;
+        const root = CLF_DOM.richRootFor(hint.messageId, hint.providerMessageId);
+        const stamp = root?.getAttribute('data-clf-fiber-rich');
+        const resolved = root && stamp && CLF_DOM.resolveRichImage(root,
+          hint.structuralEntry.event.rich, hint.nodeId, hint.mediaId, stamp,
+          () => pagePixelHintCurrent(hint));
+        // A refused pixel begin has no source lease yet. Its original exact
+        // structural slot must still resolve under the current DOM frame before
+        // an independently fresh status may retry that issuance.
+        if (!deferred) {
+          if (!resolved) {
+            pagePixelDeferred.delete(key);
+            pagePixelHints.delete(key);
+          } else {
+            pagePixelDeferred.delete(key);
+            pagePixelAttempts.delete(key);
+            if (pagePixelHints.has(key)) pagePixelHints.set(key, hint);
+          }
+          continue;
+        }
+        const source = CLF_DOM.richImageSourceStable(deferred.handle);
+        // An IMG with identical URL is not the original source after A→B→A.
+        // The private observer drains mutations and checks its exact parent,
+        // child index, row, turn, source and still-connected physical image.
+        if (!source || !resolved || resolved.image !== deferred.image ||
+            root !== deferred.root || !root?.isConnected ||
+            !deferred.image.isConnected || !root.contains(deferred.image) ||
+            root.closest('[data-message-id]') !== deferred.row ||
+            root.closest('section[data-testid^="conversation-turn"]') !== deferred.turn ||
+            source.sourceIncarnation !== deferred.source.sourceIncarnation ||
+            source.sourceSequence !== deferred.source.sourceSequence) {
+          // Source mutation may have already triggered the independent watcher
+          // rearm; do not erase a newer replacement's separately queued hint.
+          if (pagePixelDeferredWitness.get(key) === deferred) {
+            pagePixelDeferredWitness.delete(key);
+            pagePixelDeferred.delete(key);
+            pagePixelHints.delete(key);
+            pagePixelScanRearmed.delete(key);
+            CLF_DOM.releaseRichImageSource(deferred.handle);
+          }
+          continue;
+        }
+        pagePixelDeferredWitness.delete(key);
+        pagePixelDeferred.delete(key);
+        CLF_DOM.releaseRichImageSource(deferred.handle);
+        // Current-status wake may spend exactly one NEW authenticated ticket;
+        // neither the old seal, private source handle nor scan is reused.
+        pagePixelScanRearmed.delete(key);
+        pagePixelAttempts.delete(key);
+        if (pagePixelHints.has(key)) pagePixelHints.set(key, hint);
+      }
+      if (pagePixelHints.size) pumpPagePixelBegins();
+    }
+    // Status is not admission authority; explicitly refresh via the worker's
+    // authenticated, document-bound issuance rather than cached /hello metadata.
+    void refreshRecordingGeneration();
     renderStreams();
     renderControl();
   }
@@ -11255,6 +12571,11 @@
       // revival response race against its successor even though sendToWorker() is already inert.
       if (!alive) return false;
       if (!message || typeof message.type !== 'string') return false;
+      if (message.type === 'clf-recording-generation-refresh') {
+        void refreshRecordingGeneration().then(grant => sendResponse({ ok: Boolean(grant) }))
+          .catch(() => sendResponse({ ok: false }));
+        return true;
+      }
       // background.js uses this only to distinguish a live isolated-world recorder from the
       // dead context Chrome leaves behind when an unpacked extension is reloaded while the
       // ChatGPT document stays open. No page/session data crosses in this health check.
@@ -11496,6 +12817,7 @@
     // no observation, evidence or command of its can reach the app afterwards. Its
     // intervals drain themselves on their next tick through every().
     alive = false;
+    clearPagePixels();
     for (const check of pageViewChecks) void check();
     if (activityTimer !== null) {
       cancelLater(activityTimer);
@@ -11549,6 +12871,7 @@
       emit,
       flush,
       observe,
+      checkStatus: async () => { await checkStatus(); await refreshRecordingGeneration(); },
       syncTheme,
       meterView,
       paint,

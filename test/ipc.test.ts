@@ -5,9 +5,13 @@
  * the IPC surface is thin validation over modules that have their own tests.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
+import { pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import type { RichActionRecord } from '../src/main/rich-actions.js';
 
 type Handler = (event: unknown, payload: unknown) => Promise<unknown>;
 const handlers = new Map<string, Handler>();
@@ -35,9 +39,9 @@ vi.mock('electron', () => ({
 vi.mock('../src/main/extension-path.js', () => ({ extensionDir: () => process.cwd() }));
 vi.mock('../src/main/browser.js', () => ({ openInPreferredBrowser: vi.fn(async () => 'chrome.exe') }));
 
-const { defaultConfig, getConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
+const { defaultConfig, getConfig, initConfigPath, saveConfig, updateConfig } = await import('../src/main/config.js');
 const { initSecretsPath, resetSecretsCacheForTests } = await import('../src/main/secrets.js');
-const { appendEvent, createSession, initSessionStore, rebindSession, resetSessionStoreForTests, upsertMessageEvent } = await import('../src/main/session/store.js');
+const { appendEvent, createSession, initSessionStore, rebindSession, resetSessionStoreForTests, upsertMessageEvent, upsertRichMedia, upsertRichMessage } = await import('../src/main/session/store.js');
 const { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } = await import('../src/main/durable.js');
 const { pendingCommands, resetBridgeForTests, setBrowserOpener, startBridge, stopBridge } = await import(
   '../src/main/bridge.js'
@@ -84,6 +88,846 @@ const renameRoot = (payload: unknown): Promise<any> => handlers.get('roots:renam
 const removeRoot = (payload: unknown): Promise<any> => handlers.get('roots:remove')!(null, payload) as Promise<any>;
 const sessionEvents = (payload: unknown): Promise<any> => handlers.get('sessions:events')!(null, payload) as Promise<any>;
 const sessionList = (): Promise<any> => handlers.get('sessions:list')!(null, undefined) as Promise<any>;
+
+function selectionWindow() {
+  const mainFrame = {
+    url: pathToFileURL(path.join(process.cwd(), 'src/renderer/index.html')).href,
+    processId: 101, routingId: 7
+  };
+  const webContents = Object.assign(new EventEmitter(), {
+    send: vi.fn(), mainFrame, getURL: () => mainFrame.url, isDestroyed: () => false,
+    isLoadingMainFrame: () => true
+  });
+  const window = Object.assign(new EventEmitter(), {
+    webContents, isDestroyed: () => false, isVisible: () => true,
+    setBackgroundColor: vi.fn(), setTitleBarOverlay: vi.fn()
+  });
+  currentWindow = window as any;
+  return { window, webContents, mainFrame, event: { sender: webContents, senderFrame: mainFrame } };
+}
+
+describe('main-owned, inert UI selection witness', () => {
+  it('requires the exact current window/main frame, issues independent generations and never uses last activity', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const first = await createSession({ title: 'witness A', conversationId: 'selection-a' });
+    const second = await createSession({ title: 'witness B', conversationId: 'selection-b' });
+    const { event, webContents, mainFrame, window } = selectionWindow();
+    const report = (sessionId: string | null, rendererGeneration: number, invokeEvent: unknown = event) =>
+      handlers.get('sessions:uiSelection')!(invokeEvent, { sessionId, rendererGeneration }) as Promise<any>;
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect((await sessionList()).data.activeId).not.toEqual(currentUiSelectionFor(webContents as any)?.sessionId);
+    const a = await report(first.id, 1);
+    expect(a).toMatchObject({ ok: true, data: { sessionId: first.id, generation: expect.any(Number) } });
+    expect(currentUiSelectionFor(webContents as any)).toEqual(a.data);
+    const b = await report(second.id, 2);
+    const back = await report(first.id, 3);
+    const same = await report(first.id, 4);
+    const empty = await report(null, 5);
+    const again = await report(first.id, 6);
+    expect([a, b, back, same, empty, again].map(reply => reply.data.generation)).toEqual(
+      [...new Set([a, b, back, same, empty, again].map(reply => reply.data.generation))].sort((x, y) => x - y)
+    );
+    expect(currentUiSelectionFor(webContents as any)).toEqual(again.data);
+    expect((await report(second.id, 5)).ok).toBe(false);
+    expect((await report(first.id, 6)).ok).toBe(false);
+    expect(currentUiSelectionFor(webContents as any)).toEqual(again.data);
+    expect((await report(second.id, 7, { sender: webContents, senderFrame: {} })).ok).toBe(false);
+    expect((await report(second.id, 7, { sender: {}, senderFrame: mainFrame })).ok).toBe(false);
+    expect(currentUiSelectionFor(webContents as any)).toEqual(again.data);
+    const changedURL = mainFrame.url;
+    mainFrame.url = 'https://foreign.example/';
+    expect((await report(second.id, 7)).ok).toBe(false);
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    mainFrame.url = changedURL;
+    expect(currentUiSelectionFor(webContents as any)).toBeNull(); // A restored URL cannot resurrect the old witness.
+    const foreign = selectionWindow();
+    currentWindow = window as any;
+    expect((await report(second.id, 7, foreign.event)).ok).toBe(false);
+    expect(currentUiSelectionFor(foreign.webContents as any)).toBeNull();
+    const replaced = selectionWindow();
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect((await report(second.id, 7)).ok).toBe(false);
+    expect(currentUiSelectionFor(replaced.webContents as any)).toBeNull();
+  });
+
+  it('rejects malformed, unknown and deleted sessions, and revokes exact deletion without renderer cooperation', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const session = await createSession({ title: 'delete witness' });
+    const other = await createSession({ title: 'unrelated deletion' });
+    const { event, webContents } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: -1 })).toMatchObject({ ok: false });
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 1, action: 'grant' })).toMatchObject({ ok: false });
+    expect(await handler(event, { sessionId: 'missing00', rendererGeneration: 1 })).toMatchObject({ ok: false });
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 2 })).toMatchObject({ ok: true });
+    expect(await handler(event, { sessionId: other.id, rendererGeneration: 3, action: 'grant' })).toMatchObject({ ok: false });
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 4 })).toMatchObject({ ok: true });
+    expect(await handlers.get('sessions:delete')!(null, { id: other.id })).toMatchObject({ ok: true });
+    expect(currentUiSelectionFor(webContents as any)?.sessionId).toBe(session.id);
+    expect(await handlers.get('sessions:delete')!(null, { id: session.id })).toMatchObject({ ok: true });
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 5 })).toMatchObject({ ok: false });
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+  });
+
+  it('invalidates synchronously before lookup and rejects out-of-order A→B→A completions and failed B', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const store = await import('../src/main/session/store.js');
+    const a = await createSession({ title: 'race A' });
+    const b = await createSession({ title: 'race B' });
+    const { event, webContents } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    let release!: (value: Awaited<ReturnType<typeof store.getSession>>) => void;
+    const original = store.getSession;
+    const spy = vi.spyOn(store, 'getSession').mockImplementation(id => id === a.id && !release
+      ? new Promise(resolve => { release = resolve; }) : original(id));
+    try {
+      const old = handler(event, { sessionId: a.id, rendererGeneration: 1 });
+      expect(currentUiSelectionFor(webContents as any)).toBeNull();
+      const winner = await handler(event, { sessionId: b.id, rendererGeneration: 2 }) as any;
+      expect(winner).toMatchObject({ ok: true, data: { sessionId: b.id } });
+      const back = await handler(event, { sessionId: a.id, rendererGeneration: 3 }) as any;
+      expect(back).toMatchObject({ ok: true, data: { sessionId: a.id } });
+      expect(back.data.generation).toBeGreaterThan(winner.data.generation);
+      release(await original(a.id));
+      expect(await old).toMatchObject({ ok: false });
+      expect(currentUiSelectionFor(webContents as any)).toEqual(back.data);
+      expect(await handler(event, { sessionId: 'unknown0', rendererGeneration: 4 })).toMatchObject({ ok: false });
+      expect(currentUiSelectionFor(webContents as any)).toBeNull();
+      expect(await handler(event, { sessionId: a.id, rendererGeneration: 5 })).toMatchObject({ ok: true });
+    } finally { spy.mockRestore(); }
+  });
+
+  it('revokes a report that arrives while exact session deletion is still awaiting disk', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const store = await import('../src/main/session/store.js');
+    const session = await createSession({ title: 'delete while reporting' });
+    const { event, webContents } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 1 })).toMatchObject({ ok: true });
+    const original = store.deleteSession;
+    let finishDelete!: () => void;
+    const spy = vi.spyOn(store, 'deleteSession').mockImplementation(id => id === session.id
+      ? new Promise(resolve => { finishDelete = () => void original(id).then(resolve); }) : original(id));
+    try {
+      const pendingDelete = handlers.get('sessions:delete')!(null, { id: session.id });
+      await vi.waitFor(() => expect(finishDelete).toBeTypeOf('function'));
+      expect(currentUiSelectionFor(webContents as any)).toBeNull();
+      expect(await handler(event, { sessionId: session.id, rendererGeneration: 2 })).toMatchObject({ ok: true });
+      expect(currentUiSelectionFor(webContents as any)?.sessionId).toBe(session.id);
+      finishDelete();
+      expect(await pendingDelete).toMatchObject({ ok: true });
+      expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    } finally { spy.mockRestore(); }
+  });
+
+  it('suspends a main-frame navigation before loading and accepts only the new app frame after reload', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const session = await createSession({ title: 'navigation boundary' });
+    const { webContents, mainFrame, event } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    const original = await handler(event, { sessionId: session.id, rendererGeneration: 1 }) as any;
+    expect(original.ok).toBe(true);
+    // Electron announces navigation before a loading event or change to getURL(). The old
+    // document must not resurrect itself by sending one more valid, increasing sequence.
+    webContents.emit('did-start-navigation', {
+      url: mainFrame.url, isSameDocument: false, isMainFrame: true, frame: mainFrame
+    });
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 2 })).toMatchObject({ ok: false });
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    // An in-page completion does not finish an outside-document navigation, even if it
+    // advertises the same app URL and the outgoing frame's real routing identity.
+    webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId, mainFrame.routingId);
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 3 })).toMatchObject({ ok: false });
+    webContents.emit('did-start-loading');
+    const newFrame = { url: mainFrame.url, processId: 102, routingId: 8 };
+    webContents.mainFrame = newFrame;
+    (webContents as any).isLoadingMainFrame = () => false;
+    webContents.emit('did-finish-load');
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 3 })).toMatchObject({ ok: false });
+    const recovered = await handler({ sender: webContents, senderFrame: newFrame },
+      { sessionId: session.id, rendererGeneration: 0 }) as any;
+    expect(recovered).toMatchObject({ ok: true, data: { sessionId: session.id } });
+    expect(recovered.data.generation).toBeGreaterThan(original.data.generation);
+    expect(currentUiSelectionFor(webContents as any)).toEqual(recovered.data);
+  });
+
+  it('reopens only fresh reports after verified same-document main-frame navigation, never its old witness', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const a = await createSession({ title: 'in-page A' });
+    const b = await createSession({ title: 'in-page B' });
+    const { window, webContents, mainFrame, event } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    const first = await handler(event, { sessionId: a.id, rendererGeneration: 1 }) as any;
+    expect(first).toMatchObject({ ok: true, data: { sessionId: a.id } });
+    const report = (sessionId: string, rendererGeneration: number, invokeEvent: unknown = event) =>
+      handler(invokeEvent, { sessionId, rendererGeneration }) as Promise<any>;
+
+    // Electron delivers did-start-navigation then did-navigate-in-page for a same-document
+    // transition. There is NO did-start-loading, provisional abort, or replaced mainFrame.
+    (webContents as any).isLoadingMainFrame = () => false;
+    webContents.emit('did-start-navigation', {
+      url: mainFrame.url, isSameDocument: true, isMainFrame: true, frame: mainFrame
+    });
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    expect(await report(b.id, 2)).toMatchObject({ ok: false }); // Old frame cannot report early.
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+
+    // A subframe completion, foreign contents, wrong routing identity and wrong URL must
+    // not make the pending transition reportable. The URL comes only from Electron.
+    webContents.emit('did-navigate-in-page', {}, mainFrame.url, false, mainFrame.processId, mainFrame.routingId);
+    expect(await report(b.id, 3)).toMatchObject({ ok: false });
+    const foreign = selectionWindow();
+    currentWindow = window as any;
+    foreign.webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId, mainFrame.routingId);
+    expect(await report(b.id, 4)).toMatchObject({ ok: false });
+    webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId + 1, mainFrame.routingId);
+    expect(await report(b.id, 4)).toMatchObject({ ok: false });
+    webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId, mainFrame.routingId + 1);
+    expect(await report(b.id, 5)).toMatchObject({ ok: false });
+    webContents.emit('did-navigate-in-page', {}, 'https://foreign.example/', true, mainFrame.processId, mainFrame.routingId);
+    expect(await report(b.id, 6)).toMatchObject({ ok: false });
+    webContents.mainFrame = { ...mainFrame };
+    webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId, mainFrame.routingId);
+    expect(await report(b.id, 6)).toMatchObject({ ok: false });
+    webContents.mainFrame = mainFrame;
+
+    expect(webContents.mainFrame).toBe(mainFrame);
+    webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId, mainFrame.routingId);
+    expect(currentUiSelectionFor(webContents as any)).toBeNull(); // Completion never restores A.
+    expect(await report(a.id, 1)).toMatchObject({ ok: false }); // No renderer sequence reset.
+    const second = await report(b.id, 7);
+    expect(second).toMatchObject({ ok: true, data: { sessionId: b.id } });
+    expect(second.data.generation).toBeGreaterThan(first.data.generation);
+    const back = await report(a.id, 8);
+    expect(back).toMatchObject({ ok: true, data: { sessionId: a.id } });
+    expect(back.data.generation).toBeGreaterThan(second.data.generation);
+    expect(currentUiSelectionFor(webContents as any)).toEqual(back.data);
+  });
+
+  it('cannot publish an in-flight old A report after same-document A→B→A completion', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const store = await import('../src/main/session/store.js');
+    const a = await createSession({ title: 'in-page pending A' });
+    const b = await createSession({ title: 'in-page pending B' });
+    const { webContents, mainFrame, event } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    expect(await handler(event, { sessionId: a.id, rendererGeneration: 1 })).toMatchObject({ ok: true });
+    let release!: (value: Awaited<ReturnType<typeof store.getSession>>) => void;
+    const original = store.getSession;
+    const spy = vi.spyOn(store, 'getSession').mockImplementation(id => id === a.id && !release
+      ? new Promise(resolve => { release = resolve; }) : original(id));
+    try {
+      const pendingA = handler(event, { sessionId: a.id, rendererGeneration: 2 });
+      expect(currentUiSelectionFor(webContents as any)).toBeNull();
+      (webContents as any).isLoadingMainFrame = () => false;
+      webContents.emit('did-start-navigation', {
+        url: mainFrame.url, isSameDocument: true, isMainFrame: true, frame: mainFrame
+      });
+      expect(await handler(event, { sessionId: b.id, rendererGeneration: 3 })).toMatchObject({ ok: false });
+      webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId, mainFrame.routingId);
+      const winnerB = await handler(event, { sessionId: b.id, rendererGeneration: 4 }) as any;
+      expect(winnerB).toMatchObject({ ok: true, data: { sessionId: b.id } });
+      const winnerA = await handler(event, { sessionId: a.id, rendererGeneration: 5 }) as any;
+      expect(winnerA).toMatchObject({ ok: true, data: { sessionId: a.id } });
+      release(await original(a.id));
+      expect(await pendingA).toMatchObject({ ok: false });
+      expect(currentUiSelectionFor(webContents as any)).toEqual(winnerA.data);
+      expect(winnerA.data.generation).toBeGreaterThan(winnerB.data.generation);
+    } finally { spy.mockRestore(); }
+  });
+
+  it('ignores subframe navigation and never retires the current main-frame witness', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const session = await createSession({ title: 'subframe navigation' });
+    const { webContents, mainFrame, event } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    const original = await handler(event, { sessionId: session.id, rendererGeneration: 1 }) as any;
+    expect(original.ok).toBe(true);
+    webContents.emit('did-start-navigation', {
+      url: 'https://embedded.example/', isSameDocument: false, isMainFrame: false,
+      frame: { url: 'https://embedded.example/' }
+    });
+    expect(currentUiSelectionFor(webContents as any)).toEqual(original.data);
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 2 })).toMatchObject({ ok: true });
+    expect(webContents.mainFrame).toBe(mainFrame);
+  });
+
+  it('recovers a canceled main-frame navigation only after exact abort and old-frame readiness', async () => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const session = await createSession({ title: 'canceled navigation' });
+    const { webContents, mainFrame, event } = selectionWindow();
+    const handler = handlers.get('sessions:uiSelection')!;
+    const original = await handler(event, { sessionId: session.id, rendererGeneration: 1 }) as any;
+    expect(original.ok).toBe(true);
+    webContents.emit('did-start-navigation', {
+      url: 'https://external.example/', isSameDocument: false, isMainFrame: true, frame: mainFrame
+    });
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 2 })).toMatchObject({ ok: false });
+    // A stop-loading event alone is not proof that the external navigation was canceled.
+    (webContents as any).isLoadingMainFrame = () => false;
+    webContents.emit('did-stop-loading');
+    expect(await handler(event, { sessionId: session.id, rendererGeneration: 3 })).toMatchObject({ ok: false });
+    // Electron's aborted provisional load retains the original current app frame. No prior
+    // witness is restored; a fresh selection report must validate this same frame again.
+    webContents.emit('did-fail-provisional-load', {}, -3, 'ERR_ABORTED',
+      'https://external.example/', true, 1, 1);
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    const recovered = await handler(event, { sessionId: session.id, rendererGeneration: 4 }) as any;
+    expect(recovered).toMatchObject({ ok: true, data: { sessionId: session.id } });
+    expect(recovered.data.generation).toBeGreaterThan(original.data.generation);
+  });
+
+  it.each(['hide', 'did-start-loading', 'render-process-gone', 'destroyed', 'closed'])('revokes the original window on %s', async lifecycle => {
+    const { currentUiSelectionFor } = await import('../src/main/ui-selection.js');
+    const session = await createSession({ title: `lifecycle ${lifecycle}` });
+    const { window, webContents, event } = selectionWindow();
+    expect(await handlers.get('sessions:uiSelection')!(event, { sessionId: session.id, rendererGeneration: 1 })).toMatchObject({ ok: true });
+    if (lifecycle === 'hide' || lifecycle === 'closed') window.emit(lifecycle);
+    else webContents.emit(lifecycle);
+    expect(currentUiSelectionFor(webContents as any)).toBeNull();
+    if (lifecycle === 'did-start-loading') {
+      webContents.emit('did-finish-load');
+      expect(await handlers.get('sessions:uiSelection')!(event, { sessionId: session.id, rendererGeneration: 0 })).toMatchObject({ ok: true });
+    }
+    if (lifecycle === 'hide') {
+      const restored = await handlers.get('sessions:uiSelection')!(event, { sessionId: session.id, rendererGeneration: 2 });
+      expect(restored).toMatchObject({ ok: true });
+    }
+  });
+});
+
+const RICH_PENDING = '11111111-2222-4333-8444-555555555555';
+const RICH_UNKNOWN = '22222222-3333-4444-8555-666666666666';
+const RICH_RECEIPT = '33333333-4444-4555-8666-777777777777';
+const RICH_FOREIGN = '55555555-6666-4777-8888-999999999999';
+const RICH_UNAVAILABLE = { ok: true, data: {
+  id: null, state: 'unavailable', detail: 'Native interaction unavailable'
+} };
+
+/** Synthetic existing custody only: no production action ever creates these rows. */
+async function seedStatusRows(sessionId: string): Promise<string> {
+  const { resetRichActionsForTests } = await import('../src/main/rich-actions.js');
+  const base: RichActionRecord = {
+    id: RICH_PENDING, phase: 'intent', createdAt: 1789776000000, claimOwner: null,
+    sessionId, conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', bindingRevision: 1,
+    messageId: 'assistant:turn:1', providerMessageId: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff',
+    revision: 1, nodeId: 'node-1', groupId: 'group-1', kind: 'select', value: 'Forest',
+    expectedSelected: false, expectedGroupSelection: null, tabId: null,
+    documentId: null, navigationEpoch: null, openingSpent: false, resultDetail: null
+  };
+  const dispatched: RichActionRecord = {
+    ...base, id: RICH_UNKNOWN, phase: 'may_have_dispatched', claimOwner: 'a'.repeat(64),
+    groupId: 'group-2', tabId: 42, documentId: 'doc-1', navigationEpoch: 7
+  };
+  const retired: RichActionRecord = {
+    ...dispatched, id: RICH_RECEIPT, phase: 'retired', groupId: 'group-3',
+    resultDetail: 'Synthetic receipt only'
+  };
+  await fs.mkdir(path.join(dir, 'state'), { recursive: true });
+  await writeDurableNow('rich-actions', { version: 1, actions: [base, dispatched, retired], receipts: [
+    { id: RICH_RECEIPT, state: 'observed', detail: 'Synthetic receipt only' }
+  ] });
+  resetRichActionsForTests();
+  return path.join(dir, 'state', 'rich-actions.json');
+}
+
+describe('sender-bound, strictly read-only rich action status IPC', () => {
+  const status = (event: unknown, payload: unknown): Promise<any> =>
+    handlers.get('sessions:richActionStatus')!(event, payload) as Promise<any>;
+  const request = (sessionId: string, actionId = RICH_PENDING) => ({ sessionId, actionId });
+  const select = (event: unknown, sessionId: string | null, rendererGeneration: number): Promise<any> =>
+    handlers.get('sessions:uiSelection')!(event, { sessionId, rendererGeneration }) as Promise<any>;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    (await import('../src/main/rich-actions.js')).resetRichActionsForTests();
+  });
+
+  it('registers exactly the status reader, not a generic or native-action/opener channel', () => {
+    expect(handlers.has('sessions:richActionStatus')).toBe(true);
+    expect(handlers.has('sessions:richAction')).toBe(false);
+    expect(handlers.has('sessions:richOpenOriginal')).toBe(true); // Manual history navigation, not native action.
+  });
+
+  it('reads only selected, existent local-session pending/unknown and synthetic persisted receipt without rewriting custody', async () => {
+    const session = await createSession({ title: 'read-only status owner' });
+    const other = await createSession({ title: 'foreign status owner' });
+    const file = await seedStatusRows(session.id);
+    const { event, webContents } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    vi.mocked(openInPreferredBrowser).mockClear();
+    const before = await fs.readFile(file);
+    expect(await status(event, request(session.id))).toEqual({ ok: true, data: {
+      id: RICH_PENDING, state: 'pending', detail: null
+    } });
+    expect(await status(event, request(session.id, RICH_UNKNOWN))).toEqual({ ok: true, data: {
+      id: RICH_UNKNOWN, state: 'unknown', detail: 'Outcome unconfirmed; no repeat authorized'
+    } });
+    expect(await status(event, request(session.id, RICH_RECEIPT))).toEqual({ ok: true, data: {
+      id: RICH_RECEIPT, state: 'observed', detail: 'Synthetic receipt only'
+    } });
+    expect(await status(event, request(session.id, RICH_PENDING))).toMatchObject({ ok: true, data: { state: 'pending' } });
+    expect(await fs.readFile(file)).toEqual(before);
+    expect((await import('../src/main/ui-selection.js')).currentUiSelectionFor(webContents as any)?.sessionId).toBe(session.id);
+    expect(openInPreferredBrowser).not.toHaveBeenCalled();
+    // The same app-frame witness cannot use a different local session, even with a known ID.
+    expect(await status(event, request(other.id, RICH_RECEIPT))).toEqual(RICH_UNAVAILABLE);
+    expect(await status(event, request(session.id, RICH_FOREIGN))).toEqual(RICH_UNAVAILABLE);
+  });
+
+  it('rejects unknown payload keys, missing IDs and malformed UUIDs without invoking the ledger', async () => {
+    const session = await createSession({ title: 'status schema' });
+    await seedStatusRows(session.id);
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    const actions = await import('../src/main/rich-actions.js');
+    const read = vi.spyOn(actions, 'readRichActionStatus');
+    for (const payload of [null, {}, { sessionId: session.id }, request(session.id, 'not-uuid'),
+      { ...request(session.id), url: 'https://chatgpt.com' },
+      { ...request(session.id), action: 'arm' },
+      { ...request(session.id), sessionId: 'A'.repeat(65) }]) {
+      expect(await status(event, payload)).toEqual({ ok: false, error: 'Invalid input' });
+    }
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('refuses foreign sender, subframe, dead/replaced window, hidden app, null selection and unselected history preview', async () => {
+    const a = await createSession({ title: 'current status A' });
+    const b = await createSession({ title: 'history preview B' });
+    await seedStatusRows(a.id);
+    const { event, webContents, mainFrame, window } = selectionWindow();
+    expect(await status(event, request(a.id))).toEqual(RICH_UNAVAILABLE); // No witness from activeId.
+    expect(await select(event, a.id, 1)).toMatchObject({ ok: true });
+    expect(await status({ sender: {}, senderFrame: mainFrame }, request(a.id))).toEqual(RICH_UNAVAILABLE);
+    expect(await status({ sender: webContents, senderFrame: {} }, request(a.id))).toEqual(RICH_UNAVAILABLE);
+    expect(await status(null, request(a.id))).toEqual(RICH_UNAVAILABLE);
+    expect(await status(event, request(b.id))).toEqual(RICH_UNAVAILABLE);
+    (window as any).isVisible = () => false;
+    expect(await status(event, request(a.id))).toEqual(RICH_UNAVAILABLE);
+    (window as any).isVisible = () => true;
+    expect(await select(event, null, 2)).toMatchObject({ ok: true });
+    expect(await status(event, request(a.id))).toEqual(RICH_UNAVAILABLE);
+    expect(await select(event, a.id, 3)).toMatchObject({ ok: true });
+    const previous = currentWindow;
+    const replaced = selectionWindow();
+    expect(await status(event, request(a.id))).toEqual(RICH_UNAVAILABLE);
+    currentWindow = previous;
+    expect(await status(replaced.event, request(a.id))).toEqual(RICH_UNAVAILABLE);
+    (window as any).isDestroyed = () => true;
+    expect(await status(event, request(a.id))).toEqual(RICH_UNAVAILABLE);
+  });
+
+  it('revokes old status after main-frame navigation, pending selection and exact deletion', async () => {
+    const session = await createSession({ title: 'status lifecycle' });
+    await seedStatusRows(session.id);
+    const { event, webContents, mainFrame } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    webContents.emit('did-start-navigation', {
+      url: mainFrame.url, isSameDocument: true, isMainFrame: true, frame: mainFrame
+    });
+    expect(await status(event, request(session.id))).toEqual(RICH_UNAVAILABLE);
+    (webContents as any).isLoadingMainFrame = () => false;
+    webContents.emit('did-navigate-in-page', {}, mainFrame.url, true, mainFrame.processId, mainFrame.routingId);
+    expect(await status(event, request(session.id))).toEqual(RICH_UNAVAILABLE); // Completion does not restore selection.
+    expect(await select(event, session.id, 2)).toMatchObject({ ok: true });
+    expect(await handlers.get('sessions:delete')!(null, { id: session.id })).toMatchObject({ ok: true });
+    expect(await status(event, request(session.id))).toEqual(RICH_UNAVAILABLE);
+    expect(await select(event, session.id, 3)).toMatchObject({ ok: false });
+    expect(await status(event, request(session.id))).toEqual(RICH_UNAVAILABLE);
+  });
+
+  it('rechecks real session existence even when the selection witness remains', async () => {
+    const store = await import('../src/main/session/store.js');
+    const session = await createSession({ title: 'externally removed status owner' });
+    await seedStatusRows(session.id);
+    const { event, webContents } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    await store.deleteSession(session.id); // Bypass the ordinary IPC's proactive witness revocation.
+    expect((await import('../src/main/ui-selection.js')).currentUiSelectionFor(webContents as any)?.sessionId).toBe(session.id);
+    expect(await status(event, request(session.id, RICH_RECEIPT))).toEqual(RICH_UNAVAILABLE);
+  });
+
+  it('does not disclose an unsupported or removed action ledger', async () => {
+    const session = await createSession({ title: 'unsupported status ledger' });
+    const file = await seedStatusRows(session.id);
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    const actions = await import('../src/main/rich-actions.js');
+    const original = JSON.parse(await fs.readFile(file, 'utf8'));
+    // Retry Capture intentionally introduced strict v2 as a compatible union;
+    // v3 remains unsupported and must never disclose the old control receipt.
+    await fs.writeFile(file, JSON.stringify({ ...original, version: 3 }));
+    actions.resetRichActionsForTests();
+    expect(await status(event, request(session.id, RICH_RECEIPT))).toEqual(RICH_UNAVAILABLE);
+    expect(JSON.parse(await fs.readFile(file, 'utf8')).version).toBe(3);
+    await fs.rm(file);
+    actions.resetRichActionsForTests();
+    expect(await status(event, request(session.id, RICH_RECEIPT))).toEqual(RICH_UNAVAILABLE);
+    expect(await fs.readdir(path.dirname(file))).not.toContain('rich-actions.json');
+  });
+
+  it('discards a status lookup started at old A after A→B→A reselects the same ID with a newer main generation', async () => {
+    const store = await import('../src/main/session/store.js');
+    const a = await createSession({ title: 'stale status A' });
+    const b = await createSession({ title: 'stale status B' });
+    await seedStatusRows(a.id);
+    const { event } = selectionWindow();
+    expect(await select(event, a.id, 1)).toMatchObject({ ok: true });
+    const original = store.getSession;
+    let release!: () => void;
+    let entered!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const held = vi.spyOn(store, 'getSession').mockImplementation(id => id === a.id && !release
+      ? new Promise(resolve => { release = () => void original(id).then(resolve); entered(); }) : original(id));
+    try {
+      const stale = status(event, request(a.id));
+      await reached;
+      expect(await select(event, b.id, 2)).toMatchObject({ ok: true });
+      expect(await select(event, a.id, 3)).toMatchObject({ ok: true });
+      release();
+      expect(await stale).toEqual(RICH_UNAVAILABLE);
+      expect(await status(event, request(a.id))).toMatchObject({ ok: true, data: { id: RICH_PENDING, state: 'pending' } });
+    } finally { held.mockRestore(); }
+  });
+
+  it('discards a stale receipt after the awaited ledger read even when A→B→A ends on the same session', async () => {
+    const actions = await import('../src/main/rich-actions.js');
+    const a = await createSession({ title: 'ledger-await A' });
+    const b = await createSession({ title: 'ledger-await B' });
+    await seedStatusRows(a.id);
+    const { event } = selectionWindow();
+    expect(await select(event, a.id, 1)).toMatchObject({ ok: true });
+    const original = actions.readRichActionStatus;
+    let release!: () => void;
+    let entered!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const held = vi.spyOn(actions, 'readRichActionStatus').mockImplementation(async (...args) => {
+      const result = await original(...args);
+      await new Promise<void>(resolve => { release = resolve; entered(); });
+      return result;
+    });
+    try {
+      const stale = status(event, request(a.id, RICH_RECEIPT));
+      await reached;
+      expect(await select(event, b.id, 2)).toMatchObject({ ok: true });
+      expect(await select(event, a.id, 3)).toMatchObject({ ok: true });
+      release();
+      expect(await stale).toEqual(RICH_UNAVAILABLE);
+    } finally { held.mockRestore(); }
+  });
+
+  it('does not disclose a receipt if a store-owned deletion completed during its awaited ledger read', async () => {
+    const store = await import('../src/main/session/store.js');
+    const actions = await import('../src/main/rich-actions.js');
+    const session = await createSession({ title: 'deleted during rich read' });
+    await seedStatusRows(session.id);
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    const original = actions.readRichActionStatus;
+    let release!: () => void;
+    let entered!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const held = vi.spyOn(actions, 'readRichActionStatus').mockImplementation(async (...args) => {
+      const result = await original(...args);
+      await new Promise<void>(resolve => { release = resolve; entered(); });
+      return result;
+    });
+    try {
+      const pending = status(event, request(session.id, RICH_RECEIPT));
+      await reached;
+      await store.deleteSession(session.id); // Store also deletes empty abandoned input reservations.
+      release();
+      expect(await pending).toEqual(RICH_UNAVAILABLE);
+    } finally { held.mockRestore(); }
+  });
+
+  it('does not disclose a synthetic receipt when its session was removed or the ledger is corrupt', async () => {
+    const session = await createSession({ title: 'removed status' });
+    const file = await seedStatusRows(session.id);
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    await fs.writeFile(file, '{bad ledger');
+    (await import('../src/main/rich-actions.js')).resetRichActionsForTests();
+    expect(await status(event, request(session.id, RICH_RECEIPT))).toEqual(RICH_UNAVAILABLE);
+    expect(await fs.readFile(file, 'utf8')).toBe('{bad ledger');
+  });
+});
+
+describe('selected-session, read-only PAGE retry eligibility IPC', () => {
+  const messageId = 'assistant:working:exchange:1789552000000';
+  const providerMessageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+  const mediaId = 'card-image-b';
+  const nodeId = 'image-node-b';
+  const retry = (event: unknown, payload: unknown): Promise<any> =>
+    handlers.get('sessions:richRetryEligibility')!(event, payload) as Promise<any>;
+  const request = (sessionId: string, richRevision = 1) =>
+    ({ sessionId, messageId, mediaId, nodeId, richRevision });
+  const select = (event: unknown, sessionId: string | null, rendererGeneration: number): Promise<any> =>
+    handlers.get('sessions:uiSelection')!(event, { sessionId, rendererGeneration }) as Promise<any>;
+  async function page(kind: 'page' | 'native' = 'page') {
+    const conversationId = randomUUID();
+    const session = await createSession({ title: 'PAGE retry eligibility', conversationId });
+    const text = 'A diagram follows.';
+    const origin = { conversationId, bindingRevision: 0, documentId: 'document-a', navigationEpoch: 1 };
+    const media = { mediaId, nodeId, source: kind === 'page'
+      ? { kind: 'page' as const, nodeId }
+      : { kind: 'native' as const, providerMessageId, providerAssetId: 'generated-asset-one' },
+      status: 'pending' as const };
+    await upsertMessageEvent(session.id, { kind: 'assistant_message', source: 'extension', time: 100,
+      messageId, providerMessageId, message: { text, chars: text.length, truncated: false }, final: true });
+    expect(await upsertRichMessage(session.id, messageId, {
+      version: 1, status: 'available', reason: null, conversationId, messageId,
+      providerMessageId, revision: 0, accessibleText: text,
+      nodes: [{ kind: 'image', id: nodeId, mediaId, alt: 'Reference', width: 800, height: 600 }]
+    }, origin)).toBe('stored');
+    expect(await upsertRichMedia(session.id, messageId, media, origin, 1)).toBe('stored');
+    return { session, origin, media };
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('returns only inert PAGE display metadata without granting capture, opening, or rewriting the assistant shard', async () => {
+    const { session } = await page();
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    vi.mocked(openInPreferredBrowser).mockClear();
+    const shard = path.join(dir, 'sessions', session.id, 'messages',
+      (await import('node:crypto')).createHash('sha256').update(`assistant_message\u0000${messageId}`).digest('hex') + '.json');
+    const before = await fs.readFile(shard);
+    const ledger = path.join(dir, 'state', 'rich-actions.json');
+    const beforeLedger = await fs.readFile(ledger).catch(() => null);
+    expect(await retry(event, request(session.id))).toEqual({ ok: true, data: {
+      status: 'pending', reason: null, requiresRemovalConfirmation: false, eligibilityOnly: true
+    } });
+    expect(await fs.readFile(shard)).toEqual(before);
+    expect(await fs.readdir(path.join(dir, 'sessions', session.id, 'assets')).catch(() => [])).toEqual([]);
+    expect(await fs.readFile(ledger).catch(() => null)).toEqual(beforeLedger);
+    expect(openInPreferredBrowser).not.toHaveBeenCalled();
+    expect(handlers.has('sessions:richRetryImage')).toBe(false);
+    expect(handlers.has('sessions:richAction')).toBe(false);
+  });
+
+  it('refuses caller URLs, selectors, missing IDs, foreign frames and unselected history without a canonical read', async () => {
+    const { session } = await page();
+    const other = await createSession({ title: 'foreign retry session', conversationId: randomUUID() });
+    const { event, webContents, mainFrame, window } = selectionWindow();
+    const store = await import('../src/main/session/store.js');
+    const read = vi.spyOn(store, 'readCanonicalRichMediaRetryEligibility');
+    expect(await retry(event, request(session.id))).toEqual({ ok: true, data: null });
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    for (const bad of [null, {}, { ...request(session.id), url: 'https://example.test/image' },
+      { ...request(session.id), selector: 'img' }, { ...request(session.id), source: 'native' },
+      { ...request(session.id), richRevision: 0 }, { ...request(session.id), richRevision: 1.5 },
+      { ...request(session.id), nodeId: 'x'.repeat(191) }, { ...request(session.id), messageId: 'bad\u0000id' }]) {
+      expect(await retry(event, bad)).toEqual({ ok: false, error: 'Invalid input' });
+    }
+    expect(await retry({ sender: {}, senderFrame: mainFrame }, request(session.id))).toEqual({ ok: true, data: null });
+    expect(await retry({ sender: webContents, senderFrame: {} }, request(session.id))).toEqual({ ok: true, data: null });
+    expect(await retry(event, request(other.id))).toEqual({ ok: true, data: null });
+    (window as any).isVisible = () => false;
+    expect(await retry(event, request(session.id))).toEqual({ ok: true, data: null });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('refuses stale rich revisions and native sources, reports removed PAGE confirmation, and closes on Recording Off or rebind', async () => {
+    const { session, origin, media } = await page();
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    expect(await retry(event, request(session.id, 2))).toEqual({ ok: true, data: null });
+    const native = await page('native');
+    expect(await select(event, native.session.id, 2)).toMatchObject({ ok: true });
+    expect(await retry(event, request(native.session.id))).toEqual({ ok: true, data: null });
+    expect(await select(event, session.id, 3)).toMatchObject({ ok: true });
+    expect(await upsertRichMedia(session.id, messageId, {
+      ...media, status: 'unavailable', reason: 'removed'
+    }, origin, 1)).toBe('stored');
+    expect(await retry(event, request(session.id))).toEqual({ ok: true, data: {
+      status: 'unavailable', reason: 'removed', requiresRemovalConfirmation: true, eligibilityOnly: true
+    } });
+    await updateConfig(config => ({ ...config, sessions: { ...config.sessions, record: false } }));
+    expect(await retry(event, request(session.id))).toEqual({ ok: true, data: null });
+    await updateConfig(config => ({ ...config, sessions: { ...config.sessions, record: true } }));
+    expect(await retry(event, request(session.id))).toMatchObject({ ok: true, data: { eligibilityOnly: true } });
+    expect(await rebindSession(session.id, origin.conversationId, randomUUID())).toBe(true);
+    expect(await retry(event, request(session.id))).toEqual({ ok: true, data: null });
+  });
+
+  it('discards an old eligibility result after A→B→A selected-session generation changes during the canonical read', async () => {
+    const { session } = await page();
+    const other = await createSession({ title: 'middle retry selection', conversationId: randomUUID() });
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    const store = await import('../src/main/session/store.js');
+    const original = store.readCanonicalRichMediaRetryEligibility;
+    let release!: () => void;
+    let entered!: () => void;
+    let first = true;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const held = vi.spyOn(store, 'readCanonicalRichMediaRetryEligibility').mockImplementation(async (...args) => {
+      if (!first) return original(...args);
+      first = false;
+      const result = await original(...args);
+      await new Promise<void>(resolve => { release = resolve; entered(); });
+      return result;
+    });
+    try {
+      const stale = retry(event, request(session.id));
+      await reached;
+      expect(await select(event, other.id, 2)).toMatchObject({ ok: true });
+      expect(await select(event, session.id, 3)).toMatchObject({ ok: true });
+      release();
+      expect(await stale).toEqual({ ok: true, data: null });
+      expect(await retry(event, request(session.id))).toMatchObject({ ok: true, data: { eligibilityOnly: true } });
+    } finally { held.mockRestore(); }
+  });
+});
+
+describe('exact manual historical rich original IPC', () => {
+  const B = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
+  const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+  const messageId = 'assistant:working:exchange:1789552000000';
+  const openOriginal = (event: unknown, sessionId: string, id = messageId): Promise<any> =>
+    handlers.get('sessions:richOpenOriginal')!(event, { sessionId, messageId: id }) as Promise<any>;
+  const select = (event: unknown, sessionId: string | null, generation: number): Promise<any> =>
+    handlers.get('sessions:uiSelection')!(event, { sessionId, rendererGeneration: generation }) as Promise<any>;
+  async function owner() {
+    // The session store survives tests in this file: reusing an earlier A creates
+    // an actual duplicate historical owner and correctly refuses later launches.
+    const A = randomUUID();
+    const session = await createSession({ title: 'manual original', conversationId: A });
+    const text = 'Source answer';
+    await upsertMessageEvent(session.id, { kind: 'assistant_message', source: 'extension', time: 100,
+      messageId, providerMessageId: provider, message: { text, chars: text.length, truncated: false }, final: true });
+    expect(await upsertRichMessage(session.id, messageId, {
+      version: 1, status: 'available', reason: null, conversationId: A, messageId,
+      providerMessageId: provider, revision: 0, accessibleText: text,
+      nodes: [{ id: 'n1', kind: 'text', style: 'body', text }]
+    }, { conversationId: A, bindingRevision: 0, documentId: 'doc-a', navigationEpoch: 1 })).toBe('stored');
+    return session;
+  }
+
+  it('opens the canonical assistant’s stored superseded A, not the current B or a renderer URL', async () => {
+    const session = await owner();
+    const A = session.conversationId!;
+    expect(await rebindSession(session.id, A, B)).toBe(true);
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    vi.mocked(openInPreferredBrowser).mockClear();
+    expect(await openOriginal(event, session.id)).toEqual({ ok: true, data: true });
+    expect(openInPreferredBrowser).toHaveBeenCalledExactlyOnceWith(`https://chatgpt.com/c/${A}`);
+    expect(await handlers.get('sessions:richActionStatus')!(event, { sessionId: session.id,
+      actionId: '11111111-2222-4333-8444-555555555555' })).toMatchObject({ ok: true, data: { state: 'unavailable' } });
+    expect(handlers.has('sessions:richAction')).toBe(false);
+  });
+
+  it('reports the completed browser launch even when selection changes while the opener is pending', async () => {
+    const session = await owner();
+    const A = session.conversationId!;
+    const other = await createSession({ title: 'selected during launch', conversationId: B });
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    let started!: () => void;
+    let finish!: (browser: string) => void;
+    const reached = new Promise<void>(resolve => { started = resolve; });
+    vi.mocked(openInPreferredBrowser).mockImplementationOnce(() => new Promise<string>(resolve => {
+      finish = resolve;
+      started();
+    }));
+    const pending = openOriginal(event, session.id);
+    let settled = false;
+    void pending.then(() => { settled = true; });
+    await reached; // All origin/owner/selection checks have passed; launch is now in progress.
+    expect(await select(event, other.id, 2)).toMatchObject({ ok: true });
+    await Promise.resolve();
+    expect(settled).toBe(false); // No success before the real opener resolves.
+    finish('chrome.exe');
+    expect(await pending).toEqual({ ok: true, data: true });
+    expect(openInPreferredBrowser).toHaveBeenCalledWith(`https://chatgpt.com/c/${A}`);
+  });
+
+  it('reports a rejected browser launch as unsuccessful without another opening attempt', async () => {
+    const session = await owner();
+    const A = session.conversationId!;
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    vi.mocked(openInPreferredBrowser).mockClear().mockRejectedValueOnce(new Error('Browser launch failed'));
+    expect(await openOriginal(event, session.id)).toEqual({ ok: true, data: false });
+    expect(openInPreferredBrowser).toHaveBeenCalledExactlyOnceWith(`https://chatgpt.com/c/${A}`);
+  });
+
+  it('refuses malformed input, unselected/foreign sender, unknown assistant and nonunique historical owner without opening', async () => {
+    const session = await owner();
+    const A = session.conversationId!;
+    const foreign = await createSession({ title: 'another session', conversationId: B });
+    const { event, webContents, mainFrame } = selectionWindow();
+    vi.mocked(openInPreferredBrowser).mockClear();
+    expect(await openOriginal(event, session.id)).toEqual({ ok: true, data: false });
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    for (const bad of [null, {}, { sessionId: session.id },
+      { sessionId: session.id, messageId, url: `https://chatgpt.com/c/${B}` },
+      { sessionId: session.id, messageId, action: 'continue' },
+      { sessionId: session.id, messageId: 'x'.repeat(191) }]) {
+      expect(await handlers.get('sessions:richOpenOriginal')!(event, bad)).toEqual({ ok: false, error: 'Invalid input' });
+    }
+    expect(await openOriginal({ sender: {}, senderFrame: mainFrame }, session.id)).toEqual({ ok: true, data: false });
+    expect(await openOriginal({ sender: webContents, senderFrame: {} }, session.id)).toEqual({ ok: true, data: false });
+    expect(await openOriginal(event, foreign.id)).toEqual({ ok: true, data: false });
+    expect(await openOriginal(event, session.id, 'different-logical-id')).toEqual({ ok: true, data: false });
+    await createSession({ title: 'duplicate current owner', conversationId: A });
+    expect(await openOriginal(event, session.id)).toEqual({ ok: true, data: false });
+    expect(openInPreferredBrowser).not.toHaveBeenCalled();
+  });
+
+  it('rejects a request that began in A but finished after A→B→A main selection changes', async () => {
+    const session = await owner();
+    const other = await createSession({ title: 'middle selection', conversationId: B });
+    const { event } = selectionWindow();
+    expect(await select(event, session.id, 1)).toMatchObject({ ok: true });
+    const store = await import('../src/main/session/store.js');
+    const original = store.readCanonicalRichMessageOrigin;
+    let release!: () => void;
+    let entered!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const spy = vi.spyOn(store, 'readCanonicalRichMessageOrigin').mockImplementation(async (...args) => {
+      const result = await original(...args);
+      await new Promise<void>(resolve => { release = resolve; entered(); });
+      return result;
+    });
+    vi.mocked(openInPreferredBrowser).mockClear();
+    try {
+      const pending = openOriginal(event, session.id);
+      await reached;
+      expect(await select(event, other.id, 2)).toMatchObject({ ok: true });
+      expect(await select(event, session.id, 3)).toMatchObject({ ok: true });
+      release();
+      expect(await pending).toEqual({ ok: true, data: false });
+      expect(openInPreferredBrowser).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); }
+  });
+});
+
+it('keeps recording off against stale unrelated Settings saves, then accepts an explicit on choice', async () => {
+  const base = getConfig();
+  const off = { ...base, sessions: { ...base.sessions, record: false, retainDays: 60 } };
+  expect(await save(off, base)).toMatchObject({ ok: true });
+  expect(getConfig().sessions).toMatchObject({ record: false, retainDays: 0 });
+  expect((await handlers.get('state:get')!(null, undefined) as any).data.config.sessions.record).toBe(false);
+
+  const staleUnrelated = { ...base, ui: { ...base.ui, autoConnect: !base.ui.autoConnect } };
+  expect(await save(staleUnrelated, base)).toMatchObject({ ok: true });
+  expect(getConfig().ui.autoConnect).toBe(!base.ui.autoConnect);
+  expect(getConfig().sessions).toMatchObject({ record: false, retainDays: 0 });
+  expect(JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8')).sessions.record).toBe(false);
+
+  const fresh = getConfig();
+  expect(await save({ ...fresh, sessions: { ...fresh.sessions, record: true } }, fresh)).toMatchObject({ ok: true });
+  expect(getConfig().sessions).toMatchObject({ record: true, retainDays: 0 });
+});
 
 it('persists arbitrary colors through Settings IPC and preserves concurrent per-field edits', async () => {
   const { defaultAppearance } = await import('../src/shared/appearance.js');
@@ -163,14 +1007,14 @@ it('rejects stale profile tunnel edits after A to B to A while accepting unrelat
   expect(getConfig().setupProfiles).toHaveLength(1);
 });
 
-it.each([true, false])('forwards canonical input commitment even when a legacy writer proposes recording=%s', async recording => {
+it('forwards canonical input commitment when recording is enabled', async () => {
   const input = await import('../src/main/session/input.js');
   const store = await import('../src/main/session/store.js');
   const previous = await readDurable('session-input');
   const session = await createSession({ title: 'Input commitment fixture', conversationId: 'input-commitment-fixture' });
   const id = '30000000-0000-4000-8000-000000000001';
   try {
-    await saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: recording } });
+    await saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: true } });
     await writeDurableNow('session-input', [{ id, sessionId: session.id, text: 'Delivered fixture', mode: 'auto', model: null,
       reasoningEffort: null, dueAt: 100, createdAt: 100, state: 'sent', owner: null, conversationId: 'input-commitment-fixture',
       messageId: `input:${id}`, offeredAt: 200, deliveredAt: 300, historyRecorded: false,
@@ -387,11 +1231,13 @@ beforeEach(async () => {
   // The app opens the worker's chat itself; a command only exists while a page it opened
   // still has it to redeem.
   setBrowserOpener(async () => undefined);
-  await saveConfig({
+  // Deliberately re-enable from the latest committed state. A detached saveConfig
+  // snapshot must not silently undo a prior test's committed Recording Off.
+  await updateConfig(() => ({
     ...defaultConfig(),
     sessions: { ...defaultConfig().sessions, record: true },
     multiAgent: { enabled: true, maxWorkers: 3, allowUnattributedCalls: false, recoverAgentTabs: true }
-  });
+  }));
 });
 
 it('keeps origin history navigation separate from live revision cursors over IPC', async () => {
@@ -489,7 +1335,7 @@ describe('turning multi-agent mode off', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(pendingCommands().length).toBe(1);
 
-    // Recording off as well, so this really is the case where the bridge is shut down.
+    // The worker teardown is independent of the saved recording preference and bridge lifetime.
     await save(settings({ record: false, multiAgent: false }));
 
     expect(getConfig().multiAgent.enabled).toBe(false);

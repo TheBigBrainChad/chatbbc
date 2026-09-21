@@ -21,7 +21,7 @@ vi.mock('electron', () => ({
   shell: {}
 }));
 
-const { defaultConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
+const { defaultConfig, initConfigPath, recordingGenerationGrant, saveConfig } = await import('../src/main/config.js');
 const { APP_VERSION, BRIDGE_PROTOCOL } = await import('../src/main/version.js');
 const { initSecretsPath, setSecret } = await import('../src/main/secrets.js');
 const {
@@ -94,7 +94,13 @@ async function pair(): Promise<void> {
 }
 
 async function events(items: unknown[]): Promise<any> {
-  const reply = await request('POST', '/events', { body: { conversationId: CHAT, events: items } });
+  // Synthetic observations are acquired while this fixture is Recording On.
+  // Protocol 17 never assigns acquisition generation from HTTP arrival time.
+  const reply = await request('POST', '/events', { body: {
+    conversationId: CHAT,
+    events: items,
+    recordingGenerations: items.map(() => recordingGenerationGrant())
+  } });
   expect(reply.status).toBe(200);
   return reply.body;
 }
@@ -169,7 +175,8 @@ beforeEach(async () => {
 
 describe('silence after a confirmed assistant-error repair', () => {
   it('still queues the silence reload when the same turn never ends', async () => {
-    vi.useFakeTimers();
+    // Keep Node's actual HTTP/I/O scheduling intact while moving the fake wall clock.
+    vi.useFakeTimers({ toFake: ['Date'] });
     try {
       await pair();
       await events([

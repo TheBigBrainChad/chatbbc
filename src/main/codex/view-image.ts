@@ -21,7 +21,7 @@
  * envelope instead of pretending an 8 MiB source file is an 8 MiB response.
  */
 
-import sharp from 'sharp';
+import sharp from '../sharp.js';
 
 import { getMetadata, readFile } from './filesystem.js';
 import { imageMime, validateImageStructure, formatBytes, MAX_IMAGE_BYTES, type SupportedImageMime } from '../fsops.js';

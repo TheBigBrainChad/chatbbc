@@ -63,6 +63,11 @@ for (const [relative, entry] of Object.entries(lock.packages).sort(([a], [b]) =>
     // libvips distributions publish their composite attribution in README.md.
     try { await fs.access(path.join(directory, 'README.md')); files.push(path.join(directory, 'README.md')); } catch { /* package has separate licenses */ }
   }
+  if (manifest.name === '@janhapke/sharp-electron') {
+    // This addon and libvips are modified and redistributed together. Retain
+    // the fork's engineering/source attribution in addition to its LICENSE.
+    files.push(path.join(directory, 'README.md'));
+  }
   if (!files.length) missing.push(`${manifest.name}@${manifest.version}`);
   const license = typeof manifest.license === 'string' ? manifest.license : JSON.stringify(manifest.license ?? manifest.licenses ?? 'Not declared');
   notices.push('='.repeat(80), `${manifest.name}@${manifest.version}`, `Declared license: ${license}`, `Package: https://www.npmjs.com/package/${manifest.name}/v/${manifest.version}`, '');

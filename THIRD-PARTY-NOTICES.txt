@@ -2339,6 +2339,426 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 
 ================================================================================
+@janhapke/sharp-electron@0.35.4-electron.1
+Declared license: Apache-2.0
+Package: https://www.npmjs.com/package/@janhapke/sharp-electron/v/0.35.4-electron.1
+
+--- LICENSE ---
+Apache License
+Version 2.0, January 2004
+http://www.apache.org/licenses/
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. Definitions.
+
+"License" shall mean the terms and conditions for use, reproduction, and
+distribution as defined by Sections 1 through 9 of this document.
+
+"Licensor" shall mean the copyright owner or entity authorized by the copyright
+owner that is granting the License.
+
+"Legal Entity" shall mean the union of the acting entity and all other entities
+that control, are controlled by, or are under common control with that entity.
+For the purposes of this definition, "control" means (i) the power, direct or
+indirect, to cause the direction or management of such entity, whether by
+contract or otherwise, or (ii) ownership of fifty percent (50%) or more of the
+outstanding shares, or (iii) beneficial ownership of such entity.
+
+"You" (or "Your") shall mean an individual or Legal Entity exercising
+permissions granted by this License.
+
+"Source" form shall mean the preferred form for making modifications, including
+but not limited to software source code, documentation source, and configuration
+files.
+
+"Object" form shall mean any form resulting from mechanical transformation or
+translation of a Source form, including but not limited to compiled object code,
+generated documentation, and conversions to other media types.
+
+"Work" shall mean the work of authorship, whether in Source or Object form, made
+available under the License, as indicated by a copyright notice that is included
+in or attached to the work (an example is provided in the Appendix below).
+
+"Derivative Works" shall mean any work, whether in Source or Object form, that
+is based on (or derived from) the Work and for which the editorial revisions,
+annotations, elaborations, or other modifications represent, as a whole, an
+original work of authorship. For the purposes of this License, Derivative Works
+shall not include works that remain separable from, or merely link (or bind by
+name) to the interfaces of, the Work and Derivative Works thereof.
+
+"Contribution" shall mean any work of authorship, including the original version
+of the Work and any modifications or additions to that Work or Derivative Works
+thereof, that is intentionally submitted to Licensor for inclusion in the Work
+by the copyright owner or by an individual or Legal Entity authorized to submit
+on behalf of the copyright owner. For the purposes of this definition,
+"submitted" means any form of electronic, verbal, or written communication sent
+to the Licensor or its representatives, including but not limited to
+communication on electronic mailing lists, source code control systems, and
+issue tracking systems that are managed by, or on behalf of, the Licensor for
+the purpose of discussing and improving the Work, but excluding communication
+that is conspicuously marked or otherwise designated in writing by the copyright
+owner as "Not a Contribution."
+
+"Contributor" shall mean Licensor and any individual or Legal Entity on behalf
+of whom a Contribution has been received by Licensor and subsequently
+incorporated within the Work.
+
+2. Grant of Copyright License.
+
+Subject to the terms and conditions of this License, each Contributor hereby
+grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free,
+irrevocable copyright license to reproduce, prepare Derivative Works of,
+publicly display, publicly perform, sublicense, and distribute the Work and such
+Derivative Works in Source or Object form.
+
+3. Grant of Patent License.
+
+Subject to the terms and conditions of this License, each Contributor hereby
+grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free,
+irrevocable (except as stated in this section) patent license to make, have
+made, use, offer to sell, sell, import, and otherwise transfer the Work, where
+such license applies only to those patent claims licensable by such Contributor
+that are necessarily infringed by their Contribution(s) alone or by combination
+of their Contribution(s) with the Work to which such Contribution(s) was
+submitted. If You institute patent litigation against any entity (including a
+cross-claim or counterclaim in a lawsuit) alleging that the Work or a
+Contribution incorporated within the Work constitutes direct or contributory
+patent infringement, then any patent licenses granted to You under this License
+for that Work shall terminate as of the date such litigation is filed.
+
+4. Redistribution.
+
+You may reproduce and distribute copies of the Work or Derivative Works thereof
+in any medium, with or without modifications, and in Source or Object form,
+provided that You meet the following conditions:
+
+You must give any other recipients of the Work or Derivative Works a copy of
+this License; and
+You must cause any modified files to carry prominent notices stating that You
+changed the files; and
+You must retain, in the Source form of any Derivative Works that You distribute,
+all copyright, patent, trademark, and attribution notices from the Source form
+of the Work, excluding those notices that do not pertain to any part of the
+Derivative Works; and
+If the Work includes a "NOTICE" text file as part of its distribution, then any
+Derivative Works that You distribute must include a readable copy of the
+attribution notices contained within such NOTICE file, excluding those notices
+that do not pertain to any part of the Derivative Works, in at least one of the
+following places: within a NOTICE text file distributed as part of the
+Derivative Works; within the Source form or documentation, if provided along
+with the Derivative Works; or, within a display generated by the Derivative
+Works, if and wherever such third-party notices normally appear. The contents of
+the NOTICE file are for informational purposes only and do not modify the
+License. You may add Your own attribution notices within Derivative Works that
+You distribute, alongside or as an addendum to the NOTICE text from the Work,
+provided that such additional attribution notices cannot be construed as
+modifying the License.
+You may add Your own copyright statement to Your modifications and may provide
+additional or different license terms and conditions for use, reproduction, or
+distribution of Your modifications, or for any such Derivative Works as a whole,
+provided Your use, reproduction, and distribution of the Work otherwise complies
+with the conditions stated in this License.
+
+5. Submission of Contributions.
+
+Unless You explicitly state otherwise, any Contribution intentionally submitted
+for inclusion in the Work by You to the Licensor shall be under the terms and
+conditions of this License, without any additional terms or conditions.
+Notwithstanding the above, nothing herein shall supersede or modify the terms of
+any separate license agreement you may have executed with Licensor regarding
+such Contributions.
+
+6. Trademarks.
+
+This License does not grant permission to use the trade names, trademarks,
+service marks, or product names of the Licensor, except as required for
+reasonable and customary use in describing the origin of the Work and
+reproducing the content of the NOTICE file.
+
+7. Disclaimer of Warranty.
+
+Unless required by applicable law or agreed to in writing, Licensor provides the
+Work (and each Contributor provides its Contributions) on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied,
+including, without limitation, any warranties or conditions of TITLE,
+NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A PARTICULAR PURPOSE. You are
+solely responsible for determining the appropriateness of using or
+redistributing the Work and assume any risks associated with Your exercise of
+permissions under this License.
+
+8. Limitation of Liability.
+
+In no event and under no legal theory, whether in tort (including negligence),
+contract, or otherwise, unless required by applicable law (such as deliberate
+and grossly negligent acts) or agreed to in writing, shall any Contributor be
+liable to You for damages, including any direct, indirect, special, incidental,
+or consequential damages of any character arising as a result of this License or
+out of the use or inability to use the Work (including but not limited to
+damages for loss of goodwill, work stoppage, computer failure or malfunction, or
+any and all other commercial damages or losses), even if such Contributor has
+been advised of the possibility of such damages.
+
+9. Accepting Warranty or Additional Liability.
+
+While redistributing the Work or Derivative Works thereof, You may choose to
+offer, and charge a fee for, acceptance of support, warranty, indemnity, or
+other liability obligations and/or rights consistent with this License. However,
+in accepting such obligations, You may act only on Your own behalf and on Your
+sole responsibility, not on behalf of any other Contributor, and only if You
+agree to indemnify, defend, and hold each Contributor harmless for any liability
+incurred by, or claims asserted against, such Contributor by reason of your
+accepting any such warranty or additional liability.
+
+END OF TERMS AND CONDITIONS
+
+APPENDIX: How to apply the Apache License to your work
+
+To apply the Apache License to your work, attach the following boilerplate
+notice, with the fields enclosed by brackets "[]" replaced with your own
+identifying information. (Don't include the brackets!) The text should be
+enclosed in the appropriate comment syntax for the file format. We also
+recommend that a file or class name and description of purpose be included on
+the same "printed page" as the copyright notice for easier identification within
+third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+
+--- README.md ---
+# sharp-electron
+
+A drop-in replacement for [`sharp`](https://github.com/lovell/sharp) that doesn't segfault under Electron on Linux.
+
+`sharp` crashes with a native segfault — not a catchable JS error — when decoding an image (JPEG, PNG, etc.) inside any process built on Electron's Linux binary. The cause is two copies of `glib` colliding in one process; no configuration flag fixes it. This package is a rebuild of `sharp` and its bundled `libvips` with the collision fixed at the linker level. To use it, add one `overrides` entry to your `package.json` ([Usage](#usage)). macOS and Windows aren't affected, so there this package transparently re-exports the real, unmodified `sharp`. To rebuild it yourself or bump it to a newer `sharp` release, see [Building from source](#building-from-source) and [Engineering notes](#engineering-notes).
+
+## The problem
+
+Electron's Linux binary dynamically links the system's `glib` (for GTK integration). `sharp`/`libvips` bundle their own private `glib` inside `libvips-cpp.so`, but don't fully hide its symbols. Two copies of `glib` exporting the same symbols into one process corrupt `glib`'s internal state, and the process dies with `SIGSEGV` the first time an image is actually decoded — no JS exception, no stack trace. This affects any process built on Electron's binary, including a `utilityProcess`, and is a known, currently-unresolved upstream bug: [electron/electron#46323](https://github.com/electron/electron/issues/46323).
+
+Characteristically, *encoding* raw pixels works fine — only *decoding* a real compressed image crashes. If that matches what you're seeing, this is your bug.
+
+## Usage
+
+Use npm `overrides` — not a direct `import` — so that **every** `require('sharp')` / `import sharp from 'sharp'` in your dependency tree, direct or transitive, resolves to this package:
+
+```json
+{
+  "overrides": {
+    "sharp": "npm:@janhapke/sharp-electron@0.35.4-electron.1"
+  }
+}
+```
+
+```bash
+npm install
+```
+
+That's it — no source changes anywhere in your project. The `npm:` alias syntax is required: the override target's package name differs from `sharp`, so a plain `"sharp": "0.35.3-electron.1"` would tell npm to look for a package literally named `sharp` at that version, which doesn't exist.
+
+If `sharp` is also a **direct dependency** of your project, npm rejects an override that conflicts with it (`EOVERRIDE`). In that case point the dependency itself at this package and let the override reference it via the **nested** form, not a plain `"sharp": "$sharp"` (npm requires the nested form whenever a root dependency and an override target the same package name, regardless of what either resolves to):
+
+```json
+{
+  "dependencies": {
+    "sharp": "npm:@janhapke/sharp-electron@0.35.4-electron.1"
+  },
+  "overrides": {
+    "sharp": "$sharp"
+  }
+}
+```
+
+This package's own internal fallback dependency (the real, unpatched `sharp` its non-Linux build and its TypeScript types re-export) is deliberately installed under the aliased name `sharp-upstream`, not `sharp` — so an `overrides` rule targeting `"sharp"` can never recurse into it, however the rule is written. (Earlier releases installed it as a plain `sharp` dependency, which meant a *plain* `overrides` rule silently rewrote that internal dependency back into a self-referential circular reference — no install error, but `require('sharp')` inside the fallback returned `{}` at runtime and `tsc` failed to resolve `sharp`'s types. If you hit that, upgrade to `0.35.4-electron.1` or later.)
+
+### Local testing against an unpublished build
+
+To test a locally built copy of this repo (see [Building from source](#building-from-source)) against a real consuming project, **don't** point an `overrides` rule at `file:../sharp-electron/package` or a packed `.tgz` — both reliably trigger bugs in npm's dependency resolver (`@npmcli/arborist`) once the consuming project's dependency graph is large enough: a `file:`-directory override crashes `npm install` outright (`Cannot read properties of null (reading 'package')`, a race in how arborist links `file:` "Link" nodes when more than one edge resolves to the same target concurrently — confirmed via `Promise.all` in the crash's own stack trace), and overriding to a packed tarball can leave a **broken symlink pointing at the `.tgz` file itself** instead of extracting it. Both are npm bugs, not something fixable from this package's `package.json`.
+
+The reliable way to test a local build: let npm install the *real* `sharp` normally (no override at all — this sidesteps the buggy code path entirely, since `overrides` never enters the picture), then physically replace every real-`sharp` directory it created with this repo's built `package/`:
+
+```bash
+# in your consuming project, with a normal "sharp": "^X.Y.Z" dependency (no override):
+rm -rf node_modules && npm install
+
+# then, for every node_modules/**/sharp directory npm actually created:
+find node_modules -maxdepth 4 -iname sharp -type d | while read -r d; do
+  rm -rf "$d"
+  cp -r ../sharp-electron/package "$d"
+done
+```
+
+Re-run the `find`/`cp -r` loop after every rebuild of this repo (`npm run package`) — there's no live symlink here, just a plain directory copy, so changes don't propagate on their own.
+
+### Why `overrides`, not a direct import
+
+You *can* instead `npm install @janhapke/sharp-electron` and change call sites to import it directly — but only safely if you change **every** place your project touches `sharp`, including transitive dependencies you don't control.
+
+The failure mode if you miss one: this package and the real `sharp` both ship a `libvips-cpp.so` with the identical SONAME (intentionally, for compatibility). The ELF dynamic linker deduplicates shared libraries by SONAME **within a process** — once one `libvips-cpp.so` is loaded, every other module in that process that needs that SONAME silently reuses the already-loaded copy, regardless of how correctly it was built or what its RPATH says. So if two plugins each import `sharp` and only one is switched over, whichever loads first wins for both. If the unpatched one wins, the symptom isn't even the original segfault — it's a confusing ELF loader error (`undefined symbol: vips_g_...`) in the correctly-patched module. This exact scenario happened while validating this package in a real project.
+
+`overrides` sidesteps the problem structurally: every `sharp`-touching module resolves to the exact same files, so two different `libvips-cpp.so`s can never coexist in the process. Auditing call sites by hand gives no such guarantee.
+
+### Platform support
+
+| Platform | Behavior |
+|---|---|
+| `linux-x64` | The patched build. Verified against `sharp`'s own upstream test suite and a dedicated Electron crash-regression test. |
+| `linux` (other architectures, e.g. `arm64`) | Throws a clear error at load time rather than silently falling back to real `sharp` — a silent fallback would just defer the crash to the first image decode. |
+| macOS / Windows | Re-exports the real, unmodified `sharp` (a normal dependency of this package; npm installs the correct official binary automatically). The bug doesn't exist on these platforms. |
+
+### Troubleshooting
+
+- **`undefined symbol: vips_g_...` at load time** (an exception, not a crash) — almost always the SONAME-collision issue described above: some module in the process still resolves `sharp` to the real, unpatched package. Check that the `overrides` entry is in place and that `node_modules/sharp` actually contains this package's files.
+- **Segfault decoding an image under Electron on Linux, even with `overrides` correctly in place** — an unpatched `libvips-cpp.so` from some other source is winning the SONAME race (e.g. a copy loaded by a non-npm mechanism). Check what else in the process loads `libvips`.
+- **`ERR_DLOPEN_FAILED: libvips-cpp.so.8.18.3: cannot open shared object file` — but only in a *packaged* app, never under `npm start`/dev mode.** This isn't a `sharp-electron` bug — it's your packager silently dropping or mis-placing the `libvips-cpp.so` that sits next to `linux-x64/sharp/.../sharp-linux-x64-*.node` (found via that addon's `$ORIGIN` RPATH). Two independent causes, both confirmed in a real Electron Forge project — check both:
+  1. **Your own native-module whitelist/externals script only walks `dependencies`, not `optionalDependencies`.** If you (or your packaging plugin) hand-roll a "which `node_modules` packages contain native binaries" trace to avoid webpack bundling them, and it only follows `package.json`'s `dependencies` field, it will never reach `@img/sharp-libvips-linux-x64` — prebuilt-binary packages like this are conventionally declared as `optionalDependencies`. Result: the `.so` gets excluded from the packaged app outright, not just mis-placed.
+  2. **Your asar tooling unpacks `.node` files but not their `.so` sidecars.** Electron Forge's `@electron-forge/plugin-auto-unpack-natives`, for example, sets `asar.unpack` to a glob matching only `**/*.node` — it physically moves the addon out of the compressed `app.asar` into `app.asar.unpacked`, but leaves any co-located shared library trapped inside the archive, where `dlopen()` can never reach it (even though `npx asar list` will still show it "present" — that lists the archive's logical contents, not what's been physically unpacked). You need to extend the unpack glob yourself to also match `.so`/`.so.*`, e.g. (Forge): `packagerConfig.asar.unpack = '{**/*.so,**/*.so.*}'` (merges with the plugin's own `.node` pattern rather than replacing it).
+
+  Diagnose by checking the packaged output directly, not just build logs: `find <packaged-app>/resources/app.asar.unpacked -iname 'libvips-cpp.so*'` — if it's missing, you're hitting #1; if the addon is there but the `.so` isn't, you're hitting #2.
+
+- **`npm error Invalid comparator` from `npm install`/`npm ci`, before any code runs at all.** This is an npm bug, not a `sharp-electron` bug — but it's directly triggered by following the [Usage](#usage) instructions above verbatim. Root cause: npm's arborist cannot resolve an `overrides` rule targeting a package name (`sharp`) when your **root** `package.json`'s own dependency of that same name is declared via an `npm:` alias (exactly the form both `overrides` snippets above use: `"sharp": "npm:@janhapke/sharp-electron@..."`). The alias means your root "version" for `sharp` isn't an ordinary semver range, and arborist's overrides matcher throws trying to compare it against the override's version selector — regardless of whether your override is the flat or nested form.
+
+  There's no `package.json`-only fix for this — it reproduces with either override shape. Two ways out, in order of preference:
+
+  1. **Drop the `npm:` alias in favor of the plain `overrides`-only form** (top of [Usage](#usage)): don't add `sharp` as a direct/dev dependency at all, just the single `overrides` entry pointing at this package by its real name. This is exactly what that form was already meant for — the crash only happens when a root dependency *and* an override target the same name *and* the root side is an alias. If nothing else in your tree needs `sharp` as a direct dependency, this sidesteps the bug entirely and keeps the full structural guarantee `overrides` gives (see [Why overrides](#why-overrides-not-a-direct-import)).
+  2. **If you do need `sharp` as a direct/dev dependency via the `npm:` alias** (e.g. your own code does `import sharp from 'sharp'` and you want that exact package resolved, not just an override rewriting transitive requires), you can't use `overrides` for this package at all without hitting the crash. Fall back to a targeted `postinstall` step that strips any other dependency's own bundled, nested copy of `sharp` so its `require('sharp')` has nothing local to resolve to and falls through to your root, aliased install instead:
+
+     ```json
+     {
+       "scripts": {
+         "postinstall": "node -e \"require('fs').rmSync('node_modules/<the-other-dependency>/node_modules', { recursive: true, force: true })\""
+       }
+     }
+     ```
+
+     This is narrower than `overrides`' guarantee — it only closes the gap for the specific nested copy you name, not structurally for anything that might bundle `sharp` in the future. If you add another dependency that also bundles its own `sharp`, you need to extend this by hand; nothing will warn you if you miss one (the symptom would be the original SONAME-collision failure mode above, not an install-time error). Revisit option 1 if you can.
+
+## Building from source
+
+Requires only Docker on the host — the entire toolchain runs in a container matching `sharp`'s own CI environment.
+
+```bash
+git clone --recurse-submodules https://github.com/janhapke/sharp-electron.git
+cd sharp-electron
+npm install
+npm run build
+```
+
+This applies the patches to the vendored `sharp-libvips`/`sharp` submodules, rebuilds both, runs both test gates, and packages the result into `package/` — ready to consume via a `file:` override as shown above. The individual stages are also available separately: `npm run build:libvips`, `npm run build:sharp`, `npm run test:gates`, `npm run package`.
+
+To confirm the bug itself on the *unpatched* `sharp` first (recommended before trusting any of this): `npm run repro` runs [test/electron-crash-repro.js](test/electron-crash-repro.js) against the stock npm `sharp` under `ELECTRON_RUN_AS_NODE` — expect the encode step to succeed and the decode step to kill the process.
+
+## Engineering notes
+
+Everything a contributor (or future maintainer bumping versions) needs to know about how and why this works.
+
+### How the fix works
+
+The fix has two halves, applied as patches (in [patches/](patches/)) to two upstream repos vendored as git submodules pinned at release tags. The submodules stay pristine in git; [scripts/apply-patches.sh](scripts/apply-patches.sh) applies the patches to their working trees at build time (idempotently — it detects an already-patched tree and skips).
+
+**Phase A — `sharp-libvips` (the `libvips` binary).** `sharp-libvips` doesn't vendor `libvips`'s source; its `build/posix.sh` downloads the upstream release tarball at build time and patches it inline. Our patch extends that same mechanism:
+
+- Adds `extra/glib_wrapper.c`/`.h`: thin wrapper functions re-exporting each needed `glib` symbol under a renamed `vips_g_*` identity (e.g. `vips_g_malloc` calls the bundled `glib`'s `g_malloc`).
+- Broadens the `vips.map` linker version script from hiding a single symbol (`g_param_spec_types` — upstream's own partial fix for this class of bug) to hiding *everything* except `libvips`'s own API: `{ global: vips_*; _Z*; local: *; }`. This is what actually removes the colliding `g_*` exports from `libvips-cpp.so`.
+- Patches `libvips`'s C++ header `VImage8.h`, whose inline `VObject` smart-pointer class calls `g_object_ref`/`g_object_unref` directly — those calls get compiled straight into `sharp`'s addon wherever `vips::VImage` is used, so they must be redirected at the header level, not in `sharp`'s source.
+
+One non-obvious gotcha, recorded because it *will* bite again: `libvips-cpp.so`'s meson target sets `gnu_symbol_visibility: 'hidden'`, which strips any new symbol from the dynamic table at compile time — before the version script even applies — unless it's explicitly marked `__attribute__((visibility("default")))`. The build succeeds cleanly either way; only `objdump -T` reveals the difference. A clean build is not sufficient evidence here.
+
+**Phase B — `sharp` (the Node addon).** Redirects `sharp`'s own direct `glib` calls (`common.cc`, `metadata.cc`, `sharp.cc`) to the `vips_g_*` wrappers, then rebuilds the addon against the Phase A `libvips` using `sharp`'s own supported mechanism for custom libvips builds: `SHARP_FORCE_GLOBAL_LIBVIPS=1` plus `PKG_CONFIG_PATH` pointed at generated `.pc` files. The build runs in a Docker image ([scripts/sharp-build.Dockerfile](scripts/sharp-build.Dockerfile)) replicating `sharp`'s official CI environment (Rocky Linux 8, gcc-toolset-14, Node 20), so nothing touches the host toolchain and the binary matches upstream's baseline glibc compatibility.
+
+### The wrapper symbol set
+
+Seven symbols are wrapped. The machine-readable source of truth — including each symbol's origin, risk classification, and how it was found — is [patches/wrapper-symbols.json](patches/wrapper-symbols.json); version bumps should diff a fresh grep against that file, not against this prose. The short version:
+
+- `g_object_ref`, `g_object_unref` — from `libvips`'s `VImage8.h` inline header (see Phase A above); the original crash culprits.
+- `g_malloc`, `g_free` — from `sharp`'s own source. Wrapped **as a pair** deliberately: an allocator and its matching free must come from the same `glib` copy, or the result is silent heap corruption, not just a symbol-hygiene issue.
+- `g_signal_connect_data`, `g_log_set_handler` — from `sharp`'s own source.
+- `g_utf8_validate` — from `sharp`'s `metadata.cc`. Notably, this one was **missed by grepping** and only surfaced when running `sharp`'s full test suite against the rebuilt addon (`undefined symbol` at runtime). Lesson: the test-gate loop below is load-bearing, not a formality — expect a version bump to surface a symbol the grep missed.
+
+### Packaging details that matter
+
+Three hard-won, non-obvious decisions live in [scripts/package-local.sh](scripts/package-local.sh):
+
+- **`libvips-cpp.so` sits next to the `.node` addon, found via RPATH — and it must be old-style `DT_RPATH`, not `DT_RUNPATH`.** `patchelf --set-rpath` produces `DT_RUNPATH` by default, which the loader consults *after* `LD_LIBRARY_PATH` — so anything else in a real consumer's environment or `node_modules` that provides the same SONAME can win over the co-located patched copy. `patchelf --force-rpath` produces `DT_RPATH`, consulted *before* `LD_LIBRARY_PATH`, so the co-located copy always wins for the addon's own direct dependency. (Setting `process.env.LD_LIBRARY_PATH` from JavaScript doesn't work at all: glibc reads it once at process start, not per `dlopen()`.)
+- **The SONAME is kept identical to upstream's** — that's what makes the per-process SONAME deduplication safe *when everything resolves to this package* (see [Why overrides](#why-overrides-not-a-direct-import)) and is why `overrides` is the recommended install method rather than an optional nicety.
+- **`package/` runs its own `npm install` during packaging** because npm does not recursively install a `file:` dependency's own dependencies the way it does for registry packages — without this, the non-Linux `require('sharp-upstream')` fallback breaks in every local-testing setup. Relatedly, `package/package.json` must **not** declare `"os"`/`"cpu"` restrictions: those make npm skip installing the package entirely on other platforms, which would prevent the fallback from ever existing there.
+- **The fallback's real-`sharp` dependency is named `sharp-upstream`, not `sharp`** (`"sharp-upstream": "npm:sharp@<version>"` in `package/package.json`, matched by `require('sharp-upstream')` in `index.js` and `index.d.ts`). A consumer's `overrides` rule targeting `"sharp"` applies recursively to every dependency edge named `sharp` anywhere in the tree — including this package's own internal one, since npm doesn't distinguish "the package I'm overriding" from "a same-named dependency three levels inside it." Without the alias, that self-reference resolves silently (no install error) into a circular reference: `require('sharp')` inside the fallback returns `{}` at runtime, and `index.d.ts`'s `import sharp = require('sharp')` can't resolve real `sharp`'s types, producing spurious `tsc` errors in consumers (`has no exported member 'X'`, `can only be referenced with ECMAScript imports`) with no indication the cause is this package. The alias sidesteps the collision structurally, the same reason this package's own published name isn't `sharp`.
+
+### Test gates
+
+Every build must pass both, enforced by [scripts/run-gates.sh](scripts/run-gates.sh) (non-zero exit on failure, usable in CI):
+
+1. **`sharp`'s own upstream test suite** against the rebuilt addon (1804/1811 at last run; the one known failure is `test/unit/esm.mjs`, a pre-existing Node CJS/ESM interop quirk unrelated to these patches — it fails identically against stock `sharp`).
+2. **The Electron crash regression test** ([test/electron-crash-repro.js](test/electron-crash-repro.js)): encode raw pixels to JPEG, then decode a real JPEG via `.metadata()` and `.resize().toBuffer()`, under `ELECTRON_RUN_AS_NODE`. On an unpatched build the decode step reliably segfaults; on a correct build both steps pass. The same script serves both directions via `SHARP_MODULE_PATH`.
+
+**If a gate fails with `undefined symbol: g_<something>`**: that's a missing wrapper symbol. Add it to `extra/glib_wrapper.c`/`.h` in `vendor/sharp-libvips` (remember the `visibility("default")` attribute), patch the call site, update `patches/wrapper-symbols.json`, regenerate the patch files, rebuild, re-run the gates. This loop is normal — it's how `g_utf8_validate` was found.
+
+### Alternatives that didn't work
+
+Tried before concluding a from-source rebuild was the only real fix:
+
+| Approach | Result |
+|---|---|
+| `LD_PRELOAD` sharp's `libvips-cpp.so` before Electron starts | Made Electron crash even earlier |
+| `objcopy --localize-symbols` (hide symbols post-hoc, no recompile) | Still segfaults — `sharp.node`'s undefined references then bind to Electron's `glib` instead |
+| `RTLD_DEEPBIND` | Crashes differently, during load |
+| Do `sharp` work in a real separate Node process (not Electron's binary) | Works, but requires bundling a Node binary and adds an IPC boundary |
+
+### Updating to a new `sharp` release
+
+This is deliberately a guided Claude Code command, not a blind script: [.claude/commands/rebuild-for-version.md](.claude/commands/rebuild-for-version.md) (`/rebuild-for-version <sharp-version> <sharp-libvips-version>`). A version bump involves genuine judgment calls a script would get silently wrong — whether the bug even still reproduces upstream, whether a patch conflict is trivial context drift or a structural change, whether the wrapper symbol set changed. The command:
+
+1. Re-pins the submodules and first verifies the bug **still reproduces on an unpatched build** — upstream may have fixed it.
+2. Attempts the existing patches; diagnoses (rather than force-fixes) any conflict.
+3. Re-runs the exhaustive `glib`-call grep and diffs it against `patches/wrapper-symbols.json`.
+4. Rebuilds, runs both gates, and follows the wrapper-expansion loop above (bounded to 3 iterations before stopping to report).
+5. Re-verifies symbol visibility (`objdump -T`) and `DT_RPATH` (`readelf -d`), and prepares — **but never executes** — the release.
+
+Version scheme: `<upstream-sharp-version>-electron.N` — the version always names the exact `sharp` release it tracks; `N` bumps for this package's own revisions. Every version this scheme produces is, by construction, a semver **prerelease** (the `-electron.N` suffix), which matters at publish time — see below.
+
+### Releasing
+
+`npm run release <version>` ([scripts/release.sh](scripts/release.sh)) runs the full pipeline, then syncs every version reference — `package/package.json`'s `version` and its `sharp` fallback dependency (pinned to the upstream part of the new version), and this README's install snippets — then prints the remaining steps. **Publishing is always a manual, human-confirmed action** — no script or command in this repo runs `npm publish`, `git tag`, or `git push` on its own. That's a deliberate design decision, not a missing feature: a bad automated judgment call shipping silently to consumers is a worse failure mode than a release waiting a day for review.
+
+**Publishing requires `--tag latest`, every time**: `npm publish --tag latest` (not plain `npm publish`). Because every version has the `-electron.N` suffix, npm/semver treats it as a prerelease and refuses to move the `latest` dist-tag implicitly (`npm error: You must specify a tag using --tag when publishing a prerelease version`) — without `--tag latest`, a bare `npm install @janhapke/sharp-electron` (or the version-less `overrides` form) would resolve to nothing. `--access public` is not needed on the command line; it's already set via `package/package.json`'s `publishConfig`.
+
+Note for the published package: `package/README.md` is generated at package time (a copy of this file, since npmjs.com displays the published package's own README) — edit this file, never that copy.
+
+### Repository layout
+
+```
+patches/                     the actual fix: two .patch files + wrapper-symbols.json (symbol manifest)
+vendor/sharp-libvips/        git submodule, pinned at the target release tag (pristine; patched at build time)
+vendor/sharp/                git submodule, same
+scripts/                     the full pipeline: apply-patches → build-libvips → build-sharp → run-gates → package-local
+test/electron-crash-repro.js the regression test (and original bug repro)
+package/                     the published npm package: index.js dispatcher, index.d.ts (forwards to sharp's own types), built linux-x64/ payload
+dist/                        gitignored Phase A build output
+.github/workflows/ci.yml    Linux full-pipeline job + macOS/Windows fallback smoke test
+```
+
+## Status
+
+The `linux-x64` build passes both test gates and has been verified end-to-end in a real consuming Electron project. The macOS/Windows fallback is implemented and covered by CI — check the [workflow's status](.github/workflows/ci.yml) for the current result on real runners. `linux-arm64` has no patched build — it fails loudly rather than silently.
+
+## License
+
+Apache-2.0, matching `sharp`. See [LICENSE](LICENSE) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) (this project patches `libvips`, LGPL-2.1-or-later; the `glib_wrapper.c`/`.h` shim is original code).
+
+
+================================================================================
 @jitl/quickjs-ffi-types@0.32.0
 Declared license: MIT
 Package: https://www.npmjs.com/package/@jitl/quickjs-ffi-types/v/0.32.0
@@ -7260,6 +7680,205 @@ third-party archives.
 
 
 ================================================================================
+sharp@0.35.4
+Declared license: Apache-2.0
+Package: https://www.npmjs.com/package/sharp/v/0.35.4
+
+--- LICENSE ---
+Apache License
+Version 2.0, January 2004
+http://www.apache.org/licenses/
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. Definitions.
+
+"License" shall mean the terms and conditions for use, reproduction, and
+distribution as defined by Sections 1 through 9 of this document.
+
+"Licensor" shall mean the copyright owner or entity authorized by the copyright
+owner that is granting the License.
+
+"Legal Entity" shall mean the union of the acting entity and all other entities
+that control, are controlled by, or are under common control with that entity.
+For the purposes of this definition, "control" means (i) the power, direct or
+indirect, to cause the direction or management of such entity, whether by
+contract or otherwise, or (ii) ownership of fifty percent (50%) or more of the
+outstanding shares, or (iii) beneficial ownership of such entity.
+
+"You" (or "Your") shall mean an individual or Legal Entity exercising
+permissions granted by this License.
+
+"Source" form shall mean the preferred form for making modifications, including
+but not limited to software source code, documentation source, and configuration
+files.
+
+"Object" form shall mean any form resulting from mechanical transformation or
+translation of a Source form, including but not limited to compiled object code,
+generated documentation, and conversions to other media types.
+
+"Work" shall mean the work of authorship, whether in Source or Object form, made
+available under the License, as indicated by a copyright notice that is included
+in or attached to the work (an example is provided in the Appendix below).
+
+"Derivative Works" shall mean any work, whether in Source or Object form, that
+is based on (or derived from) the Work and for which the editorial revisions,
+annotations, elaborations, or other modifications represent, as a whole, an
+original work of authorship. For the purposes of this License, Derivative Works
+shall not include works that remain separable from, or merely link (or bind by
+name) to the interfaces of, the Work and Derivative Works thereof.
+
+"Contribution" shall mean any work of authorship, including the original version
+of the Work and any modifications or additions to that Work or Derivative Works
+thereof, that is intentionally submitted to Licensor for inclusion in the Work
+by the copyright owner or by an individual or Legal Entity authorized to submit
+on behalf of the copyright owner. For the purposes of this definition,
+"submitted" means any form of electronic, verbal, or written communication sent
+to the Licensor or its representatives, including but not limited to
+communication on electronic mailing lists, source code control systems, and
+issue tracking systems that are managed by, or on behalf of, the Licensor for
+the purpose of discussing and improving the Work, but excluding communication
+that is conspicuously marked or otherwise designated in writing by the copyright
+owner as "Not a Contribution."
+
+"Contributor" shall mean Licensor and any individual or Legal Entity on behalf
+of whom a Contribution has been received by Licensor and subsequently
+incorporated within the Work.
+
+2. Grant of Copyright License.
+
+Subject to the terms and conditions of this License, each Contributor hereby
+grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free,
+irrevocable copyright license to reproduce, prepare Derivative Works of,
+publicly display, publicly perform, sublicense, and distribute the Work and such
+Derivative Works in Source or Object form.
+
+3. Grant of Patent License.
+
+Subject to the terms and conditions of this License, each Contributor hereby
+grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free,
+irrevocable (except as stated in this section) patent license to make, have
+made, use, offer to sell, sell, import, and otherwise transfer the Work, where
+such license applies only to those patent claims licensable by such Contributor
+that are necessarily infringed by their Contribution(s) alone or by combination
+of their Contribution(s) with the Work to which such Contribution(s) was
+submitted. If You institute patent litigation against any entity (including a
+cross-claim or counterclaim in a lawsuit) alleging that the Work or a
+Contribution incorporated within the Work constitutes direct or contributory
+patent infringement, then any patent licenses granted to You under this License
+for that Work shall terminate as of the date such litigation is filed.
+
+4. Redistribution.
+
+You may reproduce and distribute copies of the Work or Derivative Works thereof
+in any medium, with or without modifications, and in Source or Object form,
+provided that You meet the following conditions:
+
+You must give any other recipients of the Work or Derivative Works a copy of
+this License; and
+You must cause any modified files to carry prominent notices stating that You
+changed the files; and
+You must retain, in the Source form of any Derivative Works that You distribute,
+all copyright, patent, trademark, and attribution notices from the Source form
+of the Work, excluding those notices that do not pertain to any part of the
+Derivative Works; and
+If the Work includes a "NOTICE" text file as part of its distribution, then any
+Derivative Works that You distribute must include a readable copy of the
+attribution notices contained within such NOTICE file, excluding those notices
+that do not pertain to any part of the Derivative Works, in at least one of the
+following places: within a NOTICE text file distributed as part of the
+Derivative Works; within the Source form or documentation, if provided along
+with the Derivative Works; or, within a display generated by the Derivative
+Works, if and wherever such third-party notices normally appear. The contents of
+the NOTICE file are for informational purposes only and do not modify the
+License. You may add Your own attribution notices within Derivative Works that
+You distribute, alongside or as an addendum to the NOTICE text from the Work,
+provided that such additional attribution notices cannot be construed as
+modifying the License.
+You may add Your own copyright statement to Your modifications and may provide
+additional or different license terms and conditions for use, reproduction, or
+distribution of Your modifications, or for any such Derivative Works as a whole,
+provided Your use, reproduction, and distribution of the Work otherwise complies
+with the conditions stated in this License.
+
+5. Submission of Contributions.
+
+Unless You explicitly state otherwise, any Contribution intentionally submitted
+for inclusion in the Work by You to the Licensor shall be under the terms and
+conditions of this License, without any additional terms or conditions.
+Notwithstanding the above, nothing herein shall supersede or modify the terms of
+any separate license agreement you may have executed with Licensor regarding
+such Contributions.
+
+6. Trademarks.
+
+This License does not grant permission to use the trade names, trademarks,
+service marks, or product names of the Licensor, except as required for
+reasonable and customary use in describing the origin of the Work and
+reproducing the content of the NOTICE file.
+
+7. Disclaimer of Warranty.
+
+Unless required by applicable law or agreed to in writing, Licensor provides the
+Work (and each Contributor provides its Contributions) on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied,
+including, without limitation, any warranties or conditions of TITLE,
+NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A PARTICULAR PURPOSE. You are
+solely responsible for determining the appropriateness of using or
+redistributing the Work and assume any risks associated with Your exercise of
+permissions under this License.
+
+8. Limitation of Liability.
+
+In no event and under no legal theory, whether in tort (including negligence),
+contract, or otherwise, unless required by applicable law (such as deliberate
+and grossly negligent acts) or agreed to in writing, shall any Contributor be
+liable to You for damages, including any direct, indirect, special, incidental,
+or consequential damages of any character arising as a result of this License or
+out of the use or inability to use the Work (including but not limited to
+damages for loss of goodwill, work stoppage, computer failure or malfunction, or
+any and all other commercial damages or losses), even if such Contributor has
+been advised of the possibility of such damages.
+
+9. Accepting Warranty or Additional Liability.
+
+While redistributing the Work or Derivative Works thereof, You may choose to
+offer, and charge a fee for, acceptance of support, warranty, indemnity, or
+other liability obligations and/or rights consistent with this License. However,
+in accepting such obligations, You may act only on Your own behalf and on Your
+sole responsibility, not on behalf of any other Contributor, and only if You
+agree to indemnify, defend, and hold each Contributor harmless for any liability
+incurred by, or claims asserted against, such Contributor by reason of your
+accepting any such warranty or additional liability.
+
+END OF TERMS AND CONDITIONS
+
+APPENDIX: How to apply the Apache License to your work
+
+To apply the Apache License to your work, attach the following boilerplate
+notice, with the fields enclosed by brackets "[]" replaced with your own
+identifying information. (Don't include the brackets!) The text should be
+enclosed in the appropriate comment syntax for the file format. We also
+recommend that a file or class name and description of purpose be included on
+the same "printed page" as the copyright notice for easier identification within
+third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+
+================================================================================
 shebang-command@2.0.0
 Declared license: MIT
 Package: https://www.npmjs.com/package/shebang-command/v/2.0.0
@@ -7781,7 +8400,14 @@ Upstream build/source projects:
 - Windows libvips builds: https://github.com/libvips/build-win64-mxe
 - libvips source: https://github.com/libvips/libvips
 
-The current dependency set uses sharp 0.35.4 / libvips 8.18.6. The release pipeline
+The current dependency set uses sharp 0.35.4 / libvips 8.18.6. Linux x64 uses
+the modified `@janhapke/sharp-electron@0.35.4-electron.1` paired addon and
+libvips from source commit `f7afa507bfc6975bad73ed9c6a8ee5c3be88b848`
+(archive SHA-256 `5826538e26d76f7db44b1adfe0766e6f00c86ce3c9495225d26386198d0247de`).
+The pinned fork archive preserves its Sharp/libvips patches (including GLib
+wrapper source), build and linker scripts; original Sharp/libvips sources are
+also inventoried in `sources.json`. Linux arm64 uses official unmodified @img.
+The paired x64 replacement procedure is in `SOURCE-BUILD.md`. The release pipeline
 places `ChatBBC-Native-Sources.tar.gz` beside the matching installers at:
 https://github.com/TheBigBrainChad/chatbbc/releases
 Use the source archive and checksums from the same release as your installer.
@@ -7790,6 +8416,13 @@ It contains original component archives, locked Rust dependency sources, build r
 patches, source license/copyright notices, a URL/SHA-256 inventory, and build/replacement
 instructions. Source remains under its original individual licenses, including LGPLv3 and
 MPL 2.0 where identified. `sources.json` distinguishes the Windows and Unix versions.
+The exact 24,716-byte original GVDB commit archive is pinned at
+`pinned/gvdb-53daeeb4.tar.gz`, with the same inventory SHA-256, because its
+upstream download endpoint returned HTTP 406 during fresh source packaging.
+The source packager verifies these bytes when present. The pinned file must
+also be included in the source commit and tested from a clean checkout before
+a release; a working-tree-only fallback does not satisfy that gate or replace
+the complete source inventory.
 Optional/development sources are retained as an inclusive set; this does not imply that
 every listed component is linked into every target. `COMPONENT-NOTICES.txt` preserves
 notices from those source distributions, in addition to each target's actual native README.
@@ -7813,6 +8446,21 @@ ChatBBC native image-library source notices
 The following files are preserved from the source archives identified in sources.json.
 Some upstream source archives contain optional or test dependencies; inclusion here does not assert that every listed component is linked on every target.
 Full source archives, their original notices and build recipes are available in the matching release native-source download.
+
+================================================================================
+@janhapke/sharp-electron 0.35.4-electron.1 — Linux x64 patched image backend
+Source: https://github.com/janhapke/sharp-electron/tree/f7afa507bfc6975bad73ed9c6a8ee5c3be88b848
+Source archive SHA-256: 5826538e26d76f7db44b1adfe0766e6f00c86ce3c9495225d26386198d0247de
+Published npm tarball integrity: sha512-a8G1T2Cs+SND8Be61gJspHNoUXXVQujbfnHr1+a6IxsPgDNSId58LjiL+HMPg0pCxyMY7aC8U/INRWRp7G7RXQ==
+The fork's own package and source patches are Apache-2.0 licensed. Its modified
+Sharp addon and libvips bundle retain the corresponding upstream Sharp, libvips,
+GLib and bundled-dependency copyrights and applicable Apache/LGPL/MPL notices
+from the source archives and the license supplements below. The fork builds a
+paired addon and libvips: both must be replaced together; do not swap either
+binary independently with the official @img distribution. The matching source
+archive retains the two patch files, GLib wrapper code, build/linker scripts,
+submodule identities and exact build/replacement instructions.
+
 
 ================================================================================
 proxy-libintl 0.5
@@ -202121,7 +202769,6 @@ third-party archives.
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
-
 
 
 --- LGPL-3.0.txt ---

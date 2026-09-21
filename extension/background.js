@@ -47,7 +47,7 @@ const MODEL_REQUEST_TIMEOUT_MS = 190_000;
 /** The reason a deadline aborts with, so it is a fact the caller can act on rather than prose. */
 const TIMED_OUT = 'the app took too long to answer';
 /** Bumped only when the request/response shape changes; the app compares it. */
-const BRIDGE_PROTOCOL = 15;
+const BRIDGE_PROTOCOL = 17;
 /** Browser-owned presentation preferences also exposed by the popup. */
 const RENDER_STREAM_KEY = 'renderStreamEnabled';
 const SHOW_TIMES_KEY = 'showStreamTimes';
@@ -102,6 +102,15 @@ let loaded = false;
  * awaits the same promise and never re-reads.
  */
 let loading = null;
+const RECORDING_GENERATION = /^[A-Za-z0-9_-]{43}$/;
+const MAX_DOCUMENT_GENERATIONS = 16;
+const RICH_CAPTURE_ID = /^[A-Za-z0-9_-]{32}$/;
+const RICH_SCAN_TOKEN = /^[A-Za-z0-9_-]{1,64}$/;
+const RICH_ISSUANCE_MS = 50_000; // Main begins a 60s lease before our HTTP round-trip.
+const MAX_RICH_ISSUANCES = 256;
+const MAX_RICH_PER_DOCUMENT = 64;
+const MAX_RICH_PAIRS_PER_CAPTURE = 64;
+const PIXEL_SOURCE_INCAR = /^[a-z0-9_-]{1,64}$/i;
 
 /**
  * Set when the user disconnected on purpose, and cleared only when they connect again.
@@ -210,6 +219,12 @@ let tabConversations = {};
 let tabDocuments = {};
 /** Highest same-document SPA navigation generation accepted for each tab. */
 let tabEpochs = {};
+/** Chrome MessageSender document registrations, independent of page-reported navigationEpoch.
+ * The numeric generation only proves registration order, NOT a same-document SPA capture. */
+let registeredDocuments = {};
+/** Independently held Chrome sender/document + server-issued ticket bindings. These
+ * survive MV3 worker suspension in storage.session, never a full browser restart. */
+let workerRichIssuances = {};
 let retiredDocuments = {};
 /** Durable terminal lease; cleared only when a different browser document speaks. */
 let terminalDocuments = {};
@@ -282,6 +297,8 @@ async function loadOnce() {
     'tabConversations',
     'tabDocuments',
     'tabEpochs',
+    'registeredDocuments',
+    'workerRichIssuances',
     'retiredDocuments',
     'terminalDocuments',
     'closeOutbox',
@@ -298,6 +315,15 @@ async function loadOnce() {
       : {};
   tabDocuments = live.tabDocuments && typeof live.tabDocuments === 'object' ? { ...live.tabDocuments } : {};
   tabEpochs = live.tabEpochs && typeof live.tabEpochs === 'object' ? { ...live.tabEpochs } : {};
+  registeredDocuments = live.registeredDocuments && typeof live.registeredDocuments === 'object' &&
+    !Array.isArray(live.registeredDocuments) ? { ...live.registeredDocuments } : {};
+  workerRichIssuances = {};
+  if (live.workerRichIssuances && typeof live.workerRichIssuances === 'object' &&
+      !Array.isArray(live.workerRichIssuances)) {
+    for (const [id, issuance] of Object.entries(live.workerRichIssuances).slice(-MAX_RICH_ISSUANCES)) {
+      if (validRichIssuance(id, issuance)) workerRichIssuances[id] = issuance;
+    }
+  }
   retiredDocuments =
     live.retiredDocuments && typeof live.retiredDocuments === 'object' ? { ...live.retiredDocuments } : {};
   terminalDocuments =
@@ -341,6 +367,8 @@ function persistLive() {
         tabConversations,
         tabDocuments,
         tabEpochs,
+        registeredDocuments,
+        workerRichIssuances,
         retiredDocuments,
         terminalDocuments,
         closeOutbox: closeOutbox.slice(-200),
@@ -390,14 +418,16 @@ async function persistJournalNow() {
       return true;
     } catch (err) {
       if (!durabilityGap) {
-        durabilityGap = true;
-        journal.push(
-          gapEntry(
-            journal.length > 0 ? journal[journal.length - 1] : null,
-            'chat_error',
-            '⚠ The browser refused to store this extension’s pending observations. Until the app accepts them they exist only in memory, so closing the browser or reloading the extension would lose them.'
-          )
-        );
+        // An optional pixel is never provenance for a synthetic transcript
+        // error. If this journal contains only pixels, keep their uncertain
+        // custody in memory without creating worker/session activity. A later
+        // essential row can still earn its own loss marker if writes keep failing.
+        const reportable = journal.findLast(entry => entry?.event?.kind !== 'rich_media');
+        if (reportable) {
+          durabilityGap = true;
+          journal.push(gapEntry(reportable, 'chat_error',
+            '⚠ The browser refused to store this extension’s pending observations. Until the app accepts them they exist only in memory, so closing the browser or reloading the extension would lose them.'));
+        }
       }
       return false;
     }
@@ -480,11 +510,23 @@ function routeOf(entry) {
 
 function routeKey(entry) {
   const route = routeOf(entry);
-  return JSON.stringify([route.conversationId, route.provisional, route.agent, route.agentCommandId]);
+  return JSON.stringify([route.conversationId, route.provisional, route.agent, route.agentCommandId,
+    validRecordingGeneration(entry?.recordingGeneration)]);
+}
+
+function validRecordingGeneration(value) {
+  return typeof value === 'string' && RECORDING_GENERATION.test(value) ? value : null;
 }
 
 function gapEntry(source, kind, text) {
-  return { ...routeOf(source), gap: true, event: { kind, time: Date.now(), text } };
+  return { ...routeOf(source),
+    // The bridge can bind workers from progress or an accepted transcript row.
+    // A synthetic loss marker carries neither kind of worker authority, even
+    // when the discarded observation had an exact command. Genuine rows keep
+    // their own provenance; the gap retains only route and Recording custody.
+    agent: null, agentCommandId: null,
+    recordingGeneration: validRecordingGeneration(source?.recordingGeneration),
+    gap: true, event: { kind, time: Date.now(), text } };
 }
 
 /**
@@ -532,9 +574,10 @@ function makeRoom(tighten = false) {
     bytes += sizeOf(gap) - before;
   };
 
-  // Pass one: progress and other non-essential lines, oldest first. The gap marker is
-  // inserted on the first removal and counts against the limits while we keep trimming,
-  // so pressure can never make the algorithm delete its own evidence of what was lost.
+  // Pass one: progress and other non-essential lines, oldest first. Rich pixels are
+  // optional presentation: their loss must never manufacture progress or worker
+  // recovery evidence. Genuine progress keeps its scoped loss marker, inserted on
+  // the first removal and counted against the limits while we keep trimming.
   const progressGaps = new Map();
   let progressAt = 0;
   while (!fits()) {
@@ -548,6 +591,7 @@ function makeRoom(tighten = false) {
     const index = progressAt;
     const entry = removeAt(index);
     if (!entry) break;
+    if (entry.event.kind === 'rich_media') continue;
     const key = routeKey(entry);
     let bucket = progressGaps.get(key);
     if (!bucket) {
@@ -605,6 +649,20 @@ function enqueue(entries) {
       provisional: typeof entry.provisional === 'string' ? entry.provisional : null,
       agent: typeof entry.agent === 'string' ? entry.agent : null,
       agentCommandId: typeof entry.agentCommandId === 'string' ? entry.agentCommandId : null,
+      // Preserve the original issued epoch, including explicit unknown legacy rows.
+      recordingGeneration: validRecordingGeneration(entry.recordingGeneration),
+      // This is a detached copy installed by HANDLERS.events from Chrome MessageSender;
+      // never take an origin from message.entries or the page-controlled event body.
+      capture: entry.capture ?? null,
+      // Read-only diagnostics about a claimed rich shape, even if its optional
+      // projection was refused. Never admission authority at the bridge.
+      richClaimed: entry.richClaimed === true,
+      // Attested against a previously durable, independently Chrome-issued ticket
+      // before journal acceptance. Never copy page-owned entry.richReceipt here.
+      richReceipt: entry.richReceipt ?? null,
+      // A different, purpose- and slot-bound worker attestation. No body-selected
+      // pixelReceipt, image URL, DOM handle or future action authority enters here.
+      pixelReceipt: entry.pixelReceipt ?? null,
       event: entry.event
     });
   }
@@ -698,11 +756,20 @@ function nextJournalBatch(preferredConversationId = null, excluded = []) {
       conversationId = entry.conversationId;
     }
     if (entry.conversationId !== conversationId || mine.length >= BATCH) continue;
+    // Worker provenance belongs to one envelope, so a synthetic gap cannot
+    // travel beside a genuine worker row and borrow that row's agent/command.
+    // Keep same-conversation FIFO, yielding at each gap/non-gap boundary;
+    // genuine progress retains its own worker origin in the following batch.
+    if (mine.length && Boolean(entry.gap) !== Boolean(mine[0].gap)) break;
     mine.push(entry);
     // Recovery provenance must come from the same journal entry. Older entries can have an
     // agent label but no command id; keep delivering them, but never upgrade that label into
     // worker-binding authority by combining it with another row's command id.
-    if (!agent && entry.agent && entry.agentCommandId) {
+    // An optional pixel and a synthetic loss marker cannot authenticate the
+    // envelope's worker command for their ordinary neighboring observations.
+    // Genuine progress retains the existing lost-ACK recovery path.
+    if (!agent && !entry.gap && entry.event?.kind !== 'rich_media' &&
+        entry.agent && entry.agentCommandId) {
       agent = entry.agent;
       agentCommandId = entry.agentCommandId;
     }
@@ -713,15 +780,24 @@ function nextJournalBatch(preferredConversationId = null, excluded = []) {
 
 async function deliverJournalBatch(batch) {
   const { conversationId, mine, agent, agentCommandId } = batch;
+  // Protocol 17 always sends original per-row admission, including gaps and unknown
+  // legacy rows. The same slice builder owns ordinary/413/retry positional alignment.
+  const payload = (entries) => ({
+    conversationId, agent, agentCommandId,
+    events: entries.map((entry) => entry.event),
+    recordingGenerations: entries.map(entry => validRecordingGeneration(entry.recordingGeneration)),
+    ...(entries.some((entry) => entry.richClaimed === true ||
+      (entry.event?.kind === 'assistant_message' && entry.event.rich !== undefined))
+      ? { sourceCaptures: entries.map((entry) => entry.capture ?? null) } : {}),
+    ...(entries.some(entry => entry.richReceipt)
+      ? { richCaptureReceipts: entries.map(entry => entry.richReceipt ?? null) } : {}),
+    ...(entries.some(entry => entry.pixelReceipt)
+      ? { richPixelReceipts: entries.map(entry => entry.pixelReceipt ?? null) } : {})
+  });
   const result = await call('/events', {
     method: 'POST',
     timeoutMs: EVENTS_REQUEST_TIMEOUT_MS,
-    body: JSON.stringify({
-      conversationId,
-      agent,
-      agentCommandId,
-      events: mine.map((entry) => entry.event)
-    })
+    body: JSON.stringify(payload(mine))
   });
   noteDelivery(result, mine.length, conversationId);
   if (result.status === 413 && mine.length > 1) {
@@ -730,7 +806,7 @@ async function deliverJournalBatch(batch) {
     const retry = await call('/events', {
       method: 'POST',
       timeoutMs: EVENTS_REQUEST_TIMEOUT_MS,
-      body: JSON.stringify({ conversationId, agent, agentCommandId, events: half.map((entry) => entry.event) })
+      body: JSON.stringify(payload(half))
     });
     noteDelivery(retry, half.length, conversationId);
     if (!retry.ok) return false;
@@ -741,13 +817,15 @@ async function deliverJournalBatch(batch) {
   if (result.status === 413 && mine.length === 1) {
     const rejected = mine[0];
     journal = journal.filter((entry) => entry !== rejected);
-    journal.unshift(
-      gapEntry(
-        rejected,
-        'chat_error',
-        '⚠ One browser observation was too large for the local bridge and was replaced by this explicit gap.'
-      )
-    );
+    if (rejected.event.kind !== 'rich_media') {
+      journal.unshift(
+        gapEntry(
+          rejected,
+          'chat_error',
+          '⚠ One browser observation was too large for the local bridge and was replaced by this explicit gap.'
+        )
+      );
+    }
     return true;
   }
   if (!result.ok) {
@@ -757,7 +835,7 @@ async function deliverJournalBatch(batch) {
     if (result.status >= 400 && result.status < 500 && ![401, 408, 409, 426, 429].includes(result.status)) {
       const rejected = mine[0];
       journal = journal.filter((entry) => entry !== rejected);
-      if (!rejected.gap) {
+      if (!rejected.gap && rejected.event.kind !== 'rich_media') {
         journal.unshift(
           gapEntry(
             rejected,
@@ -1630,11 +1708,281 @@ async function registerDocument(sender, message) {
   }
   if (current && current !== documentId) await adoptFreshReloadProvisional(id, documentId);
   if (current && current !== documentId) retiredDocuments[key] = [...new Set([...retired, current])].slice(-8);
+  // Only this explicit registration receives Chrome's sender documentId. Increment our own
+  // generation when its document changes; NEVER copy message.navigationEpoch into it.
+  // A legacy persisted tab without a registration has no capture epoch until it registers.
+  const registration = registeredDocuments[key];
+  if (!registration || registration.documentId !== documentId ||
+      !Number.isSafeInteger(registration.epoch) || registration.epoch < 1) {
+    const previousEpoch = Number.isSafeInteger(registration?.epoch) && registration.epoch > 0
+      ? registration.epoch : 0;
+    registeredDocuments[key] = previousEpoch < Number.MAX_SAFE_INTEGER
+      ? { documentId, epoch: previousEpoch + 1 } : null;
+  }
   tabDocuments[key] = documentId;
   tabEpochs[key] = requestedEpoch;
   delete terminalDocuments[key];
   await persistLive();
   return { ok: true, tab: id, documentId, navigationEpoch: requestedEpoch };
+}
+
+/** An app bearer alone never attests capture. Bind the authenticated issuance to
+ * the already registered Chrome sender's immutable document and SPA epoch. */
+async function issueRecordingGeneration(source) {
+  if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
+  const owner = registeredDocuments[String(source.tab)];
+  if (!owner || owner.documentId !== source.documentId) return { ok: false, error: 'document_unregistered' };
+  const result = await call('/recording/generation', { method: 'GET' });
+  if (!ownsDocument(source) || registeredDocuments[String(source.tab)] !== owner)
+    return { ok: false, error: 'stale_document' };
+  const issued = result.ok ? validRecordingGeneration(result.data?.recordingGeneration) : null;
+  if (issued) {
+    const previous = Array.isArray(owner.recordingIssuances) ? owner.recordingIssuances : [];
+    owner.recordingIssuances = [...previous.filter(row =>
+      row && validRecordingGeneration(row.generation) && Number.isSafeInteger(row.epoch) &&
+      (row.epoch !== source.navigationEpoch || row.generation !== issued)),
+      { epoch: source.navigationEpoch, generation: issued }].slice(-MAX_DOCUMENT_GENERATIONS);
+    await persistLive();
+    if (!ownsDocument(source) || registeredDocuments[String(source.tab)] !== owner)
+      return { ok: false, error: 'stale_document' };
+  }
+  return { ok: true, recordingGeneration: issued };
+}
+
+function issuedForSender(source, entry) {
+  const owner = source && registeredDocuments[String(source.tab)];
+  const generation = validRecordingGeneration(entry?.recordingGeneration);
+  const captureEpoch = entry?.recordingNavigationEpoch;
+  if (!generation || !Number.isSafeInteger(captureEpoch) || captureEpoch < 0 ||
+      !owner || owner.documentId !== source.documentId ||
+      !Array.isArray(owner.recordingIssuances)) return null;
+  return owner.recordingIssuances.some(row => row?.epoch === captureEpoch && row?.generation === generation)
+    ? generation : null;
+}
+
+/** Restore/retain only a genuinely issued, still-current browser document incarnation.
+ * Page entries cannot create one: the only writer is rich_capture_begin after the
+ * cached authenticated main reply and original Chrome MessageSender verification. */
+function validRichIssuance(id, row) {
+  if (!RICH_CAPTURE_ID.test(id) || !row || typeof row !== 'object' || Array.isArray(row) ||
+      row.captureId !== id || !Number.isSafeInteger(row.tab) || row.tab < 0 ||
+      typeof row.documentId !== 'string' || row.documentId.length < 1 || row.documentId.length > 128 ||
+      !Number.isSafeInteger(row.documentGeneration) || row.documentGeneration < 1 ||
+      !Number.isSafeInteger(row.spaEpoch) || row.spaEpoch < 0 ||
+      !cleanConversationId(row.conversationId) || !validRecordingGeneration(row.recordingGeneration) ||
+      typeof row.sessionId !== 'string' || !/^[a-z0-9_-]{1,128}$/i.test(row.sessionId) ||
+      !Number.isSafeInteger(row.bindingRevision) || row.bindingRevision < 0 ||
+      !Number.isFinite(row.expiresAt) || row.expiresAt <= Date.now() ||
+      row.expiresAt > Date.now() + RICH_ISSUANCE_MS + 1_250 ||
+      (row.scanToken != null && !RICH_SCAN_TOKEN.test(row.scanToken)) ||
+      (row.pairs != null && (typeof row.pairs !== 'object' || Array.isArray(row.pairs) ||
+        Object.keys(row.pairs).length > MAX_RICH_PAIRS_PER_CAPTURE ||
+        Object.entries(row.pairs).some(([logical, raw]) =>
+          logical.length < 1 || logical.length > 256 ||
+          !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(raw)))) ||
+      (row.purpose !== undefined && row.purpose !== 'page_pixel')) return false;
+  if (row.purpose === 'page_pixel' &&
+      (typeof row.messageId !== 'string' || row.messageId.length < 1 || row.messageId.length > 190 ||
+       typeof row.providerMessageId !== 'string' ||
+         !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(row.providerMessageId) ||
+       typeof row.nodeId !== 'string' || !/^n-(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*))*$/.test(row.nodeId) ||
+       row.mediaId !== `media-${row.nodeId}` || row.mediaId.length > 190 ||
+       !Number.isSafeInteger(row.richRevision) || row.richRevision < 1 ||
+       !Number.isSafeInteger(row.slotVersion) || row.slotVersion < 0 ||
+       (row.sourceIncarnation !== null && !PIXEL_SOURCE_INCAR.test(row.sourceIncarnation)) ||
+       (row.sourceSequence !== null && (!Number.isSafeInteger(row.sourceSequence) || row.sourceSequence < 1)) ||
+       ((row.sourceIncarnation === null) !== (row.sourceSequence === null)))) return false;
+  const key = String(row.tab);
+  const current = registeredDocuments[key];
+  return Boolean(current && current.documentId === row.documentId &&
+    current.epoch === row.documentGeneration && tabDocuments[key] === row.documentId &&
+    tabEpochs[key] === row.spaEpoch &&
+    !Object.prototype.hasOwnProperty.call(terminalDocuments, key) &&
+    !(Array.isArray(retiredDocuments[key]) && retiredDocuments[key].includes(row.documentId)) &&
+    issuedForSender({ tab: row.tab, documentId: row.documentId }, {
+      recordingGeneration: row.recordingGeneration, recordingNavigationEpoch: row.spaEpoch
+    }) === row.recordingGeneration);
+}
+
+function pruneRichIssuances() {
+  for (const [id, row] of Object.entries(workerRichIssuances)) {
+    if (!validRichIssuance(id, row)) delete workerRichIssuances[id];
+  }
+}
+
+function roomForRichIssuance(tab, documentId) {
+  pruneRichIssuances();
+  if (Object.keys(workerRichIssuances).length >= MAX_RICH_ISSUANCES) return false;
+  return Object.values(workerRichIssuances).filter(row =>
+    row.tab === tab && row.documentId === documentId).length < MAX_RICH_PER_DOCUMENT;
+}
+
+/** A seal is minted by the isolated content script only after the rich tree's exact
+ * scan/root pair. Validate it against the independently persisted worker issuance,
+ * and durably bind its first scan/pairs BEFORE this row is journal-ACKed. */
+async function attestRichRow(source, entry, event, verifiedRoute) {
+  const seal = entry?.richSeal;
+  if (!seal || typeof seal !== 'object' || Array.isArray(seal) ||
+      Object.keys(seal).sort().join(',') !== 'captureId,messageId,providerMessageId,scanToken' ||
+      !RICH_CAPTURE_ID.test(seal.captureId || '') ||
+      !RICH_SCAN_TOKEN.test(seal.scanToken || '') ||
+      typeof seal.messageId !== 'string' || seal.messageId.length < 1 || seal.messageId.length > 256 ||
+      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(seal.providerMessageId || '') ||
+      !event || event.kind !== 'assistant_message' || !event.rich ||
+      event.messageId !== seal.messageId || event.providerMessageId !== seal.providerMessageId ||
+      event.rich.messageId !== seal.messageId || event.rich.providerMessageId !== seal.providerMessageId ||
+      event.rich.conversationId !== verifiedRoute || !verifiedRoute) return null;
+  const issuance = workerRichIssuances[seal.captureId];
+  if (!validRichIssuance(seal.captureId, issuance) ||
+      issuance.purpose === 'page_pixel' ||
+      issuance.tab !== source.tab || issuance.documentId !== source.documentId ||
+      issuance.spaEpoch !== source.navigationEpoch ||
+      issuance.conversationId !== verifiedRoute || entry.conversationId !== verifiedRoute ||
+      entry.recordingNavigationEpoch !== issuance.spaEpoch ||
+      entry.recordingGeneration !== issuance.recordingGeneration ||
+      issuedForSender(source, entry) !== issuance.recordingGeneration ||
+      (issuance.scanToken && issuance.scanToken !== seal.scanToken)) return null;
+  const pairs = issuance.pairs || {};
+  if ((Object.prototype.hasOwnProperty.call(pairs, seal.messageId) &&
+       pairs[seal.messageId] !== seal.providerMessageId) ||
+      (!Object.prototype.hasOwnProperty.call(pairs, seal.messageId) &&
+       Object.keys(pairs).length >= MAX_RICH_PAIRS_PER_CAPTURE)) return null;
+
+  if (issuance.scanToken !== seal.scanToken || !Object.prototype.hasOwnProperty.call(pairs, seal.messageId)) {
+    // Never mutate a persisted issuance in place while an async storage snapshot
+    // may be in flight. A rejected write cannot be acknowledged as provenance.
+    const updated = { ...issuance, scanToken: seal.scanToken,
+      pairs: { ...pairs, [seal.messageId]: seal.providerMessageId } };
+    workerRichIssuances[seal.captureId] = updated;
+    try { await persistLive(); }
+    catch {
+      // This exact capture can no longer produce a receipt. A later retry must
+      // obtain a fresh ticket rather than relying on uncertain issuance custody.
+      delete workerRichIssuances[seal.captureId];
+      return null;
+    }
+    if (!ownsDocument(source) || !validRichIssuance(seal.captureId, updated) ||
+        workerRichIssuances[seal.captureId] !== updated) return null;
+  }
+  const current = workerRichIssuances[seal.captureId];
+  if (!ownsDocument(source) || !validRichIssuance(seal.captureId, current) ||
+      !(await currentConversationDocument(source, verifiedRoute, true)) ||
+      !validRichIssuance(seal.captureId, current) ||
+      workerRichIssuances[seal.captureId] !== current) return null;
+  return {
+    captureId: seal.captureId, scanToken: seal.scanToken,
+    messageId: seal.messageId, providerMessageId: seal.providerMessageId,
+    conversationId: issuance.conversationId, recordingGeneration: issuance.recordingGeneration,
+    tab: issuance.tab, documentId: issuance.documentId,
+    documentGeneration: issuance.documentGeneration, spaEpoch: issuance.spaEpoch
+  };
+}
+
+const PIXEL_REASONS = new Set(['not_loaded', 'unsupported', 'ambiguous', 'tainted', 'oversized', 'invalid', 'quota']);
+/** The browser worker can check bytes against a sealed digest; it cannot establish
+ * source/DOM truth by hash. That comes only from the isolated exact root+IMG witness. */
+async function attestPixelRow(source, entry, event, verifiedRoute) {
+  const seal = entry?.pixelSeal;
+  const sealFields = ['captureId', 'scanToken', 'messageId', 'providerMessageId', 'mediaId',
+    'nodeId', 'rootStamp', 'sourceIncarnation', 'sourceSequence', 'status', 'pixelBytes', 'pixelSha256'];
+  if (!seal || typeof seal !== 'object' || Array.isArray(seal) ||
+      Object.keys(seal).length !== sealFields.length ||
+      !sealFields.every(key => Object.prototype.hasOwnProperty.call(seal, key)) ||
+      !RICH_CAPTURE_ID.test(seal.captureId || '') ||
+      !RICH_SCAN_TOKEN.test(seal.scanToken || '') ||
+      typeof seal.messageId !== 'string' || seal.messageId.length < 1 || seal.messageId.length > 190 ||
+      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(seal.providerMessageId || '') ||
+      !/^n-(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*))*$/.test(seal.nodeId || '') ||
+      seal.mediaId !== `media-${seal.nodeId}` || seal.mediaId.length > 190 ||
+      typeof seal.sourceIncarnation !== 'string' || !PIXEL_SOURCE_INCAR.test(seal.sourceIncarnation) ||
+      !Number.isSafeInteger(seal.sourceSequence) || seal.sourceSequence < 1 ||
+      !new RegExp(`^src_[a-f0-9]{32}_${seal.sourceSequence.toString(36)}$`).test(seal.sourceIncarnation) ||
+      !['pending', 'available', 'unavailable'].includes(seal.status) ||
+      typeof seal.rootStamp !== 'string' || seal.rootStamp.length > 800 ||
+      seal.rootStamp !== `${seal.scanToken}:${(seal.rootStamp.split(':')[1] || '')}:` +
+        `${encodeURIComponent(seal.messageId)}:${encodeURIComponent(seal.providerMessageId)}` ||
+      !/^(?:0|[1-9]\d*)$/.test(seal.rootStamp.split(':')[1] || '') ||
+      !event || event.kind !== 'rich_media' ||
+      event.messageId !== seal.messageId || event.providerMessageId !== seal.providerMessageId ||
+      event.mediaId !== seal.mediaId || event.nodeId !== seal.nodeId ||
+      event.status !== seal.status || entry.conversationId !== verifiedRoute || !verifiedRoute) return null;
+  const issuance = workerRichIssuances[seal.captureId];
+  if (!validRichIssuance(seal.captureId, issuance) || issuance.purpose !== 'page_pixel' ||
+      issuance.tab !== source.tab || issuance.documentId !== source.documentId ||
+      issuance.spaEpoch !== source.navigationEpoch || issuance.conversationId !== verifiedRoute ||
+      entry.recordingNavigationEpoch !== issuance.spaEpoch ||
+      entry.recordingGeneration !== issuance.recordingGeneration ||
+      issuedForSender(source, entry) !== issuance.recordingGeneration ||
+      issuance.messageId !== seal.messageId || issuance.providerMessageId !== seal.providerMessageId ||
+      issuance.mediaId !== seal.mediaId || issuance.nodeId !== seal.nodeId ||
+      (issuance.scanToken && issuance.scanToken !== seal.scanToken) ||
+      (issuance.sourceIncarnation === seal.sourceIncarnation &&
+       issuance.sourceSequence !== seal.sourceSequence) ||
+      (issuance.sourceIncarnation !== seal.sourceIncarnation && issuance.sourceSequence !== null &&
+       seal.sourceSequence <= issuance.sourceSequence)) return null;
+
+  const status = seal.status;
+  const eventFields = ['kind', 'time', 'messageId', 'providerMessageId', 'mediaId', 'nodeId', 'status',
+    ...(status === 'available' ? ['previewDataUrl', 'previewWidth', 'previewHeight', 'pixelBytes', 'pixelSha256'] :
+      status === 'unavailable' ? ['reason'] : [])];
+  if (Object.keys(event).length !== eventFields.length ||
+      !eventFields.every(key => Object.prototype.hasOwnProperty.call(event, key)) ||
+      !Number.isFinite(event.time)) return null;
+  if (status !== 'available') {
+    if (seal.pixelBytes !== null || seal.pixelSha256 !== null ||
+        (status === 'unavailable' && !PIXEL_REASONS.has(event.reason))) return null;
+  } else {
+    if (!Number.isSafeInteger(event.previewWidth) || event.previewWidth < 1 || event.previewWidth > 1600 ||
+        !Number.isSafeInteger(event.previewHeight) || event.previewHeight < 1 || event.previewHeight > 1600 ||
+        event.previewWidth * event.previewHeight > 2_560_000 ||
+        !Number.isSafeInteger(event.pixelBytes) || event.pixelBytes < 1 || event.pixelBytes > 384_000 ||
+        event.pixelBytes !== seal.pixelBytes || typeof event.pixelSha256 !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(event.pixelSha256) || event.pixelSha256 !== seal.pixelSha256 ||
+        typeof event.previewDataUrl !== 'string' || event.previewDataUrl.length > 512_100 ||
+        !/^data:image\/webp;base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(event.previewDataUrl)) return null;
+    let bytes;
+    try {
+      const binary = atob(event.previewDataUrl.slice('data:image/webp;base64,'.length));
+      if (binary.length !== event.pixelBytes) return null;
+      bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+    } catch { return null; }
+    if (bytes.length < 12 || String.fromCharCode(...bytes.subarray(0, 4)) !== 'RIFF' ||
+        String.fromCharCode(...bytes.subarray(8, 12)) !== 'WEBP' ||
+        !crypto?.subtle?.digest) return null;
+    let digest;
+    try { digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)))
+      .map(value => value.toString(16).padStart(2, '0')).join(''); }
+    catch { return null; }
+    if (digest !== seal.pixelSha256) return null;
+  }
+  if (!ownsDocument(source) || !validRichIssuance(seal.captureId, issuance) ||
+      workerRichIssuances[seal.captureId] !== issuance) return null;
+  // A pixel ticket is one exact slot and one scan; no later row can adopt a new
+  // scan, logical/raw pair or source from a previously accepted issuance.
+  if (issuance.scanToken !== seal.scanToken) {
+    const updated = { ...issuance, scanToken: seal.scanToken,
+      pairs: { [seal.messageId]: seal.providerMessageId } };
+    workerRichIssuances[seal.captureId] = updated;
+    try { await persistLive(); }
+    catch {
+      if (workerRichIssuances[seal.captureId] === updated) delete workerRichIssuances[seal.captureId];
+      return null;
+    }
+    if (!ownsDocument(source) || !validRichIssuance(seal.captureId, updated) ||
+        workerRichIssuances[seal.captureId] !== updated) return null;
+  }
+  const current = workerRichIssuances[seal.captureId];
+  if (!ownsDocument(source) || !validRichIssuance(seal.captureId, current) ||
+      !(await currentConversationDocument(source, verifiedRoute, true)) ||
+      workerRichIssuances[seal.captureId] !== current || !validRichIssuance(seal.captureId, current)) return null;
+  return { captureId: seal.captureId, scanToken: seal.scanToken,
+    messageId: seal.messageId, providerMessageId: seal.providerMessageId,
+    mediaId: seal.mediaId, nodeId: seal.nodeId, rootStamp: seal.rootStamp,
+    sourceIncarnation: seal.sourceIncarnation, sourceSequence: seal.sourceSequence,
+    status, pixelBytes: seal.pixelBytes, pixelSha256: seal.pixelSha256,
+    conversationId: current.conversationId, recordingGeneration: current.recordingGeneration,
+    tab: current.tab, documentId: current.documentId,
+    documentGeneration: current.documentGeneration, spaEpoch: current.spaEpoch };
 }
 
 function ownsDocument(source) {
@@ -1646,6 +1994,22 @@ function ownsDocument(source) {
     !Object.prototype.hasOwnProperty.call(terminalDocuments, key) &&
     !(Array.isArray(retiredDocuments[key]) && retiredDocuments[key].includes(source.documentId))
   );
+}
+
+/** Browser-issued sender plus independently registered document incarnation, not rich authority.
+ * No same-document SPA navigation proof or DOM/Fiber join exists at this layer. In particular,
+ * provisional rename must never relabel the original document's captured conversation. */
+function capturedSender(source, conversationId = null) {
+  const registered = source && registeredDocuments[String(source.tab)];
+  const epoch = registered?.documentId === source?.documentId &&
+    Number.isSafeInteger(registered.epoch) && registered.epoch > 0 ? registered.epoch : null;
+  return {
+    tab: source.tab,
+    documentId: source.documentId,
+    navigationEpoch: epoch,
+    routeVerified: conversationId !== null,
+    conversationId
+  };
 }
 
 async function markTerminal(id) {
@@ -2844,10 +3208,11 @@ function serializeTab(tab, operation) {
   return tracked;
 }
 
-async function currentConversationDocument(source, conversationId) {
+async function currentConversationDocument(source, conversationId, requireSettled = false) {
   if (!conversationId || !ownsDocument(source)) return false;
   const tab = await chrome.tabs.get(source.tab).catch(() => null);
-  return Boolean(tab && !tab.pendingUrl && ownsDocument(source) && conversationFromUrl(tab.url) === conversationId);
+  return Boolean(tab && !tab.pendingUrl && (!requireSettled || tab.status === 'complete') &&
+    ownsDocument(source) && conversationFromUrl(tab.url) === conversationId);
 }
 
 /** Bind the exact accepted opening before any path can publish its first recorder evidence. */
@@ -2967,9 +3332,230 @@ const HANDLERS = {
   },
   async register_document(_message, sender) {
     const result = await registerDocument(sender, _message);
+    if (result?.ok === true) {
+      const issued = await issueRecordingGeneration(result);
+      if (!issued.ok) return issued;
+      result.recordingGeneration = issued.recordingGeneration;
+    }
     if (result?.ok === true) void maintain(true).catch(() => undefined);
     if (result && result.ok === true) void recoverDeferredRevivals().catch(() => undefined);
     return result;
+  },
+  async recording_generation(_message, _sender, source) {
+    return issueRecordingGeneration(source);
+  },
+  /** Fixed pre-scan attestation. Chrome's top-frame MessageSender and its previously
+   * registered document/issuance are checked here; HTTP main has no Chrome sender API.
+   * This returns a capture ticket only, never journal, message or native-action authority. */
+  async rich_capture_begin(message, sender, source) {
+    const refused = { ok: false, error: 'rich_capture_unavailable' };
+    // This read-only probe shares this tab's queue with canonical events. Bound the ENTIRE
+    // operation, including Chrome tab queries and response parsing: a stalled provider or
+    // app cannot delay ordinary transcript custody after content's own capture deadline.
+    let deadline = null;
+    let timedOut = false;
+    const work = (async () => {
+    const route = cleanConversationId(message.conversationId);
+    const generation = validRecordingGeneration(message.recordingGeneration);
+    const owner = source && registeredDocuments[String(source.tab)];
+    if (!route || !generation || !Number.isSafeInteger(message.navigationEpoch) ||
+        message.navigationEpoch !== source.navigationEpoch ||
+        !owner || owner.documentId !== source.documentId ||
+        !Number.isSafeInteger(owner.epoch) || owner.epoch < 1 ||
+        conversationFromUrl(sender?.url) !== route ||
+        issuedForSender(source, {
+          recordingGeneration: generation, recordingNavigationEpoch: source.navigationEpoch
+        }) !== generation ||
+        !(await currentConversationDocument(source, route, true))) {
+      return refused;
+    }
+    if (!ownsDocument(source) || registeredDocuments[String(source.tab)] !== owner)
+      return refused;
+    // A capture probe must never run the normal call() discovery/provision/re-pair path
+    // while holding this tab's queue: five 1.2s /hello attempts would block an already
+    // authored events batch after the content script gave up waiting. The existing
+    // registered generation establishes a recently paired app only when this independently
+    // cached endpoint is still warm and explicitly protocol-compatible.
+    const capturePort = port;
+    const captureToken = token;
+    if (!Number.isInteger(capturePort) || !PORTS.includes(capturePort) ||
+        !captureToken || disconnected || portCompatible !== true ||
+        !Number.isFinite(portCheckedAt) || Date.now() < portCheckedAt ||
+        Date.now() - portCheckedAt >= PORT_TRUST_MS) return refused;
+    const attested = {
+      conversationId: route, tab: source.tab, documentId: source.documentId,
+      documentGeneration: owner.epoch, spaEpoch: source.navigationEpoch, recordingGeneration: generation
+    };
+    const result = await fetchBounded(`http://127.0.0.1:${capturePort}/rich/capture/begin`, {
+      method: 'POST', cache: 'no-store', body: JSON.stringify(attested),
+      headers: { 'content-type': 'application/json', ...versionHeaders(), authorization: `Bearer ${captureToken}` }
+    }, 1_250).then(async response => ({ ok: response.ok, data: await response.json().catch(() => null) }))
+      .catch(() => refused);
+    // The app lookup may have yielded to a physical or SPA navigation. A response for the
+    // old sender is never presented as a ticket for the new route/document.
+    if (port !== capturePort || token !== captureToken || disconnected || portCompatible !== true ||
+        !ownsDocument(source) || registeredDocuments[String(source.tab)] !== owner ||
+        conversationFromUrl(sender?.url) !== route ||
+        issuedForSender(source, {
+          recordingGeneration: generation, recordingNavigationEpoch: source.navigationEpoch
+        }) !== generation ||
+        !(await currentConversationDocument(source, route, true))) {
+      return refused;
+    }
+    const capture = result.ok && result.data?.capture;
+    if (!capture || typeof capture !== 'object' || Array.isArray(capture) ||
+        typeof capture.captureId !== 'string' || !RICH_CAPTURE_ID.test(capture.captureId) ||
+        typeof capture.sessionId !== 'string' || !/^[a-z0-9_-]{1,128}$/i.test(capture.sessionId) ||
+        !Number.isSafeInteger(capture.bindingRevision) || capture.bindingRevision < 0 ||
+        capture.conversationId !== route || capture.documentId !== source.documentId ||
+        capture.documentGeneration !== owner.epoch || capture.spaEpoch !== source.navigationEpoch ||
+        capture.recordingGeneration !== generation || timedOut ||
+        !roomForRichIssuance(source.tab, source.documentId)) {
+      return refused;
+    }
+    // The ticket becomes a worker-attested issuance only after its exact Chrome
+    // document, SPA and original grant are committed to session storage. Never
+    // expose an unpersisted main ticket to content as if it had journal custody.
+    const issuance = {
+      captureId: capture.captureId, tab: source.tab, documentId: source.documentId,
+      documentGeneration: owner.epoch, spaEpoch: source.navigationEpoch,
+      conversationId: route, recordingGeneration: generation,
+      sessionId: capture.sessionId, bindingRevision: capture.bindingRevision,
+      expiresAt: Date.now() + RICH_ISSUANCE_MS, scanToken: null, pairs: {}
+    };
+    if (workerRichIssuances[capture.captureId] || timedOut ||
+        !ownsDocument(source) || registeredDocuments[String(source.tab)] !== owner) return refused;
+    workerRichIssuances[capture.captureId] = issuance;
+    try { await persistLive(); }
+    catch {
+      if (workerRichIssuances[capture.captureId] === issuance)
+        delete workerRichIssuances[capture.captureId];
+      return refused;
+    }
+    if (timedOut || !validRichIssuance(capture.captureId, issuance) ||
+        workerRichIssuances[capture.captureId] !== issuance ||
+        port !== capturePort || token !== captureToken || disconnected || portCompatible !== true ||
+        registeredDocuments[String(source.tab)] !== owner ||
+        conversationFromUrl(sender?.url) !== route ||
+        !(await currentConversationDocument(source, route, true)) || timedOut) {
+      if (workerRichIssuances[capture.captureId] === issuance)
+        delete workerRichIssuances[capture.captureId];
+      return refused;
+    }
+    return { ok: true, capture: {
+      captureId: capture.captureId, conversationId: route, sessionId: capture.sessionId,
+      bindingRevision: capture.bindingRevision, documentId: source.documentId,
+      documentGeneration: owner.epoch, spaEpoch: source.navigationEpoch,
+      recordingGeneration: generation
+    } };
+    })();
+    try {
+      return await Promise.race([
+        work,
+        new Promise(resolve => { deadline = setTimeout(() => { timedOut = true; resolve(refused); }, 1_250); })
+      ]);
+    } finally {
+      if (deadline !== null) clearTimeout(deadline);
+    }
+  },
+  /** Pixel-specific pre-scan grant. This is only a Chrome-sender-attested lease for one
+   * ALREADY committed canonical slot. It cannot authorize bytes, media publication or
+   * a text/action event; those need a separate exact sealed receipt. */
+  async rich_pixel_begin(message, sender, source) {
+    const refused = { ok: false, error: 'rich_pixel_unavailable' };
+    let deadline = null;
+    let timedOut = false;
+    const work = (async () => {
+      const route = cleanConversationId(message.conversationId);
+      const generation = validRecordingGeneration(message.recordingGeneration);
+      const owner = source && registeredDocuments[String(source.tab)];
+      const target = {
+        messageId: message.messageId, providerMessageId: message.providerMessageId,
+        mediaId: message.mediaId, nodeId: message.nodeId
+      };
+      if (!route || !generation || !Number.isSafeInteger(message.navigationEpoch) ||
+          message.navigationEpoch !== source.navigationEpoch ||
+          typeof target.messageId !== 'string' || target.messageId.length < 1 || target.messageId.length > 190 ||
+          typeof target.providerMessageId !== 'string' ||
+            !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(target.providerMessageId) ||
+          typeof target.nodeId !== 'string' ||
+            !/^n-(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*))*$/.test(target.nodeId) ||
+          target.mediaId !== `media-${target.nodeId}` || target.mediaId.length > 190 ||
+          !owner || owner.documentId !== source.documentId ||
+          !Number.isSafeInteger(owner.epoch) || owner.epoch < 1 ||
+          conversationFromUrl(sender?.url) !== route ||
+          issuedForSender(source, { recordingGeneration: generation,
+            recordingNavigationEpoch: source.navigationEpoch }) !== generation ||
+          !(await currentConversationDocument(source, route, true))) return refused;
+      if (!ownsDocument(source) || registeredDocuments[String(source.tab)] !== owner) return refused;
+      // Never use discover()/pair() inside this tab's canonical event queue.
+      const capturePort = port, captureToken = token;
+      if (!Number.isInteger(capturePort) || !PORTS.includes(capturePort) || !captureToken ||
+          disconnected || portCompatible !== true || !Number.isFinite(portCheckedAt) ||
+          Date.now() < portCheckedAt || Date.now() - portCheckedAt >= PORT_TRUST_MS) return refused;
+      const attested = { conversationId: route, tab: source.tab,
+        documentId: source.documentId, documentGeneration: owner.epoch,
+        spaEpoch: source.navigationEpoch, recordingGeneration: generation, ...target };
+      const result = await fetchBounded(`http://127.0.0.1:${capturePort}/rich/pixel/begin`, {
+        method: 'POST', cache: 'no-store', body: JSON.stringify(attested),
+        headers: { 'content-type': 'application/json', ...versionHeaders(), authorization: `Bearer ${captureToken}` }
+      }, 1_250).then(async response => ({ ok: response.ok, data: await response.json().catch(() => null) }))
+        .catch(() => refused);
+      if (port !== capturePort || token !== captureToken || disconnected || portCompatible !== true ||
+          !ownsDocument(source) || registeredDocuments[String(source.tab)] !== owner ||
+          conversationFromUrl(sender?.url) !== route ||
+          issuedForSender(source, { recordingGeneration: generation,
+            recordingNavigationEpoch: source.navigationEpoch }) !== generation ||
+          !(await currentConversationDocument(source, route, true))) return refused;
+      const capture = result.ok && result.data?.capture;
+      if (!capture || typeof capture !== 'object' || Array.isArray(capture) ||
+          !RICH_CAPTURE_ID.test(capture.captureId || '') || capture.purpose !== 'page_pixel' ||
+          typeof capture.sessionId !== 'string' || !/^[a-z0-9_-]{1,128}$/i.test(capture.sessionId) ||
+          !Number.isSafeInteger(capture.bindingRevision) || capture.bindingRevision < 0 ||
+          capture.conversationId !== route || capture.documentId !== source.documentId ||
+          capture.documentGeneration !== owner.epoch || capture.spaEpoch !== source.navigationEpoch ||
+          capture.recordingGeneration !== generation ||
+          Object.keys(target).some(key => capture[key] !== target[key]) ||
+          !Number.isSafeInteger(capture.richRevision) || capture.richRevision < 1 ||
+          !Number.isSafeInteger(capture.slotVersion) || capture.slotVersion < 0 ||
+          (capture.sourceIncarnation !== null && !PIXEL_SOURCE_INCAR.test(capture.sourceIncarnation)) ||
+          (capture.sourceSequence !== null &&
+            (!Number.isSafeInteger(capture.sourceSequence) || capture.sourceSequence < 1)) ||
+          ((capture.sourceIncarnation === null) !== (capture.sourceSequence === null)) ||
+          timedOut || !roomForRichIssuance(source.tab, source.documentId)) return refused;
+      const issuance = { ...attested, purpose: 'page_pixel', captureId: capture.captureId,
+        sessionId: capture.sessionId, bindingRevision: capture.bindingRevision,
+        richRevision: capture.richRevision, slotVersion: capture.slotVersion,
+        sourceIncarnation: capture.sourceIncarnation, sourceSequence: capture.sourceSequence,
+        expiresAt: Date.now() + RICH_ISSUANCE_MS, scanToken: null, pairs: {} };
+      if (workerRichIssuances[capture.captureId] || timedOut || !ownsDocument(source) ||
+          registeredDocuments[String(source.tab)] !== owner) return refused;
+      workerRichIssuances[capture.captureId] = issuance;
+      try { await persistLive(); }
+      catch {
+        if (workerRichIssuances[capture.captureId] === issuance) delete workerRichIssuances[capture.captureId];
+        return refused;
+      }
+      if (timedOut || !validRichIssuance(capture.captureId, issuance) ||
+          workerRichIssuances[capture.captureId] !== issuance || port !== capturePort ||
+          token !== captureToken || disconnected || portCompatible !== true ||
+          registeredDocuments[String(source.tab)] !== owner ||
+          conversationFromUrl(sender?.url) !== route ||
+          !(await currentConversationDocument(source, route, true)) || timedOut) {
+        if (workerRichIssuances[capture.captureId] === issuance) delete workerRichIssuances[capture.captureId];
+        return refused;
+      }
+      return { ok: true, capture: { ...attested, purpose: 'page_pixel',
+        captureId: capture.captureId, sessionId: capture.sessionId,
+        bindingRevision: capture.bindingRevision, richRevision: capture.richRevision,
+        slotVersion: capture.slotVersion, sourceIncarnation: capture.sourceIncarnation,
+        sourceSequence: capture.sourceSequence } };
+    })();
+    try {
+      return await Promise.race([work, new Promise(resolve => {
+        deadline = setTimeout(() => { timedOut = true; resolve(refused); }, 1_250);
+      })]);
+    } finally { if (deadline !== null) clearTimeout(deadline); }
   },
   async status() {
     await load();
@@ -3145,7 +3731,7 @@ const HANDLERS = {
    * them, so the very first message of a fresh chat is durable before ChatGPT has
    * decided what to call the conversation.
    */
-  async events(message, _sender, source) {
+  async events(message, sender, source) {
     await load();
     if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
     const conversationId = cleanConversationId(message.conversationId);
@@ -3155,9 +3741,62 @@ const HANDLERS = {
     if (!ownsDocument(source) || (binding.projectBound && !await currentConversationDocument(source, conversationId)))
       return { ok: false, error: 'stale_document' };
     const key = tabKey(source);
-    const entries = (Array.isArray(message.entries) ? message.entries : []).map((entry) =>
-      entry && !entry.conversationId ? { ...entry, provisional: key } : entry
+    // The URL is checked against Chrome's tab state, not an entry or message body.
+    // This is still admission-time route evidence; it cannot certify when the page
+    // captured a DOM/Fiber rich root, so the main recorder remains fail-closed.
+    const hasRich = Array.isArray(message.entries) && message.entries.some(
+      (entry) => (entry?.event?.kind === 'assistant_message' && entry.event.rich !== undefined) ||
+        entry?.event?.kind === 'rich_media'
     );
+    // Both facts are issued by Chrome: sender.url is bound to this MessageSender and
+    // tabs.get is the current settled tab. A page/body route alone must never attest B.
+    const verifiedRoute = hasRich && conversationId &&
+      conversationFromUrl(sender?.url) === conversationId &&
+      await currentConversationDocument(source, conversationId, true) ? conversationId : null;
+    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
+    const entries = [];
+    for (const entry of Array.isArray(message.entries) ? message.entries : []) {
+      if (!entry || typeof entry !== 'object') continue;
+      const claimed = cleanConversationId(entry.conversationId);
+      const capture = capturedSender(source, claimed && claimed === verifiedRoute ? claimed : null);
+      // Do not let page-provided capture aliases survive in the observation itself. The
+      // trusted source is copied separately, and remains unchanged on later binding/replay.
+      const event = entry.event && typeof entry.event === 'object' ? { ...entry.event } : entry.event;
+      if (event) {
+        delete event.capture;
+        delete event.richCapture;
+        delete event.richOrigin;
+        delete event.recordingGeneration;
+        delete event.captureGeneration;
+        delete event.generation;
+      }
+      const richClaimed = event?.kind === 'assistant_message' && event.rich !== undefined;
+      const richReceipt = richClaimed
+        ? await attestRichRow(source, entry, event, verifiedRoute) : null;
+      const pixelClaimed = event?.kind === 'rich_media';
+      const pixelReceipt = pixelClaimed
+        ? await attestPixelRow(source, entry, event, verifiedRoute) : null;
+      // An unproven pixel event is pure optional decoration, never independent
+      // authored prose or a transcript gap. Never journal claimed pixels on failure.
+      if (pixelClaimed && !pixelReceipt) continue;
+      if (richClaimed && !richReceipt) {
+        delete event.rich;
+        delete event.fiberConversationId;
+        // A claimed presentation without original scan custody is neither an
+        // authored message nor native completion. It cannot create a first-sight
+        // session, worker, Goal candidate or recovery event by retaining its IDs.
+        if (typeof event.text !== 'string' && typeof event.renderedHtml !== 'string' &&
+            (!Array.isArray(event.attachments) || event.attachments.length === 0)) continue;
+      }
+      entries.push({
+        conversationId: entry.conversationId, agent: entry.agent,
+        agentCommandId: entry.agentCommandId, capture, event,
+        recordingGeneration: issuedForSender(source, entry),
+        richReceipt, richClaimed, pixelReceipt,
+        ...(!entry.conversationId ? { provisional: key } : {})
+      });
+    }
+    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
     enqueue(entries);
     let ackBound = 0;
     if (message.conversationId) {
@@ -3646,6 +4285,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     'plugin_refresh',
     'usage_observation',
     'events',
+    'recording_generation',
+    'rich_capture_begin',
+    'rich_pixel_begin',
     'bind',
     'activity',
     'activity_detail',
@@ -3715,7 +4357,14 @@ chrome.tabs.onRemoved.addListener((id) => {
   }
   void serializeTab(id, async () => {
     const documentId = await markTerminal(id);
-    return releaseTab(id, null, documentId);
+    try {
+      return await releaseTab(id, null, documentId);
+    } finally {
+      // onRemoved proves physical closure. Navigation and reload also use releaseTab,
+      // but must retain this registration until Chrome proves a replacement document.
+      delete registeredDocuments[String(id)];
+      await persistLive();
+    }
   }).catch(() => undefined);
 });
 

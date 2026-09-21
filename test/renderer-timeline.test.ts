@@ -1,12 +1,14 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
+import sharp from 'sharp';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DEFAULT_GOAL_SYSTEM_PROMPT } from '../src/shared/goal.js';
 import { prependUserPrompt } from '../src/shared/user-prompt.js';
-import type { Handoff, SessionEvent, SessionSummary } from '../src/shared/session.js';
+import type { Handoff, RichMediaState, SessionEvent, SessionSummary } from '../src/shared/session.js';
 import type { InputArgs, InputEntry } from '../src/main/session/input.js';
 import type { LocalProject } from '../src/shared/projects.js';
+import type { RichResponse } from '../src/shared/rich-response.js';
 vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTerminal: () => ({
   // The real contract (workspace-terminal.ts) is element/show/hide/update, and the pane is CLOSED
   // until something opens it: the work panel reads a pane's own `hidden` as the single statement
@@ -191,12 +193,18 @@ async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers
     update: { current: '2.0.3', latest: null, stage: 'idle', error: null, checkedAt: null }
   };
   const ok = (data: any) => Promise.resolve({ ok: true, data });
-  const live = { events: [...events], inputs: [] as InputEntry[], sent: [] as InputArgs[], automation: 'off', controlCalls: [] as Array<{ id: string; action: string }>, compacting: false, finishHeld: true };
+  const live = { events: [...events], inputs: [] as InputEntry[], sent: [] as InputArgs[], automation: 'off', controlCalls: [] as Array<{ id: string; action: string }>, compacting: false, finishHeld: true,
+    selectionReports: [] as Array<{ sessionId: string | null; rendererGeneration: number }> };
+  let mainSelectionGeneration = 0;
   let sessionListener: () => void = () => undefined;
   let writeSessionListener: (id: string) => void = () => undefined;
   const taskProgressListeners = new Set<(progress: any) => void>();
   const api: any = new Proxy(
     {
+      reportUiSelection: vi.fn((selection: { sessionId: string | null; rendererGeneration: number }) => {
+        live.selectionReports.push(selection);
+        return ok({ sessionId: selection.sessionId, generation: ++mainSelectionGeneration });
+      }),
       getState: () => ok(state),
       getChatModels: () => ok({ state: 'ready', requestedAt: 1, observedAt: Date.now(), models: [{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', efforts: options.pro ? ['high', 'pro'] : ['none', 'high'] }] }),
       getSessionControls: (id: string) => ok({ sessionId: id, conversationId: 'chat-a', automation: live.automation, activeTurnId: 'held-turn', finishHeld: live.finishHeld, blocked: '', job: live.compacting ? { busy: true } : null }),
@@ -302,6 +310,229 @@ async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers
     }
   };
 }
+
+/** Recorded inert controls remain focusable DOM until their selected transcript is retired. */
+function retiringRichAnswer(): SessionEvent {
+  const rich: RichResponse = {
+    version: 1, status: 'available', reason: null,
+    conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    messageId: 'retired-selection', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+    revision: 1, accessibleText: 'Old selected answer', nodes: [{
+      id: 'old-choice', kind: 'control', control: 'choice', label: 'Old session choice',
+      groupId: 'old-group', value: 'old', selected: false, disabled: false, children: []
+    }]
+  };
+  return { kind: 'assistant_message', seq: 1, time: T0, source: 'extension',
+    messageId: rich.messageId, message: text('Old selected answer'), final: true, rich };
+}
+
+it('keeps a historical assistant’s original as an explicit manual button without opening on hydration, updates or synthetic clicks', async () => {
+  const answer = retiringRichAnswer();
+  if (answer.kind !== 'assistant_message' || !answer.rich) throw new Error('Missing exact rich assistant fixture');
+  const originalRich = answer.rich;
+  const event: SessionEvent = { ...answer, richOrigin: {
+    conversationId: originalRich.conversationId, bindingRevision: 0,
+    documentId: 'recorded-document', navigationEpoch: 1
+  } };
+  const app = await boot([event]);
+  const opener = vi.fn(async () => ({ ok: true, data: true }));
+  (app.w as any).api.openRichOriginal = opener;
+  const button = app.w.document.querySelector<HTMLButtonElement>('.said .rich-open-original');
+  expect(button?.textContent).toBe('Open original in ChatGPT');
+  expect(app.w.document.querySelector('[data-rich-control="old-choice"]')?.getAttribute('aria-disabled')).toBe('true');
+  await app.append([{ ...event, seq: 2, rich: { ...originalRich, revision: 2 } }]);
+  await settle();
+  expect(opener).not.toHaveBeenCalled();
+  app.w.document.querySelector<HTMLButtonElement>('.said .rich-open-original')!.click();
+  expect(opener).not.toHaveBeenCalled();
+  app.w.document.getElementById('newChat')!.click();
+  await settle();
+  button?.click();
+  expect(opener).not.toHaveBeenCalled();
+  expect(app.live.sent).toHaveLength(0);
+});
+
+it('reports startup New Chat, sidebar A→B→A, same-id Write Directly and New Chat in increasing renderer epochs', async () => {
+  const first = summary([]), second = { ...first, id: '2026-09-02-test0002' };
+  const { w, live, writeSession } = await boot([], true, [], [], { sessions: [first, second] });
+  expect(live.selectionReports.slice(0, 2).map(row => row.sessionId)).toEqual([null, first.id]);
+  (w.document.querySelector(`#sessionList [data-id="${second.id}"]`) as HTMLElement).click();
+  (w.document.querySelector(`#sessionList [data-id="${first.id}"]`) as HTMLElement).click();
+  writeSession(first.id);
+  w.document.getElementById('newChat')!.click();
+  await settle();
+  expect(live.selectionReports.map(row => row.sessionId)).toEqual([null, first.id, second.id, first.id, first.id, null]);
+  expect(live.selectionReports.map(row => row.rendererGeneration)).toEqual(
+    [...live.selectionReports.map(row => row.rendererGeneration)].sort((a, b) => a - b)
+  );
+  expect(new Set(live.selectionReports.map(row => row.rendererGeneration)).size).toBe(live.selectionReports.length);
+});
+
+it('reports Settings and hidden Chat as null, then freshly witnesses the selected session on return', async () => {
+  const { w, live } = await boot([]);
+  const id = summary([]).id;
+  w.document.getElementById('chatSettingsBtn')!.click();
+  await settle();
+  expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+  w.document.getElementById('backToChat')!.click();
+  await settle();
+  expect(live.selectionReports.at(-1)?.sessionId).toBe(id);
+  w.document.getElementById('sidebarPlugins')!.click();
+  await settle();
+  expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+  w.document.getElementById('backToChat')!.click();
+  await settle();
+  expect(live.selectionReports.at(-1)?.sessionId).toBe(id);
+});
+
+it('does not infer deleted selection from a bounded first page and retires only confirmed absence', async () => {
+  const first = summary([]), other = { ...first, id: '2026-09-02-test0002' };
+  const rows = [first, other];
+  const { w, live, notifySession } = await boot([], true, [], [], { sessions: rows });
+  const api = (w as any).api;
+  const before = live.selectionReports.length;
+  api.listSessions = () => Promise.resolve({ ok: true, data: { sessions: [other], total: 61, nextCursor: { id: other.id, updatedAt: other.updatedAt }, activeId: other.id, blocked: [], pressure: [] } });
+  api.getSession = vi.fn(async (id: string) => ({ ok: true, data: { summary: id === first.id ? first : other, events: [], total: 0, nextFrom: 0 } }));
+  notifySession(); await settle(450);
+  expect(live.selectionReports).toHaveLength(before);
+  expect(w.document.getElementById('chatTitle')!.textContent).toContain(first.title);
+  api.getSession = vi.fn(async () => ({ ok: false, error: 'Temporary storage failure' }));
+  notifySession(); await settle(450);
+  expect(live.selectionReports).toHaveLength(before);
+  expect(w.document.getElementById('chatTitle')!.textContent).toContain(first.title);
+  api.getSession = vi.fn(async () => ({ ok: false, error: 'Session not found' }));
+  notifySession(); await settle(450);
+  expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+});
+
+it('revokes the exact selected session after deletion and reports a new project draft transition', async () => {
+  const project = { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', name: 'Project', path: '/project', createdAt: 1 };
+  const { w, live } = await boot([], true, [], [project]);
+  const api = (w as any).api;
+  api.deleteSession = vi.fn(async () => ({ ok: true, data: true }));
+  (w.document.querySelector(`#sessionList [data-id="${summary([]).id}"] .sess-del`) as HTMLElement).click();
+  await settle();
+  expect(api.deleteSession).toHaveBeenCalledExactlyOnceWith(summary([]).id);
+  expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+  expect(w.document.getElementById('sessionControlStatus')!.textContent).toBe('');
+  const before = live.selectionReports.length;
+  (w.document.querySelector(`[data-new-project="${project.id}"]`) as HTMLElement).click();
+  await settle();
+  expect(live.selectionReports).toHaveLength(before + 1);
+  expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+  api.removeProject = vi.fn(async () => ({ ok: true, data: { ...project, ungrouped: true } }));
+  (w.document.querySelector('.project-remove') as HTMLElement).click();
+  await settle();
+  expect(live.selectionReports).toHaveLength(before + 2);
+  expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+});
+
+it('retires deleted rich controls before the null report even when the follow-up list stalls and fails', async () => {
+  const { w, live } = await boot([retiringRichAnswer()]);
+  const api = (w as any).api;
+  const draft = w.document.getElementById('chatInput') as HTMLTextAreaElement;
+  // The existing New Chat draft belongs to its own key, independent of A's deletion.
+  w.document.getElementById('newChat')!.click();
+  draft.value = 'Preserve my new conversation';
+  draft.dispatchEvent(new w.Event('input', { bubbles: true }));
+  (w.document.querySelector(`#sessionList [data-id="${summary([]).id}"]`) as HTMLElement).click();
+  await settle();
+  const timeline = w.document.getElementById('timeline')!;
+  const oldChoice = timeline.querySelector<HTMLElement>('.rich-control[data-rich-node-id="old-choice"]')!;
+  expect(oldChoice.textContent).toContain('Old session choice');
+  expect(oldChoice.isConnected).toBe(true);
+  let atNullReport: { oldConnected: boolean; oldInteractive: boolean } | null = null;
+  const originalReport = api.reportUiSelection;
+  api.reportUiSelection = vi.fn((payload: { sessionId: string | null; rendererGeneration: number }) => {
+    if (payload.sessionId === null) atNullReport = {
+      oldConnected: oldChoice.isConnected,
+      oldInteractive: oldChoice.isConnected && !timeline.hasAttribute('inert')
+    };
+    return originalReport(payload);
+  });
+  let failList!: (reply: unknown) => void;
+  api.listSessions = vi.fn(() => new Promise(resolve => { failList = resolve; }));
+  api.deleteSession = vi.fn(async () => ({ ok: true, data: true }));
+  (w.document.querySelector(`#sessionList [data-id="${summary([]).id}"] .sess-del`) as HTMLElement).click();
+  await vi.waitFor(() => expect(api.listSessions).toHaveBeenCalled());
+  expect(atNullReport).toEqual({ oldConnected: false, oldInteractive: false });
+  expect(timeline.textContent).not.toContain('Old session choice');
+  expect(timeline.querySelector('.rich-control')).toBeNull();
+  expect(w.document.getElementById('sessionControlStatus')!.textContent).toBe('');
+  expect(draft.value).toBe('Preserve my new conversation');
+  expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
+  failList({ ok: false, error: 'List temporarily unavailable' });
+  await settle();
+  expect(timeline.querySelector('.rich-control')).toBeNull();
+  expect(timeline.textContent).not.toContain('Old selected answer');
+  expect(draft.value).toBe('Preserve my new conversation');
+});
+
+it('retires confirmed-missing rich controls at the null report and ignores later failed refreshes', async () => {
+  const answer = retiringRichAnswer();
+  const first = summary([answer]), other = { ...first, id: '2026-09-02-test0002', title: 'Other session' };
+  const { w, live, notifySession } = await boot([answer], true, [], [], { sessions: [first, other] });
+  const api = (w as any).api;
+  const timeline = w.document.getElementById('timeline')!;
+  const oldChoice = timeline.querySelector<HTMLElement>('.rich-control[data-rich-node-id="old-choice"]')!;
+  expect(oldChoice.isConnected).toBe(true);
+  let atNullReport: { oldConnected: boolean; oldInteractive: boolean } | null = null;
+  const originalReport = api.reportUiSelection;
+  api.reportUiSelection = vi.fn((payload: { sessionId: string | null; rendererGeneration: number }) => {
+    if (payload.sessionId === null) atNullReport = {
+      oldConnected: oldChoice.isConnected,
+      oldInteractive: oldChoice.isConnected && !timeline.hasAttribute('inert')
+    };
+    return originalReport(payload);
+  });
+  api.listSessions = vi.fn(async () => ({ ok: true, data: {
+    sessions: [other], total: 61, nextCursor: { id: other.id, updatedAt: other.updatedAt },
+    activeId: other.id, blocked: [], pressure: []
+  } }));
+  let resolveExistence!: (reply: unknown) => void;
+  api.getSession = vi.fn((_id: string, options?: { limit?: number }) => options?.limit === 1
+    ? new Promise(resolve => { resolveExistence = resolve; })
+    : Promise.resolve({ ok: true, data: { summary: first, events: [answer], total: 1, nextFrom: 2 } }));
+  notifySession();
+  await vi.waitFor(() => expect(resolveExistence).toBeTypeOf('function'));
+  expect(oldChoice.isConnected).toBe(true); // A missing newest-page row is not deletion proof.
+  resolveExistence({ ok: false, error: 'Session not found' });
+  await vi.waitFor(() => expect(live.selectionReports.at(-1)?.sessionId).toBeNull());
+  expect(atNullReport).toEqual({ oldConnected: false, oldInteractive: false });
+  expect(timeline.querySelector('.rich-control')).toBeNull();
+  let failNextList!: (reply: unknown) => void;
+  api.listSessions = vi.fn(() => new Promise(resolve => { failNextList = resolve; }));
+  notifySession();
+  await vi.waitFor(() => expect(api.listSessions).toHaveBeenCalled());
+  expect(timeline.textContent).not.toContain('Old selected answer');
+  failNextList({ ok: false, error: 'Storage temporarily unavailable' });
+  await settle();
+  expect(timeline.querySelector('.rich-control')).toBeNull();
+  expect(timeline.textContent).not.toContain('Old selected answer');
+});
+
+it('cannot repaint B from an old A→B→A acknowledgment or failed latest witness', async () => {
+  const first = summary([]), second = { ...first, id: '2026-09-02-test0002', title: 'Selected B' };
+  const { w, writeSession } = await boot([], true, [], [], { sessions: [first, second] });
+  const api = (w as any).api;
+  const pending: Array<{ payload: { sessionId: string | null; rendererGeneration: number }; resolve: (reply: any) => void }> = [];
+  api.reportUiSelection = vi.fn((payload: { sessionId: string | null; rendererGeneration: number }) =>
+    new Promise(resolve => pending.push({ payload, resolve })));
+  (w.document.querySelector(`#sessionList [data-id="${second.id}"]`) as HTMLElement).click();
+  (w.document.querySelector(`#sessionList [data-id="${first.id}"]`) as HTMLElement).click();
+  (w.document.querySelector(`#sessionList [data-id="${second.id}"]`) as HTMLElement).click();
+  expect(pending.map(row => row.payload.sessionId)).toEqual([second.id, first.id, second.id]);
+  pending[2]!.resolve({ ok: false, error: 'Witness unavailable' });
+  pending[1]!.resolve({ ok: true, data: { sessionId: first.id, generation: 100 } });
+  pending[0]!.resolve({ ok: true, data: { sessionId: second.id, generation: 99 } });
+  await settle();
+  expect(w.document.getElementById('chatTitle')!.textContent).toContain('Selected B');
+  writeSession(second.id);
+  expect(pending[3]!.payload).toEqual({ sessionId: second.id, rendererGeneration: pending[2]!.payload.rendererGeneration + 1 });
+  pending[3]!.resolve({ ok: true, data: { sessionId: second.id, generation: 101 } });
+  await settle();
+  expect(w.document.getElementById('chatTitle')!.textContent).toContain('Selected B');
+});
 
 it('patches native reactions in place and hides streamed envelopes without changing authored messages', async () => {
   const user: SessionEvent = { kind: 'user_message', seq: 1, origin: 1, time: T0, source: 'extension', messageId: 'reaction-user', message: text('Question') };
@@ -946,6 +1177,49 @@ it('reserves geometry and hydrates multiple native generated images independentl
   pending.get('blue.webp')?.({ ok: true, data: 'data:image/webp;base64,Ymx1ZQ==' });
   await settle();
   expect(frames[0]!.querySelector('img')?.getAttribute('src')).toContain('Ymx1ZQ==');
+});
+
+it('inserts a locally supplied valid WebP for an image-only final without fabricating an assistant text row', async () => {
+  const app = await boot([]);
+  const bytes = await sharp({ create: { width: 4, height: 3, channels: 3,
+    background: '#335577' } }).webp().toBuffer();
+  expect(await sharp(bytes).metadata()).toMatchObject({ format: 'webp', width: 4, height: 3 });
+  const preview = `data:image/webp;base64,${bytes.toString('base64')}`;
+  const getImage = vi.fn(async () => ({ ok: true, data: preview }));
+  (app.w as any).api.getSessionImage = getImage;
+  await app.append([{ seq: 1, time: T0, source: 'extension', kind: 'native_image',
+    messageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb', providerAssetId: 'file_image_only',
+    providerRole: 'tool', providerChannel: 'final', providerStatus: 'finished_successfully',
+    width: 1024, height: 768, previewStatus: 'available', previewWidth: 4, previewHeight: 3,
+    asset: { id: 'abcdef12.bin', mimeType: 'image/webp', bytes: bytes.length } }]);
+  const row = app.w.document.querySelector<HTMLElement>('.said.native-image');
+  expect(row).not.toBeNull();
+  expect(row!.hidden).toBe(false);
+  expect(app.w.document.querySelectorAll('.ev-assistant_message')).toHaveLength(0);
+  expect(row!.closest('.generated-image-gallery')).not.toBeNull();
+  expect(row!.querySelector('.generated-image-frame')?.getAttribute('style')).toContain('1024 / 768');
+  expect(row!.querySelector('img')?.getAttribute('src')).toBe(preview);
+  expect(row!.querySelector('img')?.getAttribute('alt')).toBe('ChatGPT generated image');
+  expect(getImage).toHaveBeenCalledExactlyOnceWith(summary([]).id, 'abcdef12.bin');
+  // jsdom verifies a real-image URL reaches a visible DOM row, not raster decoding or pixels.
+  // Browser/Electron and installed-image acceptance remain separate evidence.
+});
+
+it.each([
+  'https://example.invalid/unverified-image.webp',
+  'data:image/png;base64,Ymx1ZQ==',
+  'data:image/webp;base64,not_valid_base64'
+])('refuses a non-local or mismatched native generated-image reader reply (%s)', async reply => {
+  const app = await boot([]);
+  (app.w as any).api.getSessionImage = vi.fn(async () => ({ ok: true, data: reply }));
+  await app.append([{ seq: 1, time: T0, source: 'extension', kind: 'native_image',
+    messageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb', providerAssetId: 'file_local_only',
+    providerRole: 'assistant', providerChannel: 'final', providerStatus: 'finished_successfully',
+    previewStatus: 'available', previewWidth: 4, previewHeight: 3,
+    asset: { id: 'abcdef1234567890abcdef1234567890.bin', mimeType: 'image/webp', bytes: 12 } }]);
+  const frame = app.w.document.querySelector<HTMLElement>('.generated-image-frame')!;
+  expect(frame.querySelector('img')).toBeNull();
+  expect(frame.textContent).toContain('Image preview unavailable');
 });
 
 it('keeps generated-image metadata visible when recording storage is full', async () => {
@@ -1819,6 +2093,211 @@ it('keeps a streaming message anchor and its following tool group across canonic
   expect(timeline.querySelector<HTMLElement>('.ev-assistant_message')!.dataset.timelineKey).toBe(anchor);
   expect(timeline.querySelector('.tool-group')).toBe(group);
   expect(group.open).toBe(true);
+});
+
+it('shows an image-only rich answer and repaints same-text rich revisions without changing its row, viewport or focused region', async () => {
+  const rich = (revision: number, label: string): RichResponse => ({
+    version: 1, status: 'available', reason: null,
+    conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    messageId: 'rich-only', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb', revision,
+    accessibleText: label,
+    nodes: [{ id: 'diagram', kind: 'group', layout: 'diagram', children: [
+      { id: 'label', kind: 'text', style: 'body', text: label },
+      { id: 'illustration', kind: 'image', mediaId: 'image-one', alt: 'Illustration', width: 4, height: 3 }
+    ] }]
+  });
+  const original: Extract<SessionEvent, { kind: 'assistant_message' }> = {
+    kind: 'assistant_message', seq: 1, origin: 1, time: T0, source: 'extension', messageId: 'rich-only',
+    message: text(''), final: true, rich: rich(1, 'First layout')
+  };
+  const { w, append } = await boot([original, toolCall(2, 'following'), toolCall(3, 'second')]);
+  const pane = w.document.getElementById('chatBody')!;
+  const timeline = w.document.getElementById('timeline')!;
+  const row = timeline.querySelector<HTMLElement>('.ev-assistant_message')!;
+  // jsdom does not measure geometry; make a genuinely scrollable viewport and a stable
+  // canonical-row rectangle so this tests anchor retention rather than bottom-following.
+  Object.defineProperties(pane, { clientHeight: { value: 400 }, scrollHeight: { value: 1000 } });
+  row.getBoundingClientRect = () => ({ top: 200 - pane.scrollTop, bottom: 300 - pane.scrollTop,
+    height: 100 } as DOMRect);
+  expect(row.hidden).toBe(false);
+  expect(row.textContent).toContain('First layout');
+  expect(row.querySelector('img')).toBeNull();
+  const region = row.querySelector<HTMLElement>('.rich-diagram')!;
+  region.focus();
+  expect(w.document.activeElement).toBe(region);
+  pane.scrollTop = 140;
+  const group = timeline.querySelector<HTMLDetailsElement>('.tool-group')!;
+  group.open = true;
+  group.dispatchEvent(new w.Event('toggle'));
+  await append([{ ...original, seq: 4, rich: rich(2, 'Updated layout') }]);
+  const updated = timeline.querySelector<HTMLElement>('.ev-assistant_message')!;
+  expect(updated).toBe(row);
+  expect(updated.dataset.timelineKey).toBe(row.dataset.timelineKey);
+  expect(updated.textContent).toContain('Updated layout');
+  expect(updated.textContent).not.toContain('First layout');
+  expect(w.document.activeElement).toBe(updated.querySelector('.rich-diagram'));
+  expect(pane.scrollTop).toBe(140);
+  expect(timeline.querySelector('.tool-group')).toBe(group);
+  expect(group.open).toBe(true);
+});
+
+it('repaints exact rich image metadata in place, and a cleanup revision retires a pending local viewer', async () => {
+  const rich: RichResponse = {
+    version: 1, status: 'available', reason: null,
+    conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    messageId: 'rich-with-preview', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb', revision: 1,
+    accessibleText: 'Blue forest', nodes: [
+      { id: 'description', kind: 'text', style: 'body', text: 'Forest and coast' },
+      { id: 'figure', kind: 'image', mediaId: 'forest-media', alt: 'Forest', width: 1024, height: 768 }
+    ]
+  };
+  const pending: RichMediaState = { mediaId: 'forest-media', nodeId: 'figure',
+    source: { kind: 'page', nodeId: 'figure' }, status: 'pending' };
+  const available: RichMediaState = { ...pending, status: 'available', previewWidth: 320, previewHeight: 180,
+    asset: { id: 'abcdef12.bin', mimeType: 'image/webp', bytes: 12 } };
+  const event: Extract<SessionEvent, { kind: 'assistant_message' }> = {
+    kind: 'assistant_message', seq: 1, origin: 1, time: T0, source: 'extension',
+    messageId: rich.messageId, providerMessageId: rich.providerMessageId!,
+    message: text(''), final: true, rich, richMedia: [pending]
+  };
+  const app = await boot([event]);
+  const { w, append } = app;
+  const row = w.document.querySelector<HTMLElement>('.ev-assistant_message')!;
+  expect(row.querySelector('.rich-image-slot')?.textContent).toContain('loading');
+  expect(row.querySelector('.rich-image-slot button')).toBeNull();
+  let finish!: (result: unknown) => void;
+  const getImage = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+  (w as any).api.getSessionImage = getImage;
+  // These are synthetic canonical states: production Task9 currently cannot publish available assets.
+  await append([{ ...event, seq: 2, richMedia: [available] }]);
+  expect(w.document.querySelector('.ev-assistant_message')).toBe(row);
+  const button = row.querySelector<HTMLButtonElement>('.rich-image-slot button')!;
+  expect(button.textContent).toBe('View saved preview');
+  button.click();
+  // Inline hydration and the explicitly opened viewer each use the fixed local reader.
+  expect(getImage).toHaveBeenCalledTimes(2);
+  expect(getImage).toHaveBeenNthCalledWith(1, summary([]).id, 'abcdef12.bin');
+  expect(getImage).toHaveBeenNthCalledWith(2, summary([]).id, 'abcdef12.bin');
+  expect(w.document.querySelector('.rich-image-viewer')).toBeNull();
+  await append([{ ...event, seq: 3, richMedia: [{ ...pending, status: 'unavailable', reason: 'removed' }],
+    retiredRichImageAssetIds: ['abcdef12.bin'] }]);
+  expect(w.document.querySelector('.ev-assistant_message')).toBe(row);
+  expect(row.querySelector('.rich-image-slot')?.textContent).toContain('removed');
+  expect(row.querySelector('.rich-image-slot button')).toBeNull();
+  finish({ ok: true, data: 'data:image/webp;base64,UklGRgAAAAA=' });
+  await settle();
+  expect(w.document.querySelector('.rich-image-viewer')).toBeNull();
+  expect(row.textContent).toContain('Forest and coast');
+  expect(row.querySelectorAll('img[src]')).toHaveLength(0);
+});
+
+it('preserves an open viewer across another image row revision, then closes it on New Chat and return', async () => {
+  const rich: RichResponse = { version: 1, status: 'available', reason: null,
+    conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    messageId: 'rich-image-switch', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+    revision: 1, accessibleText: 'Preview', nodes: [
+      { id: 'figure', kind: 'image', mediaId: 'media-one', alt: 'Coast', width: 320, height: 180 }
+    ] };
+  const media: RichMediaState = { mediaId: 'media-one', nodeId: 'figure', source: { kind: 'page', nodeId: 'figure' },
+    status: 'available', previewWidth: 320, previewHeight: 180,
+    asset: { id: 'abcdef12.bin', mimeType: 'image/webp', bytes: 12 } };
+  const event: SessionEvent = { kind: 'assistant_message', seq: 1, time: T0, source: 'extension',
+    messageId: rich.messageId, message: text(''), final: true, rich, richMedia: [media] };
+  const otherRich: RichResponse = { ...rich, messageId: 'unrelated-image', nodes: [
+    { id: 'unrelated-figure', kind: 'image', mediaId: 'unrelated-media', alt: 'Other', width: 320, height: 180 }
+  ] };
+  const other: SessionEvent = { kind: 'assistant_message', seq: 2, time: T0 + 1, source: 'extension',
+    messageId: otherRich.messageId, message: text(''), final: true, rich: otherRich };
+  // Install the fake reader before selecting this session: inline hydration begins on mount
+  // and would correctly retire an unreadable preview before a late reader replacement.
+  const { w, append } = await boot([event, other], false);
+  (w as any).api.getSessionImage = vi.fn(async () => ({ ok: true, data: 'data:image/webp;base64,UklGRgAAAAA=' }));
+  (w.document.querySelector('#sessionList [data-id]') as HTMLElement).click();
+  await settle();
+  w.document.querySelector<HTMLButtonElement>('.rich-image-slot button')!.click();
+  await settle();
+  expect(w.document.querySelector('.rich-image-viewer')).not.toBeNull();
+  await append([{ ...other, seq: 3, rich: { ...otherRich, revision: 2 } }]);
+  expect(w.document.querySelector('.rich-image-viewer')).not.toBeNull();
+  w.document.getElementById('newChat')!.click();
+  await settle();
+  expect(w.document.querySelector('.rich-image-viewer')).toBeNull();
+  (w.document.querySelector('#sessionList [data-id]') as HTMLElement).click();
+  await settle();
+  expect(w.document.querySelector('.rich-image-viewer')).toBeNull();
+});
+
+it('does not infer rich UI from ordinary authored component code or hide an unavailable-rich empty text row', async () => {
+  const source = '```xml\n<text>code example</text>\n```';
+  const plain: SessionEvent = { kind: 'assistant_message', seq: 1, time: T0, source: 'extension',
+    messageId: 'literal-code', message: text(source), final: true };
+  const unavailable: SessionEvent = { kind: 'assistant_message', seq: 2, time: T0 + 1, source: 'extension',
+    messageId: 'unsupported-rich', message: text(''), richMediaUnavailable: 'unsupported', final: true };
+  const { w } = await boot([plain, unavailable]);
+  const rows = [...w.document.querySelectorAll<HTMLElement>('.ev-assistant_message')];
+  expect(rows).toHaveLength(2);
+  expect(rows[0]!.querySelector('pre code')?.textContent).toBe('<text>code example</text>\n');
+  expect(rows[0]!.querySelector('.rich-unavailable')).toBeNull();
+  expect(rows[1]!.hidden).toBe(false);
+  expect(rows[1]!.querySelector('.rich-media-unavailable')?.textContent).toContain('Image preview unavailable');
+  expect(rows[1]!.querySelector('details.rich-source')).toBeNull();
+});
+
+it('keeps authored Markdown readable beside an unsupported generated-image notice', async () => {
+  const prose: SessionEvent = { kind: 'assistant_message', seq: 1, time: T0, source: 'extension',
+    messageId: 'answer-with-image', message: text('## Key finding\n\nThe network is connected.'),
+    richMediaUnavailable: 'unsupported', final: true };
+  const { w } = await boot([prose]);
+  const row = w.document.querySelector<HTMLElement>('.ev-assistant_message')!;
+  expect(row.hidden).toBe(false);
+  expect(row.querySelector('.msg h2')?.textContent).toBe('Key finding');
+  expect(row.querySelector('.msg p')?.textContent).toBe('The network is connected.');
+  expect(row.querySelector('.rich-media-unavailable')?.textContent).toContain('Image preview unavailable');
+  expect(row.querySelector('.rich-source')).toBeNull();
+});
+
+it('charges each rich tree against the existing resident paint budget even when source text is empty', async () => {
+  const events: SessionEvent[] = Array.from({ length: 30 }, (_, index) => ({
+    kind: 'assistant_message' as const, seq: index + 1, time: T0 + index, source: 'extension' as const,
+    messageId: `rich-budget-${index}`, final: true, message: text(''),
+    rich: {
+      version: 1 as const, status: 'available' as const, reason: null,
+      conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      messageId: `rich-budget-${index}`, providerMessageId: null, revision: 1,
+      accessibleText: `Answer ${index}`, nodes: [
+        { id: 'answer', kind: 'text' as const, style: 'body' as const, text: `Answer ${index}` }
+      ]
+    }
+  }));
+  const { w } = await boot(events);
+  const visible = [...w.document.querySelectorAll<HTMLElement>('.ev-assistant_message')];
+  expect(visible.length).toBeGreaterThan(0);
+  expect(visible.length).toBeLessThanOrEqual(16); // 16 × 128 KiB reaches the 2 MiB budget.
+  expect(visible.at(-1)!.textContent).toContain('Answer 29');
+});
+
+it('retains explicit unavailable-source disclosure and keyboard focus across a rich-status revision', async () => {
+  const unavailable: RichResponse = {
+    version: 1, status: 'unavailable', reason: 'unsupported',
+    conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    messageId: 'rich-source', providerMessageId: null, revision: 1,
+    accessibleText: '', nodes: []
+  };
+  const event: Extract<SessionEvent, { kind: 'assistant_message' }> = {
+    kind: 'assistant_message', seq: 1, origin: 1, time: T0, source: 'extension',
+    messageId: 'rich-source', message: text('<grid>canonical source</grid>'), final: true, rich: unavailable
+  };
+  const { w, append } = await boot([event]);
+  const row = w.document.querySelector<HTMLElement>('.ev-assistant_message')!;
+  const disclosure = row.querySelector<HTMLDetailsElement>('details.rich-source')!;
+  disclosure.open = true;
+  disclosure.querySelector('summary')!.focus();
+  await append([{ ...event, seq: 2, rich: { ...unavailable, revision: 2, reason: 'ambiguous' } }]);
+  expect(w.document.querySelector('.ev-assistant_message')).toBe(row);
+  const updated = row.querySelector<HTMLDetailsElement>('details.rich-source')!;
+  expect(updated.open).toBe(true);
+  expect(w.document.activeElement).toBe(updated.querySelector('summary'));
+  expect(updated.querySelector('pre')?.textContent).toBe('<grid>canonical source</grid>');
 });
 
 it('keeps an unfolded tool row as the same open node while the chat keeps appending', async () => {

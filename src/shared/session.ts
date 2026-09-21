@@ -286,6 +286,50 @@ interface BaseEvent {
   turnId?: string;
 }
 
+/** Capture provenance, never derivable from a provider DOM attribute or current tab selection. */
+export type RichOrigin = {
+  conversationId: string;
+  bindingRevision: number;
+  documentId: string;
+  navigationEpoch: number;
+};
+
+/** An exact image node's metadata on its canonical assistant shard, not a timeline event. */
+export type RichMediaState = {
+  mediaId: string;
+  nodeId: string;
+  source: { kind: 'native'; providerMessageId: string; providerAssetId: string }
+    | { kind: 'page'; nodeId: string };
+  /** Store-owned PAGE custody only. Raw observations cannot set it. The slot version is
+   * monotonic across rich hydration/rebind/restart; the opaque isolated-world incarnation
+   * and sequence never include or derive a source URL. A version alone means reacquire. */
+  pageSource?: { slotVersion: number; sequence?: number; incarnation?: string; recordingRevision?: number };
+  status: 'pending' | 'available' | 'unavailable';
+  reason?: 'not_loaded' | 'unsupported' | 'ambiguous' | 'tainted' | 'oversized' | 'invalid' | 'quota' | 'removed';
+  previewWidth?: number;
+  previewHeight?: number;
+  asset?: AssetRef;
+};
+
+/** Untrusted future wire shape. Its claimed ownership never authenticates a live observation. */
+export type RichMediaObservation = {
+  conversationId: string;
+  messageId: string;
+  providerMessageId: string;
+  documentId: string;
+  navigationEpoch: number;
+  bindingRevision: number;
+  mediaId: string;
+  nodeId: string;
+  richRevision: number;
+  source: RichMediaState['source'];
+  status: RichMediaState['status'];
+  previewDataUrl?: string;
+  previewWidth?: number;
+  previewHeight?: number;
+  reason?: RichMediaState['reason'];
+};
+
 export type SessionEvent =
   | (BaseEvent & { kind: 'session_start'; conversationId: string | null; title: string })
   | (BaseEvent & {
@@ -327,6 +371,18 @@ export type SessionEvent =
       renderedHtml?: StoredText;
       /** Public provider object UUID. Evidence for identity drift; not a canonical key or turn owner. */
       providerMessageId?: string;
+      /** Validated presentation only, written by the canonical store's dedicated rich upsert. */
+      rich?: import('./rich-response.js').RichResponse;
+      richOrigin?: RichOrigin;
+      /** Store-validated exact image-node metadata only; no rich assets until durable all-owner cleanup exists. */
+      richMedia?: RichMediaState[];
+      /** Store-owned version floor survives source-slot omission and authored rich reset.
+       * A reappearing slot cannot return to version zero after a prior capture. */
+      richSourceVersionFloor?: number;
+      richMediaUnavailable?: 'unsupported';
+      retiredRichImageAssetIds?: string[];
+      /** Durable exact media/node removal fence, including while hydration omits the image. */
+      retiredRichMediaSlots?: Array<{ mediaId: string; nodeId: string }>;
       state?: MessageState;
       /** Compatibility mirror for older consumers; equivalent to state === 'final'. */
       final: boolean;
@@ -546,6 +602,8 @@ export interface SessionSummary {
    * commit, and nothing else ever changes it.
    */
   conversationId: string | null;
+  /** Durable attachment generation. Legacy recordings start at zero; each successful rebind increments. */
+  bindingRevision?: number;
   /**
    * Every ChatGPT conversation this session has lived in, oldest first, current last.
    *

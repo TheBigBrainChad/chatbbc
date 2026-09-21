@@ -449,7 +449,10 @@ describe('the settings sheet', () => {
     const pane = document.querySelector('.view[data-view="settings"]')!;
     const numbers = [...pane.querySelectorAll('input[type="number"]')].map((input) => input.id);
     expect(numbers).toEqual(['maWorkers', 'autoCompactTokens']);
-    for (const id of ['sessRecord', 'sessRetain', 'sessAdvisory', 'sessLimit']) {
+    // Recording Off is a required privacy setting; only the superseded separate
+    // retention/advisory/limit controls must remain absent.
+    expect(document.getElementById('sessRecord')?.getAttribute('type')).toBe('checkbox');
+    for (const id of ['sessRetain', 'sessAdvisory', 'sessLimit']) {
       expect(document.getElementById(id), `#${id} is back`).toBeNull();
     }
     expect(document.querySelector('[data-group="recording"]')).toBeNull();
@@ -531,6 +534,7 @@ describe('the window as a whole', () => {
     const horizontal = [...css.matchAll(/([^{}]+)\{[^{}]*overflow-x:\s*(?:auto|scroll)[^{}]*\}/g)];
     expect(horizontal.map(match => match[1]!.trim())).toEqual([
       '.msg.rich .markdown-table',
+      '.rich-table, .rich-diagram',
       '.file-preview-markdown pre',
       '.file-preview-markdown-table',
       '.file-pdf-viewport',

@@ -3,7 +3,12 @@ import { capabilityTools, DESKTOP_CAPABILITIES, type Capabilities } from '../src
 import { BROWSER_READ_TOOLS, BROWSER_WRITE_TOOLS } from '../src/shared/browser-control.js';
 
 const native = vi.hoisted(() => ({ act: vi.fn(), getWindowState: vi.fn(), call: null as any, apis: [] as any[], allowUnattributed: false }));
-vi.mock('../src/main/config.js', () => ({ getConfig: () => ({ multiAgent: { allowUnattributedCalls: native.allowUnattributed } }) }));
+vi.mock('../src/main/config.js', () => ({
+  getConfig: () => ({ multiAgent: { allowUnattributedCalls: native.allowUnattributed } }),
+  // The session store registers a write-drain at module load. This registrar
+  // fixture never records history, so retain only the registration's no-op.
+  registerRecordingWriteDrain: vi.fn()
+}));
 vi.mock('../src/main/computer/index.js', () => ({
   ComputerError: class extends Error {}, act: native.act, getWindowState: native.getWindowState
 }));

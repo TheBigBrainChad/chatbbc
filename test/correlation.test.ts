@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushDurable, initDurableStore, resetDurableForTests, writeDurableNow } from '../src/main/durable.js';
+import { initConfigPath, loadConfig } from '../src/main/config.js';
 import {
   appendEvent,
   createSession,
@@ -351,6 +352,8 @@ describe('request correlation ownership', () => {
       resetDurableForTests();
       resetSessionStoreForTests();
       initDurableStore(dir);
+      initConfigPath(dir);
+      await loadConfig();
       initSessionStore(dir);
 
       const session = await createSession({ title: 'old attributed history', conversationId: 'conv-history' });
@@ -400,6 +403,8 @@ describe('request correlation ownership', () => {
       resetDurableForTests();
       resetSessionStoreForTests();
       initDurableStore(dir);
+      initConfigPath(dir);
+      await loadConfig();
       initSessionStore(dir);
       const conversationId = 'conv-stale-reconcile';
       const session = await createSession({ title: 'stale correlation snapshot', conversationId });

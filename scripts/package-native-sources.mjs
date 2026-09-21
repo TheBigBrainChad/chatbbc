@@ -27,6 +27,19 @@ for (const source of inventory.sources) {
       !Number.isSafeInteger(source.bytes) || source.bytes < 1 || source.bytes > 256 * 1024 * 1024) {
     throw new Error(`Incomplete native source identity: ${source.file}`);
   }
+  if (source.bundledFile !== undefined &&
+      source.bundledFile !== `pinned/${source.file}`) {
+    throw new Error(`Invalid pinned local native-source path: ${source.file}`);
+  }
+}
+// GNOME's archive endpoint has returned HTTP 406 to fresh release jobs. This tiny,
+// unchanged, SHA-verified original is supplied in the checkout so a clean runner
+// does not depend on a successful repeat request to the same endpoint.
+for (const source of inventory.sources.filter(source => source.bundledFile !== undefined)) {
+  const bytes = await fs.readFile(path.join(noticeDirectory, source.bundledFile));
+  if (bytes.length !== source.bytes || createHash('sha256').update(bytes).digest('hex') !== source.sha256) {
+    throw new Error(`Bundled native source checksum mismatch: ${source.file}`);
+  }
 }
 if (process.argv.includes('--check')) {
   console.log(`Validated ${inventory.sources.length} pinned native source archives and patches.`);
@@ -46,16 +59,20 @@ await Promise.all(Array.from({ length: 8 }, async () => {
     try { bytes = await fs.readFile(destination); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     if (!bytes) {
-      const response = await fetch(source.url, { signal: AbortSignal.timeout(180_000) });
-      if (!response.ok) throw new Error(`Native source download failed: ${source.file}: HTTP ${response.status}`);
-      const chunks = [];
-      let size = 0;
-      for await (const chunk of response.body) {
-        size += chunk.length;
-        if (size > source.bytes) throw new Error(`Native source exceeds reviewed size: ${source.file}`);
-        chunks.push(chunk);
+      if (source.bundledFile) {
+        bytes = await fs.readFile(path.join(noticeDirectory, source.bundledFile));
+      } else {
+        const response = await fetch(source.url, { signal: AbortSignal.timeout(180_000) });
+        if (!response.ok) throw new Error(`Native source download failed: ${source.file}: HTTP ${response.status}`);
+        const chunks = [];
+        let size = 0;
+        for await (const chunk of response.body) {
+          size += chunk.length;
+          if (size > source.bytes) throw new Error(`Native source exceeds reviewed size: ${source.file}`);
+          chunks.push(chunk);
+        }
+        bytes = Buffer.concat(chunks);
       }
-      bytes = Buffer.concat(chunks);
     }
     if (bytes.length !== source.bytes || createHash('sha256').update(bytes).digest('hex') !== source.sha256) {
       throw new Error(`Native source checksum mismatch: ${source.file}`);

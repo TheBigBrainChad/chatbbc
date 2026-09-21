@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
-import { defaultConfig, initConfigPath, saveConfig } from '../src/main/config.js';
+import path from 'node:path';
+import { defaultConfig, getConfig, initConfigPath, pendingRecordingOffDecision, saveConfig, updateConfig } from '../src/main/config.js';
 import { closeConversation, liveConversations, recordChatObservations, recordToolCall, resetRecorderForTests } from '../src/main/session/recorder.js';
 import { emptyEvidence, trackInFlight } from '../src/main/mcp/call-context.js';
 import { appendEvent, flushSessions, getSession, initSessionStore, readEvents, readCompletedFinal, upsertMessageEvent, rebindSession, resetSessionStoreForTests } from '../src/main/session/store.js';
@@ -60,6 +61,149 @@ beforeAll(async () => {
 });
 beforeEach(() => { resetRecorderForTests(); resetSessionStoreForTests(); });
 afterAll(async () => { resetRecorderForTests(); resetSessionStoreForTests(); await removeTempDir(directory); });
+
+it('promotes one anonymous final after the exact question in its original start/end envelope and cold replay', async () => {
+  const conversationId = 'same-envelope-question-goal';
+  const envelope = [
+    { kind: 'turn_start', time: 10, turnId: 'turn-A' },
+    { kind: 'user_message', time: 11, turnId: 'turn-A', messageId: 'question-U', text: 'Complete this task' },
+    { kind: 'assistant_message', time: 15, messageId: 'final-F', text: 'Completed answer', state: 'final', final: true },
+    { kind: 'turn_end', time: 20, turnId: 'turn-A', outcome: 'unknown' }
+  ] as const;
+  const initial = await recordChatObservations(conversationId, envelope);
+  const sessionId = initial.sessionId!;
+  expect(initial.goalCandidates).toEqual([{ replyId: 'final-F', turnId: 'reply:final-F', eventSeq: 4 }]);
+  expect((await readEvents(sessionId, { kinds: ['turn_end'] })).map(row => row.time)).toEqual([20]);
+  expect((await readEvents(sessionId, { kinds: ['assistant_message'] }))[0]).toMatchObject({
+    messageId: 'final-F', final: true, goalEligible: true
+  });
+  const originalRows = await readEvents(sessionId);
+  await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests();
+  const replay = await recordChatObservations(conversationId, envelope);
+  expect(replay.stored).toBe(0);
+  expect(replay.goalCandidates).toEqual(initial.goalCandidates);
+  expect(await readEvents(sessionId)).toEqual(originalRows);
+});
+
+it('repairs only the optional Goal revision after its first write fails following a committed question/end', async () => {
+  const conversationId = 'same-envelope-question-optional-retry';
+  const envelope = [
+    { kind: 'turn_start', time: 10, turnId: 'turn-A' },
+    { kind: 'user_message', time: 11, turnId: 'turn-A', messageId: 'question-U', text: 'The original question' },
+    { kind: 'assistant_message', time: 15, messageId: 'final-F', text: 'The complete result', state: 'final', final: true },
+    { kind: 'turn_end', time: 20, turnId: 'turn-A', outcome: 'unknown' }
+  ] as const;
+  const originalRename = fs.rename;
+  let finalRenames = 0;
+  const spy = vi.spyOn(fs, 'rename').mockImplementation(async (...args: Parameters<typeof fs.rename>) => {
+    if (String(args[1]).includes(`${path.sep}messages${path.sep}`) && String(args[1]).endsWith('.json')) {
+      finalRenames++;
+      // The original user and assistant each publish a canonical shard first.
+      // Fail only the third rename, which is the optional post-end Goal revision.
+      if (finalRenames === 3) throw Object.assign(new Error('optional Goal publication failed'), { code: 'EIO' });
+    }
+    return originalRename(...args);
+  });
+  try {
+    await expect(recordChatObservations(conversationId, envelope)).rejects.toThrow('optional Goal publication failed');
+  } finally { spy.mockRestore(); }
+  expect(finalRenames).toBe(3);
+  const { findSessionByConversation } = await import('../src/main/session/store.js');
+  const sessionId = (await findSessionByConversation(conversationId))!.id;
+  expect((await readEvents(sessionId, { kinds: ['turn_end'] })).map(row => row.time)).toEqual([20]);
+  expect((await readEvents(sessionId, { kinds: ['assistant_message'] }))[0]).not.toHaveProperty('goalEligible', true);
+  await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests();
+  const retried = await recordChatObservations(conversationId, envelope);
+  expect(retried.goalCandidates).toEqual([{ replyId: 'final-F', turnId: 'reply:final-F', eventSeq: 4 }]);
+  expect((await readEvents(sessionId, { kinds: ['turn_end'] })).map(row => row.time)).toEqual([20]);
+  expect((await readEvents(sessionId, { kinds: ['assistant_message'] }))[0]).toMatchObject({ goalEligible: true });
+});
+
+it('refuses an independent newer question even when its reused turn marker matches the obsolete end', async () => {
+  const conversationId = 'independent-question-reused-turn';
+  const opened = await recordChatObservations(conversationId, [
+    { kind: 'turn_start', time: 10, turnId: 'turn-A' }
+  ]);
+  const sessionId = opened.sessionId!;
+  const question = await recordChatObservations(conversationId, [{
+    kind: 'user_message', time: 21, turnId: 'turn-A', messageId: 'new-question-V',
+    text: 'This is a different request', authoredNow: true
+  }]);
+  expect(question.stored).toBe(1);
+  const stale = await recordChatObservations(conversationId, [{
+    kind: 'turn_end', time: 30, turnId: 'turn-A', outcome: 'completed'
+  }]);
+  expect(stale).toMatchObject({ stored: 0, activity: { terminal: false } });
+  expect(stale.goalCandidates).toEqual([]);
+  expect(stale.workerActivationProved).not.toBe(true);
+  expect((await getSession(sessionId))?.activeTurnId).toBe('turn-A');
+  expect(await readEvents(sessionId, { kinds: ['turn_end'] })).toEqual([]);
+  await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests();
+  const cold = await recordChatObservations(conversationId, [{
+    kind: 'turn_end', time: 31, turnId: 'turn-A', outcome: 'completed'
+  }]);
+  expect(cold.stored).toBe(0);
+  expect(cold.activity.terminal).toBe(false);
+  expect(await readEvents(sessionId, { kinds: ['turn_end'] })).toEqual([]);
+});
+
+it.each([false, true])('closes a running turn after an exact app tool handout, including cold recovery (restart=%s)', async restart => {
+  const conversationId = `app-tool-handout-terminal-${restart}`;
+  const opened = await recordChatObservations(conversationId, [
+    { kind: 'turn_start', time: 10, turnId: 'tool-turn' }
+  ]);
+  const inputId = 'c93ca2e6-5b9a-4cbb-b191-00b86d847fa4';
+  await upsertMessageEvent(opened.sessionId!, {
+    kind: 'user_message', source: 'app', time: 11,
+    messageId: `input:${inputId}`, inputId, inputDelivery: 'offered',
+    turnId: 'tool-turn', message: { text: 'Injected tool input', chars: 19, truncated: false }
+  });
+  if (restart) { await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests(); }
+  const result = await recordChatObservations(conversationId, [{
+    kind: 'turn_end', time: 12, turnId: 'tool-turn', outcome: 'completed'
+  }]);
+  expect(result).toMatchObject({ stored: 1, activity: { terminal: true } });
+  expect((await getSession(opened.sessionId!))?.activeTurnId).toBeNull();
+  expect((await readEvents(opened.sessionId!, { kinds: ['turn_end'] })).map(row => row.turnId)).toEqual(['tool-turn']);
+});
+
+it('never lets a later tool handout hide an independently authored newer question with the same turn marker', async () => {
+  const conversationId = 'app-handout-after-newer-native-question';
+  const opened = await recordChatObservations(conversationId, [
+    { kind: 'turn_start', time: 10, turnId: 'tool-turn' }
+  ]);
+  expect((await recordChatObservations(conversationId, [{
+    kind: 'user_message', time: 11, turnId: 'tool-turn', messageId: 'new-question-V',
+    text: 'Independent question', authoredNow: true
+  }])).stored).toBe(1);
+  const inputId = 'afaa1a41-c9a4-48d4-a085-b9256a2ee788';
+  await upsertMessageEvent(opened.sessionId!, {
+    kind: 'user_message', source: 'app', time: 12,
+    messageId: `input:${inputId}`, inputId, inputDelivery: 'confirmed',
+    turnId: 'tool-turn', message: { text: 'Tool handout', chars: 12, truncated: false }
+  });
+  await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests();
+  const stale = await recordChatObservations(conversationId, [{
+    kind: 'turn_end', time: 13, turnId: 'tool-turn', outcome: 'completed'
+  }]);
+  expect(stale).toMatchObject({ stored: 0, activity: { terminal: false } });
+  expect((await getSession(opened.sessionId!))?.activeTurnId).toBe('tool-turn');
+  expect(await readEvents(opened.sessionId!, { kinds: ['turn_end'] })).toEqual([]);
+});
+
+it('refuses an ambiguous second question inside one turn envelope without promoting its final', async () => {
+  const conversationId = 'ambiguous-same-envelope-questions';
+  const batch = await recordChatObservations(conversationId, [
+    { kind: 'turn_start', time: 10, turnId: 'turn-A' },
+    { kind: 'user_message', time: 11, turnId: 'turn-A', messageId: 'question-U', text: 'First question' },
+    { kind: 'user_message', time: 12, turnId: 'turn-A', messageId: 'question-V', text: 'Second question' },
+    { kind: 'assistant_message', time: 15, messageId: 'final-F', text: 'An ambiguous answer', state: 'final', final: true },
+    { kind: 'turn_end', time: 20, turnId: 'turn-A', outcome: 'unknown' }
+  ]);
+  expect(batch.goalCandidates).toEqual([]);
+  expect(await readEvents(batch.sessionId!, { kinds: ['turn_end'] })).toEqual([]);
+  expect((await readEvents(batch.sessionId!, { kinds: ['assistant_message'] }))[0]).not.toHaveProperty('goalEligible', true);
+});
 
 it.each([false, true])('records stopped partial-answer revisions without restoring activity (restart=%s)', async restart => {
   const conversationId = `stopped-partial-${restart}`;
@@ -163,6 +307,245 @@ it.each(['canonical', 'explicit'])('keeps a turn reopened for late tools open un
     ? [{ kind: 'assistant_message', time: 40, messageId: 'answer', text: 'A new final after the late work.', state: 'final', final: true }]
     : [{ kind: 'turn_end', time: 40, turnId: 'turn', outcome: 'completed' }]);
   expect((await getSession(opened.sessionId!))?.activeTurnId).toBeNull();
+});
+
+it('accepts a new end after an app reopen beyond the recent read budget but never replays its old end', async () => {
+  const conversationId = 'reopened-final-beyond-recent-tail';
+  const opened = await recordChatObservations(conversationId, [
+    { kind: 'turn_start', time: 10, turnId: 'turn' },
+    { kind: 'assistant_message', time: 11, turnId: 'turn', messageId: 'answer',
+      text: 'First final', state: 'final', final: true },
+    { kind: 'turn_end', time: 12, turnId: 'turn', outcome: 'completed' }
+  ]);
+  const sessionId = opened.sessionId!;
+  await appendEvent(sessionId, { source: 'app', kind: 'turn_start', time: 20,
+    turnId: 'turn', detail: 'The same server turn resumed' });
+  resetRecorderForTests();
+  await recordChatObservations(conversationId, [{ kind: 'assistant_message', time: 21,
+    messageId: 'answer', text: 'First final', state: 'final', final: true }]);
+  expect((await getSession(sessionId))?.activeTurnId).toBe('turn');
+
+  // Synthetic, individually valid durable rows prove this is not just a 2 MiB
+  // cached-history issue: the most recent lifecycle boundary is >8 MiB behind
+  // the journal tail and must still be checked without trusting absence in a page.
+  const filler = 'x'.repeat(480_000);
+  for (let index = 0; index < 20; index++) {
+    await appendEvent(sessionId, { source: 'extension', kind: 'page_tool',
+      time: 30 + index, messageId: `long-label-${index}`, label: filler });
+  }
+  await recordChatObservations(conversationId, [{ kind: 'turn_end', time: 12,
+    turnId: 'turn', outcome: 'completed' }]);
+  expect((await getSession(sessionId))?.activeTurnId).toBe('turn');
+  await recordChatObservations(conversationId, [{ kind: 'turn_end', time: 100,
+    turnId: 'turn', outcome: 'completed' }]);
+  expect((await getSession(sessionId))?.activeTurnId).toBeNull();
+  expect((await readEvents(sessionId, { kinds: ['turn_end'] })).map(event => event.time)).toEqual([12, 100]);
+}, 60_000);
+
+it('strengthens only the latest interrupted end to Stop beyond 8 MiB of unrelated activity', async () => {
+  const conversationId = 'stop-upgrade-beyond-recent-tail';
+  const opened = await recordChatObservations(conversationId, [
+    { kind: 'user_message', messageId: 'stop-question', text: 'Work', time: 10 },
+    { kind: 'turn_start', turnId: 'stop-source', time: 11 },
+    { kind: 'turn_end', turnId: 'stop-source', outcome: 'interrupted', time: 12 }
+  ]);
+  const sessionId = opened.sessionId!;
+  const filler = 'x'.repeat(480_000);
+  for (let index = 0; index < 20; index++) {
+    await appendEvent(sessionId, { source: 'extension', kind: 'page_tool',
+      time: 30 + index, messageId: `stop-long-label-${index}`, label: filler });
+  }
+  await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests();
+  const stop = { kind: 'turn_end' as const, turnId: 'stop-source', outcome: 'stopped' as const, time: 100 };
+  const accepted = await recordChatObservations(conversationId, [stop]);
+  expect(accepted).toMatchObject({ stored: 1, activity: { terminal: true } });
+  await recordChatObservations(conversationId, [stop]);
+  expect((await readEvents(sessionId, { kinds: ['turn_end'] })).map(event => event.kind === 'turn_end' && event.outcome))
+    .toEqual(['interrupted', 'stopped']);
+  await recordChatObservations(conversationId, [{ kind: 'user_message', messageId: 'new-stop-question', text: 'Next', time: 101 }]);
+  const obsolete = await recordChatObservations(conversationId, [{ ...stop, time: 102 }]);
+  expect(obsolete.activity.terminal).toBe(false);
+  expect((await readEvents(sessionId, { kinds: ['turn_end'] })).map(event => event.time)).toEqual([12, 100]);
+}, 60_000);
+
+it('refuses a Stop upgrade when the latest journal suffix is damaged', async () => {
+  const conversationId = 'stop-corrupt-journal-suffix';
+  const opened = await recordChatObservations(conversationId, [
+    { kind: 'turn_start', turnId: 'turn', time: 10 },
+    { kind: 'turn_end', turnId: 'turn', outcome: 'interrupted', time: 12 }
+  ]);
+  const sessionId = opened.sessionId!;
+  await fs.appendFile(path.join(directory, 'sessions', sessionId, 'events.jsonl'), '{damaged-row}\n');
+  await expect(recordChatObservations(conversationId, [{
+    kind: 'turn_end', turnId: 'turn', outcome: 'stopped', time: 20
+  }])).rejects.toThrow(/damaged journal/);
+  expect((await readEvents(sessionId, { kinds: ['turn_end'] })).map(event => event.time)).toEqual([12]);
+});
+
+it('rejects a replayed Stop before an app reopen and accepts only the new generation', async () => {
+  const conversationId = 'stop-prior-end-reopened';
+  const opened = await recordChatObservations(conversationId, [
+    { kind: 'turn_start', turnId: 'turn', time: 10 },
+    { kind: 'turn_end', turnId: 'turn', outcome: 'completed', time: 12 }
+  ]);
+  const sessionId = opened.sessionId!;
+  await appendEvent(sessionId, { kind: 'turn_start', source: 'app', time: 20, turnId: 'turn' });
+  resetRecorderForTests();
+  await recordChatObservations(conversationId, [{ kind: 'assistant_message', messageId: 'answer',
+    text: 'Late work', state: 'streaming', time: 21 }]);
+  const obsolete = await recordChatObservations(conversationId, [{
+    kind: 'turn_end', turnId: 'turn', outcome: 'stopped', time: 12
+  }]);
+  expect(obsolete.activity.terminal).toBe(false);
+  expect((await getSession(sessionId))?.activeTurnId).toBe('turn');
+  const accepted = await recordChatObservations(conversationId, [{
+    kind: 'turn_end', turnId: 'turn', outcome: 'stopped', time: 22
+  }]);
+  expect(accepted.activity.terminal).toBe(true);
+  expect((await readEvents(sessionId, { kinds: ['turn_end'] })).map(event => event.time)).toEqual([12, 22]);
+});
+
+it.each(['A-to-B', 'A-to-B-to-A'] as const)(
+  'refuses obsolete A completion after a %s rebind during the boundary scan', async route => {
+  const conversationId = `turn-end-boundary-race-a-${route}`;
+  const destinationId = `turn-end-boundary-race-b-${route}`;
+  const opened = await recordChatObservations(conversationId, [
+    { kind: 'turn_start', time: 10, turnId: 'turn' },
+    { kind: 'turn_end', time: 12, turnId: 'turn', outcome: 'completed' }
+  ]);
+  const sessionId = opened.sessionId!;
+  await appendEvent(sessionId, { source: 'app', kind: 'turn_start', time: 20,
+    turnId: 'turn', detail: 'Late tools prove this turn reopened' });
+  await flushSessions();
+  resetRecorderForTests();
+  // Rebuild the live reopened generation before racing the next page end.
+  await recordChatObservations(conversationId, [{ kind: 'assistant_message', time: 21,
+    messageId: 'answer', text: 'Still working', state: 'streaming' }]);
+  expect((await getSession(sessionId))?.activeTurnId).toBe('turn');
+
+  const originalOpen = fs.open;
+  let journalReads = 0;
+  let rebounded = false;
+  let moving: Promise<boolean> | null = null;
+  const spy = vi.spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+    const handle = await originalOpen(...args);
+    if (String(args[0]).endsWith('events.jsonl') && args[1] === 'r' && ++journalReads === 1) {
+      const read = handle.read.bind(handle);
+      (handle as any).read = async (...readArgs: any[]) => {
+        const bytes = await (read as any)(...readArgs);
+        if (!rebounded) {
+          rebounded = true;
+          // The rebind raises its synchronous pending fence before waiting for the
+          // session queue. Awaiting it inside that queue's reader would deadlock.
+          moving = route === 'A-to-B'
+            ? rebindSession(sessionId, conversationId, destinationId)
+            : (async () => {
+                const first = await rebindSession(sessionId, conversationId, destinationId);
+                const second = await rebindSession(sessionId, destinationId, conversationId);
+                return first && second;
+              })();
+        }
+        return bytes;
+      };
+    }
+    return handle;
+  });
+  try {
+    await recordChatObservations(conversationId, [
+      { kind: 'turn_end', time: 40, turnId: 'turn', outcome: 'completed' }
+    ]);
+  } finally { spy.mockRestore(); }
+  expect(rebounded).toBe(true);
+  expect(await moving).toBe(true);
+  expect((await getSession(sessionId))?.conversationId).toBe(route === 'A-to-B' ? destinationId : conversationId);
+  expect((await getSession(sessionId))?.bindingRevision).toBe(route === 'A-to-B' ? 1 : 2);
+  expect((await readEvents(sessionId, { kinds: ['turn_end'] })).map(event => event.time)).toEqual([12]);
+});
+
+it.each(['before', 'after'] as const)(
+  'reconciles a %s-disk append failure without inventing or losing an end receipt', async failure => {
+  const conversationId = `turn-end-append-${failure}`;
+  const opened = await recordChatObservations(conversationId, [{
+    kind: 'turn_start', turnId: 'turn', time: 10
+  }]);
+  const sessionId = opened.sessionId!;
+  const actualAppend = fs.appendFile;
+  let injected = false;
+  const spy = vi.spyOn(fs, 'appendFile').mockImplementation(async (...args: Parameters<typeof fs.appendFile>) => {
+    if (!injected && String(args[0]).endsWith('events.jsonl') &&
+        String(args[1]).includes('"kind":"turn_end"')) {
+      injected = true;
+      if (failure === 'after') await actualAppend(...args);
+      throw Object.assign(new Error('injected append failure'), { code: 'EIO' });
+    }
+    return actualAppend(...args);
+  });
+  const end = { kind: 'turn_end' as const, turnId: 'turn', time: 20, outcome: 'completed' as const };
+  try {
+    if (failure === 'before') await expect(recordChatObservations(conversationId, [end]))
+      .rejects.toThrow('injected append failure');
+    else expect((await recordChatObservations(conversationId, [end])).stored).toBe(1);
+  } finally { spy.mockRestore(); }
+  expect(injected).toBe(true);
+  const retried = await recordChatObservations(conversationId, [end]);
+  expect(retried.stored).toBe(failure === 'before' ? 1 : 0);
+  expect((await readEvents(sessionId, { kinds: ['turn_end'] })).map(event => event.time)).toEqual([20]);
+});
+
+it.each([true, false])('preserves turn-end custody when provisional Recording Off %s', async offSucceeds => {
+  const conversationId = `end-pending-off-${offSucceeds}`;
+  const opened = await recordChatObservations(conversationId, [{
+    kind: 'turn_start', turnId: 'turn', time: 10
+  }]);
+  const sessionId = opened.sessionId!;
+  const originalOpen = fs.open;
+  const originalRename = fs.rename;
+  let intercepted = false;
+  let disabling: Promise<unknown> | null = null;
+  const openSpy = vi.spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+    const handle = await originalOpen(...args);
+    if (!intercepted && String(args[0]).endsWith('events.jsonl') && args[1] === 'r') {
+      intercepted = true;
+      const read = handle.read.bind(handle);
+      (handle as any).read = async (...readArgs: any[]) => {
+        const bytes = await (read as any)(...readArgs);
+        disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+        void disabling.catch(() => undefined);
+        await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+        return bytes;
+      };
+    }
+    return handle;
+  });
+  const renameSpy = vi.spyOn(fs, 'rename').mockImplementation(async (...args: Parameters<typeof fs.rename>) => {
+    if (!offSucceeds && String(args[1]) === path.join(directory, 'config.json')) {
+      throw Object.assign(new Error('injected Recording Off failure'), { code: 'EIO' });
+    }
+    return originalRename(...args);
+  });
+  try {
+    const end = { kind: 'turn_end' as const, turnId: 'turn', time: 20, outcome: 'completed' as const };
+    if (offSucceeds) {
+      expect(await recordChatObservations(conversationId, [end]))
+        .toMatchObject({ stored: 0, activity: { terminal: false } });
+      await disabling;
+      expect((await readEvents(sessionId, { kinds: ['turn_end'] }))).toHaveLength(0);
+    } else {
+      await expect(recordChatObservations(conversationId, [end])).rejects.toThrow('Recording is disabled');
+      await expect(disabling).rejects.toThrow('injected Recording Off failure');
+      expect(getConfig().sessions.record).toBe(true);
+      expect((await recordChatObservations(conversationId, [end])).stored).toBe(1);
+      expect((await readEvents(sessionId, { kinds: ['turn_end'] })).map(event => event.time)).toEqual([20]);
+    }
+    expect(intercepted).toBe(true);
+  } finally {
+    openSpy.mockRestore();
+    renameSpy.mockRestore();
+    await Promise.allSettled([disabling].filter(promise => promise !== null));
+    if (!getConfig().sessions.record) {
+      await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
+    }
+  }
 });
 
 it('does not close the old turn after a newer user message arrives in the recovery batch', async () => {

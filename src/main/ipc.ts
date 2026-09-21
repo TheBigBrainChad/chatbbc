@@ -1,4 +1,6 @@
 import { registerWorkspaceTerminalIpc } from './workspace-terminal-ipc.js';
+import { currentUiSelectionFor, registerUiSelection } from './ui-selection.js';
+import { readRichActionStatus, type RichActionResult } from './rich-actions.js';
 import { applyLoginStartup, supportsLoginStartup } from './window-lifecycle.js';
 import { appearanceSchema } from './appearance-schema.js';
 import { mergeAppearance, effectiveAppearance, effectiveTheme } from '../shared/appearance.js';
@@ -53,7 +55,7 @@ import {
 } from '../shared/types.js';
 import { MAX_GOAL_SYSTEM_PROMPT_CHARS } from '../shared/goal.js';
 import { applySettings, connect, disconnect, getStatus, onStatusChange } from './connection.js';
-import { effectiveCapabilities, getConfig, updateConfig, MAX_MCP_INSTRUCTIONS_CHARS } from './config.js';
+import { effectiveCapabilities, getConfig, recordingWriteAllowed, updateConfig, MAX_MCP_INSTRUCTIONS_CHARS } from './config.js';
 import { clearAllGoalSwitches, draftTaskPlan, listGoalModels, MODEL_PAGE_SIZE, retireGoalDrafts, goalBackendFor, goalSwitchFor, setGoalSwitchNow, setGoalReplyActiveNow, setGoalObjectiveNow } from './goal.js';
 import { forgetExposedSurface } from './mcp/server.js';
 import { runDiagnostics } from './diagnostics.js';
@@ -90,6 +92,9 @@ import {
   getSession,
   getImageStorage,
   listSessionPage,
+  readCanonicalRichMediaRetryEligibility,
+  readCanonicalRichMessageOrigin,
+  conversationWasSuperseded,
   findSessionByConversation,
   readEvents,
   readRecentEvents,
@@ -416,6 +421,154 @@ function handle<T>(channel: string, fn: (payload: unknown) => Promise<T>): void 
 
 export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall: () => void): void {
   registerWorkspaceTerminalIpc(getWindow);
+  const uiSelection = registerUiSelection(getWindow);
+  // This channel must keep Electron's actual event: the ordinary handle() discards sender proof.
+  ipcMain.handle('sessions:uiSelection', (event, payload: unknown) => uiSelection.report(event, payload));
+  const richStatusRequest = z.object({
+    sessionId: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i),
+    actionId: z.string().uuid()
+  }).strict();
+  const unavailableRichStatus = (): RichActionResult => ({
+    id: null, state: 'unavailable', detail: 'Native interaction unavailable'
+  });
+  // Status is a read, never an action authorization. Preserve the real Electron sender
+  // rather than using handle(), which discards it; the renderer cannot supply a witness.
+  ipcMain.handle('sessions:richActionStatus', async (event, payload: unknown) => {
+    const parsed = richStatusRequest.safeParse(payload);
+    if (!parsed.success) return { ok: false as const, error: 'Invalid input' };
+    const { sessionId, actionId } = parsed.data;
+    const selected = (): number | null => {
+      const window = getWindow();
+      if (!window || window.isDestroyed() || window.webContents.isDestroyed() ||
+          !event?.sender || event.sender !== window.webContents || !event.senderFrame ||
+          event.senderFrame !== window.webContents.mainFrame) return null;
+      const witness = currentUiSelectionFor(event.sender);
+      return witness?.sessionId === sessionId ? witness.generation : null;
+    };
+    const generation = selected();
+    const stillSelected = (): boolean => generation !== null && selected() === generation;
+    if (!stillSelected()) return { ok: true as const, data: unavailableRichStatus() };
+    try {
+      if (!await getSession(sessionId) || !stillSelected()) {
+        return { ok: true as const, data: unavailableRichStatus() };
+      }
+      const result = await readRichActionStatus(sessionId, actionId);
+      if (!stillSelected()) return { ok: true as const, data: unavailableRichStatus() };
+      // A session can be deleted outside sessions:delete (e.g. an abandoned opening).
+      // Recheck after the potentially slow ledger read before disclosing its receipt.
+      if (!await getSession(sessionId) || !stillSelected()) {
+        return { ok: true as const, data: unavailableRichStatus() };
+      }
+      return { ok: true as const, data: result };
+    } catch {
+      return { ok: true as const, data: unavailableRichStatus() };
+    }
+  });
+  const richRetryEligibilityRequest = z.object({
+    sessionId: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i),
+    messageId: z.string().min(1).max(190).refine(id => !/[\u0000-\u001f\u007f]/.test(id)),
+    mediaId: z.string().min(1).max(190).regex(/^[a-z0-9:_-]+$/i),
+    nodeId: z.string().min(1).max(190).regex(/^[a-z0-9:_-]+$/i),
+    richRevision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER)
+  }).strict();
+  // This fixed read projects display metadata only. The canonical store independently
+  // proves the physical PAGE slot; neither its witness nor this IPC can grant a retry.
+  ipcMain.handle('sessions:richRetryEligibility', async (event, payload: unknown) => {
+    const parsed = richRetryEligibilityRequest.safeParse(payload);
+    if (!parsed.success) return { ok: false as const, error: 'Invalid input' };
+    const { sessionId, messageId, mediaId, nodeId, richRevision } = parsed.data;
+    const selected = (): number | null => {
+      const window = getWindow();
+      if (!window || window.isDestroyed() || window.webContents.isDestroyed() ||
+          !event?.sender || event.sender !== window.webContents || !event.senderFrame ||
+          event.senderFrame !== window.webContents.mainFrame) return null;
+      const witness = currentUiSelectionFor(event.sender);
+      return witness?.sessionId === sessionId ? witness.generation : null;
+    };
+    const generation = selected();
+    const stillSelected = (): boolean => generation !== null && selected() === generation;
+    const unavailable = { ok: true as const, data: null };
+    if (!stillSelected()) return unavailable;
+    try {
+      const before = await getSession(sessionId);
+      if (!before || !stillSelected() || !getConfig().sessions.record) return unavailable;
+      const candidate = await readCanonicalRichMediaRetryEligibility(
+        sessionId, messageId, mediaId, nodeId, richRevision);
+      if (!candidate || !stillSelected() || !recordingWriteAllowed(candidate.recordingRevision)) return unavailable;
+      // A selection surviving an await does not prove the conversation/binding stayed
+      // attached. Recheck the current session and recording revision before disclosure.
+      const after = await getSession(sessionId);
+      if (!after || !stillSelected() || !recordingWriteAllowed(candidate.recordingRevision) ||
+          before.conversationId !== after.conversationId ||
+          before.bindingRevision !== after.bindingRevision ||
+          candidate.conversationId !== after.conversationId ||
+          candidate.bindingRevision !== (after.bindingRevision ?? 0)) return unavailable;
+      return { ok: true as const, data: {
+        status: candidate.status, reason: candidate.reason,
+        requiresRemovalConfirmation: candidate.requiresRemovalConfirmation,
+        eligibilityOnly: true as const
+      } };
+    } catch { return unavailable; }
+  });
+  const manualRichOriginalRequest = z.object({
+    sessionId: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i),
+    messageId: z.string().min(1).max(190).refine(id => !/[\u0000-\u001f\u007f]/.test(id))
+  }).strict();
+  // Fixed historical navigation, outside richAction/native input authority. The
+  // app-owned button checks isTrusted, but Electron IPC has no trusted gesture
+  // witness here: renderer JavaScript can call the exposed preload method directly.
+  // Main independently checks sender, selection and the exact stored origin;
+  // it never accepts a caller conversation/URL/tab or grants old A authority.
+  ipcMain.handle('sessions:richOpenOriginal', async (event, payload: unknown) => {
+    const parsed = manualRichOriginalRequest.safeParse(payload);
+    if (!parsed.success) return { ok: false as const, error: 'Invalid input' };
+    const { sessionId, messageId } = parsed.data;
+    const selected = (): number | null => {
+      const window = getWindow();
+      if (!window || window.isDestroyed() || window.webContents.isDestroyed() ||
+          !event?.sender || event.sender !== window.webContents || !event.senderFrame ||
+          event.senderFrame !== window.webContents.mainFrame) return null;
+      const witness = currentUiSelectionFor(event.sender);
+      return witness?.sessionId === sessionId ? witness.generation : null;
+    };
+    const generation = selected();
+    const stillSelected = (): boolean => generation !== null && selected() === generation;
+    const unavailable = { ok: true as const, data: false };
+    if (!stillSelected()) return unavailable;
+    try {
+      const summary = await getSession(sessionId);
+      if (!summary || !stillSelected()) return unavailable;
+      const canonical = await readCanonicalRichMessageOrigin(sessionId, messageId);
+      if (!canonical || !stillSelected() ||
+          !/^[0-9a-z-]{8,64}$/i.test(canonical.conversationId) ||
+          !summary.chatIds.includes(canonical.conversationId) ||
+          canonical.bindingRevision > (summary.bindingRevision ?? 0)) return unavailable;
+      const owner = await findSessionByConversation(canonical.conversationId,
+        { includeHistorical: true, requireUnique: true });
+      if (!owner || owner.id !== sessionId || !stillSelected()) return unavailable;
+      // The historical owner reader checks historical duplicates; current lookup
+      // can return early even if another session has this chat as retired lineage.
+      if (owner.conversationId === canonical.conversationId &&
+          await conversationWasSuperseded(canonical.conversationId)) return unavailable;
+      if (!stillSelected()) return unavailable;
+      const latest = await getSession(sessionId);
+      if (!latest || !stillSelected() || latest.conversationId !== summary.conversationId ||
+          latest.bindingRevision !== summary.bindingRevision ||
+          JSON.stringify(latest.chatIds) !== JSON.stringify(summary.chatIds)) return unavailable;
+      const exact = await readCanonicalRichMessageOrigin(sessionId, messageId);
+      if (!exact || !stillSelected() || JSON.stringify(exact) !== JSON.stringify(canonical)) return unavailable;
+      const finalOwner = await findSessionByConversation(canonical.conversationId,
+        { includeHistorical: true, requireUnique: true });
+      if (!finalOwner || finalOwner.id !== sessionId || !stillSelected()) return unavailable;
+      if (finalOwner.conversationId === canonical.conversationId &&
+          await conversationWasSuperseded(canonical.conversationId)) return unavailable;
+      if (!stillSelected()) return unavailable;
+      await openInPreferredBrowser(chatUrl(canonical.conversationId));
+      // Once launch completes, a later selection change cannot undo the browser
+      // side effect. The renderer separately suppresses feedback for stale rows.
+      return { ok: true as const, data: true };
+    } catch { return unavailable; }
+  });
   let watchedWindow: BrowserWindow | null = null;
   const projectFileWatches = new ProjectFileWatchSet(event => {
     const target = getWindow();
@@ -1066,6 +1219,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
 
   handle('sessions:delete', async (payload) => {
     const { id } = sessionIdArg.parse(payload);
+    uiSelection.invalidateSession(id);
     // Detach first. The recorder maps live ChatGPT conversations to session ids, so
     // deleting the folder underneath a live one left it appending to a session that no
     // longer existed — the events went to a resurrected half-session with no summary.
@@ -1077,6 +1231,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     const summary = await getSession(id);
     if (summary?.conversationId) setChatBlocked(summary.conversationId, false);
     await deleteSession(id);
+    // A new renderer report could have resolved while deletion awaited disk. Revoke it too.
+    uiSelection.invalidateSession(id);
     logInfo(
       detached.length > 0
         ? `session ${id} deleted; ${detached.length} live conversation(s) will start a new session`

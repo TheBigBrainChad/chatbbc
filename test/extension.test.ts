@@ -8,9 +8,10 @@
  */
 
 import { promises as fs } from 'node:fs';
+import { createHash, webcrypto } from 'node:crypto';
 import path from 'node:path';
 import vm from 'node:vm';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const { APP_SLUG, APP_VERSION, BRIDGE_PROTOCOL } = await import('../src/main/version.js');
 
@@ -39,8 +40,8 @@ describe('extension release metadata', () => {
     expect(lock.version).toBe(APP_VERSION);
     expect(lock.packages?.['']?.version).toBe(APP_VERSION);
     expect(manifest.version).toBe(APP_VERSION);
-    expect(BRIDGE_PROTOCOL).toBe(15);
-    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 15;');
+    expect(BRIDGE_PROTOCOL).toBe(17);
+    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 17;');
   });
 
   /**
@@ -449,7 +450,8 @@ class FakeStorageArea {
 }
 
 interface WorkerHarness {
-  send(message: Record<string, unknown>, tabId?: number, documentId?: string, senderUrl?: string): Promise<any>;
+  send(message: Record<string, unknown>, tabId?: number, documentId?: string, senderUrl?: string,
+    frameId?: number): Promise<any>;
   /** Fires Chrome's real tab-close lifecycle event. */
   closeTab(tabId: number): Promise<void>;
   /** Fires only Chrome's navigation-start signal, without inventing a replacement document. */
@@ -611,6 +613,8 @@ function loadWorker(options: {
     clearTimeout,
     URL,
     TextEncoder,
+    crypto: webcrypto,
+    atob,
     console
   }, { filename: 'background.js' });
   if (!listener) throw new Error('background.js did not register a message listener');
@@ -708,7 +712,7 @@ function loadWorker(options: {
         });
       }
     },
-    send(message, tabId = 1, documentId = documentFor(tabId), senderUrl) {
+    send(message, tabId = 1, documentId = documentFor(tabId), senderUrl, frameId = 0) {
       if (message.type === 'bind' && typeof message.conversationId === 'string') {
         knownTabs.set(tabId, {
           ...knownTabs.get(tabId),
@@ -720,7 +724,7 @@ function loadWorker(options: {
       }
       return new Promise((resolve, reject) => {
         try {
-          const keep = listener!(message, { tab: { id: tabId }, documentId, frameId: 0, url: senderUrl }, resolve);
+          const keep = listener!(message, { tab: { id: tabId }, documentId, frameId, url: senderUrl }, resolve);
           if (keep !== true) reject(new Error('listener did not keep the response channel open'));
         } catch (err) {
           reject(err);
@@ -2445,6 +2449,891 @@ describe('extension revival delivery', () => {
 });
 
 describe('extension observation journal', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('persists a new pixel-purpose lease bound to the actual Chrome sender and existing exact target before returning it', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const providerMessageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const recordingGeneration = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const captureId = 'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP';
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    const target = { messageId: 'assistant:page-pixel', providerMessageId,
+      nodeId: 'n-0-1', mediaId: 'media-n-0-1' };
+    const session = new FakeStorageArea();
+    const posts: Record<string, unknown>[] = [];
+    const fetch = async (address: string, init: Record<string, unknown> = {}) => {
+      const route = new URL(address).pathname;
+      if (route === '/hello') return response(200, { app: APP_SLUG, bridge: 17, paired: true, compatible: true });
+      if (route === '/recording/generation') return response(200, { recordingGeneration });
+      if (route === '/rich/pixel/begin') {
+        const body = JSON.parse(String(init.body));
+        posts.push(body);
+        return response(200, { capture: { captureId, purpose: 'page_pixel', ...body,
+          sessionId: 'physical-session', bindingRevision: 4, richRevision: 3,
+          slotVersion: 0, sourceIncarnation: null, sourceSequence: null } });
+      }
+      return response(503, { error: 'journal_retry' });
+    };
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const worker = loadWorker({ local, session, fetch,
+      tabsGet: async () => ({ id: 42, url, status: 'complete' }) });
+    await worker.registerTab(42, 'registered-pixel-document');
+    const begin = await worker.send({ type: 'rich_pixel_begin', conversationId, ...target,
+      recordingGeneration, navigationEpoch: 0,
+      sessionId: 'page-forged', slotVersion: 999, sourceIncarnation: 'page-forged',
+      documentId: 'page-forged', tab: 999 }, 42, 'registered-pixel-document', url);
+    expect(posts).toEqual([{ conversationId, tab: 42, documentId: 'registered-pixel-document',
+      documentGeneration: 1, spaEpoch: 0, recordingGeneration, ...target }]);
+    expect(begin).toMatchObject({ ok: true, capture: { captureId, purpose: 'page_pixel',
+      conversationId, sessionId: 'physical-session', bindingRevision: 4,
+      ...target, richRevision: 3, slotVersion: 0, sourceIncarnation: null, sourceSequence: null } });
+    const persisted = (session.data.workerRichIssuances as Record<string, any>)[captureId];
+    expect(persisted).toMatchObject({ captureId, purpose: 'page_pixel',
+      tab: 42, documentId: 'registered-pixel-document', documentGeneration: 1, spaEpoch: 0,
+      recordingGeneration, sessionId: 'physical-session', bindingRevision: 4,
+      ...target, richRevision: 3, slotVersion: 0, sourceIncarnation: null, sourceSequence: null });
+    expect(JSON.stringify(persisted)).not.toContain('page-forged');
+    const restored = loadWorker({ local, session, fetch,
+      tabsGet: async () => ({ id: 42, url, status: 'complete' }) });
+    await restored.send({ type: 'status' });
+    expect((session.data.workerRichIssuances as Record<string, any>)[captureId]).toMatchObject({
+      purpose: 'page_pixel', captureId, ...target
+    });
+
+    // A pixel-purpose issuance cannot be spent to mint a structural rich receipt.
+    const rich = { version: 1, status: 'available', reason: null, conversationId,
+      messageId: target.messageId, providerMessageId, revision: 0, accessibleText: '', nodes: [] };
+    await restored.send({ type: 'events', conversationId, navigationEpoch: 0, entries: [{
+      conversationId, recordingGeneration, recordingNavigationEpoch: 0,
+      richSeal: { captureId, scanToken: 'forged-structural',
+        messageId: target.messageId, providerMessageId },
+      event: { kind: 'assistant_message', time: Date.now(), ...target, rich }
+    }] }, 42, 'registered-pixel-document', url);
+    expect(journalOf(session)).toEqual([]);
+  });
+
+  it('refuses pixel issuance without current Chrome document, route, source G and a valid fixed target', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const recordingGeneration = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    let beginPosts = 0;
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session: new FakeStorageArea(),
+      tabsGet: async () => ({ id: 42, url, status: 'complete' }),
+      fetch: async address => {
+        const route = new URL(address).pathname;
+        if (route === '/hello') return response(200, { app: APP_SLUG, bridge: 17, paired: true, compatible: true });
+        if (route === '/recording/generation') return response(200, { recordingGeneration });
+        if (route === '/rich/pixel/begin') beginPosts++;
+        return response(503, { error: 'no_slot' });
+      } });
+    await worker.registerTab(42, 'registered-pixel-document');
+    const target = { messageId: 'assistant:page-pixel', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      nodeId: 'n-0-1', mediaId: 'media-n-0-1' };
+    const cases = [
+      { message: { type: 'rich_pixel_begin', conversationId, ...target,
+        recordingGeneration, navigationEpoch: 0 }, doc: 'wrong-document', senderUrl: url },
+      { message: { type: 'rich_pixel_begin', conversationId, ...target,
+        recordingGeneration: 'Z'.repeat(43), navigationEpoch: 0 }, doc: 'registered-pixel-document', senderUrl: url },
+      { message: { type: 'rich_pixel_begin', conversationId, ...target,
+        recordingGeneration, navigationEpoch: 1 }, doc: 'registered-pixel-document', senderUrl: url },
+      { message: { type: 'rich_pixel_begin', conversationId, ...target,
+        nodeId: 'n-0-2', recordingGeneration, navigationEpoch: 0 }, doc: 'registered-pixel-document', senderUrl: url },
+      { message: { type: 'rich_pixel_begin', conversationId, ...target,
+        recordingGeneration, navigationEpoch: 0 }, doc: 'registered-pixel-document',
+        senderUrl: 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }
+    ];
+    for (const item of cases) {
+      const reply = await worker.send(item.message, 42, item.doc, item.senderUrl);
+      expect(reply.ok).toBe(false);
+    }
+    expect(beginPosts).toBe(0);
+  });
+
+  it('attests only exact-purpose pixel rows, verifies actual encoded-byte digest, and journals independent positional receipts', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const providerMessageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const recordingGeneration = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const captureId = 'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP';
+    const scanToken = 'pixel-scan-1';
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    const target = { messageId: 'assistant:page-pixel', providerMessageId,
+      nodeId: 'n-0-1', mediaId: 'media-n-0-1' };
+    const sourceIncarnation = `src_${'a'.repeat(32)}_1`, sourceSequence = 1;
+    // A synthetic WebP header only exercises the worker's custody/hash boundary.
+    // It is NOT evidence for decoded media, provider pixels or recorder availability.
+    const bytes = Buffer.from('524946460400000057454250', 'hex');
+    const pixelSha256 = createHash('sha256').update(bytes).digest('hex');
+    const previewDataUrl = `data:image/webp;base64,${bytes.toString('base64')}`;
+    const rootStamp = `${scanToken}:0:${encodeURIComponent(target.messageId)}:${encodeURIComponent(providerMessageId)}`;
+    const seal = { captureId, scanToken, ...target, rootStamp,
+      sourceIncarnation, sourceSequence, status: 'available',
+      pixelBytes: bytes.length, pixelSha256 };
+    const event = { kind: 'rich_media', time: Date.now(), ...target,
+      status: 'available', previewDataUrl, previewWidth: 4, previewHeight: 4,
+      pixelBytes: bytes.length, pixelSha256 };
+    const session = new FakeStorageArea();
+    const posts: any[] = [];
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session, tabsGet: async () => ({ id: 42, url, status: 'complete' }),
+      fetch: async (address, init = {}) => {
+        const route = new URL(address).pathname;
+        if (route === '/hello') return response(200, { app: APP_SLUG, bridge: 17, paired: true, compatible: true });
+        if (route === '/recording/generation') return response(200, { recordingGeneration });
+        if (route === '/rich/pixel/begin') return response(200, { capture: {
+          captureId, purpose: 'page_pixel', ...JSON.parse(String(init.body)),
+          sessionId: 'physical-session', bindingRevision: 4, richRevision: 1,
+          slotVersion: 0, sourceIncarnation: null, sourceSequence: null } });
+        if (route === '/events') { posts.push(JSON.parse(String(init.body))); return response(503, {}); }
+        return response(503, {});
+      } });
+    await worker.registerTab(42, 'registered-pixel-document');
+    expect((await worker.send({ type: 'rich_pixel_begin', conversationId, ...target,
+      recordingGeneration, navigationEpoch: 0 }, 42, 'registered-pixel-document', url))
+      .capture).toMatchObject({ captureId, purpose: 'page_pixel' });
+    const entries = [
+      { conversationId, recordingGeneration, recordingNavigationEpoch: 0,
+        pixelSeal: seal, pixelReceipt: { captureId: 'FORGED', status: 'available' }, event },
+      { conversationId, recordingGeneration, recordingNavigationEpoch: 0,
+        event: { kind: 'user_message', time: Date.now(), messageId: 'ordinary-user', text: 'Ordinary prose' } },
+      { conversationId, recordingGeneration, recordingNavigationEpoch: 0,
+        pixelSeal: { ...seal, status: 'unavailable', pixelBytes: null, pixelSha256: null },
+        event: { kind: 'rich_media', time: Date.now(), ...target, status: 'unavailable', reason: 'tainted' } }
+    ];
+    expect(await worker.send({ type: 'events', conversationId, navigationEpoch: 0, entries },
+      42, 'registered-pixel-document', url)).toMatchObject({ ok: true, durable: true });
+    const journal = journalOf(session);
+    expect(journal).toHaveLength(3);
+    expect(journal.map(row => row.pixelReceipt)).toEqual([
+      expect.objectContaining({ captureId, scanToken, ...target, rootStamp,
+        sourceIncarnation, sourceSequence, status: 'available', pixelBytes: bytes.length, pixelSha256,
+        conversationId, tab: 42, documentId: 'registered-pixel-document',
+        documentGeneration: 1, spaEpoch: 0, recordingGeneration }),
+      null,
+      expect.objectContaining({ captureId, ...target, sourceIncarnation, sourceSequence,
+        status: 'unavailable', pixelBytes: null, pixelSha256: null })
+    ]);
+    expect(JSON.stringify(journal)).not.toContain('FORGED');
+    expect(journal[0].event.previewDataUrl).toBe(previewDataUrl);
+    expect(posts[0]).toMatchObject({ recordingGenerations: [recordingGeneration, recordingGeneration, recordingGeneration],
+      richPixelReceipts: [expect.objectContaining({ captureId, status: 'available' }),
+        null, expect.objectContaining({ captureId, status: 'unavailable' })] });
+    expect(posts[0].richPixelReceipts).toHaveLength(posts[0].events.length);
+
+    const forgedBytes = { ...event, previewDataUrl: `data:image/webp;base64,${Buffer.from('not-webp').toString('base64')}` };
+    const forgedSeal = { ...seal, captureId };
+    await worker.send({ type: 'events', conversationId, navigationEpoch: 0, entries: [
+      { conversationId, recordingGeneration, recordingNavigationEpoch: 0,
+        pixelSeal: forgedSeal, event: forgedBytes }
+    ] }, 42, 'registered-pixel-document', url);
+    expect(journalOf(session)).toHaveLength(3); // No forged digest can journal a pixel.
+  });
+
+  it('preserves exact original pixel-receipt indexes and null gaps in both HTTP 413 halves', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const recordingGeneration = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const providerMessageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const captureId = 'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP';
+    const scanToken = 'pixel-scan-413', sourceIncarnation = `src_${'a'.repeat(32)}_1`;
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    const target = { messageId: 'assistant:page-pixel', providerMessageId,
+      mediaId: 'media-n-0-1', nodeId: 'n-0-1' };
+    const rootStamp = `${scanToken}:0:${encodeURIComponent(target.messageId)}:${encodeURIComponent(providerMessageId)}`;
+    const pixel = (status: 'pending' | 'unavailable') => ({
+      conversationId, recordingGeneration, recordingNavigationEpoch: 0,
+      pixelSeal: { captureId, scanToken, ...target, rootStamp, sourceIncarnation,
+        sourceSequence: 1, status, pixelBytes: null, pixelSha256: null },
+      event: { kind: 'rich_media', time: Date.now(), ...target, status,
+        ...(status === 'unavailable' ? { reason: 'tainted' } : {}) }
+    });
+    const posts: any[] = [];
+    let refuseOnce = true;
+    const session = new FakeStorageArea();
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session, tabsGet: async () => ({ id: 42, url, status: 'complete' }),
+      fetch: async (address, init = {}) => {
+        const route = new URL(address).pathname;
+        if (route === '/hello') return response(200, { app: APP_SLUG, bridge: 17, paired: true, compatible: true });
+        if (route === '/recording/generation') return response(200, { recordingGeneration });
+        if (route === '/rich/pixel/begin') return response(200, { capture: {
+          captureId, purpose: 'page_pixel', ...JSON.parse(String(init.body)),
+          sessionId: 'physical-session', bindingRevision: 4, richRevision: 1,
+          slotVersion: 0, sourceIncarnation: null, sourceSequence: null } });
+        if (route === '/events') {
+          const body = JSON.parse(String(init.body));
+          posts.push(body);
+          if (refuseOnce) { refuseOnce = false; return response(413, { error: 'body_too_large' }); }
+          return response(200, { stored: body.events.length });
+        }
+        return response(503, {});
+      } });
+    await worker.registerTab(42, 'registered-pixel-document');
+    expect((await worker.send({ type: 'rich_pixel_begin', conversationId,
+      recordingGeneration, navigationEpoch: 0, ...target },
+    42, 'registered-pixel-document', url)).ok).toBe(true);
+    const normal = { conversationId, recordingGeneration, recordingNavigationEpoch: 0,
+      event: { kind: 'user_message', time: Date.now(), messageId: 'author-prose', text: 'exact prose' } };
+    await worker.send({ type: 'events', conversationId, navigationEpoch: 0,
+      entries: [pixel('pending'), normal, pixel('unavailable')] },
+    42, 'registered-pixel-document', url);
+    await vi.waitFor(() => expect(journalOf(session)).toEqual([]));
+    expect(posts.length).toBeGreaterThanOrEqual(3);
+    expect(posts[0].richPixelReceipts).toEqual([
+      expect.objectContaining({ captureId, scanToken, status: 'pending', ...target }),
+      null,
+      expect.objectContaining({ captureId, scanToken, status: 'unavailable', ...target })
+    ]);
+    for (const post of posts) {
+      expect(post.richPixelReceipts).toHaveLength(post.events.length);
+      expect(post.recordingGenerations).toHaveLength(post.events.length);
+      expect(post.richPixelReceipts).toEqual(post.events.map((event: any) =>
+        event.kind === 'rich_media' ? expect.objectContaining({
+          captureId, scanToken, ...target, status: event.status
+        }) : null));
+    }
+    expect(posts.filter(post => post.events.length < 3)).toHaveLength(2);
+    expect(posts.flatMap(post => post.events.map((event: any) => event.messageId)))
+      .toEqual([target.messageId, 'author-prose', target.messageId,
+        target.messageId, 'author-prose', target.messageId]);
+  });
+
+  it('persists the issued Chrome document ticket before ACK and freezes its exact row receipt across MV3 restart', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const recordingGeneration = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const captureId = 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
+    const providerMessageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const scanToken = 'frame-before-scan';
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const fetch = async (address: string, init: Record<string, unknown> = {}) => {
+      const route = new URL(address).pathname;
+      if (route === '/hello') return response(200, { app: APP_SLUG, paired: true, bridge: 17, compatible: true });
+      if (route === '/recording/generation') return response(200, { recordingGeneration });
+      if (route === '/rich/capture/begin') return response(200, { capture: {
+        captureId, ...JSON.parse(String(init.body)), sessionId: 'physical-session', bindingRevision: 3
+      } });
+      return response(503, { error: 'journal_retry' });
+    };
+    const worker = loadWorker({ local, session, fetch,
+      tabsGet: async () => ({ id: 42, url, status: 'complete' }) });
+    await worker.registerTab(42, 'physical-document');
+    const begin = await worker.send({ type: 'rich_capture_begin', conversationId,
+      navigationEpoch: 0, recordingGeneration }, 42, 'physical-document', url);
+    expect(begin).toMatchObject({ ok: true, capture: { captureId,
+      sessionId: 'physical-session', bindingRevision: 3 } });
+    // This is the durable storage image, not the returned ticket's page-controlled body.
+    expect((session.data.workerRichIssuances as Record<string, any>)[captureId]).toMatchObject({
+      captureId, tab: 42, documentId: 'physical-document', documentGeneration: 1,
+      spaEpoch: 0, conversationId, recordingGeneration, sessionId: 'physical-session', bindingRevision: 3
+    });
+    const rich = { version: 1, status: 'available', reason: null,
+      conversationId, messageId: 'logical-one', providerMessageId, revision: 0,
+      accessibleText: 'Example', nodes: [] };
+    const entry = { conversationId, recordingGeneration, recordingNavigationEpoch: 0,
+      richSeal: { captureId, scanToken, messageId: 'logical-one', providerMessageId },
+      event: { kind: 'assistant_message', time: Date.now(), messageId: 'logical-one',
+        providerMessageId, rich } };
+    expect(await worker.send({ type: 'events', conversationId, navigationEpoch: 0,
+      entries: [entry] }, 42, 'physical-document', url)).toMatchObject({ ok: true, durable: true });
+    const journal = journalOf(session);
+    expect(journal).toHaveLength(1);
+    expect(journal[0].richReceipt).toEqual({ captureId, scanToken,
+      messageId: 'logical-one', providerMessageId, conversationId, recordingGeneration,
+      tab: 42, documentId: 'physical-document', documentGeneration: 1, spaEpoch: 0 });
+    const restored = loadWorker({ local, session, fetch,
+      tabsGet: async () => ({ id: 42, url, status: 'complete' }) });
+    await restored.send({ type: 'status' });
+    expect(journalOf(session)[0].richReceipt).toEqual(journal[0].richReceipt);
+    expect((session.data.workerRichIssuances as Record<string, any>)[captureId]).toMatchObject({
+      scanToken, pairs: { 'logical-one': providerMessageId }
+    });
+  });
+
+  it('strips forged rich receipt and unsealed rich-only rows but preserves independent authored text', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const recordingGeneration = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    const session = new FakeStorageArea();
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session, tabsGet: async () => ({ id: 42, url, status: 'complete' }),
+      fetch: async address => new URL(address).pathname === '/recording/generation'
+        ? response(200, { recordingGeneration }) : response(503, {}) });
+    await worker.registerTab(42, 'physical-document');
+    const rich = { version: 1, status: 'available', reason: null,
+      conversationId, messageId: 'logical', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      revision: 0, accessibleText: 'Untrusted', nodes: [] };
+    await worker.send({ type: 'events', conversationId, navigationEpoch: 0, entries: [
+      { conversationId, recordingGeneration, recordingNavigationEpoch: 0,
+        richReceipt: { captureId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', scanToken: 'forged' },
+        event: { kind: 'assistant_message', messageId: rich.messageId,
+          providerMessageId: rich.providerMessageId, text: 'Real authored prose', rich } },
+      { conversationId, recordingGeneration, recordingNavigationEpoch: 0,
+        event: { kind: 'assistant_message', messageId: 'rich-only',
+          providerMessageId: rich.providerMessageId, rich: { ...rich, messageId: 'rich-only' } } }
+    ] }, 42, 'physical-document', url);
+    const journal = journalOf(session);
+    expect(journal).toHaveLength(1);
+    expect(journal[0].event).toMatchObject({ kind: 'assistant_message', text: 'Real authored prose' });
+    expect(journal[0].event).not.toHaveProperty('rich');
+    expect(journal[0].richReceipt).toBeNull();
+    expect(JSON.stringify(journal)).not.toContain('forged');
+  });
+
+  it('slices genuine exact-row receipts positionally with null ordinary rows through HTTP 413 and replay', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const recordingGeneration = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const captureId = 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
+    const providerA = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const providerB = '3150f756-bf2d-45fa-ac0f-45010b2239fc';
+    const scanToken = 'scan-two-pairs';
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    const posts: any[] = [];
+    let first = true;
+    const session = new FakeStorageArea();
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session, tabsGet: async () => ({ id: 42, url, status: 'complete' }),
+      fetch: async (address, init = {}) => {
+        const route = new URL(address).pathname;
+        if (route === '/hello') return response(200, { app: APP_SLUG, bridge: 17, compatible: true, paired: true });
+        if (route === '/recording/generation') return response(200, { recordingGeneration });
+        if (route === '/rich/capture/begin') return response(200, { capture: {
+          captureId, ...JSON.parse(String(init.body)), sessionId: 'physical-session', bindingRevision: 1
+        } });
+        if (route === '/events') {
+          const body = JSON.parse(String(init.body));
+          posts.push(body);
+          if (first) { first = false; return response(413, { error: 'body_too_large' }); }
+          return response(200, { stored: body.events.length });
+        }
+        return response(200, {});
+      } });
+    await worker.registerTab(42, 'physical-document');
+    expect(await worker.send({ type: 'rich_capture_begin', conversationId,
+      recordingGeneration, navigationEpoch: 0 }, 42, 'physical-document', url))
+      .toMatchObject({ ok: true, capture: { captureId } });
+    const richEntry = (messageId: string, providerMessageId: string) => ({
+      conversationId, recordingGeneration, recordingNavigationEpoch: 0,
+      richSeal: { captureId, scanToken, messageId, providerMessageId },
+      richReceipt: { captureId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', scanToken: 'forged' },
+      event: { kind: 'assistant_message', time: Date.now(), messageId, providerMessageId,
+        rich: { version: 1, status: 'available', reason: null, conversationId,
+          messageId, providerMessageId, revision: 0, accessibleText: '', nodes: [] } }
+    });
+    await worker.send({ type: 'events', conversationId, navigationEpoch: 0, entries: [
+      richEntry('logical-a', providerA),
+      { conversationId, recordingGeneration, recordingNavigationEpoch: 0,
+        event: { kind: 'user_message', time: Date.now(), messageId: 'normal-user', text: 'authored' } },
+      richEntry('logical-b', providerB)
+    ] }, 42, 'physical-document', url);
+    await vi.waitFor(() => expect(journalOf(session)).toEqual([]));
+    expect(posts.length).toBeGreaterThanOrEqual(2);
+    expect(posts[0].richCaptureReceipts).toHaveLength(3);
+    expect(posts[0].richCaptureReceipts[0]).toMatchObject({ captureId,
+      scanToken, messageId: 'logical-a', providerMessageId: providerA });
+    expect(posts[0].richCaptureReceipts[1]).toBeNull();
+    expect(posts[0].richCaptureReceipts[2]).toMatchObject({ captureId,
+      scanToken, messageId: 'logical-b', providerMessageId: providerB });
+    for (const post of posts) {
+      expect(post.recordingGenerations).toHaveLength(post.events.length);
+      if (post.richCaptureReceipts) {
+        expect(post.richCaptureReceipts).toHaveLength(post.events.length);
+        expect(post.richCaptureReceipts).toEqual(post.events.map((event: any) =>
+          event.kind === 'assistant_message' ? expect.objectContaining({
+            captureId, scanToken, messageId: event.messageId, providerMessageId: event.providerMessageId
+          }) : null));
+      } else expect(post.events.every((event: any) => event.kind !== 'assistant_message')).toBe(true);
+    }
+    expect(JSON.stringify(posts)).not.toContain('forged');
+  });
+
+  it('attests a pre-scan rich ticket from registered Chrome sender, physical document, SPA grant and settled route', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const generation = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    const posted: any[] = [];
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session: new FakeStorageArea(), tabsGet: async () => ({ id: 42, url, status: 'complete' }),
+      fetch: async (address, init = {}) => {
+        const route = new URL(address).pathname;
+        if (route === '/hello') return response(200, { app: APP_SLUG, paired: true, bridge: 17, compatible: true });
+        if (route === '/recording/generation') return response(200, { recordingGeneration: generation });
+        if (route === '/rich/capture/begin') {
+          const body = JSON.parse(String(init.body));
+          posted.push(body);
+          return response(200, { capture: { captureId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+            ...body, sessionId: 'session-from-main', bindingRevision: 0 } });
+        }
+        return response(200, {});
+      } });
+    expect(await worker.registerTab(42, 'registered-document')).toMatchObject({ ok: true, recordingGeneration: generation });
+    const result = await worker.send({ type: 'rich_capture_begin', conversationId,
+      navigationEpoch: 0, recordingGeneration: generation,
+      tab: 999, documentId: 'page-forged', sessionId: 'page-forged', bindingRevision: 999 },
+    42, 'registered-document', url);
+    expect(result).toMatchObject({ ok: true, capture: { captureId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      sessionId: 'session-from-main', bindingRevision: 0, documentId: 'registered-document',
+      documentGeneration: 1, spaEpoch: 0, conversationId, recordingGeneration: generation } });
+    expect(posted).toEqual([{ conversationId, tab: 42, documentId: 'registered-document',
+      documentGeneration: 1, spaEpoch: 0, recordingGeneration: generation }]);
+  });
+
+  it.each(['missing-sender', 'subframe', 'unregistered-document', 'wrong-spa', 'unknown-grant', 'loading', 'wrong-sender-route'])(
+    'refuses rich ticket before app issuance for %s', async failure => {
+      const conversationId = '11111111-2222-3333-4444-555555555555';
+      const generation = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+      const url = `https://chatgpt.com/c/${conversationId}`;
+      let capturePosts = 0;
+      const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+        session: new FakeStorageArea(), tabsGet: async () => ({ id: 42, url,
+          status: failure === 'loading' ? 'loading' : 'complete' }),
+        fetch: async (address) => {
+          const route = new URL(address).pathname;
+          if (route === '/hello') return response(200, { app: APP_SLUG, paired: true, bridge: 17, compatible: true });
+          if (route === '/recording/generation') return response(200, { recordingGeneration: generation });
+          if (route === '/rich/capture/begin') capturePosts++;
+          return response(200, {});
+        } });
+      await worker.registerTab(42, 'registered-document');
+      const result = await worker.send({ type: 'rich_capture_begin', conversationId,
+        navigationEpoch: failure === 'wrong-spa' ? 700 : 0,
+        recordingGeneration: failure === 'unknown-grant' ? 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC' : generation },
+      42, failure === 'missing-sender' ? '' : failure === 'unregistered-document' ? 'unregistered-document' : 'registered-document',
+      failure === 'wrong-sender-route' ? 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' : url,
+      failure === 'subframe' ? 3 : 0);
+      expect(result.ok).toBe(false);
+      expect(capturePosts).toBe(0);
+    }
+  );
+
+  it('refuses an in-flight rich ticket if the Chrome route changes while main answers', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const generation = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    let currentUrl = url;
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session: new FakeStorageArea(), tabsGet: async () => ({ id: 42, url: currentUrl, status: 'complete' }),
+      fetch: async (address, init = {}) => {
+        const route = new URL(address).pathname;
+        if (route === '/hello') return response(200, { app: APP_SLUG, paired: true, bridge: 17, compatible: true });
+        if (route === '/recording/generation') return response(200, { recordingGeneration: generation });
+        if (route === '/rich/capture/begin') {
+          entered();
+          await gate;
+          return response(200, { capture: { captureId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+            ...JSON.parse(String(init.body)), sessionId: 'session-from-main', bindingRevision: 0 } });
+        }
+        return response(200, {});
+      } });
+    await worker.registerTab(42, 'registered-document');
+    const pending = worker.send({ type: 'rich_capture_begin', conversationId,
+      navigationEpoch: 0, recordingGeneration: generation }, 42, 'registered-document', url);
+    try {
+      await reached;
+      currentUrl = 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    } finally { release(); }
+    expect((await pending).ok).toBe(false);
+  });
+
+  it('journals canonical events after a bounded rich begin even when its app response never settles', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const generation = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    const session = new FakeStorageArea();
+    let entered!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const requests: string[] = [];
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session, tabsGet: async () => ({ id: 42, url, status: 'complete' }),
+      fetch: async address => {
+        const route = new URL(address).pathname;
+        requests.push(route);
+        if (route === '/hello') return response(200, { app: APP_SLUG, paired: true });
+        if (route === '/recording/generation') return response(200, { recordingGeneration: generation });
+        if (route === '/rich/capture/begin') {
+          entered();
+          // The fetch intentionally ignores AbortSignal: the worker's whole-operation
+          // deadline must still release the per-tab queue for the canonical event.
+          return new Promise<ReturnType<typeof response>>(() => undefined);
+        }
+        return response(503, { error: 'app_unavailable' });
+      } });
+    await worker.registerTab(42, 'registered-document');
+    const pendingCapture = worker.send({ type: 'rich_capture_begin', conversationId,
+      navigationEpoch: 0, recordingGeneration: generation }, 42, 'registered-document', url);
+    await reached;
+    const canonical = worker.send({ type: 'events', conversationId, navigationEpoch: 0,
+      entries: [{ conversationId, recordingGeneration: generation, recordingNavigationEpoch: 0,
+        event: { kind: 'user_message', time: Date.now(), messageId: 'authored-event', text: 'Keep this' } }] },
+    42, 'registered-document', url);
+    expect(await pendingCapture).toMatchObject({ ok: false, error: 'rich_capture_unavailable' });
+    expect(await canonical).toMatchObject({ ok: true, durable: true });
+    expect(journalOf(session).map(row => row.event.messageId)).toContain('authored-event');
+    expect(requests.filter(route => route === '/rich/capture/begin')).toHaveLength(1);
+  });
+
+  it('refuses a cold rich probe without running port discovery ahead of canonical event custody', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const generation = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    const local = new FakeStorageArea({ port: null, token: 'paired-token' });
+    const session = new FakeStorageArea({
+      tabDocuments: { '42': 'registered-document' }, tabEpochs: { '42': 0 },
+      registeredDocuments: { '42': { documentId: 'registered-document', epoch: 1,
+        recordingIssuances: [{ epoch: 0, generation }] } }
+    });
+    let helloCount = 0;
+    const worker = loadWorker({ local, session, tabsGet: async () => ({ id: 42, url, status: 'complete' }),
+      fetch: async address => {
+        if (new URL(address).pathname === '/hello') helloCount++;
+        return response(503, { error: 'app_unavailable' });
+      } });
+    expect(await worker.send({ type: 'rich_capture_begin', conversationId,
+      navigationEpoch: 0, recordingGeneration: generation }, 42, 'registered-document', url))
+      .toMatchObject({ ok: false, error: 'rich_capture_unavailable' });
+    expect(helloCount).toBe(0);
+  });
+
+  it('binds old and renewed recording grants to the Chrome document before accepting page rows and preserves 413 positions', async () => {
+    const g0 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const g2 = 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
+    let issued = g0;
+    const id = '11111111-2222-3333-4444-555555555555';
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const batches: any[] = [];
+    let first = true;
+    const worker = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      const route = new URL(input).pathname;
+      if (route === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (route === '/recording/generation') return response(200, { recordingGeneration: issued });
+      if (route === '/events') {
+        const body = JSON.parse(String(init.body));
+        batches.push(body);
+        if (first) { first = false; return response(413, { error: 'body_too_large' }); }
+        return response(200, { stored: body.events.length });
+      }
+      return response(200, {});
+    } });
+    const initial = await worker.registerTab(42, 'issued-document');
+    expect(initial).toMatchObject({ ok: true, recordingGeneration: g0 });
+    issued = g2; // App committed Off then On before content's old G0 queue reached worker.
+    expect(await worker.send({ type: 'recording_generation', navigationEpoch: 0 }, 42, 'issued-document'))
+      .toMatchObject({ ok: true, recordingGeneration: g2 });
+    await worker.send({ type: 'events', conversationId: id, navigationEpoch: 0, entries: [
+      { conversationId: id, recordingGeneration: g0, recordingNavigationEpoch: 0,
+        event: { kind: 'user_message', messageId: 'old-g0', text: 'private', recordingGeneration: g2 } },
+      { conversationId: id, recordingGeneration: g2, recordingNavigationEpoch: 0,
+        event: { kind: 'assistant_message', messageId: 'fresh-g2', text: 'new', recordingGeneration: g0 } },
+      { conversationId: id, recordingGeneration: 'forged', recordingNavigationEpoch: 0,
+        event: { kind: 'user_message', messageId: 'unknown', text: 'not authorized' } }
+    ] }, 42, 'issued-document');
+    expect(batches.map(batch => batch.recordingGenerations)).toEqual([
+      [g0, g2, null], [g0], [g2, null]
+    ]);
+    expect(batches[0].events.every((entry: any) => !Object.hasOwn(entry, 'recordingGeneration'))).toBe(true);
+    expect(session.data.journal).toEqual([]);
+    const registered = session.data.registeredDocuments as Record<string, any>;
+    expect(registered['42'].recordingIssuances).toMatchObject([
+      { generation: g0, epoch: 0 }, { generation: g2, epoch: 0 }
+    ]);
+  });
+
+  it('retires unversioned and malformed saved observations as unknown without forging a new gap', async () => {
+    const id = '11111111-2222-3333-4444-555555555555';
+    const session = new FakeStorageArea({ journal: [
+      { conversationId: id, provisional: null, event: { kind: 'user_message', messageId: 'v16-legacy', text: 'old' } },
+      { conversationId: id, provisional: null, recordingGeneration: 'malformed-v17',
+        event: { kind: 'assistant_message', messageId: 'bad-token', text: 'unknown' } }
+    ] });
+    const posts: any[] = [];
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session,
+      fetch: async (input, init = {}) => {
+        if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
+        if (new URL(input).pathname === '/events') posts.push(JSON.parse(String(init.body)));
+        return response(200, { stored: 0, recordingSuppressed: true });
+      } });
+    await worker.send({ type: 'status' });
+    await vi.waitFor(() => expect(journalOf(session)).toEqual([]));
+    expect(posts).toMatchObject([{ recordingGenerations: [null, null], events: [
+      { messageId: 'v16-legacy' }, { messageId: 'bad-token' }
+    ] }]);
+    expect(posts.flatMap(post => post.events).some(entry => entry.kind === 'chat_error')).toBe(false);
+  });
+
+  it('refuses a protocol-16 hello without attempting an events POST or retiring the journal', async () => {
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const requests: string[] = [];
+    const worker = loadWorker({ local, session, fetch: async (input) => {
+      const path = new URL(input).pathname;
+      requests.push(path);
+      if (path === '/hello') return response(200, { app: APP_SLUG, bridge: 16, compatible: false, paired: true });
+      throw new Error(`incompatible extension attempted ${path}`);
+    } });
+    const id = '11111111-2222-3333-4444-555555555555';
+    await worker.send({ type: 'events', conversationId: id,
+      entries: [{ conversationId: id, event: { kind: 'user_message', time: Date.now(), text: 'retain' } }] });
+    const status = await worker.send({ type: 'status' });
+    expect(status).toMatchObject({ compatible: false, extensionProtocol: 17, appProtocol: 16, pending: 1 });
+    expect(requests).not.toContain('/events');
+    expect(journalOf(session)).toHaveLength(1);
+  });
+
+  it('captures Chrome sender per journal row, never forged entry fields, and retains old document across reload/rename', async () => {
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const sent: any[] = [];
+    let deliver = false;
+    const worker = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      const route = new URL(input).pathname;
+      if (route === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (route === '/events') {
+        sent.push(JSON.parse(String(init.body)));
+        return deliver ? response(200, { stored: 1 }) : response(503, { error: 'retry' });
+      }
+      return response(200, {});
+    } });
+    const id = '11111111-2222-3333-4444-555555555555';
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const projection = { version: 1, status: 'available', reason: null, conversationId: id,
+      messageId: 'logical-a', providerMessageId: provider, revision: 0, accessibleText: 'Choose', nodes: [] };
+    expect(await worker.registerTab(42, 'document-42-0')).toMatchObject({ ok: true });
+    await worker.send({ type: 'events', entries: [{ conversationId: null,
+      capture: { tab: 999, documentId: 'forged', navigationEpoch: 999, routeVerified: true },
+      event: { kind: 'assistant_message', time: Date.now(), messageId: 'logical-a',
+        providerMessageId: provider, text: 'Authored answer', rich: projection } }] }, 42, 'document-42-0');
+    const original = journalOf(session)[0].capture;
+    expect(original).toMatchObject({ tab: 42, documentId: 'document-42-0', navigationEpoch: 1, routeVerified: false });
+    expect(JSON.stringify(original)).not.toContain('forged');
+    expect(journalOf(session)[0].event).not.toHaveProperty('rich');
+    expect(journalOf(session)[0].richReceipt).toBeNull();
+    await worker.navigateTab(42, 'https://chatgpt.com/');
+    expect(journalOf(session)[0].capture).toEqual(original);
+    expect(journalOf(session)[0].provisional).toBe('tab-42:document-42-1');
+    deliver = true;
+    await worker.send({ type: 'bind', conversationId: id }, 42, 'document-42-1');
+    expect(sent.at(-1)).toMatchObject({ conversationId: id,
+      sourceCaptures: [original], events: [expect.objectContaining({ messageId: 'logical-a' })] });
+    expect(journalOf(session)).toEqual([]);
+  });
+
+  it('attests a rich row route only against Chrome tab URL, not its claimed conversation or page epoch', async () => {
+    const a = '11111111-2222-3333-4444-555555555555';
+    const b = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const worker = loadWorker({ local, session,
+      tabsGet: async (id) => ({ id, url: `https://chatgpt.com/c/${a}`, status: 'complete' }) });
+    await worker.registerTab(42, 'document-42-0');
+    const rich = { version: 1, status: 'available', reason: null, conversationId: a,
+      messageId: 'logical-a', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      revision: 0, accessibleText: 'Choose', nodes: [] };
+    await worker.send({ type: 'events', conversationId: a, navigationEpoch: 700,
+      entries: [{ conversationId: a, event: { kind: 'assistant_message', time: Date.now(),
+        text: 'Authored A', rich } },
+        { conversationId: b, event: { kind: 'assistant_message', time: Date.now(),
+          text: 'Authored B', rich } }] },
+      42, 'document-42-0', `https://chatgpt.com/c/${a}`);
+    expect(journalOf(session).map(entry => entry.capture)).toEqual([
+      { tab: 42, documentId: 'document-42-0', navigationEpoch: 1, routeVerified: true, conversationId: a },
+      { tab: 42, documentId: 'document-42-0', navigationEpoch: 1, routeVerified: false, conversationId: null }
+    ]);
+    // The independently registered document generation did not become the page's `700`.
+    expect(session.data.registeredDocuments).toMatchObject({ '42': { documentId: 'document-42-0', epoch: 1 } });
+    await worker.send({ type: 'events', conversationId: a,
+      entries: [{ conversationId: a, event: { kind: 'assistant_message', time: Date.now(),
+        text: 'Authored A', rich } }] },
+      42, 'document-42-0', `https://chatgpt.com/c/${b}`);
+    expect(journalOf(session).at(-1).capture).toMatchObject({ routeVerified: false, conversationId: null });
+  });
+
+  it('does not attest a rich route while Chrome is loading with no pendingUrl, then attests it when settled', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    const session = new FakeStorageArea();
+    let status = 'loading';
+    const worker = loadWorker({
+      local: new FakeStorageArea(), session,
+      tabsGet: async (id) => ({ id, url, status })
+    });
+    await worker.registerTab(42, 'document-42-0');
+    const rich = { version: 1, status: 'available', reason: null, conversationId,
+      messageId: 'logical-a', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      revision: 0, accessibleText: 'Choose', nodes: [] };
+    const entry = { conversationId, event: { kind: 'assistant_message',
+      time: Date.now(), text: 'Authored answer', rich } };
+
+    await worker.send({ type: 'events', conversationId, entries: [entry] }, 42, 'document-42-0', url);
+    expect(journalOf(session)[0].capture).toEqual({
+      tab: 42, documentId: 'document-42-0', navigationEpoch: 1,
+      routeVerified: false, conversationId: null
+    });
+
+    status = 'complete';
+    await worker.send({ type: 'events', conversationId, entries: [entry] }, 42, 'document-42-0', url);
+    expect(journalOf(session)[1].capture).toEqual({
+      tab: 42, documentId: 'document-42-0', navigationEpoch: 1,
+      routeVerified: true, conversationId
+    });
+    expect(journalOf(session)[0].capture.routeVerified).toBe(false);
+  });
+
+  it('retires registration on physical close and preserves queued rich provenance when a tab id is reused', async () => {
+    const a = '11111111-2222-3333-4444-555555555555';
+    const b = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const session = new FakeStorageArea();
+    let url = `https://chatgpt.com/c/${a}`;
+    const worker = loadWorker({
+      local: new FakeStorageArea(), session,
+      tabsGet: async (id) => ({ id, url, status: 'complete' })
+    });
+    const rich = (conversationId: string) => ({ version: 1, status: 'available', reason: null,
+      conversationId, messageId: 'logical', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      revision: 0, accessibleText: 'Choose', nodes: [] });
+    await worker.registerTab(42, 'old-document');
+    await worker.send({ type: 'events', conversationId: a,
+      entries: [{ conversationId: a, event: { kind: 'assistant_message', time: Date.now(),
+        text: 'Authored A', rich: rich(a) } }] },
+    42, 'old-document', url);
+    const oldCapture = journalOf(session)[0].capture;
+    expect(oldCapture).toMatchObject({ documentId: 'old-document', navigationEpoch: 1, routeVerified: true });
+
+    await worker.closeTab(42);
+    await vi.waitFor(() => expect(session.data.registeredDocuments).toEqual({}));
+    expect(journalOf(session)[0].capture).toEqual(oldCapture);
+
+    url = `https://chatgpt.com/c/${b}`;
+    await worker.registerTab(42, 'new-document');
+    await worker.send({ type: 'events', conversationId: b,
+      entries: [{ conversationId: b, event: { kind: 'assistant_message', time: Date.now(),
+        text: 'Authored B', rich: rich(b) } }] },
+    42, 'new-document', url);
+    expect(journalOf(session).map((entry) => entry.capture)).toEqual([
+      oldCapture,
+      { tab: 42, documentId: 'new-document', navigationEpoch: 1, routeVerified: true, conversationId: b }
+    ]);
+    expect(session.data.registeredDocuments).toMatchObject({ '42': { documentId: 'new-document', epoch: 1 } });
+  });
+
+  it('sends the exact per-entry Chrome capture with both 413 halves and persisted retry', async () => {
+    const id = '11111111-2222-3333-4444-555555555555';
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const batches: any[] = [];
+    let first = true;
+    const fetch = async (input: string, init: Record<string, unknown> = {}) => {
+      if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (new URL(input).pathname !== '/events') return response(200, {});
+      const body = JSON.parse(String(init.body));
+      batches.push(body);
+      if (first) { first = false; return response(413, { error: 'body_too_large' }); }
+      return response(200, { stored: body.events.length });
+    };
+    const worker = loadWorker({ local, session, fetch });
+    expect(await worker.registerTab(42, 'document-42-0')).toMatchObject({ ok: true });
+    const rich = (messageId: string) => ({ version: 1, status: 'available', reason: null,
+      conversationId: id, messageId, providerMessageId: provider, revision: 0, accessibleText: '', nodes: [] });
+    await worker.send({ type: 'events', conversationId: id, entries: [
+      { conversationId: id, event: { kind: 'assistant_message', time: Date.now(),
+        messageId: 'logical-a', text: 'Authored A', rich: rich('logical-a') } },
+      { conversationId: id, event: { kind: 'assistant_message', time: Date.now(),
+        messageId: 'logical-b', text: 'Authored B', rich: rich('logical-b') } }
+    ] }, 42, 'document-42-0');
+    expect(batches.map(batch => batch.events.length)).toEqual([2, 1, 1]);
+    expect(batches[0].sourceCaptures).toHaveLength(2);
+    for (const batch of batches) {
+      expect(batch.sourceCaptures).toHaveLength(batch.events.length);
+      expect(batch.sourceCaptures).toEqual(batch.events.map(() => ({
+        tab: 42, documentId: 'document-42-0', navigationEpoch: 1, routeVerified: false, conversationId: null
+      })));
+    }
+    expect(journalOf(session)).toEqual([]);
+  });
+
+  it('replays the original registered document capture after a service-worker restart', async () => {
+    const id = '11111111-2222-3333-4444-555555555555';
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const rich = { version: 1, status: 'available', reason: null, conversationId: id,
+      messageId: 'logical-retry', providerMessageId: provider, revision: 0, accessibleText: '', nodes: [] };
+    const first = loadWorker({ local, session, fetch: async (input) =>
+      new URL(input).pathname === '/hello' ? response(200, { app: APP_SLUG, paired: true }) : response(503, {}) });
+    await first.registerTab(42, 'document-42-0');
+    await first.send({ type: 'events', conversationId: id,
+      entries: [{ conversationId: id, event: { kind: 'assistant_message',
+        time: Date.now(), text: 'Authored retry', rich } }] }, 42);
+    const captured = journalOf(session)[0].capture;
+    expect(captured).toMatchObject({ tab: 42, documentId: 'document-42-0', navigationEpoch: 1 });
+    const posted: any[] = [];
+    const restored = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (new URL(input).pathname === '/events') posted.push(JSON.parse(String(init.body)));
+      return response(200, {});
+    } });
+    await restored.send({ type: 'status' });
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].sourceCaptures).toEqual([captured]);
+    expect(journalOf(session)).toEqual([]);
+  });
+
+  it('keeps old-chat source on delayed journal replay after a different Chrome document binds B', async () => {
+    const a = '11111111-2222-3333-4444-555555555555';
+    const b = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const posts: any[] = [];
+    let healthy = false;
+    const worker = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      const route = new URL(input).pathname;
+      if (route === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (route === '/events') {
+        posts.push(JSON.parse(String(init.body)));
+        return healthy ? response(200, {}) : response(503, {});
+      }
+      return response(200, {});
+    } });
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const rich = (conversationId: string) => ({ version: 1, status: 'available', reason: null,
+      conversationId, messageId: 'logical-shard', providerMessageId: provider, revision: 0,
+      accessibleText: 'Choose', nodes: [] });
+    await worker.registerTab(42, 'document-42-0');
+    await worker.send({ type: 'bind', conversationId: a }, 42, 'document-42-0');
+    await worker.send({ type: 'events', conversationId: a,
+      entries: [{ conversationId: a, event: { kind: 'assistant_message', time: Date.now(),
+        text: 'Authored A', rich: rich(a) } }] },
+      42, 'document-42-0', `https://chatgpt.com/c/${a}`);
+    const oldCapture = journalOf(session)[0].capture;
+    await worker.navigateTab(42, `https://chatgpt.com/c/${b}`);
+    expect(await worker.send({ type: 'events', conversationId: a,
+      entries: [{ conversationId: a, event: { kind: 'assistant_message', time: Date.now(),
+        text: 'Authored A', rich: rich(a) } }] },
+      42, 'document-42-0', `https://chatgpt.com/c/${a}`)).toMatchObject({ ok: false });
+    await worker.send({ type: 'bind', conversationId: b }, 42, 'document-42-1');
+    await worker.send({ type: 'events', conversationId: b,
+      entries: [{ conversationId: b, event: { kind: 'assistant_message', time: Date.now(),
+        text: 'Authored B', rich: rich(b) } }] },
+      42, 'document-42-1', `https://chatgpt.com/c/${b}`);
+    expect(journalOf(session)).toMatchObject([
+      { conversationId: a, capture: oldCapture },
+      { conversationId: b, capture: { documentId: 'document-42-1', navigationEpoch: 2, conversationId: null } }
+    ]);
+    healthy = true;
+    await worker.send({ type: 'status' });
+    await vi.waitFor(() => expect(journalOf(session)).toHaveLength(0));
+    expect(posts.filter(post => post.conversationId === a).at(-1).sourceCaptures).toEqual([oldCapture]);
+    expect(posts.filter(post => post.conversationId === b).at(-1).sourceCaptures).toEqual([
+      expect.objectContaining({ documentId: 'document-42-1', navigationEpoch: 2 })
+    ]);
+  });
+
   it.each([false, true])('retains a slow durable event batch beyond ten seconds, including a split retry: %s', async split => {
     vi.useFakeTimers();
     const chat = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
@@ -2713,6 +3602,80 @@ describe('extension observation journal', () => {
     expect(JSON.stringify(journalOf(session))).not.toContain('rejected by the local bridge');
   });
 
+  it('retains a 500-failed batch in Chrome storage and retries the exact payload after service-worker restart', async () => {
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const conversationId = '77777777-8888-4999-aaaa-bbbbbbbbbbbb';
+    let original: unknown = null;
+    const failing = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (new URL(input).pathname === '/events') {
+        original = JSON.parse(String(init.body));
+        return response(500, { error: 'pending_off' });
+      }
+      return response(200, {});
+    } });
+    await failing.send({ type: 'events', conversationId, entries: [
+      { conversationId, event: { kind: 'user_message', time: 101, messageId: 'original-500', text: 'owed once' } }
+    ] });
+    expect(journalOf(session)).toMatchObject([{ event: { messageId: 'original-500', text: 'owed once' } }]);
+    const posts: unknown[] = [];
+    const restored = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (new URL(input).pathname === '/events') posts.push(JSON.parse(String(init.body)));
+      return response(200, { stored: 1 });
+    } });
+    await restored.send({ type: 'status' });
+    await vi.waitFor(() => expect(journalOf(session)).toEqual([]));
+    expect(posts).toEqual([original]);
+  });
+
+  it('retains the exact journal payload through the real 60-second events AbortController deadline', async () => {
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const conversationId = '77777777-8888-4999-aaaa-cccccccccccc';
+    let reached!: () => void;
+    const started = new Promise<void>(resolve => { reached = resolve; });
+    let original: unknown = null;
+    const timedFetch = async (input: string, init: Record<string, unknown> = {}) => {
+      if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (new URL(input).pathname !== '/events') return response(200, {});
+      original = JSON.parse(String(init.body));
+      reached();
+      return new Promise<ReturnType<typeof response>>((_resolve, reject) => {
+        const signal = init.signal as AbortSignal;
+        if (signal.aborted) reject(signal.reason);
+        else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    };
+    try {
+      // Inject the fake clock before constructing the VM; it captures its timer
+      // references at load time, not when a later request starts.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const failing = loadWorker({ local, session, fetch: timedFetch });
+      const pending = failing.send({ type: 'events', conversationId, entries: [
+        { conversationId, event: { kind: 'assistant_message', time: 101, messageId: 'timeout-owned', text: 'original final' } }
+      ] });
+      await started;
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(journalOf(session)).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await pending).toMatchObject({ ok: true, pending: 1, durable: true });
+      expect(journalOf(session)).toMatchObject([{ event: { messageId: 'timeout-owned', text: 'original final' } }]);
+    } finally {
+      vi.useRealTimers();
+    }
+    const posts: unknown[] = [];
+    const restored = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      if (new URL(input).pathname === '/hello') return response(200, { app: APP_SLUG, paired: true });
+      if (new URL(input).pathname === '/events') posts.push(JSON.parse(String(init.body)));
+      return response(200, { stored: 1 });
+    } });
+    await restored.send({ type: 'status' });
+    await vi.waitFor(() => expect(journalOf(session)).toEqual([]));
+    expect(posts).toEqual([original]);
+  });
+
   it('keeps one retry alarm while work remains instead of resetting it on every failure', async () => {
     const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
     const session = new FakeStorageArea();
@@ -2853,7 +3816,8 @@ describe('extension observation journal', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(postedEvents).toEqual([
-      { conversationId, events: [expect.objectContaining({ kind: 'user_message', text: 'command bootstrap' })] }
+      { conversationId, events: [expect.objectContaining({ kind: 'user_message', text: 'command bootstrap' })],
+        recordingGenerations: [null] }
     ]);
     expect(session.data.commandAckOutbox).toEqual([]);
     expect(journalOf(session)).toEqual([]);
@@ -3017,8 +3981,8 @@ describe('extension observation journal', () => {
     });
 
     expect(posted).toEqual([
-      { conversationId: a, events: [{ kind: 'progress', time: expect.any(Number), text: 'A1' }, { kind: 'progress', time: expect.any(Number), text: 'A2' }] },
-      { conversationId: b, events: [{ kind: 'progress', time: expect.any(Number), text: 'B1' }] }
+      { conversationId: a, events: [{ kind: 'progress', time: expect.any(Number), text: 'A1' }, { kind: 'progress', time: expect.any(Number), text: 'A2' }], recordingGenerations: [null, null] },
+      { conversationId: b, events: [{ kind: 'progress', time: expect.any(Number), text: 'B1' }], recordingGenerations: [null] }
     ]);
     expect(journalOf(session)).toEqual([]);
   });
@@ -3704,6 +4668,89 @@ describe('extension observation journal', () => {
     expect(journal.some((entry) => entry.gap === true && /progress line\(s\).*dropped/.test(entry.event.text))).toBe(true);
   });
 
+  it('evicts optional attested pixels without inventing worker progress or changing authored prose', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    const recordingGeneration = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const captureId = 'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP';
+    const target = { messageId: 'assistant:page-pixel',
+      providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      mediaId: 'media-n-0-1', nodeId: 'n-0-1' };
+    const scanToken = 'pressure-pixel-scan';
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    const posts: any[] = [];
+    const worker = loadWorker({ local, session,
+      tabsGet: async () => ({ id: 42, url, status: 'complete' }),
+      fetch: async (address, init = {}) => {
+        const route = new URL(address).pathname;
+        if (route === '/hello') return response(200, { app: APP_SLUG, bridge: 17, paired: true, compatible: true });
+        if (route === '/recording/generation') return response(200, { recordingGeneration });
+        if (route === '/rich/pixel/begin') return response(200, { capture: {
+          captureId, purpose: 'page_pixel', ...JSON.parse(String(init.body)),
+          sessionId: 'physical-session', bindingRevision: 4, richRevision: 1,
+          slotVersion: 0, sourceIncarnation: null, sourceSequence: null
+        } });
+        if (route === '/events') { posts.push(JSON.parse(String(init.body))); return response(503, {}); }
+        return response(503, {});
+      } });
+    await worker.registerTab(42, 'pixel-document');
+    expect((await worker.send({ type: 'recording_generation', navigationEpoch: 0 },
+      42, 'pixel-document', url)).recordingGeneration).toBe(recordingGeneration);
+    expect((await worker.send({ type: 'rich_pixel_begin', conversationId,
+      recordingGeneration, navigationEpoch: 0, ...target }, 42, 'pixel-document', url)).ok).toBe(true);
+    const pixel = { conversationId, agent: 'worker-1', agentCommandId: 'exact-worker-command',
+      recordingGeneration, recordingNavigationEpoch: 0,
+      pixelSeal: { captureId, scanToken, ...target,
+        rootStamp: `${scanToken}:0:${encodeURIComponent(target.messageId)}:${encodeURIComponent(target.providerMessageId)}`,
+        sourceIncarnation: `src_${'a'.repeat(32)}_1`, sourceSequence: 1,
+        status: 'pending', pixelBytes: null, pixelSha256: null },
+      event: { kind: 'rich_media', time: Date.now(), ...target, status: 'pending' } };
+    expect((await worker.send({ type: 'events', conversationId, navigationEpoch: 0,
+      entries: [pixel] }, 42, 'pixel-document', url)).durable).toBe(true);
+    expect(journalOf(session)[0]).toMatchObject({ agentCommandId: 'exact-worker-command',
+      pixelReceipt: { captureId, status: 'pending' } });
+
+    // Real progress may carry the exact worker command, but a *later synthetic*
+    // loss marker cannot borrow that same worker authority after both optional
+    // progress rows and their neighboring pixel have been evicted.
+    const genuineProgress = Array.from({ length: 2 }, (_, index) => ({
+      conversationId, agent: 'worker-1', agentCommandId: 'exact-worker-command',
+      recordingGeneration, recordingNavigationEpoch: 0,
+      event: { kind: 'progress', time: Date.now(), text: `real worker progress ${index}` }
+    }));
+    expect((await worker.send({ type: 'events', conversationId, navigationEpoch: 0,
+      entries: genuineProgress }, 42, 'pixel-document', url)).durable).toBe(true);
+    expect(posts.some(post => post.agent === 'worker-1' &&
+      post.agentCommandId === 'exact-worker-command' &&
+      post.events.some((event: any) => event.text === 'real worker progress 0'))).toBe(true);
+
+    const prose = (index: number) => ({ conversationId, recordingGeneration,
+      recordingNavigationEpoch: 0,
+      event: { kind: 'user_message', time: Date.now(), messageId: `user-${index}`,
+        text: `authored prose ${index}` } });
+    posts.length = 0;
+    expect((await worker.send({ type: 'events', conversationId, navigationEpoch: 0,
+      entries: Array.from({ length: 3999 }, (_, index) => prose(index)) },
+    42, 'pixel-document', url)).durable).toBe(true);
+
+    const retained = journalOf(session);
+    expect(retained).toHaveLength(4000);
+    expect(retained[0]).toMatchObject({ conversationId, provisional: null,
+      agent: null, agentCommandId: null, gap: true,
+      event: { kind: 'progress', text: expect.stringMatching(/2 progress line\(s\).*dropped/) } });
+    expect(retained.slice(1).every(row => row.event.kind === 'user_message' && row.gap !== true &&
+      row.agent === null && row.agentCommandId === null && row.pixelReceipt === null)).toBe(true);
+    expect(retained.slice(1).map(row => row.event.text)).toEqual(
+      Array.from({ length: 3999 }, (_, index) => `authored prose ${index}`));
+    expect(posts.length).toBeGreaterThan(0);
+    expect(posts.every(post => post.agent == null && post.agentCommandId == null &&
+      post.events.every((event: any) => event.kind === 'user_message' || event.kind === 'progress'))).toBe(true);
+    expect(posts.some(post => post.events.some((event: any) => event.kind === 'progress'))).toBe(true);
+    expect(posts.every(post => post.events.every((event: any) => event.kind !== 'chat_error' &&
+      event.kind !== 'rich_media'))).toBe(true);
+  });
+
   it('keeps queue-pressure gap evidence scoped to every affected chat and provisional route', async () => {
     const local = new FakeStorageArea();
     const session = new FakeStorageArea();
@@ -3801,6 +4848,155 @@ describe('extension observation journal', () => {
     expect(received).toHaveLength(1);
     expect(received[0]).toMatchObject({ kind: 'chat_error' });
     expect(received[0].text).toMatch(/too large.*explicit gap/i);
+  });
+
+  it('retires a single 413 pixel without generating a worker-bearing chat error', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const captured: any[] = [];
+    const session = new FakeStorageArea({ journal: [{
+      conversationId, provisional: null, agent: 'worker-1', agentCommandId: 'exact-worker-command',
+      recordingGeneration: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      pixelReceipt: { captureId: 'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP' },
+      event: { kind: 'rich_media', time: Date.now(), messageId: 'assistant:page-pixel',
+        providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+        mediaId: 'media-n-0-1', nodeId: 'n-0-1', status: 'pending' }
+    }] });
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session, fetch: async (address, init = {}) => {
+        const route = new URL(address).pathname;
+        if (route === '/hello') return response(200, { app: APP_SLUG, paired: true });
+        if (route === '/events') {
+          captured.push(JSON.parse(String(init.body)));
+          return response(413, { error: 'body_too_large' });
+        }
+        return response(503, {});
+      } });
+    await worker.send({ type: 'drain' });
+    expect(captured).toHaveLength(1);
+    expect(captured[0].events).toMatchObject([{ kind: 'rich_media', status: 'pending' }]);
+    expect(journalOf(session)).toEqual([]);
+  });
+
+  it('does not manufacture a worker chat error when storage refuses an optional pixel journal', async () => {
+    const pixel = { conversationId: '11111111-2222-3333-4444-555555555555',
+      provisional: null, agent: 'worker-1', agentCommandId: 'exact-worker-command',
+      recordingGeneration: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      event: { kind: 'rich_media', time: Date.now(), messageId: 'assistant:page-pixel',
+        providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+        mediaId: 'media-n-0-1', nodeId: 'n-0-1', status: 'pending' } };
+    // This is a restored pending journal fixture: the test targets the persistence
+    // failure owner, independent from separate Chrome ticket/receipt admission.
+    const session = new FakeStorageArea({ journal: [pixel] });
+    const worker = loadWorker({ local: new FakeStorageArea(), session });
+    await worker.registerTab(42, 'pixel-document');
+    session.failNextSets = 2;
+    expect((await worker.send({ type: 'events', entries: [] }, 42, 'pixel-document')).durable).toBe(false);
+    expect((await worker.send({ type: 'events', entries: [] }, 42, 'pixel-document')).durable).toBe(true);
+    expect(journalOf(session)).toEqual([pixel]);
+  });
+
+  it('does not promote mixed pixel and real worker progress into worker-bearing chat error after double storage failure', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const recordingGeneration = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const route = { conversationId, provisional: null,
+      agent: 'worker-1', agentCommandId: 'exact-worker-command', recordingGeneration };
+    const pixel = { ...route, event: { kind: 'rich_media', time: Date.now(),
+      messageId: 'assistant:page-pixel', providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      mediaId: 'media-n-0-1', nodeId: 'n-0-1', status: 'pending' } };
+    const progress = { ...route, event: { kind: 'progress', time: Date.now(), text: 'real worker progress' } };
+    const session = new FakeStorageArea({ journal: [pixel, progress] });
+    const worker = loadWorker({ local: new FakeStorageArea(), session });
+    await worker.registerTab(42, 'pixel-document');
+    session.failNextSets = 2;
+    expect((await worker.send({ type: 'events', entries: [] }, 42, 'pixel-document')).durable).toBe(false);
+    expect((await worker.send({ type: 'events', entries: [] }, 42, 'pixel-document')).durable).toBe(true);
+    expect(journalOf(session)).toEqual([
+      pixel, progress,
+      { ...route, agent: null, agentCommandId: null, gap: true,
+        event: { kind: 'chat_error', time: expect.any(Number),
+          text: expect.stringMatching(/browser refused to store.*pending observations/) } }
+    ]);
+    const genuine = { type: 'events', conversationId,
+      entries: [{ conversationId, agent: 'worker-1', agentCommandId: 'exact-worker-command',
+        event: { kind: 'chat_error', time: Date.now(), text: 'Actual page error' } }] };
+    expect((await worker.send(genuine, 42, 'pixel-document')).durable).toBe(true);
+    expect(journalOf(session).at(-1)).toMatchObject({ conversationId,
+      agent: 'worker-1', agentCommandId: 'exact-worker-command',
+      event: { kind: 'chat_error', text: 'Actual page error' } });
+    expect(journalOf(session).at(-1)).not.toHaveProperty('gap');
+  });
+
+  it.each([413, 422])('retains the error marker but drops worker command identity after HTTP %i rejects progress', async status => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const original = { conversationId, provisional: null,
+      agent: 'worker-1', agentCommandId: 'exact-worker-command',
+      recordingGeneration: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      event: { kind: 'progress', time: Date.now(), text: 'Real worker progress' } };
+    const session = new FakeStorageArea({ journal: [original] });
+    const sent: any[] = [];
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session, fetch: async (address, init = {}) => {
+        const route = new URL(address).pathname;
+        if (route === '/hello') return response(200, { app: APP_SLUG, paired: true });
+        if (route === '/events') {
+          sent.push(JSON.parse(String(init.body)));
+          return response(sent.length === 1 ? status : 200, { stored: 1 });
+        }
+        return response(503, {});
+      } });
+    await worker.send({ type: 'drain' });
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toMatchObject({ conversationId, agent: 'worker-1',
+      agentCommandId: 'exact-worker-command', events: [{ kind: 'progress', text: 'Real worker progress' }] });
+    expect(sent[1]).toMatchObject({ conversationId,
+      events: [{ kind: 'chat_error', text: expect.stringMatching(/explicit gap/) }] });
+    expect(sent[1]).not.toHaveProperty('agent');
+    expect(sent[1]).not.toHaveProperty('agentCommandId');
+    expect(journalOf(session)).toEqual([]);
+  });
+
+  it('never borrows a surviving pixel command for a neighboring synthetic loss marker', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const recordingGeneration = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const session = new FakeStorageArea({ journal: [
+      { conversationId, provisional: null, agent: 'worker-1', agentCommandId: 'exact-worker-command',
+        recordingGeneration, pixelReceipt: { captureId: 'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP' },
+        event: { kind: 'rich_media', time: Date.now(), messageId: 'assistant:page-pixel',
+          providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+          mediaId: 'media-n-0-1', nodeId: 'n-0-1', status: 'pending' } },
+      { conversationId, provisional: null, agent: null, agentCommandId: null,
+        recordingGeneration, gap: true,
+        event: { kind: 'chat_error', time: Date.now(), text: 'A browser observation was lost' } },
+      { conversationId, provisional: null, agent: 'worker-1', agentCommandId: 'exact-worker-command',
+        recordingGeneration, event: { kind: 'progress', time: Date.now(), text: 'Authentic progress after loss' } }
+    ] });
+    const posts: any[] = [];
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session, fetch: async (address, init = {}) => {
+        const route = new URL(address).pathname;
+        if (route === '/hello') return response(200, { app: APP_SLUG, paired: true });
+        if (route === '/events') {
+          posts.push(JSON.parse(String(init.body)));
+          return response(200, { stored: 1 });
+        }
+        return response(503, {});
+      } });
+    await worker.send({ type: 'drain' });
+    expect(posts).toHaveLength(3);
+    expect(posts[0]).toMatchObject({ conversationId,
+      events: [{ kind: 'rich_media', status: 'pending' }] });
+    expect(posts[0]).not.toHaveProperty('agent');
+    expect(posts[0]).not.toHaveProperty('agentCommandId');
+    expect(posts[0].richPixelReceipts).toHaveLength(1);
+    expect(posts[1]).toMatchObject({ conversationId,
+      events: [{ kind: 'chat_error', text: 'A browser observation was lost' }] });
+    expect(posts[1]).not.toHaveProperty('agent');
+    expect(posts[1]).not.toHaveProperty('agentCommandId');
+    expect(posts[1]).not.toHaveProperty('richPixelReceipts');
+    expect(posts[2]).toMatchObject({ conversationId,
+      agent: 'worker-1', agentCommandId: 'exact-worker-command',
+      events: [{ kind: 'progress', text: 'Authentic progress after loss' }] });
+    expect(journalOf(session)).toEqual([]);
   });
 
   it('tightens and retries when Chrome rejects a session-storage write', async () => {

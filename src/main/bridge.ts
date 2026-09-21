@@ -51,7 +51,7 @@ import { CHAT_ACTIVE_MS, CHAT_SILENCE_MS, continuationMarkerOf, isReasoningEffor
   type ReasoningEffort, type SessionEvent, type SessionOrigin, type StoredText, type ToolCallRecord } from '../shared/session.js';
 import { isChatBlocked, chatBlockedAt } from './session/blocked-chats.js';
 export { CHAT_ACTIVE_MS, CHAT_SILENCE_MS } from '../shared/session.js';
-import { effectiveCapabilities, getConfig, updateConfig } from './config.js';
+import { effectiveCapabilities, getConfig, getRecordingRevision, pendingRecordingOffDecision, recordingGenerationGrant, recordingGenerationMatches, updateConfig } from './config.js';
 import { getSecret, secureStorageStatus, setSecret } from './secrets.js';
 import {
   acceptGoalReplyNow,
@@ -88,17 +88,21 @@ import {
   startGoalDraft
 } from './goal.js';
 import { logInfo, logWarn } from './logger.js';
+import { parseRichResponse } from '../shared/rich-response.js';
 import {
   closeConversation,
   liveConversations,
   noteChatOrigin,
   recordAgentMessage,
   recordChatObservations,
+  recordVerifiedChatObservations,
   recordRequestEvidence,
   recordProgress,
   restoreRecordedConversation,
   setCallAttributionListener,
   type ChatObservation,
+  type VerifiedPixelObservation,
+  type VerifiedRichObservation,
   type PageCallEvidence
 } from './session/recorder.js';
 import {
@@ -107,6 +111,7 @@ import {
   conversationWasSuperseded,
   findSessionByConversation,
   getSession,
+  isRecordingDisabledError,
   readSessionPlan,
   listUsageSessions,
   readRecentEvents,
@@ -115,6 +120,8 @@ import {
   turnHasMcpCall,
   readActivityEvents,
   readHydratedActivityCall,
+  readPageRichPixelTarget,
+  sessionAttachmentTransitionPending,
   sessionDurableModifiedAt
 } from './session/store.js';
 import { inFlightMcpRequests, runningToolCalls, runningToolProgress, settlingToolCalls } from './mcp/call-context.js';
@@ -560,6 +567,288 @@ const commandRetirementsAwaitingBroker = new Map<string, Command>();
 const commandWrites = new Map<string, Promise<boolean>>();
 /** Serializes the broker-claim + browser-lease half of one revival redeem. */
 const commandRedeems = new Map<string, Promise<void>>();
+/** Pre-scan issuance only. No /events caller can spend this until the separate capture-custody
+ * stage proves the exact row's Chrome sender and DOM/Fiber join. Restart/stop retires all IDs. */
+type RichCaptureTicket = Readonly<{
+  captureId: string;
+  conversationId: string;
+  sessionId: string;
+  bindingRevision: number;
+  tab: number;
+  documentId: string;
+  documentGeneration: number;
+  spaEpoch: number;
+  recordingGeneration: string;
+  recordingRevision: number;
+  expiresAt: number;
+}>;
+const RICH_CAPTURE_TTL_MS = 60_000;
+const MAX_RICH_CAPTURE_TICKETS = 256;
+const MAX_RICH_CAPTURE_PER_DOCUMENT = 64;
+const MAX_RICH_PAIRS_PER_CAPTURE = 64;
+const richCaptureTickets = new Map<string, RichCaptureTicket>();
+/** A later pixel scan is not the structural scan. It gets a new purpose/slot-bound
+ * short-lived lease, and no body-supplied source identity is ever ticket authority. */
+type RichPixelTicket = RichCaptureTicket & Readonly<{
+  purpose: 'page_pixel';
+  messageId: string;
+  providerMessageId: string;
+  mediaId: string;
+  nodeId: string;
+  richRevision: number;
+  slotVersion: number;
+  sourceIncarnation: string | null;
+  sourceSequence: number | null;
+}>;
+const MAX_RICH_PIXEL_TICKETS = 128;
+const MAX_RICH_PIXEL_PER_DOCUMENT = 32;
+const richPixelTickets = new Map<string, RichPixelTicket>();
+const richPixelAssociations = new WeakMap<RichPixelTicket, Readonly<{
+  scanToken: string; sourceIncarnation: string; sourceSequence: number;
+}>>();
+/** One Fiber scan can carry several assistants. Freeze its scan and bound each logical→raw
+ * association exactly as the worker's independently persisted issuance does. */
+const richCaptureAssociations = new WeakMap<RichCaptureTicket, Readonly<{
+  scanToken: string; pairs: ReadonlyMap<string, string>
+}>>();
+
+type JournalRichReceipt = Readonly<{
+  captureId: string; scanToken: string; messageId: string; providerMessageId: string;
+  conversationId: string; recordingGeneration: string; tab: number; documentId: string;
+  documentGeneration: number; spaEpoch: number;
+}>;
+
+/** Only worker-journal receipt metadata has this exact shape; reject extra authority aliases. */
+function parseJournalRichReceipt(value: unknown): JournalRichReceipt | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const fields = value as Record<string, unknown>;
+  const keys = ['captureId', 'scanToken', 'messageId', 'providerMessageId', 'conversationId',
+    'recordingGeneration', 'tab', 'documentId', 'documentGeneration', 'spaEpoch'];
+  if (Object.keys(fields).length !== keys.length || !keys.every(key => Object.hasOwn(fields, key))) return null;
+  if (typeof fields.captureId !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(fields.captureId) ||
+      typeof fields.scanToken !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(fields.scanToken) ||
+      typeof fields.messageId !== 'string' || !fields.messageId || fields.messageId.length > 190 ||
+      typeof fields.providerMessageId !== 'string' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(fields.providerMessageId) ||
+      !conversationId(fields.conversationId) ||
+      typeof fields.recordingGeneration !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(fields.recordingGeneration) ||
+      !Number.isSafeInteger(fields.tab) || (fields.tab as number) < 0 ||
+      typeof fields.documentId !== 'string' || !/^[a-z0-9_-]{1,128}$/i.test(fields.documentId) ||
+      !Number.isSafeInteger(fields.documentGeneration) || (fields.documentGeneration as number) < 1 ||
+      !Number.isSafeInteger(fields.spaEpoch) || (fields.spaEpoch as number) < 0) return null;
+  return fields as JournalRichReceipt;
+}
+
+/**
+ * Main joins a worker's accepted immutable receipt against its private pre-scan ticket.
+ * HTTP/sourceCaptures/event.rich fields alone never select the session, binding or document.
+ * The paired extension is the attester of Chrome MessageSender and isolated scan association;
+ * possession of the bridge bearer is not independent cryptographic Chrome authentication.
+ */
+function verifiedRichReceipt(
+  value: unknown, observation: ChatObservation, rawIndex: number,
+  envelopeConversation: string, originalGeneration: string, ingressRevision: number | null
+): VerifiedRichObservation | null {
+  if (!observation.rich || observation.kind !== 'assistant_message' || !observation.messageId ||
+      !observation.providerMessageId || !Number.isSafeInteger(rawIndex) || rawIndex < 0) return null;
+  const receipt = parseJournalRichReceipt(value);
+  if (!receipt) return null;
+  const ticket = richCaptureTickets.get(receipt.captureId);
+  if (!ticket || ticket.expiresAt <= Date.now() ||
+      !recordingGenerationMatches(originalGeneration) || !recordingGenerationMatches(ticket.recordingGeneration) ||
+      ingressRevision === null || ticket.recordingRevision !== ingressRevision ||
+      receipt.recordingGeneration !== originalGeneration || ticket.recordingGeneration !== originalGeneration ||
+      receipt.conversationId !== envelopeConversation || ticket.conversationId !== envelopeConversation ||
+      receipt.messageId !== observation.messageId || receipt.providerMessageId !== observation.providerMessageId ||
+      receipt.messageId !== observation.rich.messageId || receipt.providerMessageId !== observation.rich.providerMessageId ||
+      observation.rich.conversationId !== envelopeConversation ||
+      receipt.tab !== ticket.tab || receipt.documentId !== ticket.documentId ||
+      receipt.documentGeneration !== ticket.documentGeneration || receipt.spaEpoch !== ticket.spaEpoch ||
+      sessionAttachmentTransitionPending(ticket.sessionId)) return null;
+  const associated = richCaptureAssociations.get(ticket);
+  if (associated && associated.scanToken !== receipt.scanToken) return null;
+  const priorRaw = associated?.pairs.get(receipt.messageId);
+  if (priorRaw !== undefined && priorRaw !== receipt.providerMessageId) return null;
+  if (priorRaw === undefined) {
+    if ((associated?.pairs.size ?? 0) >= MAX_RICH_PAIRS_PER_CAPTURE) return null;
+    const pairs = new Map<string, string>(associated?.pairs ?? []);
+    pairs.set(receipt.messageId, receipt.providerMessageId);
+    richCaptureAssociations.set(ticket, { scanToken: receipt.scanToken, pairs });
+  }
+  const issuedEpoch = bridgeLifecycleEpoch;
+  const isTicketLive = (): boolean => bridgeDesiredRunning && !bridgeShutdownRequested &&
+    bridgeLifecycleEpoch === issuedEpoch && richCaptureTickets.get(ticket.captureId) === ticket &&
+    ticket.expiresAt > Date.now();
+  return Object.freeze({ rawIndex, observation, ticket,
+    seal: Object.freeze({ captureId: ticket.captureId, scanToken: receipt.scanToken,
+      messageId: receipt.messageId, providerMessageId: receipt.providerMessageId }),
+    isTicketLive, expectedRecordingRevision: ticket.recordingRevision });
+}
+
+type JournalPixelReceipt = VerifiedPixelObservation['receipt'];
+
+/** The positional worker receipt is independent from the event and never taken from
+ * sourceCaptures or caller-provided event provenance. Unknown aliases fail closed. */
+function parseJournalPixelReceipt(value: unknown): JournalPixelReceipt | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const fields = value as Record<string, unknown>;
+  const keys = ['captureId', 'scanToken', 'messageId', 'providerMessageId', 'mediaId',
+    'nodeId', 'rootStamp', 'sourceIncarnation', 'sourceSequence', 'status', 'pixelBytes',
+    'pixelSha256', 'conversationId', 'recordingGeneration', 'tab', 'documentId',
+    'documentGeneration', 'spaEpoch'];
+  if (Object.keys(fields).length !== keys.length || !keys.every(key => Object.hasOwn(fields, key)) ||
+      typeof fields.captureId !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(fields.captureId) ||
+      typeof fields.scanToken !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(fields.scanToken) ||
+      typeof fields.messageId !== 'string' || !fields.messageId || fields.messageId.length > 190 ||
+      typeof fields.providerMessageId !== 'string' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(fields.providerMessageId) ||
+      typeof fields.nodeId !== 'string' ||
+        !/^n-(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*))*$/.test(fields.nodeId) ||
+      fields.mediaId !== `media-${fields.nodeId}` ||
+      typeof fields.sourceIncarnation !== 'string' ||
+        !/^src_[a-f0-9]{32}_[0-9a-z]{1,11}$/.test(fields.sourceIncarnation) ||
+      !Number.isSafeInteger(fields.sourceSequence) || (fields.sourceSequence as number) < 1 ||
+      fields.sourceIncarnation !== `src_${fields.sourceIncarnation.slice(4, 36)}_${(fields.sourceSequence as number).toString(36)}` ||
+      typeof fields.rootStamp !== 'string' || fields.rootStamp.length > 800 ||
+      !new RegExp(`^${fields.scanToken}:(?:0|[1-9]\\d*):`).test(fields.rootStamp) ||
+      fields.rootStamp !== `${fields.scanToken}:${fields.rootStamp.split(':')[1]}:` +
+        `${encodeURIComponent(fields.messageId)}:${encodeURIComponent(fields.providerMessageId)}` ||
+      (fields.status !== 'pending' && fields.status !== 'available' && fields.status !== 'unavailable') ||
+      (fields.status === 'available'
+        ? !Number.isSafeInteger(fields.pixelBytes) || (fields.pixelBytes as number) < 1 ||
+          (fields.pixelBytes as number) > 384_000 ||
+          typeof fields.pixelSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(fields.pixelSha256)
+        : fields.pixelBytes !== null || fields.pixelSha256 !== null) ||
+      !conversationId(fields.conversationId) ||
+      typeof fields.recordingGeneration !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(fields.recordingGeneration) ||
+      !Number.isSafeInteger(fields.tab) || (fields.tab as number) < 0 ||
+      typeof fields.documentId !== 'string' || !/^[a-z0-9_-]{1,128}$/i.test(fields.documentId) ||
+      !Number.isSafeInteger(fields.documentGeneration) || (fields.documentGeneration as number) < 1 ||
+      !Number.isSafeInteger(fields.spaEpoch) || (fields.spaEpoch as number) < 0) return null;
+  return fields as JournalPixelReceipt;
+}
+
+function verifiedPixelReceipt(
+  value: unknown, observation: ChatObservation, rawIndex: number,
+  envelopeConversation: string, originalGeneration: string, ingressRevision: number | null
+): VerifiedPixelObservation | null {
+  if (observation.kind !== 'rich_media' || !observation.messageId ||
+      !observation.providerMessageId || !observation.mediaId || !observation.nodeId ||
+      !Number.isSafeInteger(rawIndex) || rawIndex < 0) return null;
+  const receipt = parseJournalPixelReceipt(value);
+  if (!receipt) return null;
+  const ticket = richPixelTickets.get(receipt.captureId);
+  if (!ticket || ticket.purpose !== 'page_pixel' || ticket.expiresAt <= Date.now() ||
+      !recordingGenerationMatches(originalGeneration) ||
+      ingressRevision === null || ticket.recordingRevision !== ingressRevision ||
+      receipt.recordingGeneration !== originalGeneration || ticket.recordingGeneration !== originalGeneration ||
+      receipt.conversationId !== envelopeConversation || ticket.conversationId !== envelopeConversation ||
+      receipt.messageId !== observation.messageId || receipt.providerMessageId !== observation.providerMessageId ||
+      receipt.mediaId !== observation.mediaId || receipt.nodeId !== observation.nodeId ||
+      ticket.messageId !== receipt.messageId || ticket.providerMessageId !== receipt.providerMessageId ||
+      ticket.mediaId !== receipt.mediaId || ticket.nodeId !== receipt.nodeId ||
+      receipt.status !== observation.previewStatus ||
+      (receipt.status === 'available' &&
+        (receipt.pixelBytes !== observation.pixelBytes || receipt.pixelSha256 !== observation.pixelSha256)) ||
+      receipt.tab !== ticket.tab || receipt.documentId !== ticket.documentId ||
+      receipt.documentGeneration !== ticket.documentGeneration || receipt.spaEpoch !== ticket.spaEpoch ||
+      (ticket.sourceIncarnation === receipt.sourceIncarnation &&
+        ticket.sourceSequence !== receipt.sourceSequence) ||
+      (ticket.sourceIncarnation !== receipt.sourceIncarnation && ticket.sourceSequence !== null &&
+        receipt.sourceSequence <= ticket.sourceSequence) ||
+      sessionAttachmentTransitionPending(ticket.sessionId)) return null;
+  const prior = richPixelAssociations.get(ticket);
+  if (prior && (prior.scanToken !== receipt.scanToken ||
+      prior.sourceIncarnation !== receipt.sourceIncarnation ||
+      prior.sourceSequence !== receipt.sourceSequence)) return null;
+  if (!prior) richPixelAssociations.set(ticket, Object.freeze({
+    scanToken: receipt.scanToken, sourceIncarnation: receipt.sourceIncarnation,
+    sourceSequence: receipt.sourceSequence
+  }));
+  // A positional receipt establishes identity once, not a perpetual publication
+  // lease. Stop/restart revokes the map and the lifecycle epoch synchronously;
+  // this private closure is checked again at each recorder/store write barrier.
+  const issuedEpoch = bridgeLifecycleEpoch;
+  const isTicketLive = (): boolean => bridgeDesiredRunning && !bridgeShutdownRequested &&
+    bridgeLifecycleEpoch === issuedEpoch && richPixelTickets.get(ticket.captureId) === ticket &&
+    ticket.expiresAt > Date.now();
+  return Object.freeze({ rawIndex, observation, ticket, receipt, isTicketLive,
+    expectedRecordingRevision: ticket.recordingRevision });
+}
+
+function parseRichCaptureBegin(value: unknown): Pick<RichCaptureTicket,
+  'conversationId' | 'tab' | 'documentId' | 'documentGeneration' | 'spaEpoch' | 'recordingGeneration'> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  const keys = ['conversationId', 'tab', 'documentId', 'documentGeneration', 'spaEpoch', 'recordingGeneration'];
+  if (Object.keys(body).length !== keys.length || !keys.every(key => Object.hasOwn(body, key))) return null;
+  const conversation = conversationId(body.conversationId);
+  if (!conversation || !Number.isSafeInteger(body.tab) || (body.tab as number) < 0 ||
+      typeof body.documentId !== 'string' || !/^[a-z0-9_-]{1,128}$/i.test(body.documentId) ||
+      !Number.isSafeInteger(body.documentGeneration) || (body.documentGeneration as number) < 1 ||
+      !Number.isSafeInteger(body.spaEpoch) || (body.spaEpoch as number) < 0 ||
+      typeof body.recordingGeneration !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(body.recordingGeneration)) return null;
+  return {
+    conversationId: conversation, tab: body.tab as number, documentId: body.documentId,
+    documentGeneration: body.documentGeneration as number, spaEpoch: body.spaEpoch as number,
+    recordingGeneration: body.recordingGeneration
+  };
+}
+
+/** This request identifies an *existing* image slot only. No page-provided session,
+ * rich revision, version, source URL/incarnation, bytes or asset may choose admission. */
+function parseRichPixelBegin(value: unknown): (ReturnType<typeof parseRichCaptureBegin> & {
+  messageId: string; providerMessageId: string; mediaId: string; nodeId: string;
+}) | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  const allowed = ['conversationId', 'tab', 'documentId', 'documentGeneration', 'spaEpoch',
+    'recordingGeneration', 'messageId', 'providerMessageId', 'mediaId', 'nodeId'];
+  if (Object.keys(body).length !== allowed.length || !allowed.every(key => Object.hasOwn(body, key)) ||
+      typeof body.messageId !== 'string' || !body.messageId || body.messageId.length > 190 ||
+      typeof body.providerMessageId !== 'string' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.providerMessageId) ||
+      typeof body.nodeId !== 'string' ||
+        !/^n-(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*))*$/.test(body.nodeId) ||
+      typeof body.mediaId !== 'string' || body.mediaId !== `media-${body.nodeId}` ||
+      body.mediaId.length > 190) return null;
+  const capture = parseRichCaptureBegin({
+    conversationId: body.conversationId, tab: body.tab, documentId: body.documentId,
+    documentGeneration: body.documentGeneration, spaEpoch: body.spaEpoch,
+    recordingGeneration: body.recordingGeneration
+  });
+  return capture ? { ...capture, messageId: body.messageId, providerMessageId: body.providerMessageId,
+    mediaId: body.mediaId, nodeId: body.nodeId } : null;
+}
+
+function roomForRichPixel(tab: number, documentId: string, now: number): boolean {
+  for (const [id, ticket] of richPixelTickets) if (ticket.expiresAt <= now) richPixelTickets.delete(id);
+  for (const [id, ticket] of richCaptureTickets) if (ticket.expiresAt <= now) richCaptureTickets.delete(id);
+  if (richPixelTickets.size >= MAX_RICH_PIXEL_TICKETS ||
+      richPixelTickets.size + richCaptureTickets.size >= MAX_RICH_CAPTURE_TICKETS) return false;
+  let owned = 0;
+  for (const ticket of richPixelTickets.values()) {
+    if (ticket.tab === tab && ticket.documentId === documentId && ++owned >= MAX_RICH_PIXEL_PER_DOCUMENT)
+      return false;
+  }
+  return true;
+}
+
+function roomForRichCapture(tab: number, documentId: string, now: number): boolean {
+  for (const [id, ticket] of richCaptureTickets) if (ticket.expiresAt <= now) richCaptureTickets.delete(id);
+  for (const [id, ticket] of richPixelTickets) if (ticket.expiresAt <= now) richPixelTickets.delete(id);
+  if (richCaptureTickets.size + richPixelTickets.size >= MAX_RICH_CAPTURE_TICKETS) return false;
+  let owned = 0;
+  for (const ticket of richCaptureTickets.values()) {
+    if (ticket.tab === tab && ticket.documentId === documentId && ++owned >= MAX_RICH_CAPTURE_PER_DOCUMENT)
+      return false;
+  }
+  for (const ticket of richPixelTickets.values()) {
+    if (ticket.tab === tab && ticket.documentId === documentId && ++owned >= MAX_RICH_CAPTURE_PER_DOCUMENT)
+      return false;
+  }
+  return true;
+}
 let requestWindow = { start: Date.now(), count: 0 };
 const listeners = new Set<() => void>();
 let extensionVersion: string | null = null;
@@ -963,6 +1252,7 @@ const OBSERVATION_KINDS = new Set([
   'conversation_title',
   'user_message',
   'assistant_message',
+  'rich_media',
   'native_image',
   'page_tool',
   'turn_start',
@@ -1048,17 +1338,70 @@ function parseCallEvidence(input: unknown, untooled = false): PageCallEvidence[]
  * a months-old chat is exactly when we need ChatGPT's own creation time so its messages can
  * be interleaved with already-recorded MCP calls instead of all appearing at reload time.
  */
-function parseObservations(input: unknown): ChatObservation[] {
+/**
+ * Structural parsing retains the ORIGINAL raw index even when an earlier event is filtered.
+ * sourceCaptures is a legacy diagnostic field: it may never provide rich ownership or alter
+ * parsed structure. The separate /events ticket join below alone grants rich publication.
+ */
+function parseIndexedObservations(input: unknown, envelopeConversation?: string): Array<{
+  rawIndex: number; observation: ChatObservation
+}> {
   if (!Array.isArray(input)) return [];
   const now = Date.now();
   const earliestChatGpt = Date.UTC(2022, 10, 30);
-  const out: ChatObservation[] = [];
-  for (const raw of input.slice(0, MAX_OBSERVATIONS)) {
+  const out: Array<{ rawIndex: number; observation: ChatObservation }> = [];
+  for (const [index, raw] of input.slice(0, MAX_OBSERVATIONS).entries()) {
     if (!raw || typeof raw !== 'object') continue;
     const item = raw as Record<string, unknown>;
     const kind = typeof item['kind'] === 'string' ? item['kind'] : '';
     if (!OBSERVATION_KINDS.has(kind)) continue;
     const time = typeof item['time'] === 'number' && Number.isFinite(item['time']) ? item['time'] : now;
+    if (kind === 'rich_media') {
+      // Internal shape-only parser. This is never the public parseObservations API
+      // or an authorization: only the bridge's private live pixel ticket, worker
+      // journal receipt and exact raw positional G may admit this row below.
+      const status = item['status'];
+      if (status !== 'pending' && status !== 'available' && status !== 'unavailable') continue;
+      const keys = ['kind', 'time', 'messageId', 'providerMessageId', 'mediaId', 'nodeId', 'status',
+        ...(status === 'available' ? ['previewDataUrl', 'previewWidth', 'previewHeight', 'pixelBytes', 'pixelSha256'] :
+          status === 'unavailable' ? ['reason'] : [])];
+      if (Object.keys(item).length !== keys.length || !keys.every(key => Object.hasOwn(item, key)) ||
+          typeof item['time'] !== 'number' || !Number.isFinite(item['time']) ||
+          typeof item['messageId'] !== 'string' || !item['messageId'] || item['messageId'].length > 190 ||
+          typeof item['providerMessageId'] !== 'string' ||
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(item['providerMessageId']) ||
+          typeof item['nodeId'] !== 'string' ||
+            !/^n-(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*))*$/.test(item['nodeId']) ||
+          item['mediaId'] !== `media-${item['nodeId']}` ||
+          (status === 'unavailable' && !['not_loaded', 'unsupported', 'ambiguous', 'tainted',
+            'oversized', 'invalid', 'quota'].includes(String(item['reason'])))) continue;
+      if (status === 'available' &&
+          (!Number.isSafeInteger(item['previewWidth']) || (item['previewWidth'] as number) < 1 ||
+           (item['previewWidth'] as number) > 1600 ||
+           !Number.isSafeInteger(item['previewHeight']) || (item['previewHeight'] as number) < 1 ||
+           (item['previewHeight'] as number) > 1600 ||
+           (item['previewWidth'] as number) * (item['previewHeight'] as number) > 2_560_000 ||
+           !Number.isSafeInteger(item['pixelBytes']) || (item['pixelBytes'] as number) < 1 ||
+           (item['pixelBytes'] as number) > 384_000 ||
+           typeof item['pixelSha256'] !== 'string' || !/^[a-f0-9]{64}$/.test(item['pixelSha256']) ||
+           typeof item['previewDataUrl'] !== 'string' || item['previewDataUrl'].length > 512_100 ||
+           !/^data:image\/webp;base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(item['previewDataUrl']))) continue;
+      out.push({ rawIndex: index, observation: {
+        kind: 'rich_media', time, messageId: item['messageId'] as string,
+        providerMessageId: item['providerMessageId'] as string,
+        mediaId: item['mediaId'] as string, nodeId: item['nodeId'] as string,
+        previewStatus: status,
+        ...(status === 'unavailable' ? { previewError: item['reason'] as ChatObservation['previewError'] } : {}),
+        ...(status === 'available' ? {
+          previewDataUrl: item['previewDataUrl'] as string,
+          previewWidth: item['previewWidth'] as number,
+          previewHeight: item['previewHeight'] as number,
+          pixelBytes: item['pixelBytes'] as number,
+          pixelSha256: item['pixelSha256'] as string
+        } : {})
+      } });
+      continue;
+    }
     const observation: ChatObservation = {
       kind: kind as ChatObservation['kind'],
       time: time > now + 60_000 || time < earliestChatGpt ? now : time
@@ -1162,6 +1505,18 @@ function parseObservations(input: unknown): ChatObservation[] {
       const fiberId = conversationId(item['fiberConversationId']);
       if (fiberId) observation.fiberConversationId = fiberId;
     }
+    if (kind === 'assistant_message' && item['rich'] !== undefined) {
+      // A field-wise validated envelope is a necessary transport shape, not proof that
+      // the page's rich DOM snapshot belonged to this source at its actual capture time.
+      // No page-supplied event.origin/documentId/navigationEpoch may stand in for it.
+      if (observation.text === undefined) observation.richOnly = true;
+      const parsed = parseRichResponse(item['rich']);
+      if (parsed &&
+          parsed.messageId === observation.messageId && parsed.providerMessageId &&
+          parsed.providerMessageId === observation.providerMessageId &&
+          parsed.conversationId === observation.fiberConversationId &&
+          parsed.conversationId === envelopeConversation) observation.rich = parsed;
+    }
     if (item['final'] === true) observation.final = true;
     if (typeof item['outcome'] === 'string' && OUTCOMES.has(item['outcome'])) {
       observation.outcome = item['outcome'] as ChatObservation['outcome'];
@@ -1181,9 +1536,18 @@ function parseObservations(input: unknown): ChatObservation[] {
     if (typeof item['recoverable'] === 'boolean') observation.recoverable = item['recoverable'];
     if (item['blocking'] === true) observation.blocking = true;
     if (Array.isArray(item['calls'])) observation.calls = parseCallEvidence(item['calls']);
-    out.push(observation);
+    out.push({ rawIndex: index, observation });
   }
   return out;
+}
+
+/** Pure compatibility/test parser. Even a parsed rich tree carries NO source authority. */
+export function parseObservations(input: unknown, _captures?: unknown, envelopeConversation?: string): ChatObservation[] {
+  // A shape-only pixel candidate cannot be returned to untrusted/public callers.
+  // Only the /events path below can couple it to a private ticket and worker receipt.
+  return parseIndexedObservations(input, envelopeConversation)
+    .filter(({ observation }) => observation.kind !== 'rich_media')
+    .map(({ observation }) => observation);
 }
 
 /**
@@ -1750,6 +2114,19 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   const { ok: originAllowed, origin } = originOf(req);
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   const route = url.pathname;
+  // The HTTP body can arrive in pieces. Freeze this process's original admission
+  // epoch before the first await: Off→On during readBody must not turn an old POST
+  // into newly authorized transcript work. Cross-process Chrome retry still needs
+  // a source-issued durable generation; this ingress fence alone cannot prove it.
+  const eventIngressRevision = route === '/events' && req.method === 'POST' ? getRecordingRevision() : null;
+  const eventIngressDecision = eventIngressRevision !== null ? pendingRecordingOffDecision() : null;
+  const richCaptureIngressRevision = (route === '/rich/capture/begin' || route === '/rich/pixel/begin') &&
+    req.method === 'POST'
+    ? getRecordingRevision() : null;
+  const richCaptureIngressGeneration = richCaptureIngressRevision !== null ? recordingGenerationGrant() : null;
+  // stopBridge invalidates an outstanding read before it clears tickets. A later start
+  // cannot let the older handler repopulate its freshly empty ticket map.
+  const richCaptureLifecycleEpoch = richCaptureIngressRevision !== null ? bridgeLifecycleEpoch : null;
   const receivedAt = Date.now();
 
   if (req.method === 'OPTIONS') {
@@ -1865,6 +2242,133 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   // consume the browser's shared budget before failing origin/authentication.
   if (rateLimited()) return json(res, 429, { error: 'rate_limited' }, origin);
   if (noteBrowserSeen()) changed();
+
+  // Read-only source of capture admission for the paired extension. Never surface
+  // this token in public /hello or a cached /status projection: a page must obtain
+  // it through its registered Chrome sender before observing persistent content.
+  if (route === '/recording/generation' && req.method === 'GET') {
+    return json(res, 200, { recordingGeneration: recordingGenerationGrant() }, origin);
+  }
+
+  if (route === '/rich/capture/begin' && req.method === 'POST') {
+    let body: unknown;
+    try { body = await readBody(req); }
+    catch (error) {
+      return (error as Error).message === 'body_too_large' ? tooLarge(res, origin) :
+        json(res, 400, { error: 'bad_capture_request' }, origin);
+    }
+    // The paired extension attests its Chrome MessageSender in its own registered-document
+    // handler. Main cannot see MessageSender over HTTP; this fixed body supplies no independent
+    // browser proof and can never be used as a /events origin or an action authorization.
+    const attested = parseRichCaptureBegin(body);
+    if (!attested) return json(res, 400, { error: 'bad_capture_request' }, origin);
+    const currentAdmission = () => richCaptureIngressRevision !== null &&
+      bridgeDesiredRunning && server !== null &&
+      bridgeLifecycleEpoch === richCaptureLifecycleEpoch &&
+      getRecordingRevision() === richCaptureIngressRevision &&
+      richCaptureIngressGeneration !== null &&
+      recordingGenerationGrant() === richCaptureIngressGeneration &&
+      attested.recordingGeneration === richCaptureIngressGeneration;
+    if (!currentAdmission()) return json(res, 409, { error: 'capture_unavailable' }, origin);
+    // A page's sessionId/bindingRevision is not an input. Resolve the single current durable
+    // attachment twice across the awaits so a concurrent rebind, including A→B→A, cannot
+    // leave a ticket whose selected route and revision came from different moments.
+    const owner = await findSessionByConversation(attested.conversationId, { requireUnique: true });
+    if (!owner || sessionAttachmentTransitionPending(owner.id) || !currentAdmission())
+      return json(res, 409, { error: 'capture_unavailable' }, origin);
+    const attached = await getSession(owner.id);
+    if (!attached || sessionAttachmentTransitionPending(owner.id) ||
+        attached.conversationId !== attested.conversationId ||
+        !Number.isSafeInteger(attached.bindingRevision ?? 0) || (attached.bindingRevision ?? 0) < 0 ||
+        !currentAdmission()) return json(res, 409, { error: 'capture_unavailable' }, origin);
+    const unique = await findSessionByConversation(attested.conversationId, { requireUnique: true });
+    if (!unique || unique.id !== owner.id || unique.bindingRevision !== attached.bindingRevision ||
+        sessionAttachmentTransitionPending(owner.id) ||
+        !currentAdmission()) return json(res, 409, { error: 'capture_unavailable' }, origin);
+    const now = Date.now();
+    if (!currentAdmission()) return json(res, 409, { error: 'capture_unavailable' }, origin);
+    if (!roomForRichCapture(attested.tab, attested.documentId, now))
+      return json(res, 409, { error: 'capture_capacity' }, origin);
+    const ticket: RichCaptureTicket = Object.freeze({
+      ...attested, captureId: randomBytes(24).toString('base64url'), sessionId: owner.id,
+      bindingRevision: attached.bindingRevision ?? 0,
+      recordingRevision: richCaptureIngressRevision!, expiresAt: now + RICH_CAPTURE_TTL_MS
+    });
+    if (sessionAttachmentTransitionPending(owner.id) || !currentAdmission())
+      return json(res, 409, { error: 'capture_unavailable' }, origin);
+    richCaptureTickets.set(ticket.captureId, ticket);
+    const { recordingRevision: _revision, expiresAt: _expiresAt, tab: _tab, ...capture } = ticket;
+    return json(res, 200, { capture }, origin);
+  }
+
+  if (route === '/rich/pixel/begin' && req.method === 'POST') {
+    let body: unknown;
+    try { body = await readBody(req); }
+    catch (error) {
+      return (error as Error).message === 'body_too_large' ? tooLarge(res, origin) :
+        json(res, 400, { error: 'bad_pixel_request' }, origin);
+    }
+    const attested = parseRichPixelBegin(body);
+    if (!attested) return json(res, 400, { error: 'bad_pixel_request' }, origin);
+    const currentAdmission = () => richCaptureIngressRevision !== null &&
+      bridgeDesiredRunning && server !== null && !bridgeShutdownRequested &&
+      bridgeLifecycleEpoch === richCaptureLifecycleEpoch &&
+      getConfig().sessions.record && getRecordingRevision() === richCaptureIngressRevision &&
+      richCaptureIngressGeneration !== null &&
+      recordingGenerationGrant() === richCaptureIngressGeneration &&
+      attested.recordingGeneration === richCaptureIngressGeneration;
+    if (!currentAdmission()) return json(res, 409, { error: 'pixel_unavailable' }, origin);
+    // Neither the caller's supplied target nor getSession alone proves a canonical
+    // attachment. Resolve unique owner, exact shard/slot in its serialized store queue,
+    // then recheck both after awaits so A→B→A and concurrent reseeding fail closed.
+    const owner = await findSessionByConversation(attested.conversationId, { requireUnique: true });
+    if (!owner || sessionAttachmentTransitionPending(owner.id) || !currentAdmission())
+      return json(res, 409, { error: 'pixel_unavailable' }, origin);
+    const attached = await getSession(owner.id);
+    if (!attached || sessionAttachmentTransitionPending(owner.id) ||
+        attached.conversationId !== attested.conversationId ||
+        !Number.isSafeInteger(attached.bindingRevision ?? 0) ||
+        attached.bindingRevision !== owner.bindingRevision || !currentAdmission())
+      return json(res, 409, { error: 'pixel_unavailable' }, origin);
+    const target = await readPageRichPixelTarget(owner.id, attested.messageId,
+      attested.providerMessageId, attested.mediaId, attested.nodeId);
+    // A later exact source change must be able to retire a formerly *available*
+    // preview to pending under the store CAS. Refusing tickets for available slots
+    // would leave stale A pixels visible forever after the IMG changed to B.
+    if (!target || target.removed || !['pending', 'available', 'unavailable'].includes(target.status) ||
+        target.richOrigin.conversationId !== attested.conversationId ||
+        target.richOrigin.bindingRevision !== attached.bindingRevision ||
+        target.richOrigin.documentId !== attested.documentId ||
+        target.richOrigin.navigationEpoch !== attested.spaEpoch ||
+        !Number.isSafeInteger(target.richRevision) || target.richRevision < 1 ||
+        !Number.isSafeInteger(target.slotVersion) || target.slotVersion < 0 ||
+        sessionAttachmentTransitionPending(owner.id) || !currentAdmission())
+      return json(res, 409, { error: 'pixel_unavailable' }, origin);
+    const unique = await findSessionByConversation(attested.conversationId, { requireUnique: true });
+    if (!unique || unique.id !== owner.id || unique.bindingRevision !== attached.bindingRevision ||
+        sessionAttachmentTransitionPending(owner.id) || !currentAdmission())
+      return json(res, 409, { error: 'pixel_unavailable' }, origin);
+    const fresh = await readPageRichPixelTarget(owner.id, attested.messageId,
+      attested.providerMessageId, attested.mediaId, attested.nodeId);
+    if (!fresh || JSON.stringify(fresh) !== JSON.stringify(target) ||
+        sessionAttachmentTransitionPending(owner.id) || !currentAdmission())
+      return json(res, 409, { error: 'pixel_unavailable' }, origin);
+    const now = Date.now();
+    if (!roomForRichPixel(attested.tab, attested.documentId, now) || !currentAdmission())
+      return json(res, 409, { error: 'pixel_capacity' }, origin);
+    const ticket: RichPixelTicket = Object.freeze({ ...attested,
+      purpose: 'page_pixel', captureId: randomBytes(24).toString('base64url'),
+      sessionId: owner.id, bindingRevision: attached.bindingRevision ?? 0,
+      recordingRevision: richCaptureIngressRevision!, expiresAt: now + RICH_CAPTURE_TTL_MS,
+      richRevision: target.richRevision, slotVersion: target.slotVersion,
+      sourceIncarnation: target.sourceIncarnation, sourceSequence: target.sourceSequence
+    });
+    if (sessionAttachmentTransitionPending(owner.id) || !currentAdmission())
+      return json(res, 409, { error: 'pixel_unavailable' }, origin);
+    richPixelTickets.set(ticket.captureId, ticket);
+    const { recordingRevision: _revision, expiresAt: _expiresAt, tab: _tab, ...capture } = ticket;
+    return json(res, 200, { capture }, origin);
+  }
 
   if (route === '/browser-control' && req.method === 'POST') {
     const body = await readBody(req) as Record<string, unknown>;
@@ -2178,6 +2682,36 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     const id = conversationId(body['conversationId']);
     if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
+    const suppressed = (): void => json(res, 200, { sessionId: null, stored: 0, recordingSuppressed: true }, origin);
+    // Once this request has reached the bridge during an Off attempt, its outcome
+    // belongs to that exact config transaction. It must not see a later On and
+    // revive a browser-journal batch that the user already switched Off.
+    const offDecision = eventIngressDecision ?? pendingRecordingOffDecision();
+    if (offDecision && await offDecision.settled) return suppressed();
+    if (eventIngressRevision !== getRecordingRevision()) return suppressed();
+    // Protocol-17 admission is positional. Invalid, unknown or legacy generations
+    // are suppressed with a successful custody receipt, never assigned the current
+    // generation from HTTP arrival time. Keep null placeholders at original indexes:
+    // the independently verified rich receipt must never slide onto an adjacent row.
+    const rawEvents = body['events'];
+    const suppliedGenerations = body['recordingGenerations'];
+    if (!Array.isArray(rawEvents) || rawEvents.length > MAX_OBSERVATIONS ||
+        !Array.isArray(suppliedGenerations) || suppliedGenerations.length !== rawEvents.length)
+      return suppressed();
+    const admissionGeneration = recordingGenerationGrant();
+    if (!admissionGeneration) return suppressed();
+    const admittedEvents = rawEvents.map((event, index) =>
+      recordingGenerationMatches(suppliedGenerations[index]) &&
+      suppliedGenerations[index] === admissionGeneration ? event : null);
+    if (admittedEvents.every(event => event === null)) return suppressed();
+    // Absent/older protocol-17 peers remain ordinary prose-only. A malformed positional
+    // array authorizes no rich rows, but cannot erase separately admitted authored prose.
+    const suppliedReceipts = body['richCaptureReceipts'];
+    const receipts = Array.isArray(suppliedReceipts) && suppliedReceipts.length === rawEvents.length
+      ? suppliedReceipts : null;
+    const suppliedPixelReceipts = body['richPixelReceipts'];
+    const pixelReceipts = Array.isArray(suppliedPixelReceipts) &&
+      suppliedPixelReceipts.length === rawEvents.length ? suppliedPixelReceipts : null;
     // Normal worker binding happens on the exact command ACK. `/events` is the lost-ACK
     // recovery path, but the friendly id (`worker-1`) is reused by every later swarm and is
     // therefore not enough authority on its own. A command-opened document also carries the
@@ -2188,47 +2722,176 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       ? body['agent']
       : null;
     const reportedCommandId = typeof body['agentCommandId'] === 'string' ? body['agentCommandId'] : null;
-    if (reportedAgent && reportedCommandId) {
-      const pending = commands.find(
+    const pendingWorkerCommand = reportedAgent && reportedCommandId
+      ? commands.find(
         (command) =>
           command.id === reportedCommandId &&
           command.spec.type === 'worker' &&
           command.spec.agent === reportedAgent &&
           swarmRunning(command.spec.runId) &&
           command.claimedAt !== null
-      );
-      if (pending?.spec.type === 'worker') bindConversation(reportedAgent, id, pending.spec.runId);
+      ) ?? null : null;
+    const verifiedRichByItem = new WeakMap<ChatObservation, VerifiedRichObservation>();
+    const verifiedPixelByItem = new WeakMap<ChatObservation, VerifiedPixelObservation>();
+    let hasVerifiedRich = false;
+    let hasVerifiedPixel = false;
+    const observations = parseIndexedObservations(admittedEvents, id).flatMap(({ rawIndex, observation }) => {
+      if (observation.kind === 'rich_media') {
+        const proof = pixelReceipts && suppliedGenerations[rawIndex] === admissionGeneration
+          ? verifiedPixelReceipt(pixelReceipts[rawIndex], observation, rawIndex, id,
+            admissionGeneration, eventIngressRevision) : null;
+        if (!proof) return [];
+        verifiedPixelByItem.set(observation, proof);
+        hasVerifiedPixel = true;
+        return [observation];
+      }
+      if (observation.kind !== 'assistant_message' || !observation.rich) {
+        // A malformed rich-only payload has no text and must never create a session.
+        return observation.richOnly ? [] : [observation];
+      }
+      const proof = receipts && suppliedGenerations[rawIndex] === admissionGeneration
+        ? verifiedRichReceipt(receipts[rawIndex], observation, rawIndex, id,
+          admissionGeneration, eventIngressRevision) : null;
+      if (proof) {
+        verifiedRichByItem.set(observation, proof);
+        hasVerifiedRich = true;
+        return [observation];
+      }
+      delete observation.rich;
+      return observation.richOnly ? [] : [observation];
+    });
+    if (!observations.length) {
+      // Only an exact leased command accompanied by well-formed legacy progress
+      // is independent worker binding evidence. Unknown/malformed observations
+      // are discarded without activating a worker or changing command custody.
+      const progressOnly = admittedEvents.length > 0 && admittedEvents.every(event =>
+        event && typeof event === 'object' && !Array.isArray(event) &&
+        event.kind === 'progress' && typeof event.time === 'number' && Number.isFinite(event.time) &&
+        typeof event.text === 'string' && event.text.length <= 500);
+      if (!progressOnly || pendingWorkerCommand?.spec.type !== 'worker') return suppressed();
+      const noRowsOff = pendingRecordingOffDecision();
+      if (noRowsOff && await noRowsOff.settled) return suppressed();
+      if (eventIngressRevision !== getRecordingRevision() || recordingGenerationGrant() !== admissionGeneration)
+        return suppressed();
+      if (!bindConversation(pendingWorkerCommand.spec.agent, id, pendingWorkerCommand.spec.runId)) return suppressed();
+      return json(res, 200, { sessionId: null, stored: 0, workerCommandRecovered: true }, origin);
     }
-    // The page reporting for a conversation is the other half of first-hand liveness, and
-    // the reason a worker whose tab is open is never on the silence clock at all. It also
-    // takes back a worker this app gave up on while its tab was gone but its turn was not.
-    const revived = noteAgentAlive(id, 'page');
-    if (revived?.report) await recordAgentMessage(revived.report, 'sent', id);
-    const observations = parseObservations(body['events']);
     observationWritesInFlight += 1;
-    let committed: { sessionId: string | null; stored: number; wake: boolean } | undefined;
+    let committed: { sessionId: string | null; stored: number; wake: boolean; partialCommitted: boolean } | undefined;
     try {
-      const agent = agentForOwnedConversation(id);
-      // The command acknowledgement normally supplies this origin before the worker's first
-      // observation. Its pending copy lives in recorder memory until a session exists, though,
-      // so an app restart in that narrow gap used to create an origin-less worker session even
-      // though the broker had durably restored the exact worker binding and task. Reconstitute
-      // the same origin from that authoritative binding before the recorder creates the session.
-      if (agent && agent !== 'prime') {
+      // A pending worker command is still no authority to activate a worker merely
+      // because an existing assistant's rich presentation changed.
+      const agent = agentForOwnedConversation(id) ??
+        (pendingWorkerCommand?.spec.type === 'worker' ? pendingWorkerCommand.spec.agent : null);
+      // The command ACK normally supplies this origin. Recover its exact identity
+      // from the durable broker/command here, but delay any origin mutation until
+      // this request has passed recording and the original Off decision.
+      let workerOrigin: SessionOrigin | null = null;
+      if (agent && agent !== 'prime' && observations.some(item =>
+        item.kind !== 'rich_media' && !(item.kind === 'assistant_message' && item.richOnly))) {
         const worker = agentInfoForOwnedConversation(id);
-        if (worker?.role === 'worker') {
+        workerOrigin = pendingWorkerCommand?.spec.type === 'worker'
+          ? await commandOrigin(pendingWorkerCommand.id) : null;
+        if (!workerOrigin && worker?.role === 'worker') {
           const prime = primeForOwnedConversation(id);
-          await noteChatOrigin(id, {
-            kind: 'worker',
+          workerOrigin = { kind: 'worker',
             fromSessionId: prime ? (await findSessionByConversation(prime, { requireUnique: true }))?.id ?? null : null,
-            agentId: worker.id,
-            task: worker.task
-          });
+            agentId: worker.id, task: worker.task };
         }
       }
-      const result = await recordChatObservations(id, observations, agent);
+      // Worker-origin lookup above may yield across Off→On. Recheck this request's
+      // original epoch immediately before submitting transcript work.
+      const lateOff = pendingRecordingOffDecision();
+      if (lateOff && await lateOff.settled) return suppressed();
+      if (eventIngressRevision !== getRecordingRevision()) return suppressed();
+      if (recordingGenerationGrant() !== admissionGeneration) return suppressed();
+      // An earlier ticket may have expired or been cleared by stopBridge during the
+      // worker-origin awaits. Revoke only that supplemental rich projection; the
+      // original ordinary prose retains its independent admission and queue order.
+      const currentObservations = observations.filter(item => {
+        if (item.kind === 'rich_media') {
+          const pixel = verifiedPixelByItem.get(item);
+          return Boolean(pixel && richPixelTickets.get(pixel.ticket.captureId) === pixel.ticket &&
+            pixel.ticket.expiresAt > Date.now() &&
+            !sessionAttachmentTransitionPending(pixel.ticket.sessionId));
+        }
+        const proof = verifiedRichByItem.get(item);
+        if (!proof || (richCaptureTickets.get(proof.ticket.captureId) === proof.ticket &&
+            proof.ticket.expiresAt > Date.now())) return true;
+        delete item.rich;
+        return !item.richOnly;
+      });
+      if (currentObservations.length === 0) return suppressed();
+      let result: Awaited<ReturnType<typeof recordChatObservations>>;
+      try {
+        result = hasVerifiedRich || hasVerifiedPixel
+          ? await recordVerifiedChatObservations(id, currentObservations, agent,
+            verifiedRichByItem, verifiedPixelByItem)
+          : await recordChatObservations(id, currentObservations, agent);
+      } catch (error) {
+        if (!isRecordingDisabledError(error)) throw error;
+        // One batch may have committed its first canonical row and then met Off on
+        // the next row. Off success retires the remaining observations. Off failure
+        // permits one idempotent retry under the still-current On generation.
+        const interruptedOff = pendingRecordingOffDecision();
+        if (interruptedOff && await interruptedOff.settled) return suppressed();
+        if (eventIngressRevision !== getRecordingRevision() || recordingGenerationGrant() !== admissionGeneration) return suppressed();
+        result = hasVerifiedRich || hasVerifiedPixel
+          ? await recordVerifiedChatObservations(id, currentObservations, agent,
+            verifiedRichByItem, verifiedPixelByItem)
+          : await recordChatObservations(id, currentObservations, agent);
+      }
+      // Off may interrupt the *remainder* after a canonical prefix already crossed its
+      // physical write barrier. Never erase that committed receipt or reconcile the
+      // uncommitted suffix, which the extension retires with this successful HTTP reply.
+      const epochRetired = Boolean(offDecision && await offDecision.settled) ||
+        eventIngressRevision !== getRecordingRevision() || recordingGenerationGrant() !== admissionGeneration;
+      if (epochRetired && result.stored === 0) return suppressed();
+      // Parsed rich-only presentation is intentionally refused before session
+      // creation. No canonical owner was admitted, so it cannot wake a worker,
+      // bind its command or install an origin as a side effect.
+      if (!result.sessionId) return suppressed();
+      if (result.presentationOnly === true) {
+        // One canonical shard's supplemental display revision is the entire receipt.
+        // No worker activation, origin, browser decision, Goal, recovery, context
+        // accounting or finish/reopen consequence can follow from this alone.
+        return json(res, 200, { sessionId: result.sessionId, stored: result.stored,
+          ...(result.remainderSuppressed ? { partialCommitted: true, remainderSuppressed: true } : {}) }, origin);
+      }
+      const committedObservations = epochRetired || result.remainderSuppressed
+        ? result.committedObservations : currentObservations.filter(item =>
+          item.kind !== 'rich_media' && !item.richOnly);
+      // The recorder alone knows whether an original authored/lifecycle fact
+      // actually crossed its canonical write barrier. Merely parsing a nonpixel
+      // row (metadata, a duplicate message, or a synthetic journal gap) cannot
+      // turn an invited worker into the owner of this conversation.
+      const workerActivationProved = result.workerActivationProved === true;
+      // A turn beginning is first-hand page evidence only when that exact row committed.
+      // A discarded suffix must never revive a worker or renew recovery activity.
+      let turnStartedAt = 0;
+      for (const item of committedObservations) {
+        if (item.kind === 'turn_start') turnStartedAt = Math.max(turnStartedAt, item.time);
+      }
+      // A request earns its transcript verdict before any observation-derived
+      // origin, worker or report mutation. Subsequent Off cannot retroactively
+      // suppress the already committed row while those independent writes drain.
+      if (workerActivationProved && workerOrigin)
+        await noteChatOrigin(id, workerOrigin, epochRetired ? result.sessionId : undefined);
+      if (workerActivationProved && pendingWorkerCommand?.spec.type === 'worker')
+        bindConversation(pendingWorkerCommand.spec.agent, id, pendingWorkerCommand.spec.runId);
+      const revived = workerActivationProved ? noteAgentAlive(id, 'page') : null;
+      if (revived?.report) await recordAgentMessage(revived.report, 'sent', id);
+      if (workerActivationProved && turnStartedAt > 0) {
+        const woke = noteAgentAlive(id, 'turn', turnStartedAt);
+        if (woke?.report) await recordAgentMessage(woke.report, 'sent', id);
+        if (woke?.revived) tidyCommands();
+      }
       const superseded = await conversationWasSuperseded(id);
-      if (!superseded && !isChatBlocked(id) && result.activity.working && result.activity.at) {
+      // A committed prefix may settle old custody under Off; it must not start a NEW
+      // browser decision after Recording has been disabled.
+      // Model picker metadata may refine an *already existing* activity deadline;
+      // this is not authority to bind or wake an invited worker.
+      if (!superseded && !isChatBlocked(id) && result.activity.working && result.activity.at && !epochRetired) {
         const woke = result.activity.startedAt !== undefined
           ? noteAgentAlive(id, 'turn', result.activity.startedAt)
           : noteAgentAlive(id, 'output', result.activity.at);
@@ -2237,7 +2900,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         if (woke?.report) await recordAgentMessage(woke.report, 'sent', id);
         if (woke?.revived) tidyCommands();
       }
-      if (!superseded && result.sessionId) await collectRecordedBrowserDecision(id);
+      if (!superseded && result.sessionId && !epochRetired)
+        await collectRecordedBrowserDecision(id);
       // The stable assistant message, not the page-local turn id, is the exactly-once Goal
       // checkpoint. Freeze app config/key policy before 200 lets the browser retire this
       // terminal observation from its durable journal.
@@ -2262,7 +2926,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         forgetGoalWatch(id);
         compactionWatch.delete(id);
       } else {
-        await noteRecoveryObservations(id, result.sessionId, observations, result.activity);
+        await noteRecoveryObservations(id, result.sessionId, committedObservations, result.activity);
       }
       // How full this chat is, measured by the app's own session record rather than by
       // anything the model said about itself, and fed in before the finish reconciliation
@@ -2272,7 +2936,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       // because the durable session is what carries the figure across a crash, not the
       // snapshot: the first observation batch from a restored chat puts it back before that
       // worker's next sleep or revival.
-      if (agent && result.sessionId) {
+      if (workerActivationProved && agent && result.sessionId) {
         const summary = await getSession(result.sessionId).catch(() => null);
         if (summary) noteAgentContextTokens(id, summary.contextTokens);
       }
@@ -2282,8 +2946,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       // journal is allowed to split one turn's observations across adjacent HTTP batches, so
       // reconcile against the just-written durable session rather than treating one transport
       // envelope as a lifecycle boundary.
-      if (agent && agent !== PRIME_ID && result.sessionId) {
-        if (!(await reconcileWorkerFinish(id, result.sessionId, observations))) {
+      if (workerActivationProved && agent && agent !== PRIME_ID && result.sessionId) {
+        if (!(await reconcileWorkerFinish(id, result.sessionId, committedObservations))) {
           return json(res, 503, { error: 'worker_state_not_durable', retryable: true }, origin);
         }
         tidyCommands();
@@ -2292,7 +2956,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       // no input row changed: finish stages and after-turn sends can now be claimed.
       // Publish that boundary to the existing wake channel instead of waiting for
       // the extension's idle maintenance poll. Claims still recheck exact state.
-      committed = { sessionId: result.sessionId, stored: result.stored, wake: !superseded && result.activity.terminal };
+      committed = { sessionId: result.sessionId, stored: result.stored,
+        wake: !epochRetired && !superseded && result.activity.terminal,
+        partialCommitted: result.stored > 0 && result.remainderSuppressed };
     } finally {
       observationWritesInFlight -= 1;
     }
@@ -2301,7 +2967,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     // deadline into that same outbox row before acknowledging the observation.
     if (activeUntil.get(id)?.thinkingFailed) await fileSilenceInputTicket(id, Date.now());
     if (committed?.wake) wakeBrowserWork();
-    return json(res, 200, { sessionId: committed!.sessionId, stored: committed!.stored }, origin);
+    return json(res, 200, {
+      sessionId: committed!.sessionId, stored: committed!.stored,
+      ...(committed!.partialCommitted ? { partialCommitted: true, remainderSuppressed: true } : {})
+    }, origin);
   }
 
   if (route === '/closed' && req.method === 'POST') {
@@ -4732,6 +5401,8 @@ async function startBridgeOnce(epoch: number): Promise<number | null> {
 }
 
 export async function stopBridge(): Promise<void> {
+  richCaptureTickets.clear();
+  richPixelTickets.clear();
   if (!bridgeDesiredRunning && bridgeStopRequest) return bridgeStopRequest;
   if (!bridgeDesiredRunning && !server && !bridgeStartRequest) return;
 
@@ -8875,6 +9546,8 @@ export async function restoreCommands(): Promise<void> {
 
 /** Test seam. */
 export function resetBridgeForTests(): void {
+  richCaptureTickets.clear();
+  richPixelTickets.clear();
   clearCompanionDiagnostics();
   for (const command of commands) if (command.timer) clearTimeout(command.timer);
   if (browserPresenceTimer) clearTimeout(browserPresenceTimer);

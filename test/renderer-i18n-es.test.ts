@@ -14,6 +14,41 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); dom.window.close(); });
 
 describe('Spanish app interface', () => {
+  it('translates the saved Recording Off choice, future-only help and bridge warning on each locale switch', async () => {
+    const { initLanguage, setLanguage, t, ui } = await import('../src/renderer/i18n.js');
+    initLanguage();
+    const recording = document.getElementById('sessRecord') as HTMLInputElement;
+    const label = recording.closest('label')!;
+    const title = label.querySelector('b')!;
+    const help = label.querySelector('em')!;
+    const bridge = document.getElementById('bridgeState')!;
+    // The bridge status is dynamic; bind its actual status node the same way chatApply does.
+    ui(bridge, 'textContent', () => t('The local bridge is off even though browser-backed features need it.'));
+    recording.checked = false;
+
+    for (const [locale, expectedTitle, expectedHelp, expectedWarning] of [
+      ['es', 'Registrar el nuevo historial local',
+        'Guarda una transcripción local de la actividad nueva de las conversaciones. Si desactivas esta opción, el historial existente se conservará hasta que lo elimines.',
+        'El puente local está desactivado, aunque las funciones que dependen del navegador lo necesitan.'],
+      ['zh-CN', '记录新的本地历史',
+        '保存新对话活动的本地记录。关闭此选项后，现有历史会保留，直到你将其删除。',
+        '本地桥接已关闭，但依赖浏览器的功能仍需要它。'],
+      ['zh-TW', '記錄新的本機歷史',
+        '儲存新對話活動的本機記錄。關閉此選項後，現有歷史會保留，直到你將其刪除。',
+        '本機橋接已關閉，但依賴瀏覽器的功能仍需要它。'],
+      ['en', 'Record new local history',
+        'Keep a local transcript of new conversation activity. Turning this off keeps existing history until you delete it.',
+        'The local bridge is off even though browser-backed features need it.']
+    ] as const) {
+      setLanguage(locale);
+      expect(title.textContent, locale).toBe(expectedTitle);
+      expect(help.textContent, locale).toBe(expectedHelp);
+      expect(bridge.textContent, locale).toBe(expectedWarning);
+      expect(document.getElementById('sessRecord')).toBe(recording);
+      expect(recording.checked).toBe(false);
+    }
+  });
+
   it('covers the complete source catalog and preserves every numbered argument', () => {
     expect(Object.keys(es).sort()).toEqual(Object.keys(zhCN).sort());
     for (const [source, translation] of Object.entries(es)) {

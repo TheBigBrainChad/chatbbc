@@ -16,6 +16,9 @@ import { messageReaction, withoutMessageReaction } from '../shared/message-react
 import { goalErrorMessage } from '../shared/goal-errors.js';
 import type { GoalModel } from '../shared/goal-reasoning.js';
 import { renderGoalReasoning } from './goal-reasoning.js';
+import { renderRichResponse } from './rich-response.js';
+import { localDataUrl, retireRichImageViewer, retireRichImageViewerWithin, retireStaleRichImageViewer } from './rich-image.js';
+import { RICH_LIMITS } from '../shared/rich-response.js';
 import { preserveTimelineViewport } from './timeline-scroll.js';
 import { createSidebarOrder } from './sidebar-order.js';
 import { toolResultText } from './tool-result.js';
@@ -137,6 +140,25 @@ let workspaceTerminal: ReturnType<typeof createWorkspaceTerminal> | null = null;
 let sidebarOrder: ReturnType<typeof createSidebarOrder> | undefined;
 function draftKey(): string { return selectedId ?? (selectedProjectId ? `project:${selectedProjectId}` : 'new'); }
 let selectionGeneration = 0;
+let selectionReportSequence = 0;
+let reportedSessionId: string | null = null;
+let acknowledgedUiSelection: { sessionId: string | null; rendererGeneration: number; generation: number } | null = null;
+let currentChatView = 'timeline';
+
+/** Presentation only. Main validates the sender, current window and session before witnessing. */
+function reportVisibleSelection(force = false): void {
+  const sessionId = visible && currentChatView === 'timeline' && !document.hidden ? selectedId : null;
+  if (!force && sessionId === reportedSessionId && acknowledgedUiSelection?.sessionId === sessionId) return;
+  reportedSessionId = sessionId;
+  acknowledgedUiSelection = null;
+  const rendererGeneration = ++selectionReportSequence;
+  void api.reportUiSelection({ sessionId, rendererGeneration }).then(result => {
+    // A→B→A and same-id reselections retire all older acknowledgments, including failures.
+    if (rendererGeneration !== selectionReportSequence || sessionId !== reportedSessionId ||
+        !result.ok || result.data.sessionId !== sessionId) return;
+    acknowledgedUiSelection = { sessionId, rendererGeneration, generation: result.data.generation };
+  }).catch(() => { /* A failed witness stays unavailable; ordinary chat remains usable. */ });
+}
 // Async file import belongs to one visible composer draft, not just to a session key.
 // Replacing that draft retires in-flight imports even when navigation returns to the
 // same key or a send failure later restores the submitted text.
@@ -236,22 +258,48 @@ async function toggleSessionBlock(id: string, blocked: boolean): Promise<void> {
   paintSessions(sessionHost);
 }
 
+/** One selection retirement path for deletion and independently confirmed disappearance. */
+function clearSelectedSession(): void {
+  retireRichImageViewer();
+  rememberDraft();
+  selectionGeneration++;
+  replaceComposerDraft();
+  selectedId = null;
+  newChatSelected = true;
+  pendingNewInput = null;
+  events = [];
+  totalEvents = 0;
+  detailFor = null;
+  detailCursor = null;
+  historyBefore = null;
+  handoff = null;
+  handoffFor = null;
+  detailLoadGeneration++;
+  handoffLoadGeneration++;
+  // Deletion and confirmed absence arrive outside selectSession/selectNewChat. Retire the old
+  // recorded controls and their cached rows on this same stack, before reporting null or
+  // awaiting another list/detail read that could fail or stall indefinitely.
+  $('timeline').setAttribute('inert', '');
+  $('inputQueue').setAttribute('inert', '');
+  $('timeline').replaceChildren();
+  $('inputQueue').replaceChildren();
+  forgetTimelineRows();
+  restoreDraft();
+  void refreshSessionControls();
+  paintSessions(sessionHost);
+  paintDetail(false);
+  paintHandoff();
+  reportVisibleSelection(true);
+}
+
 async function deleteSession(id: string): Promise<void> {
   const done = await run(api.deleteSession(id));
-  if (done === null) return;
+  if (done === null) { if (selectedId === id) reportVisibleSelection(true); return; }
   sessions = sessions.filter((entry) => entry.id !== id);
   pressure.delete(id);
   sessionTotal = Math.max(0, sessionTotal - 1);
   if (selectedId === id) {
-    selectedId = null;
-    events = [];
-    totalEvents = 0;
-    detailFor = null;
-    detailCursor = null;
-    handoff = null;
-    handoffFor = null;
-    detailLoadGeneration++;
-    handoffLoadGeneration++;
+    clearSelectedSession();
   }
   toast(t("Session deleted"));
   await loadSessions();
@@ -263,6 +311,7 @@ async function loadSessions(): Promise<void> {
   const generation = ++sessionsLoadGeneration;
   const [list, catalog] = await Promise.all([run(api.listSessions({ limit: SESSION_PAGE_SIZE })), run(api.listProjects())]);
   if (!list || generation !== sessionsLoadGeneration) return;
+  const previouslySelected = sessions.find(row => row.id === selectedId);
   if (catalog) projects = catalog;
   // Once older pages have been requested, a hot refresh only replaces/updates the newest page.
   // Throwing the older rows away here would make scrolling history vanish every 400 ms while a
@@ -292,9 +341,21 @@ async function loadSessions(): Promise<void> {
     pressure = new Map(list.pressure.map((entry) => [entry.id, entry]));
   }
   if (selectedId !== null && !sessions.some((s) => s.id === selectedId)) {
-    selectedId = null;
-    detailFor = null;
-    detailCursor = null;
+    // A bounded newest page cannot prove an older selected session was removed.
+    const wanted = selectedId, selection = selectionGeneration;
+    let resolved: SessionSummary | null | undefined;
+    try {
+      const reply = await api.getSession(wanted, { limit: 1 });
+      if (reply.ok && reply.data.summary?.id === wanted) resolved = reply.data.summary;
+      else if (!reply.ok && /session not found/i.test(reply.error)) resolved = null;
+    } catch { /* A read error is unknown, never an authoritative deletion. */ }
+    if (generation !== sessionsLoadGeneration || selection !== selectionGeneration || selectedId !== wanted) return;
+    if (resolved === null) clearSelectedSession();
+    else {
+      // Preserve the selected row and title across pagination and transient read failures.
+      const retained = resolved ?? previouslySelected;
+      if (retained) sessions = mergeSessionRows(sessions, [retained]);
+    }
   }
   paintSessions(sessionHost);
   await loadDetail();
@@ -1273,7 +1334,30 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
     case 'assistant_message': {
       const box = el('div', 'said');
       box.append(el('b', '', () => event.final ? 'ChatGPT' : t("ChatGPT (partial)")));
-      box.append(renderedMarkdown(event.message.text, event.renderedHtml));
+      const id = context?.id ?? selectedId;
+      const generation = selectionGeneration;
+      const currentRichRow = () => context ? context.current() : selectedId === id && selectionGeneration === generation;
+      box.append(event.rich ? renderRichResponse(event.rich, event.message.text, id ? {
+        sessionId: id,
+        media: event.richMedia ?? [],
+        current: currentRichRow,
+        // Displaying persisted richOrigin is not a URL grant. The explicit button
+        // performs no action or browser input: main rereads the exact canonical
+        // historical assistant under the current window/selection witness.
+        ...(event.richOrigin && event.messageId ? { openOriginal: async () => {
+          const selected = acknowledgedUiSelection;
+          if (!currentRichRow() || selected?.sessionId !== id) return false;
+          try {
+            const reply = await api.openRichOriginal(id, event.messageId!);
+            return currentRichRow() && acknowledgedUiSelection?.generation === selected.generation &&
+              reply.ok && reply.data === true;
+          } catch { return false; }
+        } } : {})
+      } : undefined)
+        : renderedMarkdown(event.message.text, event.renderedHtml));
+      if (event.richMediaUnavailable) {
+        box.append(el('p', 'meta rich-media-unavailable', () => t("Image preview unavailable — open original in ChatGPT")));
+      }
       return box;
     }
     case 'native_image': {
@@ -1303,7 +1387,10 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
         void (async () => {
           const data = await run(api.getSessionImage(id, event.asset!.id));
           if (context ? !context.current() : id !== selectedId || generation !== selectionGeneration) return;
-          if (!data) {
+          // Only the fixed local image reader's bounded bytes may become an IMG source.
+          // A malformed IPC reply must never trigger a remote image request or paint a
+          // different MIME under this exact canonical generated-image asset.
+          if (!localDataUrl(data, event.asset!.mimeType)) {
             const pane = context ? box.closest<HTMLElement>('.agent-panel-body') : $('chatBody');
             const timeline = context ? pane : $('timeline');
             const restore = pane && timeline && box.isConnected ? preserveTimelineViewport(pane, timeline) : () => {};
@@ -1404,7 +1491,8 @@ function eventRow(event: SessionEvent): HTMLElement {
   // this builder only says which family a row belongs to. `ev-<kind>` stays: it is the
   // hook the reconciliation, grouping and fixtures already select on.
   const row = el('div', `ev ev-${event.kind} tl-row ${categoryClass(categoryFor(event.kind))}`);
-  if (event.kind === 'assistant_message' && !withoutMessageReaction(event.message.text).trim()) row.hidden = true;
+  if (event.kind === 'assistant_message' && !event.rich && !event.richMediaUnavailable &&
+      !withoutMessageReaction(event.message.text).trim()) row.hidden = true;
   tagImageRow(row, event);
   const time = document.createElement('time');
   time.textContent = clockTime(event.time);
@@ -1485,8 +1573,12 @@ function visibleEvents(): SessionEvent[] {
 function eventTextCost(event: SessionEvent): number {
   switch (event.kind) {
     case 'user_message':
+      return event.message.text.length;
     case 'assistant_message':
-      return event.message.text.length + (event.kind === 'assistant_message' ? (event.renderedHtml?.text.length ?? 0) : 0);
+      // Charge the schema's maximum rather than traversing an untrusted tree for each page.
+      // Text/HTML plus rich must share the existing 2 MiB resident paint budget.
+      return event.message.text.length + (event.renderedHtml?.text.length ?? 0) +
+        (event.rich ? RICH_LIMITS.bytes : 0) + (event.richMediaUnavailable ? 128 : 0);
     case 'progress':
     case 'chat_error':
     case 'note':
@@ -1883,7 +1975,10 @@ function itemSignature(item: TimelineItem): string {
       parts.push(event.message.chars);
       break;
     case 'assistant_message':
-      parts.push(event.message.chars, event.renderedHtml?.chars ?? 0, event.state ?? '', event.final ? 'final' : '');
+      parts.push(event.message.chars, event.renderedHtml?.chars ?? 0, event.state ?? '', event.final ? 'final' : '',
+        event.rich?.revision ?? '', event.rich?.status ?? '', event.rich?.reason ?? '',
+        event.richMediaUnavailable ?? '', JSON.stringify(event.richMedia ?? []),
+        JSON.stringify(event.retiredRichImageAssetIds ?? []));
       break;
     case 'native_image':
       parts.push(event.messageId, event.providerAssetId, event.providerStatus ?? '', event.previewStatus, event.asset?.id ?? '',
@@ -2033,6 +2128,7 @@ function paintDetail(followBottom = historyBefore === null): void {
   // height above it; retaining absolute scrollTop would move the reader's content.
   const pane = $('chatBody');
   const restoreViewport = preserveTimelineViewport(pane, $('timeline'), followBottom);
+  let restoreRichFocus: (() => void) | null = null;
   const timelineRows: HTMLElement[] = [];
   const keep = new Set<string>();
   let activityBoundary = '';
@@ -2083,7 +2179,30 @@ function paintDetail(followBottom = historyBefore === null): void {
       timelineRows.push(cached.row);
       continue;
     }
-    const row = item.kind === 'compaction' ? compactionRow(item.block, cached?.row) : eventRow(item.event);
+    let row = item.kind === 'compaction' ? compactionRow(item.block, cached?.row) : eventRow(item.event);
+    if (cached && item.kind === 'event' && item.event.kind === 'assistant_message') {
+      // Revision cursor changes a bubble's contents, not its immutable viewport identity.
+      // Keep the outer row mounted and recover keyboard focus by validated semantic node id.
+      const active = document.activeElement as HTMLElement | null;
+      const focused = active && cached.row.contains(active) ? active.closest<HTMLElement>('[data-rich-node-id]') : null;
+      const focusId = focused?.dataset.richNodeId;
+      const focusTag = active?.tagName;
+      const oldDisclosure = cached.row.querySelector<HTMLDetailsElement>('details.rich-source');
+      const newDisclosure = row.querySelector<HTMLDetailsElement>('details.rich-source');
+      if (oldDisclosure?.open && newDisclosure) newDisclosure.open = true;
+      retireRichImageViewerWithin(cached.row);
+      cached.row.replaceChildren(...row.childNodes);
+      cached.row.hidden = row.hidden;
+      cached.row.className = row.className;
+      row = cached.row;
+      if (focusId && focusTag) restoreRichFocus = () => {
+        const owner = [...row.querySelectorAll<HTMLElement>('[data-rich-node-id]')]
+          .find(node => node.dataset.richNodeId === focusId);
+        const target = owner?.tagName === focusTag ? owner
+          : [...(owner?.querySelectorAll<HTMLElement>('*') ?? [])].find(node => node.tagName === focusTag);
+        target?.focus({ preventScroll: true });
+      };
+    }
     row.dataset.timelineKey = key;
     row.dataset.activityBoundary = activityBoundary;
     paintInputReceipt(row, item);
@@ -2106,9 +2225,11 @@ function paintDetail(followBottom = historyBefore === null): void {
   reconcileChildren(timeline, spine.length === 0
     ? groupImageRows(groupToolRows(timelineRows))
     : withSpineSegments(groupImageRows(groupToolRows(timelineRows)), spine));
+  retireStaleRichImageViewer();
   paintPendingInputs(deliveryHost);
   $('timelineEmpty').hidden = selectedId !== null || timelineRows.length > 0 || $('inputQueue').childElementCount > 0;
   restoreViewport();
+  restoreRichFocus?.();
 
   const facts: string[] = [];
   if (summary) {
@@ -2377,9 +2498,7 @@ export function chatSettingsPatch(current: Config): {
   const threshold = number('autoCompactTokens', current.compaction.autoTokens, 10_000, 4_000_000);
   return {
     sessions: {
-      // Main enforces these invariants too. Keeping the canonical values in the complete
-      // renderer snapshot prevents an old/foreign control value from being proposed at all.
-      record: true,
+      record: $<HTMLInputElement>('sessRecord').checked,
       retainDays: 0,
       // Both follow the single threshold above rather than being typed separately.
       advisoryTokens: threshold,
@@ -2755,11 +2874,11 @@ function applyAutoCompactHint(config: Config): void {
  * A field that is not here does not save: it keeps what was typed until the next repaint
  * and then quietly reverts. `autoCompactTokens` was missing, which made the one number the
  * automatic trigger fires on the one control in the app that never kept what you typed.
- * Recording and age retention are absent because history is always recorded and does not
- * expire by age.
+ * Age retention is absent because history does not expire by age.
  */
 const CHAT_INPUTS = [
   'chatBrowser',
+  'sessRecord',
   'goalIncludeToolCalls',
   'planBackend',
   'finishTool', 'finishLeadMinutes', 'workerModel', 'workerReasoning', 'backgroundChats', 'browserOnly', 'autoRefreshPlugins',
@@ -2788,6 +2907,7 @@ export function chatApply(state: AppState, previous?: Config): void {
   paintContextMeter(sessions.find(session => session.id === selectedId) ?? null, config, confirmedComposerModel());
   applyChatModels(config, previous);
 
+  applyChatChecked($<HTMLInputElement>('sessRecord'), config.sessions.record, previous?.sessions.record);
   applyChatChecked($<HTMLInputElement>('autoCompact'), config.compaction.auto, previous?.compaction.auto);
   applyChatValue(
     $<HTMLInputElement>('autoCompactTokens'),
@@ -2825,7 +2945,7 @@ export function chatApply(state: AppState, previous?: Config): void {
     : !secureStorageAvailable
       ? (state.secureStorage?.detail ?? t("Secure credential storage is unavailable, so the extension cannot pair safely."))
     : !bridge.running
-      ? t("The local bridge is off even though recording or multi-agent mode needs it.")
+      ? t("The local bridge is off even though browser-backed features need it.")
       : bridge.present
         ? t("Connected. Listening on 127.0.0.1:{0} · last message {1}.", [bridge.port ?? '?', ago(bridge.lastSeenAt)])
         : bridge.paired
@@ -2841,6 +2961,7 @@ export function chatApply(state: AppState, previous?: Config): void {
 export function chatVisible(next: boolean): void {
   if (visible === next) return;
   visible = next;
+  reportVisibleSelection(next && selectedId !== null);
   if (next) void refreshAll();
   else {
     window.clearTimeout(toolActivityTimer);
@@ -3001,6 +3122,10 @@ export function openChatView(name: string): void {
 }
 
 function showView(name: string): void {
+  if (currentChatView !== name) {
+    currentChatView = name;
+    reportVisibleSelection();
+  }
   $('composer').hidden = name === 'settings';
   $('composerDock').hidden = name === 'settings';
   $('inputQueue').hidden = name !== 'timeline';
@@ -3019,6 +3144,7 @@ function showView(name: string): void {
 }
 
 function selectSession(id: string): void {
+  retireRichImageViewer();
   const ownerChanged = id !== selectedId;
   rememberDraft();
   selectionGeneration++; replaceComposerDraft();
@@ -3026,6 +3152,7 @@ function selectSession(id: string): void {
   $('finishQueue').replaceChildren(); $('finishQueue').hidden = true;
   newChatSelected = false;
   selectedId = id;
+  reportVisibleSelection(true);
   const selected = sessions.find(row => row.id === id);
   applyComposerSessionModel(`${id}:${selectionGeneration}`, composerSessionSelection(selected) ?? null);
   const parent = selected?.origin?.kind === 'worker' ? selected.origin.fromSessionId : null;
@@ -3059,10 +3186,12 @@ function selectSession(id: string): void {
 }
 
 function selectNewChat(projectId: string | null = null): void {
+  retireRichImageViewer();
   rememberDraft(); selectionGeneration++; replaceComposerDraft(); pendingNewInput = null;
   inputQueueGeneration++;
   $('finishQueue').replaceChildren(); $('finishQueue').hidden = true;
   newChatSelected = true; selectedId = null; selectedProjectId = projectId; detailFor = null; detailCursor = null;
+  reportVisibleSelection(true);
   if (projectId) expandedProjects.add(projectId);
   applyComposerSessionModel(null, null);
   // New Chat selects its existing draft, just like a session. Navigation is not
@@ -3225,6 +3354,7 @@ async function removeProject(id: string): Promise<void> {
       const oldKey = draftKey();
       const authoredDraft = authoredComposerText();
       selectedProjectId = null; selectionGeneration++; replaceComposerDraft();
+      reportVisibleSelection(true);
       // Keep the visible draft and its attachments while moving to unfiled.
       inputDrafts.set(draftKey(), authoredDraft); inputDrafts.delete(oldKey); newChatTasks.delete(oldKey);
       skillPicker?.restore();
@@ -3244,6 +3374,9 @@ export function initChat(next: Deps): void {
     .filter(entry => (entry.conversationId || entry.origin?.kind === 'desktop') && entry.origin?.kind !== 'worker')
     .map(entry => ({ id: entry.id, scope: projectGroup(projects, entry.projectId) ?? '' })), () => paintSessions(sessionHost));
   deps = next;
+  reportVisibleSelection(true); // Initial New Chat/null is explicit; activity never supplies selection.
+  document.addEventListener('visibilitychange', () => reportVisibleSelection(!document.hidden));
+  window.addEventListener('focus', () => reportVisibleSelection(true));
   const fileToggle = el('button', 'btn file-panel-toggle') as HTMLButtonElement;
   fileToggle.id = 'filePanelToggle'; fileToggle.type = 'button'; fileToggle.hidden = true;
   fileToggle.append(icon('i-folder'));

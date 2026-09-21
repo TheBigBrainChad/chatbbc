@@ -30,10 +30,15 @@ commitment.
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: **2026-09-19**, including the 2.1.18 release candidate. App/extension **2.1.18**,
-bridge protocol **15** in the checked declarations (`package.json`, `src/main/version.ts`,
-`extension/manifest.json`, `extension/background.js`). This rename is the second hard identity
-cut. The two halves identify each other twice: the companion accepts a `/hello` reply only when
+Source alignment: **2026-09-21**, including the 2.1.18 release line merged into the
+rich-response worktree. App/package/extension declarations are **2.1.18**; main and
+extension declare bridge protocol **17** (`package.json`,
+`src/main/version.ts`, `extension/manifest.json`, `extension/background.js`). Protocol 16
+introduced bounded rich observations; 17 adds pre-observation recording generations and
+positional journal admission. Linux x64 packaging, packaged native runtime and a disposable
+Ubuntu 24.04 DEB GUI startup are verified for this tree; a signed-in companion/provider
+handshake is not. The earlier ChatBBC rename remains a hard identity cut. The
+two halves identify each other twice: the companion accepts a `/hello` reply only when
 `app` equals its own expected slug, and it separately compares the protocol integer. A
 companion that disagrees only about the integer is refused with 426
 `incompatible_extension` rather than served; a companion carrying the predecessor's slug
@@ -205,7 +210,7 @@ define the tool/config/wire contract. README and worklogs are secondary and can 
 | --- | --- | --- |
 | Roots | None. | Root-requiring capabilities cannot be published usefully until a root is approved. |
 | Tool capabilities | Current `defaultConfig()` starts all Core capability flags on; read-only off. | Omitted legacy flags use conservative `DEFAULT_CAPABILITIES`. Malformed existing config is conservative recovery, not fresh consent. |
-| Recording | On, 30-day retention. | Explicit Off stays Off; retention still applies to old history. |
+| Recording | On, no age-based expiry (`retainDays: 0`). | Explicit Off stays Off; user-confirmed image cleanup and session deletion still apply to old history. |
 | Context / compaction | Advisory 400,000; limit rounded from advisory × 4/3; auto-compaction on at advisory. | Estimated local units. Automatic execution additionally requires live work, current ownership and eligible model/role. |
 | Multi-agent | On, 2 simultaneous slot-holding workers **per family**, configured hard max 8. | Legacy absent enabled/allow-unattributed fields remain false. Existing choices stay exact. |
 | Unattributed allowance | True on first launch. | Relaxes ambiguity fences only; known blocked/retired/superseded ownership stays enforced. |
@@ -240,7 +245,7 @@ Paths in this section are repository-relative. Most mechanisms have `main`, `sha
 | Patching/images | `src/main/codex/apply-patch/*`, `codex/{filesystem,read-backend,view-image}.ts`. |
 | Projects/cwd | `src/main/projects.ts`, `workspace.ts`, `src/shared/projects.ts`: explicit local folder catalog, session binding, inherited/learned workspaces. |
 | Project Files UI | `src/main/project-files.ts`, `project-file-watcher.ts`, `src/shared/project-files.ts`, `src/renderer/{file-panel,file-code-editor,file-pdf-viewer,work-panel-resize}.ts`: bounded project views, revision-checked saves and renderer-owned drafts. |
-| Durable history | `src/main/session/{store,recorder,correlation,retention,summarize,progress}.ts`, `src/shared/{session,chronology}.ts`: canonical messages, tool truth, chronology and indexes. |
+| Durable history | `src/main/session/{store,recorder,correlation,summarize,progress}.ts`, `src/shared/{session,chronology}.ts`: canonical messages, tool truth, chronology, explicit deletion and indexes. |
 | Input | `src/main/session/{input,start-input,input-history,input-attachments,input-images,prompt}.ts`, `src/shared/{input,user-prompt}.ts`: outbox, native files, prompt frame and receipts. |
 | Finish/planning | `src/main/session/finish.ts`, `task-request.ts`, `goal.ts`, `src/shared/{finish,task-progress}.ts`: held turn, decision/plan invocation and cancellation. |
 | Continuation | `src/main/session/{continuation,resume-gate,handoff,handoff-prompt}.ts`: A→B transaction, send ambiguity and exact brief. |
@@ -250,7 +255,8 @@ Paths in this section are repository-relative. Most mechanisms have `main`, `sha
 | Extension | `extension/{manifest.json,chatgpt-dom.js,content.js,fiber.js,background.js,usage.js,overlay.css,popup.html,popup.css,popup.js}`: injection worlds, native observations/actions, journal and UI. |
 | Models/usage | `src/main/chat-models.ts`, `session/usage.ts`; `src/shared/{chat-models,usage}.ts`; `src/renderer/{chat-models,context-meter,usage}.ts`: account observations vs local estimates. |
 | External plugins | `src/main/plugins/{catalog,installer,manager,exposure,oauth}.ts`, `plugins-ipc.ts`, `plugin-refresh.ts`, `src/shared/{plugins,plugin-refresh}.ts`, `src/renderer/plugins.ts`. |
-| Renderer boundary | `src/main/ipc.ts`, `edit-context-menu.ts`, `src/preload/index.ts`; `src/renderer/{main,chat,dom,tool-result,timeline-scroll,sidebar-resize,browser-preferences,connection-popover,i18n}.ts`, `locales/{es,zh-CN}.json`, `index.html`, `styles.css`. |
+| Renderer boundary | `src/main/ipc.ts`, `edit-context-menu.ts`, `src/preload/index.ts`; `src/renderer/{main,chat,dom,tool-result,timeline-scroll,sidebar-resize,browser-preferences,connection-popover,i18n,rich-response,rich-image}.ts`, `locales/{es,zh-CN}.json`, `index.html`, `styles.css`. |
+| Rich capture/actions | `src/main/{rich-actions,rich-retry-admission}.ts`, `src/shared/rich-response.ts`: bounded semantic trees, PAGE media, inert native controls, read-only status and retry eligibility. Production `begin`/`elect`/`arm` remain non-arming until a purpose-specific trusted gesture and exact native postcondition exist. |
 | Appearance | `src/shared/appearance.ts`, `src/main/appearance-schema.ts`, `src/renderer/appearance.ts`: bounded saved colors/typography, field-wise Settings merge, immediate semantic CSS projection. `window-layout.ts` shares native caption/backing colors. |
 | Native Desktop | `src/main/computer/{index,helper,browser-chords,windows-api,windows-capture,windows-apps,windows-keys}.ts`, `src/shared/windows-computer.ts`, `mcp/tools-desktop-{windows,macos}.ts`, `native/macos-desktop-helper/*`, `native/macos-desktop-addon/*`. |
 | Direct browser control | `src/main/browser-control.ts`, `mcp/tools-browser.ts`, `src/shared/browser-control.ts`, `extension/browser-control{,-page}.js`: short-lived RPCs, session-owned debugger tabs, bounded DOM/diagnostics and background input. |
@@ -266,6 +272,9 @@ Paths in this section are repository-relative. Most mechanisms have `main`, `sha
 | Session/current chat/project | `store.ts` / `sessions/<id>/meta.json` | Rebind is the semantic A→B commit. |
 | Exact request ownership | `correlation.ts` / `state/request-correlations.json` plus recorded proof | First exact proof wins; retain local session epoch; reconcile from history on startup. |
 | Authored message | `store.ts` / canonical message shard | Replace by stable identity, preserving origin chronology. |
+| Rich presentation | `store.ts` / that same canonical assistant shard | Bounded semantic tree and media revisions require exact existing message, provider and originating document/binding; they cannot create turns or send actions. |
+| Rich action ledger | `rich-actions.ts` / session-owned physical ledger | Parse, restore and main-private pre-dispatch reconciliation only. Production begin/elect/arm/finish stay unavailable. A status receipt is not native success. |
+| Recording acquisition generation | `config.ts` / private `config.json` field; issued by authenticated bridge to an exact registered extension document | Freeze before page-local observation; preserve through queues, journal, retries and bridge ingress; a committed On/Off transition rotates it. Unknown or old generations cannot be restamped. |
 | Agent progress plan | `store.ts::updateSessionPlan` / `sessions/<id>/plan.json` | Exact caller/session and invocation ordering; atomically replace the whole plan. |
 | Input and checkpoints | `input.ts` / `state/session-input.json` | Serialized acceptance, frozen payload, exclusive claim and receipt; stages belong here. |
 | Native upload originals | `input-attachments.ts` / `input-attachments/` | Immutable bytes, opaque ids; outbox owns membership and retention. |
@@ -295,7 +304,8 @@ plugin manager, loads Goal ledgers, exact correlations and blocked chats, then r
 and every active/dormant prime family. Persistence hooks exist even when multi-agent is Off.
 Continuation restore follows swarm restore because it may repair prime ownership. IPC/input
 hooks precede browser traffic. Then the secure window/tray, bridge for recording or agents,
-independent retention maintenance, optional connector auto-connect and updater lifetime begin.
+optional connector auto-connect and updater lifetime begin. There is no age-based session
+retention/pruning startup job or repeating timer; explicit deletion and image cleanup remain.
 The current first-window model-discovery exception is noted in §21.
 
 Settings use validated current config and `effectiveCapabilities()`. Fresh-install defaults,
@@ -318,6 +328,14 @@ form field cannot undo a newer browser-side setting. Renderer saves also seriali
 from the latest requested state, preserving fast successive edits. Disable side effects are
 ordered: revoke/park worker execution and durably retain history, cancel its commands while the
 bridge is available, then stop unnecessary bridge/publication resources.
+Recording consent is not inferred from a detached full-config snapshot: the legacy `saveConfig`
+path cannot silently turn a committed Off back On when another caller edits only appearance or
+other settings. Deliberate re-enablement must use the current-state `updateConfig` transition.
+The private generation rotates with each committed Recording On/Off decision, including an
+Off that completes after previously admitted writes drain. A failed settings rename leaves the
+previous committed choice/generation authoritative, not a false success or a half-published
+token. First launch and valid legacy migration persist a fresh token before exposing recording
+admission; corrupt config/epoch and failed initialization conservatively disable it.
 
 The BrowserWindow keeps context isolation, sandbox and web security on; Node integration and
 webviews off. CSP, permission denial, navigation/window restrictions and fixed preload methods
@@ -1198,6 +1216,37 @@ The renderer groups adjacent same-response images into two columns, bounds loade
 and uses compact failure cards. Exact selection generations prevent old pages from filling a
 newly selected chat. Loading assets retain their bounded geometry through pixel hydration.
 
+Rich answers are a separate bounded semantic projection on an **existing** canonical assistant
+message, not executable provider component source or a second transcript. `fiber.js` and the
+content/bridge/recorder chain must prove the exact logical-message/raw-provider/DOM association,
+originating conversation, document/navigation epoch and local binding before publication.
+`shared/rich-response.ts` validates full trees; `renderer/rich-response.ts` independently reparses
+them and renders safe cards, text, grids, diagrams, horizontally contained tables and embedded
+image slots. A complete malformed/unknown tree shows a readable unavailable fallback instead of
+partially rendering tags or evaluating code; a literal authored code example stays ordinary text.
+Revisions preserve an existing rich assistant's canonical row, source text, chronology and
+Goal/turn state, even when its authored text is empty. Independently, a generated image-only
+final remains one or more native `native_image` tuples and needs no fabricated assistant text
+row. `upsertRichMedia` joins exact image nodes; the existing
+asset inventory, quota, explicit cleanup and tombstones own bytes. Pending, available, removed,
+unsupported and quota-exceeded previews stay distinguishable. An exact available, owned saved
+preview can hydrate inline from the existing local session-image reader, including inside a card;
+pending and ambiguous previews stay placeholders. A saved local preview is **not** the original
+ChatGPT asset; inline display and its local viewer do not fetch or regenerate the original.
+Unknown media ownership never creates a guessed `native_image` tuple or downloads a signed URL.
+
+Recorded choice, radio, checkbox, input and Continue elements currently paint as **inert**
+descriptions with disabled action surfaces. A historical selected state means selected *when
+recorded*, not current native selection. No generic HTML/JavaScript/selector executor, arbitrary
+URL, fabricated action receipt or substitute text prompt is available through rich rendering.
+Manual original opening is the only live rich IPC mutation: it reconstructs a ChatGPT URL from
+the stored origin after physical shard/owner rechecks and never grants native-action authority.
+Capture retry eligibility is read-only. An actual mirrored native control requires a purpose-specific
+trusted app gesture plus an observed exact selection/Continue postcondition; current
+source-status tests and a provider-button observation do not establish it. See
+`test/rich-response-schema.test.ts`, `rich-response-store`, `rich-media`, `rich-actions`,
+`renderer-timeline`, `image-storage` and `rich-response-lifecycle`.
+
 Reads join only the relevant session's committed queue. `readActivityEvents()` does not flush
 every dirty metadata row. A reopened session hydrates a bounded journal tail; append tail and
 canonical map serve revisions/cursors. `tailFrom` states proven coverage and cannot be lowered
@@ -1232,8 +1281,10 @@ manual Stop cannot be used as that proof. This reopen evidence is process-local.
 
 Large text has distinct inline/overflow/asset/read/render limits. Do not silently shorten
 authored history to fix the UI. Asset quotas and explicit overflow ceilings remain enforced;
-if earlier recording already lost content, expose that loss. Retention runs once on startup
-and every six hours using current settings, even when new recording is Off.
+if earlier recording already lost content, expose that loss. Age-based session pruning is not
+scheduled at startup or periodically; `retainDays` normalizes to zero. Explicit session deletion
+and user-confirmed image cleanup still remove their exact owned data, including while Recording
+is Off, without deleting another session's content-hash twin.
 Image asset admission failures preserve the original MCP response and tool outcome. The recorder
 adds a bounded, path-free warning to the existing activity summary, including quota exhaustion;
 older successful `view_image` rows without assets explicitly show that no preview was retained.
@@ -1442,6 +1493,20 @@ one batch per conversation and fair batch election prevent one hot/stalled chat 
 Command ACK custody precedes later observations from that
 route. Reconnection restores eligible documents before creating new work; browser restart is
 a different lifetime from MV3 suspension (§2).
+
+Protocol 17 separately issues a private recording generation after bridge authentication to the
+registered document; `/hello` is not acquisition authority. The isolated content script freezes
+the generation **before** observing a page row, including asynchronous inline/native images.
+Coalescing, gaps, journal persistence, batch slicing and HTTP 413 splitting preserve each row's
+original generation. `/events` validates the positional generation alongside its matching
+source-capture index. A missing/legacy/unknown token stays unknown; neither an enqueue after On
+nor a retry can promote a pre-Off observation into a new epoch. Unchanged pre-Off assistant
+prose cannot be freshly recorded just because a scanner revisits it after Off→On; genuinely
+changed or newly authored post-On text can be. Main config owns the cryptographically generated
+epoch and publishes On/Off rotations with its settings commit; failed Off is not acknowledged as
+successful. The relevant tests are `config`, `bridge`, `content-script`, `extension` and
+`rich-response-lifecycle`. A source test or matched source protocol is not installed extension
+compatibility evidence.
 
 An idle composer or missing Stop button alone does not prove a completed answer. Turn state
 combines native message/terminal evidence with exact user/assistant identities and live tools.
@@ -1676,7 +1741,7 @@ Status, event upload, activity, claims, receipts and bounded attachment chunks h
 contracts; a successful status read is not proof that a browser action happened.
 
 Every `/hello` reply is stamped with `app: APP_SLUG` (`chatbbc`) and the current
-`BRIDGE_PROTOCOL` (15), and the companion checks both: it treats a reply as its own only when
+`BRIDGE_PROTOCOL` (17), and the companion checks both: it treats a reply as its own only when
 `app` matches, and it rejects a reply whose `bridge` integer differs. The app enforces the same
 integer on every protected route and answers 426 `incompatible_extension`, which is why the
 slug and the integer moved together for this rename — and why the two failure modes differ. A
@@ -2212,6 +2277,21 @@ and `scripts/verify-pet-electron.cjs` cover this owner without provider conversa
 Projects, workers, plans, model choice, usage and plugins have focused modules (§4). The renderer
 calls a fixed `preload/index.ts` allowlist into validated `ipc.ts`/`plugins-ipc.ts` handlers.
 No arbitrary IPC invocation, Node access, filesystem path opening or renderer-side secret store.
+`ui-selection.ts` retains only a process-memory, current-main-frame display-selection witness:
+full navigation, deleted/missing sessions, a changed renderer incarnation and failed/foreign
+same-document navigation retire or suspend eligibility; a verified matching in-page completion
+may recover it without reviving an earlier witness. The named `sessions:richActionStatus`
+IPC/preload method is **read-only** and sender-bound to that current witness, rechecking
+session/selection after awaited reads; a status ledger's `pending`, `unknown` or historical
+receipt is not proof of a new native action. No rich-action dispatch, automatic status poll
+or active control binding is provided. The separate fixed `sessions:richOpenOriginal`
+IPC/preload method is **manual historical navigation only**: a direct trusted click on
+the app-owned rich-row button supplies a session/logical-message ID, and main rereads the
+exact physical canonical assistant shard and stored `richOrigin`, verifies the unique
+current or historical conversation owner and selected main-frame generation across awaits,
+then constructs the original ChatGPT URL itself. A missing/corrupt shard, ambiguous owner,
+superseded selection or unknown origin fails closed. This opener never grants the old chat
+native-action authority, retries pixels or synthesizes a choice/Continue postcondition.
 Changing the selected session synchronously retires prior data/control ownership and handoff.
 Keep the last painted transcript and images inert while the destination detail loads, then
 replace them directly; queue/status repaints must not flash the New Chat welcome screen.
@@ -2741,6 +2821,20 @@ shared-tree change may already have addressed them.
   Recording Off lacks a uniform runtime gate for retained per-chat overrides. Attempt
   invalidation now preserves debt, but these remaining controls still need one durable
   semantic transaction and effective current-setting enforcement.
+- **Rich native action and Retry Capture:** source foundations exist (UI-selection witness,
+  strict physical descriptor, durable parser/transition, read-only status and retry eligibility).
+  Production intent admission, companion one-shot native input and executable Retry Capture
+  remain unavailable: no purpose-specific trusted gesture or matched signed-in original-page
+  postcondition has been observed. Do not infer selectors or arm `begin`/`elect`/`arm` from
+  fixtures.
+- **Matched live generated-image and rich paint:** packaged Linux x64 native runtime and a
+  disposable Ubuntu 24.04 DEB GUI startup are verified. Signed-in companion pairing,
+  provider-generated single/gallery/image-only pixels, native choice/Continue postconditions
+  and installed raster/accessibility remain unverified.
+- **Corresponding-source GVDB fallback:** the reviewed `docs/licenses/native/pinned/gvdb-53daeeb4.tar.gz`
+  (24,716 bytes; SHA-256 `069a00aa1fc893f18423602f4e095583be5a220429f6e8a58d70511490b4b019`) is
+  present locally but untracked. A clean checkout cannot reproduce the corresponding-source
+  archive until that file is included.
 
 Do not restore obsolete claims while investigating: two MCP surfaces, one global prime run,
 three browser command kinds, fixed 60s Unattributed repair, tab-query

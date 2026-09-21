@@ -141,7 +141,9 @@ describe('which installations update themselves', () => {
    * that was never going to happen. Same for macOS, where the artifacts ship unsigned.
    */
   it('leaves a Linux package install and macOS to be updated by hand', async () => {
-    expect(stagedArtifact('linux', 'x64', undefined)).toBeNull();
+    // Explicitly model a package install: passing undefined would activate the
+    // function's default process.env.APPIMAGE from the actual test host.
+    expect(stagedArtifact('linux', 'x64', '')).toBeNull();
     expect(stagedArtifact('darwin', 'arm64')).toBeNull();
     expect(stagedArtifact('win32', 'ia32')).toBeNull();
 

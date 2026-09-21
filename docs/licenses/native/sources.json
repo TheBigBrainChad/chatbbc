@@ -1,6 +1,7 @@
 {
   "format": 1,
   "packages": {
+    "@janhapke/sharp-electron": "0.35.4-electron.1",
     "@img/sharp-darwin-arm64": "0.35.4",
     "@img/sharp-darwin-x64": "0.35.4",
     "@img/sharp-libvips-darwin-arm64": "1.3.3",
@@ -14,6 +15,16 @@
     "sharp": "0.35.4"
   },
   "sources": [
+    {
+      "id": "sharp-electron-patched-build",
+      "url": "https://codeload.github.com/janhapke/sharp-electron/tar.gz/f7afa507bfc6975bad73ed9c6a8ee5c3be88b848",
+      "version": "v0.35.4-electron.1@f7afa507bfc6975bad73ed9c6a8ee5c3be88b848",
+      "type": "patched-build-repo",
+      "sha256": "5826538e26d76f7db44b1adfe0766e6f00c86ce3c9495225d26386198d0247de",
+      "targets": ["linux-x64"],
+      "file": "sharp-electron-f7afa507.tar.gz",
+      "bytes": 50967
+    },
     {
       "id": "sharp-libvips-build",
       "url": "https://github.com/lovell/sharp-libvips/archive/4da6d14c0d59866adfb9d8cf52bcaa53846dc4f6.tar.gz",
@@ -7430,6 +7441,7 @@
         "win32"
       ],
       "file": "gvdb-53daeeb4.tar.gz",
+      "bundledFile": "pinned/gvdb-53daeeb4.tar.gz",
       "sha256": "069a00aa1fc893f18423602f4e095583be5a220429f6e8a58d70511490b4b019",
       "bytes": 24716
     },
@@ -9954,5 +9966,5 @@
       "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
     }
   ],
-  "componentNoticesSha256": "422f822ef4b9697149c2ad0e00794077fdc7a8015aa4acb253f60346b53698ba"
+  "componentNoticesSha256": "0c820b2e4b8393b4dd3b25585e1c6241bb0dfd80401dd780cbe9d8d5ecbacc45"
 }

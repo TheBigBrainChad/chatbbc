@@ -1,19 +1,296 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import sharp from 'sharp';
-import { appendEvent, createSession, getSession, initSessionStore, observeSessionModel, readEvents, resetSessionStoreForTests, upsertMessageEvent, upsertNativeImageEvent, writeAsset } from '../src/main/session/store.js';
+// Spy on the actual main-process backend, not a separate ESM wrapper of upstream Sharp.
+import sharp from '../src/main/sharp.js';
+import { appendEvent, clearImageStorage, createSession, deleteSession, flushSessions, getSession, initSessionStore, observeSessionModel, readEvents, rebindSession, resetSessionStoreForTests, sessionsRoot, upsertMessageEvent, upsertNativeImageEvent, upsertRichMedia, upsertRichMessage, writeAsset } from '../src/main/session/store.js';
 import { recordDeliveredInput, recordedInputImage } from '../src/main/session/input-history.js';
 import type { InputEntry } from '../src/main/session/input.js';
 import { chronological } from '../src/shared/chronology.js';
 import * as store from '../src/main/session/store.js';
 import { initDurableStore, readDurable, writeDurableNow, flushDurable } from '../src/main/durable.js';
 import { configureInputDelivery, listInputs, resetInputForTests, claimBrowserInput } from '../src/main/session/input.js';
+import { initConfigPath, loadConfig } from '../src/main/config.js';
 
 let directory: string;
-beforeEach(async () => { directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cos-input-history-')); initSessionStore(directory); });
+beforeEach(async () => {
+  directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cos-input-history-'));
+  initConfigPath(directory);
+  await loadConfig();
+  initSessionStore(directory);
+});
 afterEach(async () => { vi.restoreAllMocks(); resetInputForTests(); await flushDurable(); resetSessionStoreForTests(); await fs.rm(directory, { recursive: true, force: true }); });
+
+/** Synthetic *disk-only* future owner: this does not authorize production rich availability. */
+async function richImageFixture(source: 'page' | 'native' = 'page') {
+  const conversationId = randomUUID(), providerMessageId = randomUUID(), messageId = 'logical-rich-image';
+  const session = await createSession({ conversationId });
+  const bytes = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#164579' } }).webp().toBuffer();
+  const asset = await writeAsset(session.id, bytes, 'image/webp');
+  const origin = { conversationId, bindingRevision: session.bindingRevision ?? 0, documentId: 'document-one', navigationEpoch: 1 };
+  await upsertMessageEvent(session.id, { kind: 'assistant_message', source: 'extension', time: 100,
+    messageId, providerMessageId, final: true, message: { text: 'A reference image', chars: 17, truncated: false } });
+  expect(await upsertRichMessage(session.id, messageId, { version: 1, status: 'available', reason: null,
+    conversationId, messageId, providerMessageId, revision: 0, accessibleText: 'A reference image',
+    nodes: [{ kind: 'image', id: 'image-node', mediaId: 'image-media', alt: 'A reference', width: 5, height: 4 }]
+  }, origin)).toBe('stored');
+  const native = source === 'native' ? await upsertNativeImageEvent(session.id, {
+    kind: 'native_image', source: 'extension', time: 101, messageId: providerMessageId,
+    providerAssetId: 'provider-asset', providerRole: 'tool', providerStatus: 'finished_successfully',
+    previewStatus: 'available', previewWidth: 5, previewHeight: 4, asset
+  }) : null;
+  await flushSessions();
+  const shard = path.join(sessionsRoot(), session.id, 'messages',
+    `${createHash('sha256').update(`assistant_message\u0000${messageId}`).digest('hex')}.json`);
+  const original = JSON.parse(await fs.readFile(shard, 'utf8'));
+  const media = { mediaId: 'image-media', nodeId: 'image-node',
+    source: source === 'page' ? { kind: 'page', nodeId: 'image-node' } :
+      { kind: 'native', providerMessageId, providerAssetId: 'provider-asset' },
+    status: 'available', previewWidth: 5, previewHeight: 4, asset };
+  await fs.writeFile(shard, JSON.stringify({ ...original, richMedia: [media] }));
+  resetSessionStoreForTests(); initSessionStore(directory);
+  return { session, conversationId, providerMessageId, messageId, bytes, asset, origin, native, shard, media,
+    async edit(change: (row: any) => any) {
+      const prior = JSON.parse(await fs.readFile(shard, 'utf8'));
+      await fs.writeFile(shard, JSON.stringify(change(prior)));
+      resetSessionStoreForTests(); initSessionStore(directory);
+    }
+  };
+}
+
+it('reads only a committed exact rich image shard and keeps the available writer disabled, including historical rebinding', async () => {
+  const owner = await richImageFixture();
+  const expected = `data:image/webp;base64,${owner.bytes.toString('base64')}`;
+  expect(await recordedInputImage(owner.session.id, owner.asset.id)).toBe(expected);
+  const foreign = await createSession({ conversationId: randomUUID() });
+  await writeAsset(foreign.id, owner.bytes, 'image/webp'); // Same content hash, no owner.
+  expect(await recordedInputImage(foreign.id, owner.asset.id)).toBeNull();
+  expect(await upsertRichMedia(owner.session.id, owner.messageId, owner.media as any, owner.origin, 1)).toBe('refused');
+  const B = randomUUID();
+  expect(await rebindSession(owner.session.id, owner.conversationId, B)).toBe(true);
+  expect(await recordedInputImage(owner.session.id, owner.asset.id)).toBe(expected); // Historical read, no native action.
+});
+
+it('refuses corrupt, mismatched, removed and foreign rich owners rather than trusting a stale in-memory row', async () => {
+  const mutations: Array<(row: any, owner: Awaited<ReturnType<typeof richImageFixture>>) => any> = [
+    (row) => ({ ...row, messageId: 'different-logical' }),
+    (row) => ({ ...row, providerMessageId: randomUUID() }),
+    (row) => ({ ...row, richOrigin: { ...row.richOrigin, conversationId: randomUUID() } }),
+    (row) => ({ ...row, rich: { ...row.rich, nodes: [{ ...row.rich.nodes[0], mediaId: 'another-id' }] } }),
+    (row) => ({ ...row, richMedia: [...row.richMedia, row.richMedia[0]] }),
+    (row) => ({ ...row, richMedia: [{ ...row.richMedia[0], previewWidth: 7 }] }),
+    (row) => ({ ...row, richMedia: [{ ...row.richMedia[0], status: 'unavailable', reason: 'removed', asset: undefined }] }),
+    (row, owner) => ({ ...row, retiredRichImageAssetIds: [owner.asset.id] }),
+    (row) => ({ ...row, richMedia: [{ ...row.richMedia[0], asset: { ...row.richMedia[0].asset, bytes: 999 } }] })
+  ];
+  for (const mutate of mutations) {
+    const owner = await richImageFixture();
+    await owner.edit(row => mutate(row, owner));
+    expect(await recordedInputImage(owner.session.id, owner.asset.id)).toBeNull();
+  }
+  const owner = await richImageFixture();
+  expect(await recordedInputImage(owner.session.id, owner.asset.id)).not.toBeNull();
+  await fs.writeFile(owner.shard, '{invalid-json'); // Loaded cache was previously valid.
+  expect(await recordedInputImage(owner.session.id, owner.asset.id)).toBeNull();
+  await fs.rm(owner.shard);
+  expect(await recordedInputImage(owner.session.id, owner.asset.id)).toBeNull();
+});
+
+it('requires exact available native tuple and a trustworthy canonical image/asset path', async () => {
+  const owner = await richImageFixture('native');
+  expect(await recordedInputImage(owner.session.id, owner.asset.id)).not.toBeNull();
+  await owner.edit(row => ({ ...row, richMedia: [{ ...row.richMedia[0], source: {
+    ...row.richMedia[0].source, providerAssetId: 'wrong-provider-asset'
+  } }] }));
+  // The independently valid native_image still owns this same asset. A broken rich link
+  // cannot *revoke* the native permission granted by the existing fixed image endpoint.
+  expect(await recordedInputImage(owner.session.id, owner.asset.id)).toBe(`data:image/webp;base64,${owner.bytes.toString('base64')}`);
+  const unsupported = await richImageFixture();
+  await unsupported.edit(row => ({ ...row, richMedia: [{ ...row.richMedia[0], source: {
+    kind: 'native', providerMessageId: unsupported.providerMessageId, providerAssetId: 'missing-native-tuple'
+  } }] }));
+  expect(await recordedInputImage(unsupported.session.id, unsupported.asset.id)).toBeNull();
+  const other = await richImageFixture();
+  const assetPath = path.join(sessionsRoot(), other.session.id, 'assets', other.asset.id);
+  await fs.writeFile(assetPath, Buffer.from('corrupt image'));
+  expect(await recordedInputImage(other.session.id, other.asset.id)).toBeNull();
+  await fs.rm(assetPath);
+  await fs.symlink(path.join(sessionsRoot(), owner.session.id, 'assets', owner.asset.id), assetPath);
+  expect(await recordedInputImage(other.session.id, other.asset.id)).toBeNull();
+});
+
+it('denies a missing or symlinked authoritative rich shard and absent owner sources', async () => {
+  for (const missing of ['messages.json', 'events.jsonl'] as const) {
+    const owner = await richImageFixture();
+    await fs.rm(path.join(sessionsRoot(), owner.session.id, missing));
+    expect(await recordedInputImage(owner.session.id, owner.asset.id)).toBeNull();
+  }
+  const owner = await richImageFixture();
+  const external = path.join(directory, 'foreign-canonical.json');
+  await fs.copyFile(owner.shard, external);
+  await fs.rm(owner.shard);
+  await fs.symlink(external, owner.shard);
+  expect(await recordedInputImage(owner.session.id, owner.asset.id)).toBeNull();
+});
+
+it('does not normalize invalid UTF-8 journal bytes into seemingly valid owner evidence', async () => {
+  const owner = await richImageFixture();
+  const journal = path.join(sessionsRoot(), owner.session.id, 'events.jsonl');
+  await fs.appendFile(journal, Buffer.concat([
+    Buffer.from('{"kind":"note","seq":999,"message":"'), Buffer.from([0xff]), Buffer.from('"}\n')
+  ]));
+  expect(await recordedInputImage(owner.session.id, owner.asset.id)).toBeNull();
+});
+
+async function recordedImageWithLongHistory() {
+  const session = await createSession({ conversationId: randomUUID(), title: 'Long image history' });
+  const images = [];
+  for (const background of ['#2856a3', '#882255', '#229966']) {
+    const bytes = await sharp({ create: { width: 5, height: 4, channels: 3, background } }).png().toBuffer();
+    images.push({ bytes, asset: await writeAsset(session.id, bytes, 'image/png') });
+  }
+  await upsertMessageEvent(session.id, { kind: 'user_message', source: 'app', time: 100,
+    messageId: 'long-history-user', message: { text: 'User image', chars: 10, truncated: false }, assets: [images[0]!.asset] });
+  await upsertNativeImageEvent(session.id, { kind: 'native_image', source: 'extension', time: 101,
+    messageId: 'long-history-native', providerAssetId: 'provider-image', providerRole: 'tool',
+    providerStatus: 'finished_successfully', previewStatus: 'available', previewWidth: 5, previewHeight: 4, asset: images[1]!.asset });
+  await appendEvent(session.id, { kind: 'tool_call', source: 'mcp', time: 102, call: {
+    callId: 'long-history-tool', tool: 'view_image', requestId: null, conversationId: null,
+    attribution: 'unattributed', attributionMethod: 'unattributed',
+    args: { text: '{}', chars: 2, truncated: false }, result: { text: '{}', chars: 2, truncated: false },
+    outcome: 'ok', durationMs: 1, summary: { kind: 'other', title: 'Image', tone: 'neutral' }, assets: [images[2]!.asset]
+  } });
+  const note = 'ordinary session history '.repeat(19_000);
+  for (let index = 0; index < 20; index++) await appendEvent(session.id, {
+    kind: 'note', source: 'app', time: 200 + index,
+    message: { text: note, chars: note.length, truncated: false }
+  });
+  await flushSessions();
+  expect((await fs.stat(path.join(sessionsRoot(), session.id, 'events.jsonl'))).size).toBeGreaterThan(8 * 1024 * 1024);
+  return { session, images };
+}
+
+it('keeps committed user/native/tool pixels readable after more than 8 MiB of unrelated valid history', async () => {
+  const owner = await recordedImageWithLongHistory();
+  for (const { asset, bytes } of owner.images) {
+    expect(await recordedInputImage(owner.session.id, asset.id)).toBe(`data:image/png;base64,${bytes.toString('base64')}`);
+  }
+});
+
+it('still refuses a malformed source in a long otherwise valid image history', async () => {
+  const owner = await recordedImageWithLongHistory();
+  await fs.appendFile(path.join(sessionsRoot(), owner.session.id, 'events.jsonl'), '{invalid-journal-row}\n');
+  expect(await recordedInputImage(owner.session.id, owner.images[0]!.asset.id)).toBeNull();
+});
+
+it('reads the exact owner revision queued before an image request', async () => {
+  const session = await createSession({ title: 'Queued image revision' });
+  const firstBytes = await sharp({ create: { width: 3, height: 2, channels: 3, background: '#123456' } }).png().toBuffer();
+  const nextBytes = await sharp({ create: { width: 3, height: 2, channels: 3, background: '#987654' } }).png().toBuffer();
+  const first = await writeAsset(session.id, firstBytes, 'image/png');
+  const next = await writeAsset(session.id, nextBytes, 'image/png');
+  const message = { kind: 'user_message' as const, source: 'app' as const, time: 100,
+    messageId: 'revision-owner', message: { text: 'Updated image', chars: 13, truncated: false } };
+  await upsertMessageEvent(session.id, { ...message, assets: [first] });
+  const shard = path.join(sessionsRoot(), session.id, 'messages',
+    `${createHash('sha256').update('user_message\u0000revision-owner').digest('hex')}.json`);
+  let entered!: () => void, release!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const originalRename = fs.rename.bind(fs);
+  const hold = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+    if (String(to) === shard) { entered(); await gate; }
+    return originalRename(from, to);
+  }) as typeof fs.rename);
+  const revision = upsertMessageEvent(session.id, { ...message, assets: [next] });
+  await reached;
+  const stale = recordedInputImage(session.id, first.id);
+  const updated = recordedInputImage(session.id, next.id);
+  release();
+  await revision;
+  expect(await stale).toBeNull();
+  expect(await updated).toBe(`data:image/png;base64,${nextBytes.toString('base64')}`);
+  hold.mockRestore();
+});
+
+it('rejects provider alias ambiguity and mismatched native/asset content without cross-session fallback', async () => {
+  const owner = await richImageFixture();
+  const second = { ...JSON.parse(await fs.readFile(owner.shard, 'utf8')),
+    messageId: 'different-logical', rich: undefined, richOrigin: undefined, richMedia: undefined };
+  const alias = path.join(sessionsRoot(), owner.session.id, 'messages',
+    `${createHash('sha256').update('assistant_message\u0000different-logical').digest('hex')}.json`);
+  await fs.writeFile(alias, JSON.stringify(second));
+  resetSessionStoreForTests(); initSessionStore(directory);
+  expect(await recordedInputImage(owner.session.id, owner.asset.id)).toBeNull();
+
+  const nativeOwner = await richImageFixture('native');
+  const foreignPixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#882244' } }).webp().toBuffer();
+  const alternate = await writeAsset(nativeOwner.session.id, foreignPixels, 'image/webp');
+  await nativeOwner.edit(row => ({ ...row, richMedia: [{ ...row.richMedia[0], asset: alternate }] }));
+  expect(await recordedInputImage(nativeOwner.session.id, alternate.id)).toBeNull();
+
+  const changed = await richImageFixture();
+  const filename = path.join(sessionsRoot(), changed.session.id, 'assets', changed.asset.id);
+  await fs.writeFile(filename, await sharp({ create: { width: 5, height: 4, channels: 3, background: '#aabbee' } }).webp().toBuffer());
+  expect(await recordedInputImage(changed.session.id, changed.asset.id)).toBeNull();
+});
+
+it('rejects a shortened content-hash alias even when bytes and metadata otherwise match', async () => {
+  const owner = await richImageFixture();
+  const shortId = `${owner.asset.id.slice(0, 8)}.bin`;
+  await fs.copyFile(path.join(sessionsRoot(), owner.session.id, 'assets', owner.asset.id),
+    path.join(sessionsRoot(), owner.session.id, 'assets', shortId));
+  await owner.edit(row => ({ ...row, richMedia: [{ ...row.richMedia[0],
+    asset: { ...row.richMedia[0].asset, id: shortId } }] }));
+  expect(await recordedInputImage(owner.session.id, shortId)).toBeNull();
+});
+
+it('does not return a pre-cleanup rich preview, then retires its durable owner across restart', async () => {
+  const owner = await richImageFixture();
+  let entered!: () => void, release!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const original = sharp.prototype.stats;
+  let held = false;
+  const spy = vi.spyOn(sharp.prototype, 'stats').mockImplementation(async function (this: ReturnType<typeof sharp>, ...args: Parameters<typeof original>) {
+    if (!held) { held = true; entered(); await gate; }
+    return original.apply(this, args);
+  });
+  const reading = recordedInputImage(owner.session.id, owner.asset.id);
+  await reached;
+  const clearing = clearImageStorage('all');
+  release();
+  expect(await reading).toBeNull();
+  spy.mockRestore();
+  expect(await clearing).toMatchObject({ removedFiles: 1 });
+  resetSessionStoreForTests(); initSessionStore(directory);
+  expect(await recordedInputImage(owner.session.id, owner.asset.id)).toBeNull();
+  expect((await readEvents(owner.session.id)).find(row => row.kind === 'assistant_message')).toMatchObject({
+    retiredRichImageAssetIds: [owner.asset.id], richMedia: [{ status: 'unavailable', reason: 'removed' }]
+  });
+});
+
+it('invalidates an in-flight image read at the user session-deletion request edge', async () => {
+  const owner = await richImageFixture();
+  let entered!: () => void, release!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const original = sharp.prototype.stats;
+  const spy = vi.spyOn(sharp.prototype, 'stats').mockImplementation(async function (this: ReturnType<typeof sharp>, ...args: Parameters<typeof original>) {
+    entered(); await gate;
+    return original.apply(this, args);
+  });
+  const reading = recordedInputImage(owner.session.id, owner.asset.id);
+  await reached;
+  const deletion = deleteSession(owner.session.id);
+  release();
+  expect(await reading).toBeNull();
+  spy.mockRestore();
+  await deletion;
+  expect(await recordedInputImage(owner.session.id, owner.asset.id)).toBeNull();
+});
 
 it('commits the image handout before quota failure, retries without decoding again, and enriches its original row', async () => {
   const session = await createSession({ conversationId: 'image-handout', title: 'Image handout' });

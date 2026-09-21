@@ -13,7 +13,7 @@
  * the pending work, never the app's ability to start.
  */
 
-import { promises as fs } from 'node:fs';
+import { constants as fsConstants, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { logWarn } from './logger.js';
 
@@ -59,6 +59,78 @@ export async function readDurable<T>(name: string): Promise<T | null> {
       logWarn(`could not read ${name} state: ${(err as Error).message}`);
     }
     return null;
+  }
+}
+
+/** Security-sensitive readers cannot equate an absent file with unreadable/corrupt state.
+ * This deliberately does not change the legacy best-effort readDurable contract. A missing
+ * state DIRECTORY is not proof of a new ledger: only ENOENT for the named file beneath a
+ * verified, initialized directory qualifies as a fresh absence. No writes or mkdir occur.
+ * A future mutating consumer must serialize its own reads with its writes; this reader
+ * does not establish a transaction boundary against an in-flight writer. */
+export type StrictDurableRead<T> =
+  | { kind: 'valid'; value: T }
+  | { kind: 'absent' }
+  | { kind: 'unavailable'; reason: 'uninitialized' | 'storage' | 'oversized' | 'corrupt' };
+
+const MAX_STRICT_DURABLE_BYTES = 512 * 1024;
+
+export async function readDurableStrict<T = unknown>(name: string): Promise<StrictDurableRead<T>> {
+  if (!durableStoreReady()) return { kind: 'unavailable', reason: 'uninitialized' };
+  const target = fileFor(name); // Preserve the existing fixed-name validation.
+  let directoryIdentity: { dev: number; ino: number };
+  try {
+    const directory = await fs.lstat(root);
+    if (!directory.isDirectory() || directory.isSymbolicLink()) return { kind: 'unavailable', reason: 'storage' };
+    directoryIdentity = { dev: directory.dev, ino: directory.ino };
+  } catch {
+    return { kind: 'unavailable', reason: 'storage' };
+  }
+
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    // O_NOFOLLOW also prevents a symlink substituted between the directory check and open.
+    handle = await fs.open(target, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      try {
+        const current = await fs.lstat(root);
+        if (current.isDirectory() && !current.isSymbolicLink() &&
+            current.dev === directoryIdentity.dev && current.ino === directoryIdentity.ino) {
+          return { kind: 'absent' };
+        }
+      } catch { /* A vanished/replaced parent cannot certify fresh absence. */ }
+    }
+    return { kind: 'unavailable', reason: 'storage' };
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) return { kind: 'unavailable', reason: 'storage' };
+    if (!Number.isSafeInteger(stat.size) || stat.size > MAX_STRICT_DURABLE_BYTES) {
+      return { kind: 'unavailable', reason: 'oversized' };
+    }
+    // Never allocate/read unbounded bytes even if another process grows the file after stat.
+    const bytes = Buffer.alloc(stat.size + 1);
+    const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+    if (bytesRead > MAX_STRICT_DURABLE_BYTES) return { kind: 'unavailable', reason: 'oversized' };
+    if (bytesRead !== stat.size) return { kind: 'unavailable', reason: 'storage' };
+    // O_NOFOLLOW protects only the final component: a replaced state directory
+    // must not let an outside file become an accepted ledger snapshot.
+    const currentDirectory = await fs.lstat(root);
+    if (!currentDirectory.isDirectory() || currentDirectory.isSymbolicLink() ||
+        currentDirectory.dev !== directoryIdentity.dev || currentDirectory.ino !== directoryIdentity.ino) {
+      return { kind: 'unavailable', reason: 'storage' };
+    }
+    try {
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, bytesRead));
+      return { kind: 'valid', value: JSON.parse(text) as T };
+    } catch {
+      return { kind: 'unavailable', reason: 'corrupt' };
+    }
+  } catch {
+    return { kind: 'unavailable', reason: 'storage' };
+  } finally {
+    await handle.close().catch(() => undefined);
   }
 }
 
@@ -158,8 +230,13 @@ export function writeDurableSnapshotSoon(name: string, snapshot: () => unknown):
  * Used for transaction intent immediately before another durable commit: a debounced
  * snapshot is correct for ordinary progress, but cannot close a crash window between two
  * files when recovery needs to know which side of the boundary the process reached.
+ * A caller that quarantines an ambiguous failed checkpoint can explicitly opt out of the
+ * usual automatic retry; a rejected transition must not later become a physical mutation.
+ * This does not undo a rename that succeeded before its acknowledgment was lost.
  */
-export async function writeDurableNow(name: string, value: unknown): Promise<void> {
+export async function writeDurableNow(
+  name: string, value: unknown, options: { retryOnFailure?: false } = {}
+): Promise<void> {
   if (!root) return;
   const timer = timers.get(name);
   if (timer) {
@@ -174,9 +251,20 @@ export async function writeDurableNow(name: string, value: unknown): Promise<voi
     // not merely that some later state happened to be written instead.
     await enqueueSlot(name, slot);
   } catch (err) {
-    // Keep the newest pending generation recoverable. Callers which deliberately roll a
-    // failed staged transition back can supersede it by queueing their safe snapshot.
-    scheduleRetry(name);
+    if (options.retryOnFailure === false) {
+      // Only the rejected generation is ours to discard. An independent newer write may
+      // have arrived during the awaited rename and must retain its own retry/timer.
+      if (pending.get(name) === slot) {
+        pending.delete(name);
+        retryAttempts.delete(name);
+        const retry = timers.get(name);
+        if (retry) { clearTimeout(retry); timers.delete(name); }
+      }
+    } else {
+      // Normal durable state still retries exact failed generations. Transaction callers
+      // that quarantine on any uncertain disk outcome must use the explicit no-retry mode.
+      scheduleRetry(name);
+    }
     throw err;
   }
 }

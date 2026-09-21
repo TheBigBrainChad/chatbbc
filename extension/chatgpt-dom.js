@@ -525,6 +525,587 @@ var CLF_DOM = (() => {
   }
 
   /**
+   * This is deliberately narrower than a DOM query for "a rich-looking response".
+   * MAIN has already correlated one mounted DIL root with its own Fiber message UUID,
+   * this turn's public message and the concrete route. A scan-specific stamp is the
+   * only candidate; content.js also compares its entire value against its current
+   * Fiber frame before using it. An old stamp is never a live action lease.
+   */
+  /** Count actual DOM elements incrementally; reject ambiguity or >1024 nodes before copying any list. */
+  function uniqueRichSurface(root) {
+    const walker = root.ownerDocument.createTreeWalker(root, 1);
+    let surface = null;
+    let visited = 0;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (++visited > 1024) return { surface: null, oversized: true };
+      if (!node.matches('.puik-root.not-prose.not-markdown')) continue;
+      if (surface) return { surface: null, oversized: false };
+      surface = node;
+    }
+    return { surface: surface?.parentElement === root ? surface : null, oversized: false };
+  }
+
+  /** A static querySelectorAll would allocate all matches before any duplicate check. */
+  function uniqueBoundedDocumentMatch(selector) {
+    const first = document.querySelector(selector);
+    if (!first) return null;
+    const walker = document.createTreeWalker(document, 1);
+    walker.currentNode = first;
+    let checked = 1;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      // If another matching node exists, uniqueness is disproved immediately.
+      // If the rest of the document is too large, it remains unproven.
+      if (++checked > 1024 || node.matches(selector)) return null;
+    }
+    return first;
+  }
+
+  function richRootFor(logicalMessageId, providerMessageId) {
+    return safe(() => {
+      if (typeof logicalMessageId !== 'string' || !logicalMessageId || logicalMessageId.length > 190 ||
+          typeof providerMessageId !== 'string' || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(providerMessageId)) return null;
+      const suffix = `:${encodeURIComponent(logicalMessageId)}:${encodeURIComponent(providerMessageId)}`;
+      // Exact selectors still have arbitrarily many matching duplicates. Never
+      // allocate their static NodeLists before checking bounded uniqueness.
+      const root = uniqueBoundedDocumentMatch(`[data-clf-fiber-rich$="${suffix}"]`);
+      if (!root) return null;
+      const stamp = root.getAttribute('data-clf-fiber-rich') || '';
+      const prefix = stamp.slice(0, -suffix.length);
+      if (!stamp.endsWith(suffix) || !/^[a-z\d-]{1,80}:\d+$/i.test(prefix)) return null;
+      const uniqueRow = uniqueBoundedDocumentMatch(`[data-message-author-role="assistant"][data-message-id="${providerMessageId}"]`);
+      if (!uniqueRow) return null;
+      const row = root.closest('[data-message-id]');
+      return root.isConnected && row === uniqueRow && row.contains(root) && !root.closest(OWN_SURFACES) &&
+        uniqueRichSurface(root).surface ? root : null;
+    }, null);
+  }
+
+  const richFailure = new WeakMap();
+  /** Read inert rendered semantics, never model-authored component source, URLs or callbacks. */
+  function captureRichRoot(root, onImage = null) {
+    return safe(() => {
+      if (root && typeof root === 'object') richFailure.delete(root);
+      if (!root?.isConnected || !root.hasAttribute('data-clf-fiber-rich')) return null;
+      const seen = new WeakSet();
+      let count = 0, controls = 0, media = 0, characters = 0;
+      const overLimit = () => { richFailure.set(root, 'oversized'); return null; };
+      const unique = uniqueRichSurface(root);
+      if (unique.oversized) return overLimit();
+      const surface = unique.surface;
+      if (!surface) return null;
+      const visible = element => {
+        if (element.closest(`${OWN_SURFACES}, [hidden], [inert], [aria-hidden="true"]`)) return false;
+        const style = getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse';
+      };
+      const walk = (element, path, depth) => {
+        if (depth > 24 || ++count > 1024) return overLimit();
+        if (seen.has(element)) return null;
+        seen.add(element);
+        if (!visible(element)) return [];
+        const name = element.tagName.toLowerCase();
+        if (['script', 'style', 'template', 'iframe', 'object', 'embed', 'canvas', 'video', 'audio'].includes(name)) return null;
+        if (name === 'svg') {
+          // A decorative icon has no representation; an authored diagram needs its own
+          // separately proven visual capture, not a guessed reconstruction.
+          return element.getAttribute('aria-hidden') === 'true' || !element.textContent?.trim() && !element.getAttribute('aria-label') ? [] : null;
+        }
+        const id = `n-${path.join('-')}`;
+        if (name === 'img') {
+          if (++media > 64) return overLimit();
+          const alt = element.getAttribute('alt') || '';
+          if (alt.length > 8192) return overLimit();
+          characters += alt.length;
+          const width = Number.isSafeInteger(element.naturalWidth) && element.naturalWidth > 0 && element.naturalWidth <= 100000 ? element.naturalWidth : null;
+          const height = Number.isSafeInteger(element.naturalHeight) && element.naturalHeight > 0 && element.naturalHeight <= 100000 ? element.naturalHeight : null;
+          if (onImage) onImage(element, id);
+          return [{ id, kind: 'image', mediaId: `media-${id}`, alt, width, height }];
+        }
+        const isControl = ['button', 'input', 'select', 'a'].includes(name) || ['button', 'checkbox', 'radio'].includes(element.getAttribute('role'));
+        // A NodeList can have arbitrarily many hostile siblings. Check its size
+        // against the remaining tree budget *before* iterating or materializing it.
+        const rawChildren = element.childNodes;
+        if (rawChildren.length > 1024 - count) return overLimit();
+        const children = [];
+        for (let index = 0; index < rawChildren.length; index++) {
+          const child = rawChildren[index];
+          if (child.nodeType === 3) {
+            const value = child.nodeValue?.replace(/\u00a0/g, ' ').trim() || '';
+            if (!value) continue;
+            if (++count > 1024 || value.length > 8192) return overLimit();
+            characters += value.length;
+            children.push({ id: `${id}-t${index}`, kind: 'text', text: value,
+              style: ['pre', 'code'].includes(name) ? 'code' : /^h[1-6]$/.test(name) ? 'heading' : 'body' });
+          } else if (child.nodeType === 1) {
+            const captured = walk(child, [...path, index], depth + 1);
+            if (!captured) return null;
+            children.push(...captured);
+          }
+          if (characters > 65536) return overLimit();
+        }
+        if (isControl) {
+          if (++controls > 128) return overLimit();
+          const role = element.getAttribute('role');
+          const control = role === 'checkbox' || role === 'radio' ? role :
+            name === 'a' ? 'link' : name === 'select' ? 'select' : name === 'input' ? 'input' : 'button';
+          // element.textContent also includes CSS-hidden/inert descendants whose
+          // nodes were deliberately excluded above. Derive only from the captured,
+          // visible subtree, or an independently length-checked aria-label.
+          const ariaLabel = element.getAttribute('aria-label');
+          if (ariaLabel !== null && ariaLabel.length > 8192) return overLimit();
+          const visibleText = [];
+          const collectText = entries => {
+            for (const entry of entries) {
+              if (entry.kind === 'text') visibleText.push(entry.text);
+              else if (entry.kind === 'control' && entry.label) visibleText.push(entry.label);
+              else if (entry.children) collectText(entry.children);
+            }
+          };
+          if (!ariaLabel?.trim()) collectText(children);
+          const label = ariaLabel?.trim() || visibleText.join(' ').trim();
+          if (!label) return null;
+          if (label.length > 8192) return overLimit();
+          const checked = element.getAttribute('aria-checked');
+          const pressed = element.getAttribute('aria-pressed');
+          const selected = checked === 'true' || pressed === 'true' || element.checked === true;
+          const disabled = element.disabled === true || element.getAttribute('aria-disabled') === 'true';
+          return [{ id, kind: 'control', control, label, groupId: null, value: null,
+            selected, disabled, children }];
+        }
+        if (!children.length) return [];
+        const display = getComputedStyle(element);
+        const component = element.getAttribute('data-d-component');
+        const layout = component === 'grid' || display.display.includes('grid') ? 'grid' :
+          name === 'ul' || name === 'ol' ? 'list' : name === 'table' ? 'table' :
+            display.display.includes('flex') ? display.flexDirection === 'row' ? 'row' : 'column' :
+              'column';
+        return [{ id, kind: 'group', layout, children }];
+      };
+      const nodes = walk(surface, [0], 1);
+      if (!nodes || !nodes.length) return null;
+      const encoded = JSON.stringify(nodes);
+      // If TextEncoder is unavailable (e.g. a DOM-only test harness), assume the
+      // worst-case four UTF-8 bytes per UTF-16 code unit rather than undercount.
+      const bytes = typeof TextEncoder === 'function' ? new TextEncoder().encode(encoded).byteLength : encoded.length * 4;
+      return bytes <= 131072 ? nodes : overLimit();
+    }, null);
+  }
+  const richCaptureReason = root => richFailure.get(root) || 'unsupported';
+
+  /**
+   * Resolve one transient, already-rendered PAGE image from the same bounded walk that
+   * created its semantic slot. The caller must independently retain the original Chrome
+   * document/SPA/recording/binding witness in stillCurrent; a DOM stamp or URL cannot
+   * distinguish an A→B→A navigation. This supplies no pixel, URL or publication authority.
+   */
+  function resolveRichImage(root, rich, nodeId, mediaId, expectedStamp, stillCurrent) {
+    return safe(() => {
+      if (typeof stillCurrent !== 'function' || stillCurrent() !== true ||
+          !root?.isConnected || root.ownerDocument !== document ||
+          !rich || rich.version !== 1 || rich.status !== 'available' || !Array.isArray(rich.nodes) ||
+          typeof nodeId !== 'string' || !/^n-(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*))*$/.test(nodeId) ||
+          typeof mediaId !== 'string' || mediaId !== `media-${nodeId}` ||
+          typeof expectedStamp !== 'string' ||
+          conversationId() !== rich.conversationId ||
+          richRootFor(rich.messageId, rich.providerMessageId) !== root) return null;
+      const suffix = `:${encodeURIComponent(rich.messageId)}:${encodeURIComponent(rich.providerMessageId)}`;
+      if (!expectedStamp.endsWith(suffix)) return null;
+      const turnStamp = expectedStamp.slice(0, -suffix.length);
+      if (!/^[a-z\d-]{1,80}:\d+$/i.test(turnStamp) ||
+          root.getAttribute('data-clf-fiber-rich') !== expectedStamp ||
+          root.closest(TURN)?.getAttribute('data-clf-fiber-turn') !== turnStamp) return null;
+      const originalRow = root.closest('[data-message-id]');
+      const originalTurn = root.closest(TURN);
+      if (!originalRow?.isConnected || !originalTurn?.isConnected) return null;
+
+      let slotCount = 0;
+      let visited = 0;
+      const pending = [];
+      // Reject an oversized frontier before reading even its first element. The
+      // source tree is only candidate data; a caller-supplied array must not use
+      // an iterator/getter to allocate beyond the same 1024-node DOM walk budget.
+      const admit = nodes => {
+        if (!Array.isArray(nodes) || !Number.isSafeInteger(nodes.length) ||
+            nodes.length > 1024 - visited - pending.length) return false;
+        for (let index = nodes.length - 1; index >= 0; index--) {
+          const slot = Object.getOwnPropertyDescriptor(nodes, String(index));
+          if (!slot?.enumerable || !('value' in slot)) return false;
+          pending.push(slot.value);
+        }
+        return true;
+      };
+      if (!admit(rich.nodes)) return null;
+      while (pending.length) {
+        const node = pending.pop();
+        if (!node || ++visited > 1024) return null;
+        if (node.kind === 'image' && (node.id === nodeId || node.mediaId === mediaId)) {
+          if (node.id !== nodeId || node.mediaId !== mediaId || ++slotCount > 1) return null;
+        }
+        if (node.kind === 'group' || node.kind === 'control') {
+          if (!admit(node.children)) return null;
+        }
+      }
+      if (slotCount !== 1) return null;
+      let image = null;
+      let matches = 0;
+      const fresh = captureRichRoot(root, (element, id) => {
+        if (id === nodeId && `media-${id}` === mediaId) { image = element; matches++; }
+      });
+      if (!fresh || matches !== 1 || JSON.stringify(fresh) !== JSON.stringify(rich.nodes) ||
+          !image?.isConnected || !root.contains(image) ||
+          stillCurrent() !== true || conversationId() !== rich.conversationId ||
+          !originalRow.isConnected || root.closest('[data-message-id]') !== originalRow ||
+          !originalTurn.isConnected || root.closest(TURN) !== originalTurn ||
+          root.getAttribute('data-clf-fiber-rich') !== expectedStamp ||
+          root.closest(TURN)?.getAttribute('data-clf-fiber-turn') !== turnStamp ||
+          richRootFor(rich.messageId, rich.providerMessageId) !== root) return null;
+      return { root, image };
+    }, null);
+  }
+
+  /**
+   * Inert, synchronous source association ONLY. A fresh Fiber scan stamps an IMG
+   * with a typed public generated-image tuple if its asset has exactly one typed
+   * owner in that turn. The rich resolver independently returns the precise IMG
+   * which produced a semantic image node. Their *object identity* is the join:
+   * matching URLs, nearby images and matching assistant message IDs are not.
+   *
+   * `turns` is caller-supplied candidate data from the current *selected* Fiber
+   * frame; a readable DOM stamp and page-posted frame are NOT independent typed
+   * attestation. `sourceHandle` must be a preexisting private, observer-backed
+   * source lease from the original exact rich-slot observation, not a newly
+   * minted lease at association time. `stillCurrent` separately retains Chrome
+   * document, SPA, recording and binding witnesses. No producer currently calls
+   * this helper; it grants no asset receipt, media publication, URL, pixels or
+   * browser/action authority even when all these consistency checks succeed.
+   */
+  function resolveRichNativeImage(root, rich, nodeId, mediaId, expectedStamp,
+    scanToken, turns, originalImage, stillCurrent, sourceHandle) {
+    return safe(() => {
+      // The supplied frame may contain custom iterators or accessor elements.
+      // Never invoke those to walk an allegedly bounded typed-owner inventory.
+      const boundedLength = (array, max) => {
+        if (!Array.isArray(array) || Object.getOwnPropertyDescriptor(array, Symbol.iterator)) return -1;
+        const own = Object.getOwnPropertyDescriptor(array, 'length');
+        return own && 'value' in own && Number.isSafeInteger(own.value) &&
+          own.value >= 0 && own.value <= max ? own.value : -1;
+      };
+      const data = (object, key) => {
+        if (!object || typeof object !== 'object') return undefined;
+        const own = Object.getOwnPropertyDescriptor(object, key);
+        return own?.enumerable && 'value' in own ? own.value : undefined;
+      };
+      const turnCount = boundedLength(turns, 6);
+      if (typeof scanToken !== 'string' || !/^[a-z\d-]{1,80}$/i.test(scanToken) ||
+          turnCount < 1 ||
+          typeof stillCurrent !== 'function' || stillCurrent() !== true) return null;
+      const suffix = `:${encodeURIComponent(rich?.messageId)}:${encodeURIComponent(rich?.providerMessageId)}`;
+      if (typeof expectedStamp !== 'string' || !expectedStamp.endsWith(suffix)) return null;
+      const turnStamp = expectedStamp.slice(0, -suffix.length);
+      const match = /^([a-z\d-]{1,80}):(0|[1-9]\d*)$/i.exec(turnStamp);
+      if (!match || match[1] !== scanToken || !Number.isSafeInteger(Number(match[2]))) return null;
+      const turnIndex = Number(match[2]);
+      const sourceState = richImageSources.get(sourceHandle);
+      if (!sourceState || sourceState.retired || sourceState.pending ||
+          sourceState.root !== root || sourceState.image !== originalImage ||
+          sourceState.rich !== rich || sourceState.nodeId !== nodeId ||
+          sourceState.mediaId !== mediaId || sourceState.expectedStamp !== expectedStamp ||
+          sourceState.stillCurrent() !== true || !richImageSourceStable(sourceHandle)) return null;
+      const resolved = resolveRichImage(root, rich, nodeId, mediaId, expectedStamp, stillCurrent);
+      if (!resolved || resolved.image !== originalImage || resolved.image.tagName !== 'IMG' ||
+          !resolved.image.matches('[class~="group/imagegen-image"] img')) return null;
+      const image = resolved.image;
+      const imageStamp = image.getAttribute('data-clf-fiber-image');
+      if (typeof imageStamp !== 'string' || !imageStamp.startsWith(`${turnStamp}:`) ||
+          imageStamp.length > 360) return null;
+
+      // Inspect the complete bounded typed scan, not just the first matching
+      // descriptor. Duplicate typed ownership of an asset in ANY selected turn
+      // invalidates a node↔tuple join even when this IMG still carries a stamp.
+      let owner = null;
+      const assetOwners = new Map();
+      for (let index = 0; index < turnCount; index++) {
+        const turn = data(turns, String(index));
+        const images = data(turn, 'images');
+        const imageCount = boundedLength(images, 200);
+        if (data(turn, 'index') !== index || data(turn, 'conversationConflict') !== false ||
+            data(turn, 'conversationId') !== rich.conversationId || imageCount < 0) return null;
+        for (let item = 0; item < imageCount; item++) {
+          const descriptor = data(images, String(item));
+          const messageId = data(descriptor, 'messageId');
+          const assetId = data(descriptor, 'assetId');
+          if (typeof messageId !== 'string' ||
+              !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(messageId) ||
+              typeof assetId !== 'string' ||
+              !/^file_[A-Za-z0-9_-]{8,100}$/.test(assetId)) return null;
+          assetOwners.set(assetId, (assetOwners.get(assetId) || 0) + 1);
+          const expectedImageStamp = `${scanToken}:${index}:${encodeURIComponent(messageId)}:${encodeURIComponent(assetId)}`;
+          if (index === turnIndex && imageStamp === expectedImageStamp) {
+            if (owner) return null;
+            owner = { messageId, assetId };
+          }
+        }
+      }
+      if (!owner || assetOwners.get(owner.assetId) !== 1) return null;
+
+      // URL validates the already-identified physical IMG's current selected
+      // source, never supplies a missing identity or prompts any fetch.
+      const source = image.currentSrc || image.src;
+      if (typeof source !== 'string' || source.length > 8192 || image.currentSrc !== image.src) return null;
+      const url = new URL(source, location.href);
+      if (url.origin !== location.origin || url.protocol !== 'https:' ||
+          url.pathname !== '/backend-api/estuary/content' || url.hash ||
+          url.searchParams.getAll('id').length !== 1 ||
+          url.searchParams.get('id') !== owner.assetId) return null;
+      if (stillCurrent() !== true || !image.isConnected || !root.contains(image) ||
+          root.getAttribute('data-clf-fiber-rich') !== expectedStamp ||
+          root.closest(TURN)?.getAttribute('data-clf-fiber-turn') !== turnStamp ||
+          !image.matches('[class~="group/imagegen-image"] img') ||
+          image.getAttribute('data-clf-fiber-image') !== imageStamp ||
+          (image.currentSrc || image.src) !== source ||
+          richRootFor(rich.messageId, rich.providerMessageId) !== root ||
+          richImageSources.get(sourceHandle) !== sourceState || sourceState.retired ||
+          !richImageSourceStable(sourceHandle)) return null;
+      return Object.freeze({ root, image, messageId: owner.messageId, assetId: owner.assetId });
+    }, null);
+  }
+
+  // Isolated-world, document-lifetime source identity only. The opaque handle and
+  // its private URL snapshot are never an event, source URL lookup or store grant.
+  // Eviction/release/replacement terminally invalidates the old incarnation.
+  const richImageSources = new WeakMap();
+  const activeRichImageSources = new Map();
+  const MAX_RICH_IMAGE_SOURCES = 64;
+  let richImageSourceSequence = 0;
+
+  function richImageSourceSnapshot(image, pending = false) {
+    const raw = image.getAttribute('src');
+    // With responsive selection (srcset/sizes/picture) a browser may switch
+    // currentSrc without any observable IMG attribute mutation. Unknown source
+    // algorithms and relative URLs (document <base> can change) are ineligible.
+    if (typeof raw !== 'string' || raw.length > 8192 || !/^https:\/\/[^\s]+$/i.test(raw) ||
+        image.hasAttribute('srcset') || image.hasAttribute('sizes') || image.closest('picture')) return null;
+    const src = image.src, currentSrc = image.currentSrc;
+    if (pending) {
+      // Source retirement needs an identity before an image loads. Only the
+      // physical IMG and its exact absolute HTTPS src are observed here. A
+      // browser can still expose A as currentSrc while B's src loads: that old
+      // selection is never used for a pixel claim. Loaded capture rechecks B.
+      return typeof src === 'string' && src.startsWith('https://') && src.length <= 8192
+        ? { raw, src } : null;
+    }
+    const width = image.naturalWidth, height = image.naturalHeight;
+    if (image.complete !== true || typeof src !== 'string' || !src.startsWith('https://') || src.length > 8192 ||
+        typeof currentSrc !== 'string' || currentSrc !== src ||
+        !Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
+        width < 1 || height < 1 || width > 100000 || height > 100000 ||
+        width * height > 30000000) return null;
+    return { raw, src, currentSrc, width, height };
+  }
+
+  function releaseRichImageSource(handle, reason = null) {
+    const state = richImageSources.get(handle);
+    if (!state || state.retired) return;
+    state.retired = true;
+    state.observer.disconnect();
+    state.image.removeEventListener('load', state.loaded, true);
+    state.image.removeEventListener('error', state.failed, true);
+    activeRichImageSources.delete(handle);
+    richImageSources.delete(handle);
+    if (reason && state.onRetire) state.onRetire(reason, handle);
+  }
+
+  // An image's source has a longer lifetime than a Fiber scan. Keep that fact
+  // private and independently observable through benign rich text/stamp changes;
+  // it is never sufficient to authorize a pixel receipt from an older scan.
+  function richImageSourceMutated(state, records) {
+    return records.some(record => record.target === state.image &&
+      ['src', 'srcset', 'sizes'].includes(record.attributeName)) ||
+      records.some(record => record.type === 'childList' &&
+        [...record.removedNodes].some(node => node === state.image || node.contains?.(state.image)));
+  }
+
+  function richImageSourceStable(handle) {
+    return safe(() => {
+      const state = richImageSources.get(handle);
+      if (!state || state.retired) return null;
+      const records = state.observer.takeRecords();
+      if (richImageSourceMutated(state, records)) {
+        releaseRichImageSource(handle, 'source');
+        return null;
+      }
+      const current = richImageSourceSnapshot(state.image, state.pending);
+      if (!current || !Object.keys(state.snapshot).every(key => current[key] === state.snapshot[key])) {
+        releaseRichImageSource(handle, 'source');
+        return null;
+      }
+      if (!state.image.isConnected || !state.root.isConnected ||
+          state.root.ownerDocument !== document || !state.root.contains(state.image) ||
+          state.root.closest('[data-message-id]') !== state.row ||
+          state.root.closest(TURN) !== state.turn ||
+          state.image.parentNode !== state.parent ||
+          state.image.parentNode?.childNodes[state.index] !== state.image ||
+          conversationId() !== state.rich.conversationId ||
+          richRootFor(state.rich.messageId, state.rich.providerMessageId) !== state.root) {
+        releaseRichImageSource(handle, 'detached');
+        return null;
+      }
+      return state.witness;
+    }, null);
+  }
+
+  /** Synchronous getter: drains un-delivered mutations before even comparing URLs. */
+  function richImageSourceWitness(handle) {
+    return safe(() => {
+      const state = richImageSources.get(handle);
+      if (!state || state.retired) return null;
+      // An incomplete lease is valid for source retirement only. Asking for
+      // loaded pixels must not destroy the source proof needed after load.
+      if (state.pending) return null;
+      const exact = richImageSourceStable(handle) && richImageSourceSnapshot(state.image) &&
+        state.stillCurrent() === true &&
+        resolveRichImage(state.root, state.rich, state.nodeId, state.mediaId,
+          state.expectedStamp, state.stillCurrent)?.image === state.image;
+      // A mutation while the synchronous DOM resolver read the source must not
+      // disappear just because the final URL returned to its original value.
+      if (!exact || state.retired || !richImageSourceStable(handle)) {
+        releaseRichImageSource(handle);
+        return null;
+      }
+      return state.witness;
+    }, null);
+  }
+
+  /** A pending witness proves a source incarnation, never readiness or pixels. */
+  function richImagePendingWitness(handle) {
+    return safe(() => {
+      const state = richImageSources.get(handle);
+      if (!state?.pending || !richImageSourceStable(handle) ||
+          state.stillCurrent() !== true ||
+          resolveRichImage(state.root, state.rich, state.nodeId, state.mediaId,
+            state.expectedStamp, state.stillCurrent)?.image !== state.image ||
+          !richImageSourceStable(handle)) return null;
+      return state.witness;
+    }, null);
+  }
+
+  /** Rebind one already pending physical source to a new independently ticketed
+   * scan. A load cannot change its incarnation or turn the old scan into authority. */
+  function rebindLoadedRichImageSource(handle, root, rich, nodeId, mediaId, expectedStamp, stillCurrent) {
+    return safe(() => {
+      const state = richImageSources.get(handle);
+      if (!state?.pending || !richImageSourceStable(handle) ||
+          !richImageSourceSnapshot(state.image)) return null;
+      const resolved = resolveRichImage(root, rich, nodeId, mediaId, expectedStamp, stillCurrent);
+      if (!resolved || resolved.image !== state.image || root !== state.root ||
+          nodeId !== state.nodeId || mediaId !== state.mediaId ||
+          !richImageSourceStable(handle)) return null;
+      const full = richImageSourceSnapshot(state.image);
+      if (!full || full.raw !== state.snapshot.raw || full.src !== state.snapshot.src) return null;
+      state.rich = rich;
+      state.expectedStamp = expectedStamp;
+      state.stillCurrent = stillCurrent;
+      state.snapshot = full;
+      state.pending = false;
+      return richImageSourceWitness(handle) ? handle : null;
+    }, null);
+  }
+
+  /**
+   * Begin ONLY after independent pre-scan Chrome document/SPA/G/binding proof.
+   * No page state is persisted; the caller owns release in its capture finally.
+   */
+  function beginRichImageSource(root, rich, nodeId, mediaId, expectedStamp, stillCurrent,
+    onRetire = null, pending = false, onLoad = null) {
+    return safe(() => {
+      const resolved = resolveRichImage(root, rich, nodeId, mediaId, expectedStamp, stillCurrent);
+      if (!resolved || typeof MutationObserver !== 'function' ||
+          !crypto?.getRandomValues || richImageSourceSequence >= Number.MAX_SAFE_INTEGER) return null;
+      const initial = richImageSourceSnapshot(resolved.image, pending);
+      if (!initial || (pending && richImageSourceSnapshot(resolved.image))) return null;
+      for (const [handle, state] of activeRichImageSources) {
+        if (state.image !== resolved.image || state.root !== root || state.nodeId !== nodeId ||
+            state.mediaId !== mediaId || state.expectedStamp !== expectedStamp ||
+            state.rich !== rich || state.pending !== pending) continue;
+        if ((pending ? richImagePendingWitness(handle) : richImageSourceWitness(handle)) &&
+            stillCurrent() === true) return handle;
+      }
+      // The 65th lease cannot silently evict a completed available image's
+      // source observer. Its owner may retry only after a physical slot exits.
+      if (activeRichImageSources.size >= MAX_RICH_IMAGE_SOURCES) return null;
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      const sequence = ++richImageSourceSequence;
+      const witness = Object.freeze({
+        sourceIncarnation: `src_${Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')}_${sequence.toString(36)}`,
+        sourceSequence: sequence
+      });
+      const handle = Object.freeze({});
+      const state = {
+        handle, root, image: resolved.image, rich, nodeId, mediaId, expectedStamp,
+        stillCurrent, snapshot: initial, witness, retired: false, observer: null,
+        invalidate: null, loaded: null, failed: null, onLoad, pending,
+        onRetire, row: root.closest('[data-message-id]'), turn: root.closest(TURN),
+        parent: resolved.image.parentNode,
+        index: [...resolved.image.parentNode.childNodes].indexOf(resolved.image)
+      };
+      state.invalidate = () => releaseRichImageSource(handle, 'source');
+      state.loaded = () => {
+        if (!state.pending) return state.invalidate();
+        if (richImageSourceStable(handle)) state.onLoad?.(handle);
+      };
+      state.failed = () => { if (!state.pending) state.invalidate(); };
+      const observer = new MutationObserver(records => {
+        if (richImageSourceMutated(state, records)) state.invalidate();
+        else if (records.length) richImageSourceStable(handle);
+      });
+      state.observer = observer;
+      try {
+        // No document-wide subtree or unrelated rich-node mutation queue: only
+        // the exact IMG attributes and its finite parent chain affect its
+        // source, rooted path, row and turn membership.
+        observer.observe(state.image, { attributes: true });
+        // Catch same-object remove→restore of IMG, root, row and turn, including
+        // changes to row/turn stamps. Observe only this ancestor chain, not the
+        // entire document subtree or a growing selector collection.
+        let ancestor = state.image.parentNode, depth = 0;
+        while (ancestor && ++depth <= 48) {
+          observer.observe(ancestor, { attributes: true, childList: true });
+          if (ancestor === document) break;
+          ancestor = ancestor.parentNode;
+        }
+        if (ancestor !== document) { observer.disconnect(); return null; }
+        state.image.addEventListener('load', state.loaded, true);
+        state.image.addEventListener('error', state.failed, true);
+        richImageSources.set(handle, state);
+        activeRichImageSources.set(handle, state);
+        // A freshly installed observer must cover every read after its initial
+        // snapshot. Never grant a witness merely because the URL matches again.
+        if (!(pending ? richImagePendingWitness(handle) : richImageSourceWitness(handle))) {
+          // Pending witness does not retire the lease. A failed post-install
+          // check would otherwise occupy one of the 64 document-lifetime slots.
+          releaseRichImageSource(handle);
+          return null;
+        }
+        return handle;
+      } catch {
+        observer.disconnect();
+        state.image.removeEventListener('load', state.loaded, true);
+        state.image.removeEventListener('error', state.failed, true);
+        richImageSources.delete(handle);
+        activeRichImageSources.delete(handle);
+        return null;
+      }
+    }, null);
+  }
+
+  function beginPendingRichImageSource(root, rich, nodeId, mediaId, expectedStamp,
+    stillCurrent, onRetire = null, onLoad = null) {
+    return beginRichImageSource(root, rich, nodeId, mediaId, expectedStamp,
+      stillCurrent, onRetire, true, onLoad);
+  }
+
+  /**
    * The messages of exactly one turn.
    *
    * Split out of messages() rather than duplicated because callers that need turn-scoped
@@ -2474,6 +3055,18 @@ var CLF_DOM = (() => {
     turns,
     presentationTurns,
     messages,
+    richRootFor,
+    captureRichRoot,
+    richCaptureReason,
+    resolveRichImage,
+    resolveRichNativeImage,
+    beginRichImageSource,
+    beginPendingRichImageSource,
+    richImageSourceWitness,
+    richImagePendingWitness,
+    rebindLoadedRichImageSource,
+    richImageSourceStable,
+    releaseRichImageSource,
     messagesIn,
     sectionSignature,
     generating,

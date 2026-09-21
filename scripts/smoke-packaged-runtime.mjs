@@ -39,6 +39,7 @@ if (!packageRoot) throw new Error(`Could not find unpacked ${targetPlatform}-${t
 const sourcePackage = JSON.parse(readFileSync(path.join(repository, 'package.json'), 'utf8'));
 const expectedVersion = sourcePackage.version;
 const expectedElectronVersion = sourcePackage.devDependencies?.electron;
+const patchedSharpOnTarget = targetPlatform === 'linux' && targetArch === 'x64';
 if (!/^\d+\.\d+\.\d+$/.test(expectedElectronVersion ?? '')) {
   throw new Error(`Electron must be pinned to an exact release version, got ${JSON.stringify(expectedElectronVersion)}`);
 }
@@ -96,13 +97,34 @@ for (const relative of [
   'rg/COPYING',
   'rg/LICENSE-MIT',
   'rg/UNLICENSE',
-  'app.asar.unpacked/node_modules/sharp/LICENSE',
   'app.asar.unpacked/node_modules/node-pty/LICENSE',
   'app.asar.unpacked/node_modules/tree-sitter/LICENSE',
   'app.asar.unpacked/node_modules/tree-sitter-bash/LICENSE',
   `app.asar.unpacked/node_modules/tree-sitter/prebuilds/${nativeDir}/tree-sitter.node`,
   `app.asar.unpacked/node_modules/tree-sitter-bash/prebuilds/${nativeDir}/tree-sitter-bash.node`
 ]) required(relative);
+
+if (patchedSharpOnTarget) {
+  // A successful require('sharp') is not evidence of a safe Electron runtime:
+  // stock libvips may load but crash on its first real pixel decode. Verify
+  // the actual selected backend's co-located native pair before invoking it.
+  required('app.asar.unpacked/node_modules/@janhapke/sharp-electron/linux-x64/sharp/src/build/Release/sharp-linux-x64-0.35.4.node');
+  required('app.asar.unpacked/node_modules/@janhapke/sharp-electron/linux-x64/sharp/src/build/Release/libvips-cpp.so.8.18.6');
+  required('app.asar.unpacked/node_modules/@janhapke/sharp-electron/LICENSE');
+  required('THIRD-PARTY-NOTICES-sharp-electron.md');
+  const fork = JSON.parse(readFileSync(required('app.asar.unpacked/node_modules/@janhapke/sharp-electron/package.json'), 'utf8'));
+  if (fork.version !== '0.35.4-electron.1') throw new Error('Packaged x64 Sharp fork is not the pinned version');
+  for (const forbidden of ['sharp', 'sharp-upstream', '@img/sharp-linux-x64', '@img/sharp-libvips-linux-x64']) {
+    if (existsSync(path.join(resourcesDir, 'app.asar.unpacked/node_modules', forbidden))) {
+      throw new Error(`Packaged competing native Sharp payload: ${forbidden}`);
+    }
+  }
+} else {
+  required('app.asar.unpacked/node_modules/sharp/LICENSE');
+  if (existsSync(path.join(resourcesDir, 'app.asar.unpacked/node_modules/@janhapke/sharp-electron/linux-x64'))) {
+    throw new Error('A Linux x64 Sharp native binary leaked into a different target');
+  }
+}
 
 if (targetPlatform === 'win32') {
   required(`THIRD-PARTY-NOTICES-sharp-win32-${targetArch}.md`);
@@ -111,13 +133,14 @@ if (targetPlatform === 'win32') {
   required(`app.asar.unpacked/node_modules/node-pty/prebuilds/${nativeDir}/conpty_console_list.node`);
   required(`app.asar.unpacked/node_modules/node-pty/prebuilds/${nativeDir}/conpty/OpenConsole.exe`);
 } else {
-  required(`THIRD-PARTY-NOTICES-sharp-libvips-${targetPlatform}-${targetArch}.md`);
-  required(`app.asar.unpacked/node_modules/@img/sharp-${targetPlatform}-${targetArch}/LICENSE`);
-  // The pinned sharp-libvips 1.3.2 npm packages declare LGPL-3.0-or-later in package.json
-  // but do not ship a LICENSE file. Require the metadata + version manifest they actually
-  // publish instead of making every macOS/Linux smoke test fail on an invented file.
-  required(`app.asar.unpacked/node_modules/@img/sharp-libvips-${targetPlatform}-${targetArch}/package.json`);
-  required(`app.asar.unpacked/node_modules/@img/sharp-libvips-${targetPlatform}-${targetArch}/versions.json`);
+  if (!patchedSharpOnTarget) {
+    required(`THIRD-PARTY-NOTICES-sharp-libvips-${targetPlatform}-${targetArch}.md`);
+    required(`app.asar.unpacked/node_modules/@img/sharp-${targetPlatform}-${targetArch}/LICENSE`);
+    // These published libvips packages supply metadata/versions, not a separate
+    // LICENSE file. The native-source archive and shipped README carry notices.
+    required(`app.asar.unpacked/node_modules/@img/sharp-libvips-${targetPlatform}-${targetArch}/package.json`);
+    required(`app.asar.unpacked/node_modules/@img/sharp-libvips-${targetPlatform}-${targetArch}/versions.json`);
+  }
   required(`app.asar.unpacked/node_modules/node-pty/prebuilds/${nativeDir}/pty.node`);
   if (targetPlatform === 'darwin') required(`app.asar.unpacked/node_modules/node-pty/prebuilds/${nativeDir}/spawn-helper`);
   if (targetPlatform === 'darwin') {
@@ -147,7 +170,9 @@ const rgVersion = readFileSync(path.join(resourcesDir, 'rg', 'VERSION'), 'utf8')
 if (tunnelVersion !== TUNNEL_CLIENT.version) throw new Error(`Packaged tunnel-client ${tunnelVersion} != ${TUNNEL_CLIENT.version}`);
 if (rgVersion !== RIPGREP.version) throw new Error(`Packaged ripgrep ${rgVersion} != ${RIPGREP.version}`);
 
-for (const packageName of readdirSync(path.join(resourcesDir, 'app.asar.unpacked', 'node_modules', '@img')).filter((name) => name.startsWith('sharp-'))) {
+const imgDirectory = path.join(resourcesDir, 'app.asar.unpacked', 'node_modules', '@img');
+for (const packageName of (existsSync(imgDirectory) ? readdirSync(imgDirectory) : []).filter((name) => name.startsWith('sharp-'))) {
+  if (patchedSharpOnTarget) throw new Error(`Packaged competing @img payload: ${packageName}`);
   const expected = targetPlatform === 'win32'
     ? new Set([`sharp-win32-${targetArch}`])
     : new Set([`sharp-${targetPlatform}-${targetArch}`, `sharp-libvips-${targetPlatform}-${targetArch}`]);
@@ -194,12 +219,15 @@ runExecutable(path.join(resourcesDir, 'tunnel', `cloudflared${suffix}`), ['--ver
 const probe = String.raw`
 (async () => {
   const base = process.env.COS_RESOURCES_DIR;
-  const sharp = require(base + '/app.asar/node_modules/sharp');
+  const sharp = require(base + '/app.asar/node_modules/' + (process.platform === 'linux' && process.arch === 'x64'
+    ? '@janhapke/sharp-electron' : 'sharp'));
   const pty = require(base + '/app.asar/node_modules/node-pty');
   const Parser = require(base + '/app.asar/node_modules/tree-sitter');
   const Bash = require(base + '/app.asar/node_modules/tree-sitter-bash');
   const manifest = require(base + '/app.asar/package.json');
   const png = await sharp({ create: { width: 2, height: 2, channels: 4, background: { r: 1, g: 2, b: 3, alpha: 1 } } }).png().toBuffer();
+  const decoded = await sharp(png).metadata();
+  const webp = await sharp(png).resize(1, 1).webp().toBuffer();
   const parser = new Parser();
   parser.setLanguage(Bash);
   const tree = parser.parse('echo packaged-tree-sitter');
@@ -219,7 +247,7 @@ const probe = String.raw`
     terminal.onData((data) => { output += data; });
     terminal.onExit(({ exitCode }) => { clearTimeout(timer); exitCode === 0 ? resolve() : reject(new Error('node-pty child exited ' + exitCode)); });
   });
-  process.stdout.write(JSON.stringify({ version: manifest.version, electron: process.versions.electron, sharp: sharp.versions.sharp, vips: sharp.versions.vips, png: png.length, pty: output.includes('packaged-pty'), tree: tree.rootNode.type, desktop }) + '\n');
+  process.stdout.write(JSON.stringify({ version: manifest.version, electron: process.versions.electron, sharp: sharp.versions.sharp, vips: sharp.versions.vips, png: png.length, decoded: decoded.format === 'png' && decoded.width === 2 && decoded.height === 2, webp: webp.length, pty: output.includes('packaged-pty'), tree: tree.rootNode.type, desktop }) + '\n');
   process.exit(0);
 })().catch((error) => process.stderr.write(String(error?.stack || error) + '\n', () => process.exit(1)));`;
 
@@ -234,7 +262,7 @@ if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);
 if (result.status !== 0) process.exit(result.status ?? 1);
 const runtime = JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
-if (runtime.version !== expectedVersion || runtime.electron !== expectedElectronVersion || !runtime.sharp || !runtime.vips || runtime.png <= 0 || !runtime.pty || runtime.tree !== 'program' || (targetPlatform === 'darwin' && runtime.desktop !== true)) {
+if (runtime.version !== expectedVersion || runtime.electron !== expectedElectronVersion || !runtime.sharp || !runtime.vips || runtime.png <= 0 || runtime.decoded !== true || runtime.webp <= 0 || !runtime.pty || runtime.tree !== 'program' || (targetPlatform === 'darwin' && runtime.desktop !== true)) {
   throw new Error(`Packaged native runtime probe failed: ${JSON.stringify(runtime)}`);
 }
 process.stdout.write(`Packaged ${targetPlatform}-${targetArch} resources and native runtimes verified for ${expectedVersion}.\n`);

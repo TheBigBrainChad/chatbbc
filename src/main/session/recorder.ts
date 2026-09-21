@@ -13,9 +13,9 @@
  * choose an owner.
  */
 
-import { randomUUID } from 'node:crypto';
-import sharp from 'sharp';
-import { userTitle } from './title.js';
+import { createHash, randomUUID } from 'node:crypto';
+import sharp from '../sharp.js';
+import type { Metadata as SharpMetadata } from 'sharp';
 import type {
   ActivitySummary,
   AgentMessage,
@@ -29,10 +29,12 @@ import type {
   ToolOutcome,
   TurnOutcome
 } from '../../shared/session.js';
-import { estimateTokens, originTitle } from '../../shared/session.js';
+import { estimateTokens, originTitle, workSequence } from '../../shared/session.js';
+import type { RichResponse } from '../../shared/rich-response.js';
 import { chatErrorMessageKey } from '../../shared/chat-error.js';
 import { overlappingRequestTurns, recordedRequestTurn, responseTurnId } from '../../shared/chronology.js';
-import { getConfig } from '../config.js';
+import { getConfig, getRecordingRevision, pendingRecordingOffDecision, recordingGenerationGrant,
+  recordingGenerationMatches, recordingWriteAllowed } from '../config.js';
 import { logInfo, logWarn } from '../logger.js';
 import { redactCredentialText } from '../redaction.js';
 import { currentCall, emptyEvidence, runningToolCalls, type CallEvidence } from '../mcp/call-context.js';
@@ -42,7 +44,9 @@ import {
   MAX_TOOL_RESULT_CHARS,
   MAX_USER_MESSAGE_CHARS,
   MAX_ASSET_BYTES,
+  RecordingDisabledError,
   appendEvent,
+  appendTurnEndIfCurrent,
   recordProcessCall,
   completeProcessCall,
   observeSessionModel,
@@ -55,14 +59,20 @@ import {
   readAsset,
   readEvents,
   readRecentEvents,
+  readExactNativeHistoryIdentity,
   readLatestUserMessage,
   readCompletedFinal,
   indexedSessions,
+  isRecordingDisabledError,
+  sessionAttachmentTransitionPending,
+  beginVerifiedPageRichMediaSource,
+  settleVerifiedPageRichMedia,
   renameSession,
   reopenSession,
   rewriteUnattributedToolCalls,
   setSessionOrigin,
   upsertMessageEvent,
+  upsertRichMessage,
   upsertNativeImageEvent,
   writeAsset,
   writeOverflowText
@@ -119,6 +129,9 @@ interface LiveConversation {
 interface ProgressRecord {
   /** Seq of the first record written for this item — where every reader positions it. */
   seq: number;
+  /** Restored presentation tails may contain only a later revision. Trust the original
+   * owner only after a complete exact-session identity read or this writer's own append. */
+  originalVerified?: true;
   /** And the time it was first seen, for the same reason. */
   time: number;
   /** Most recent observation of this logical item, used only to validate a re-parent alias. */
@@ -128,6 +141,8 @@ interface ProgressRecord {
   turnId?: string;
   /** Semantic work stamp; zero is a historical native row first seen on reload. */
   contentSeq?: number;
+  /** Original row owner; a later presentation update must not borrow a pending worker. */
+  agent?: string;
 }
 
 const conversations = new Map<string, LiveConversation>();
@@ -269,6 +284,7 @@ async function initializeSessionForConversation(
   title?: string
 ): Promise<string | null> {
   if (!recordingEnabled()) return null;
+  const recordingRevision = getRecordingRevision();
   if (!conversationId) return ensureUnattributedSession();
   const existing = conversations.get(conversationId);
   if (existing) {
@@ -314,7 +330,8 @@ async function initializeSessionForConversation(
       conversationId,
       title: origin && origin.kind !== 'desktop' ? await titleForOrigin(origin) : title,
       origin,
-      titleSource: 'fallback'
+      titleSource: 'fallback',
+      recordingRevision
     }));
   if (origin && !known) pendingOrigins.delete(conversationId);
   // Reopening a chat that was closed earlier makes its session live again. Appending
@@ -435,7 +452,9 @@ async function promoteConversationTitle(sessionId: string, title?: string, conve
  * into a fresh tab — the only point at which the queued command and the conversation it
  * became are both known.
  */
-export async function noteChatOrigin(conversationId: string, origin: SessionOrigin): Promise<void> {
+export async function noteChatOrigin(
+  conversationId: string, origin: SessionOrigin, committedSessionId?: string
+): Promise<void> {
   if (!conversationId) return;
   pendingOrigins.set(conversationId, origin);
   while (pendingOrigins.size > MAX_PENDING_ORIGINS) {
@@ -443,15 +462,20 @@ export async function noteChatOrigin(conversationId: string, origin: SessionOrig
     if (oldest.done) break;
     pendingOrigins.delete(oldest.value);
   }
-  if (!recordingEnabled()) return;
+  // This exceptional caller has already committed a canonical worker row before Off.
+  // Its exact existing session still needs its origin metadata; this does not admit
+  // further observations, create a session or reopen Recording for new content.
+  if (!recordingEnabled() && !committedSessionId) return;
   const live = conversations.get(conversationId);
   const sessionId =
-    live?.sessionId ??
+    committedSessionId ?? live?.sessionId ??
     (await findSessionByConversation(conversationId))?.id ??
     null;
   // No session yet is the common case: the ack beats the page's first observation.
   // sessionForConversation picks the origin up out of pendingOrigins when it creates one.
-  if (sessionId) await applyOrigin(sessionId, conversationId);
+  if (sessionId && (!committedSessionId || (await getSession(sessionId))?.conversationId === conversationId)) {
+    await applyOrigin(sessionId, conversationId);
+  }
 }
 
 /** The name for a chat this app opened, taking a resume's name from its source. */
@@ -566,6 +590,7 @@ async function storedHistory(sessionId: string): Promise<StoredHistory> {
             updatedAt: event.time,
             text: event.label,
             contentSeq: event.contentSeq,
+            agent: event.agent,
             ...(event.turnId ? { turnId: event.turnId } : {})
           });
         } else {
@@ -583,10 +608,11 @@ async function storedHistory(sessionId: string): Promise<StoredHistory> {
 
 async function ensureUnattributedSession(): Promise<string | null> {
   if (!recordingEnabled()) return null;
+  const recordingRevision = getRecordingRevision();
   if (unattributedSessionId) return unattributedSessionId;
   if (unattributedInitialization) return unattributedInitialization;
   const initializing = (async () => {
-    const summary = await createSession({ title: 'Unattributed activity' });
+    const summary = await createSession({ title: 'Unattributed activity', recordingRevision });
     await appendEvent(summary.id, {
       time: Date.now(), source: 'app', kind: 'session_start', conversationId: null, title: summary.title
     });
@@ -1675,6 +1701,7 @@ export interface ChatObservation {
     | 'conversation_title'
     | 'user_message'
     | 'assistant_message'
+    | 'rich_media'
     | 'native_image'
     | 'page_tool'
     | 'turn_start'
@@ -1699,9 +1726,18 @@ export interface ChatObservation {
   reaction?: string | null;
   /** ChatGPT's already-rendered authored markup for this same logical message. */
   renderedHtml?: string;
+  /** Schema-validated rich projection only; NOT evidence of Chrome document ownership. */
+  rich?: RichResponse;
+  /** Bridge-derived marker: a rich payload arrived without authored prose, valid or not. */
+  richOnly?: boolean;
   messageId?: string;
   /** Raw public provider message UUID, retained as evidence, never used to guess ownership. */
   providerMessageId?: string;
+  /** Embedded PAGE image candidate only; no public observation grants pixel custody. */
+  mediaId?: string;
+  nodeId?: string;
+  pixelBytes?: number;
+  pixelSha256?: string;
   /** Exact non-secret provider asset id for a native generated image. */
   providerAssetId?: string;
   providerRole?: 'tool' | 'assistant';
@@ -1712,7 +1748,7 @@ export interface ChatObservation {
   previewWidth?: number;
   previewHeight?: number;
   previewStatus?: 'pending' | 'available' | 'unavailable';
-  previewError?: 'not_loaded' | 'ambiguous' | 'tainted' | 'oversized' | 'invalid' | 'quota';
+  previewError?: 'not_loaded' | 'unsupported' | 'ambiguous' | 'tainted' | 'oversized' | 'invalid' | 'quota';
   previewDataUrl?: string;
   turnId?: string;
   final?: boolean;
@@ -1763,9 +1799,12 @@ export interface PageCallEvidence {
 async function recordNativeImage(
   sessionId: string,
   item: ChatObservation,
-  base: { time: number; source: 'extension'; turnId?: string; agent?: string }
+  base: { time: number; source: 'extension'; turnId?: string; agent?: string },
+  onCommitted?: (count: number, firstTuple: boolean) => void,
+  retriedFailedOff = false
 ): Promise<number> {
-  if (!item.messageId || !item.providerAssetId || !item.providerRole) return 0;
+  if (!recordingEnabled() || !item.messageId || !item.providerAssetId || !item.providerRole) return 0;
+  const recordingRevision = getRecordingRevision();
   const metadata = await upsertNativeImageEvent(sessionId, {
     ...base,
     kind: 'native_image',
@@ -1777,13 +1816,20 @@ async function recordNativeImage(
     ...(item.width ? { width: item.width } : {}),
     ...(item.height ? { height: item.height } : {}),
     previewStatus: item.previewDataUrl ? 'pending' : item.previewStatus ?? 'pending',
-    ...(item.previewError ? { previewError: item.previewError } : {})
+    ...(item.previewError ? { previewError: item.previewError === 'unsupported' ? 'invalid' as const : item.previewError } : {})
   });
   // A false `changed` can mean either an idempotent same-owner replay or an explicit
   // role/agent refusal. Only the store's canonical-owner verdict may admit preview bytes.
-  if (!metadata.accepted) return 0;
+  if (!metadata.accepted) {
+    if (recordingEnabled() && !recordingWriteAllowed(recordingRevision)) throw new RecordingDisabledError();
+    return 0;
+  }
   let changed = metadata.changed ? 1 : 0;
+  // The store alone distinguishes a new provider tuple from a metadata revision:
+  // its first canonical event owns origin === seq, later enrichment keeps origin.
+  if (metadata.changed) onCommitted?.(1, metadata.event.origin === metadata.event.seq);
   if (!item.previewDataUrl || metadata.event.asset) return changed;
+  if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) return changed;
   try {
     if (!/^data:image\/webp;base64,[A-Za-z0-9+/]+={0,2}$/.test(item.previewDataUrl) || item.previewDataUrl.length > 512_100) {
       throw new Error('invalid native image preview');
@@ -1797,7 +1843,9 @@ async function recordNativeImage(
       throw new Error('invalid native image preview');
     }
     await decoded.stats();
+    if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) return changed;
     const asset = await writeAsset(sessionId, data, 'image/webp');
+    if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) return changed;
     const enriched = await upsertNativeImageEvent(sessionId, {
       ...base,
       kind: 'native_image',
@@ -1813,8 +1861,29 @@ async function recordNativeImage(
       previewHeight: info.height,
       asset
     });
-    if (enriched.changed) changed += 1;
+    if (enriched.changed) {
+      changed += 1;
+      onCommitted?.(1, false);
+    }
   } catch (error) {
+    // A committed metadata row remains history; Off during decode/storage cannot
+    // create a late failure revision or provoke a replay after recording resumes.
+    // Pending Off is different: if saving the preference fails, an ACK here would
+    // permanently retire the browser's only copy while recording remains On.
+    if (isRecordingDisabledError(error) && recordingEnabled()) {
+      // Only the optional preview failed: metadata may already be canonical. If this
+      // exact attempted Off fails, resume the same provider tuple idempotently while
+      // the original HTTP receipt still owns both physical revisions. Never cross a
+      // committed Off/On generation or spin across repeated pending decisions.
+      const attemptedOff = pendingRecordingOffDecision();
+      if (!retriedFailedOff && (!attemptedOff || !(await attemptedOff.settled)) &&
+          recordingEnabled() && getRecordingRevision() === recordingRevision) {
+        return changed + await recordNativeImage(sessionId, item, base, onCommitted, true);
+      }
+      throw error;
+    }
+    if (isRecordingDisabledError(error) || !recordingEnabled() ||
+        getRecordingRevision() !== recordingRevision) return changed;
     const reason = /quota/i.test((error as Error).message) ? 'quota' : 'invalid';
     logWarn(`native generated image preview unavailable: ${(error as Error).message}`);
     const unavailable = await upsertNativeImageEvent(sessionId, {
@@ -1830,7 +1899,10 @@ async function recordNativeImage(
       previewStatus: 'unavailable',
       previewError: reason
     });
-    if (unavailable.changed) changed += 1;
+    if (unavailable.changed) {
+      changed += 1;
+      onCommitted?.(1, false);
+    }
   }
   return changed;
 }
@@ -1849,22 +1921,21 @@ async function recordPageTool(
   sessionId: string,
   live: LiveConversation | undefined,
   item: ChatObservation,
-  base: { time: number; source: 'extension'; turnId?: string; agent?: string }
+  base: { time: number; source: 'extension'; turnId?: string; agent?: string },
+  historical?: ProgressRecord | null
 ): Promise<boolean> {
   const id = item.messageId;
   const label = (item.text ?? '').slice(0, 300).trim();
   if (!id || !label) return false;
-  if (!live) {
-    await appendEvent(sessionId, { ...base, kind: 'page_tool', messageId: id, label });
-    return true;
-  }
-
-  const held = live.pageTools.get(id);
+  const held = live?.pageTools.get(id) ?? historical;
   if (held && held.text === label) return false;
 
   const event = await appendEvent(sessionId, {
     ...base,
-    ...(held?.turnId ? { turnId: held.turnId } : {}),
+    ...(held ? { agent: held.agent } : {}),
+    // A historical row with NO original turn must not adopt the latest page's
+    // turnId from base. Its owner is precisely the original durable event.
+    ...(held ? { turnId: held.turnId } : {}),
     time: held ? held.time : base.time,
     kind: 'page_tool',
     messageId: id,
@@ -1872,28 +1943,56 @@ async function recordPageTool(
     ...(held?.contentSeq !== undefined ? { contentSeq: held.contentSeq } : item.activeNow === false && !held ? { contentSeq: 0 } : {}),
     ...(held ? { origin: held.seq } : {})
   });
-  live.pageTools.set(id, {
+  live?.pageTools.set(id, {
     seq: held ? held.seq : event.seq,
+    originalVerified: true,
     time: held ? held.time : base.time,
     updatedAt: base.time,
     text: label,
-    turnId: held?.turnId ?? base.turnId,
+    ...(held ? (held.turnId ? { turnId: held.turnId } : {}) :
+      (base.turnId ? { turnId: base.turnId } : {})),
+    agent: held ? held.agent : base.agent,
     contentSeq: event.kind === 'page_tool' ? event.contentSeq : undefined
   });
   return true;
 }
 
+/** Restored tails are deliberately bounded. A cache miss grants no first-sight authority
+ * until the exact durable session's full journal either supplies its original identity
+ * or has been scanned completely with no damaged lines. The store streams fixed chunks. */
+async function durablePageTool(
+  sessionId: string, live: LiveConversation | undefined, id: string
+): Promise<ProgressRecord | null> {
+  const cached = live?.pageTools.get(id);
+  if (cached?.originalVerified) return cached;
+  const history = await readExactNativeHistoryIdentity(sessionId, 'page_tool', id);
+  if (!history || history.original.kind !== 'page_tool' ||
+      history.latest.kind !== 'page_tool') return null;
+  const { original, latest } = history;
+  const held: ProgressRecord = {
+    seq: original.origin ?? original.seq, time: original.time, updatedAt: latest.time,
+    originalVerified: true,
+    text: latest.label, contentSeq: original.contentSeq,
+    agent: original.agent,
+    ...(original.turnId ? { turnId: original.turnId } : {})
+  };
+  live?.pageTools.set(id, held);
+  return held;
+}
+
+async function durableTurnKnown(
+  sessionId: string, live: LiveConversation | undefined, turnId: string,
+  kind: 'turn_start' | 'turn_end'
+): Promise<boolean> {
+  const cache = kind === 'turn_start' ? live?.knownTurnStarts : live?.knownTurnEnds;
+  if (cache?.has(turnId)) return true;
+  const event = await readExactNativeHistoryIdentity(sessionId, kind, turnId);
+  if (!event) return false;
+  cache?.add(turnId);
+  return true;
+}
+
 const observationChains = new Map<string, Promise<void>>();
-
-function observedUserTitle(first?: string): string | undefined {
-  return first ? userTitle(first) || undefined : undefined;
-}
-
-function observationTitle(observations: readonly ChatObservation[]): string | undefined {
-  const title = observations.find((item) => item.kind === 'conversation_title')?.text?.trim();
-  const first = observations.find((item) => item.kind === 'user_message')?.text;
-  return title || observedUserTitle(first);
-}
 
 /** The one ownership ingress used by both /correlations and transcript batches.
  * Exact proof needs a committed session/lineage, but must never wait behind that chat's
@@ -1904,7 +2003,9 @@ export async function recordRequestEvidence(
 ): Promise<string | null> {
   if (!recordingEnabled()) return null;
   const lineage = !conversations.has(conversationId) ? await supersededLineage(conversationId) : null;
-  const sessionId = lineage ?? await sessionForConversation(conversationId, observationTitle(observations));
+  // Request proof does not authorize publishing a title/user from the same envelope:
+  // a later transcript row may be excluded by a successful Recording Off.
+  const sessionId = lineage ?? await sessionForConversation(conversationId);
   if (!sessionId) return null;
   // Proof identifies even a retired caller; kernel/recorder attachment checks then refuse it
   // as superseded. Never turn an exact historical owner into anonymous executable authority.
@@ -1916,16 +2017,129 @@ export async function recordRequestEvidence(
   return sessionId;
 }
 
-export function recordChatObservations(
-  conversationId: string,
-  observations: readonly ChatObservation[],
-  agent?: string | null
-): Promise<{
+interface RecordedObservationBatch {
   sessionId: string | null;
   stored: number;
   activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; startedAt?: number; endedTurnId?: string };
   goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
-}> {
+  /** Only these original rows may affect recovery or worker reconciliation after a partial Off. */
+  committedObservations: readonly ChatObservation[];
+  remainderSuppressed: boolean;
+  /** Only a canonical presentation revision was committed; bridge must skip all work/Goal/origin effects. */
+  presentationOnly?: boolean;
+  /** A new authored or lifecycle fact crossed its physical barrier. Metadata, duplicate
+   * prose and rich presentation cannot activate a pending worker by sharing an envelope. */
+  workerActivationProved?: true;
+}
+
+/**
+ * Main-process handoff from the bridge's private ticket map and positional, worker-issued
+ * journal receipt. The shape is NOT provenance: a body field or a caller-constructed object
+ * never earns rich custody. The bridge alone may associate its independently verified receipt
+ * with the exact parsed observation object through a WeakMap, after filtering by original G.
+ */
+export type VerifiedRichObservation = Readonly<{
+  rawIndex: number;
+  observation: ChatObservation;
+  /** Bridge-private revocable custody, never read from /events or a source seal. */
+  isTicketLive: () => boolean;
+  ticket: Readonly<{
+    captureId: string;
+    conversationId: string;
+    sessionId: string;
+    bindingRevision: number;
+    tab: number;
+    documentId: string;
+    documentGeneration: number;
+    spaEpoch: number;
+    recordingGeneration: string;
+    recordingRevision: number;
+    expiresAt: number;
+  }>;
+  seal: Readonly<{
+    captureId: string;
+    scanToken: string;
+    messageId: string;
+    providerMessageId: string;
+  }>;
+  expectedRecordingRevision: number;
+}>;
+
+/** The bridge creates this only from its private pixel ticket and the worker's
+ * independently journalled positional Chrome receipt. A structurally identical
+ * HTTP body is never a VerifiedPixelObservation. */
+export type VerifiedPixelObservation = Readonly<{
+  rawIndex: number;
+  observation: ChatObservation;
+  /** Bridge-private revocable custody, never read from /events or a source seal. */
+  isTicketLive: () => boolean;
+  ticket: Readonly<{
+    captureId: string; purpose: 'page_pixel'; conversationId: string; sessionId: string;
+    bindingRevision: number; tab: number; documentId: string; documentGeneration: number;
+    spaEpoch: number; recordingGeneration: string; recordingRevision: number; expiresAt: number;
+    messageId: string; providerMessageId: string; mediaId: string; nodeId: string;
+    richRevision: number; slotVersion: number; sourceIncarnation: string | null;
+    sourceSequence: number | null;
+  }>;
+  receipt: Readonly<{
+    captureId: string; scanToken: string; messageId: string; providerMessageId: string;
+    mediaId: string; nodeId: string; rootStamp: string; sourceIncarnation: string;
+    sourceSequence: number; status: 'pending' | 'available' | 'unavailable';
+    pixelBytes: number | null; pixelSha256: string | null;
+    conversationId: string; recordingGeneration: string; tab: number; documentId: string;
+    documentGeneration: number; spaEpoch: number;
+  }>;
+  expectedRecordingRevision: number;
+}>;
+
+type VerifiedPixelResult = 'stored' | 'unchanged' | 'refused' | 'prefix_only' | 'optional_settlement_revoked';
+
+/** A partial pixel receipt may borrow only a source→pending rename from this very
+ * HTTP envelope, never a previous request or another source using the same ticket. */
+function pixelSourceKey(proof: VerifiedPixelObservation): string {
+  const { ticket, receipt } = proof;
+  return JSON.stringify([ticket.sessionId, ticket.captureId, ticket.messageId,
+    ticket.providerMessageId, ticket.mediaId, ticket.nodeId,
+    receipt.sourceIncarnation, receipt.sourceSequence]);
+}
+
+export function recordChatObservations(
+  conversationId: string,
+  observations: readonly ChatObservation[],
+  agent?: string | null
+): Promise<RecordedObservationBatch> {
+  return recordChatObservationsIngress(conversationId, observations, agent);
+}
+
+/**
+ * Internal bridge ingress only. No HTTP/observation field can call this method: stage-(b)
+ * must resolve a PRIVATE live ticket, attest the original journal row and supply its
+ * object-identity receipt map before wiring this entrypoint. Until then it is dormant.
+ */
+export function recordVerifiedChatObservations(
+  conversationId: string,
+  observations: readonly ChatObservation[],
+  agent: string | null | undefined,
+  verifiedRichByItem: WeakMap<ChatObservation, VerifiedRichObservation>,
+  verifiedPixelByItem?: WeakMap<ChatObservation, VerifiedPixelObservation>
+): Promise<RecordedObservationBatch> {
+  return recordChatObservationsIngress(conversationId, observations, agent,
+    verifiedRichByItem instanceof WeakMap ? verifiedRichByItem : undefined,
+    verifiedPixelByItem instanceof WeakMap ? verifiedPixelByItem : undefined);
+}
+
+function recordChatObservationsIngress(
+  conversationId: string,
+  observations: readonly ChatObservation[],
+  agent?: string | null,
+  verifiedRichByItem?: WeakMap<ChatObservation, VerifiedRichObservation>,
+  verifiedPixelByItem?: WeakMap<ChatObservation, VerifiedPixelObservation>
+): Promise<RecordedObservationBatch> {
+  // A still-pending Off has closed physical admission but has not committed the
+  // user's preference. Keep the browser journal's batch for retry if saving fails.
+  if (recordingEnabled() && !recordingWriteAllowed(getRecordingRevision())) {
+    return Promise.reject(new RecordingDisabledError());
+  }
   const hasEvidence = observations.some((item) => item.kind === 'tool_evidence');
   const ownership = hasEvidence ? recordRequestEvidence(conversationId, observations) : null;
   // Observe rejection now even if an earlier transcript batch is still blocked. The queued
@@ -1934,8 +2148,318 @@ export function recordChatObservations(
   const transcript = hasEvidence ? observations.filter((item) => item.kind !== 'tool_evidence') : observations;
   return serializeObservations(conversationId, async () => {
     await ownership;
-    return recordChatObservationsNow(conversationId, transcript, agent);
+    try {
+      return await recordChatObservationsNow(conversationId, transcript, agent,
+        verifiedRichByItem, verifiedPixelByItem);
+    } catch (error) {
+      // A browser journal is at-least-once. Off is successful suppression, not a
+      // transport failure eligible for replay when recording is enabled again.
+      if (isRecordingDisabledError(error) && !recordingEnabled()) return {
+        sessionId: null, stored: 0,
+        activity: { meaningful: false, working: false, terminal: false }, goalCandidates: [],
+        committedObservations: [], remainderSuppressed: true
+      };
+      throw error;
+    }
   });
+}
+
+/**
+ * Revalidate every independent recorder fact before crossing the store's serialized queue.
+ * The queue itself owns the final binding and original Recording revision CAS. In particular
+ * neither a valid tree, an old selected route nor the ticket's own fields authorize a write.
+ */
+async function recordBridgeVerifiedRich(
+  conversationId: string,
+  item: ChatObservation,
+  proofs?: WeakMap<ChatObservation, VerifiedRichObservation>,
+  expectedSessionId?: string
+): Promise<'stored' | 'unchanged' | 'refused'> {
+  const proof = proofs?.get(item);
+  if (!proof || proof.observation !== item || typeof proof.isTicketLive !== 'function' ||
+      !proof.isTicketLive() || item.kind !== 'assistant_message' ||
+      !item.rich || !item.messageId || !item.providerMessageId) return 'refused';
+  const { ticket, seal } = proof;
+  if (!ticket || !seal || !Number.isSafeInteger(proof.rawIndex) || proof.rawIndex < 0 ||
+      !/^[A-Za-z0-9_-]{32}$/.test(ticket.captureId) || seal.captureId !== ticket.captureId ||
+      typeof seal.scanToken !== 'string' || seal.scanToken.length < 1 || seal.scanToken.length > 64 ||
+      seal.messageId !== item.messageId || seal.providerMessageId !== item.providerMessageId ||
+      item.rich.messageId !== seal.messageId || item.rich.providerMessageId !== seal.providerMessageId ||
+      item.rich.conversationId !== conversationId || ticket.conversationId !== conversationId ||
+      (expectedSessionId !== undefined && ticket.sessionId !== expectedSessionId) ||
+      !Number.isSafeInteger(ticket.tab) || ticket.tab < 0 ||
+      typeof ticket.documentId !== 'string' || !/^[a-z0-9_-]{1,128}$/i.test(ticket.documentId) ||
+      !Number.isSafeInteger(ticket.documentGeneration) || ticket.documentGeneration < 1 ||
+      !Number.isSafeInteger(ticket.spaEpoch) || ticket.spaEpoch < 0 ||
+      !Number.isSafeInteger(ticket.bindingRevision) || ticket.bindingRevision < 0 ||
+      !Number.isSafeInteger(ticket.recordingRevision) || ticket.recordingRevision < 0 ||
+      proof.expectedRecordingRevision !== ticket.recordingRevision ||
+      !Number.isSafeInteger(ticket.expiresAt) || ticket.expiresAt <= Date.now()) return 'refused';
+
+  const originalRecordingCurrent = () =>
+    ticket.expiresAt > Date.now() &&
+    getRecordingRevision() === ticket.recordingRevision &&
+    recordingGenerationMatches(ticket.recordingGeneration);
+  const stillAdmitted = (): boolean => {
+    if (!originalRecordingCurrent()) return false;
+    if (recordingWriteAllowed(ticket.recordingRevision) &&
+        recordingGenerationGrant() === ticket.recordingGeneration) return true;
+    // A failed pending Off must leave this journal row retryable. A successful Off
+    // suppresses it after the same decision settles in the existing caller catch.
+    if (recordingEnabled() && pendingRecordingOffDecision()) throw new RecordingDisabledError();
+    return false;
+  };
+  if (!proof.isTicketLive() || !stillAdmitted() ||
+      sessionAttachmentTransitionPending(ticket.sessionId)) return 'refused';
+  const unique = await findSessionByConversation(conversationId, { requireUnique: true });
+  if (!unique || unique.id !== ticket.sessionId ||
+      (unique.bindingRevision ?? 0) !== ticket.bindingRevision ||
+      sessionAttachmentTransitionPending(ticket.sessionId) || !stillAdmitted() ||
+      !proof.isTicketLive()) return 'refused';
+  const attached = await getSession(ticket.sessionId);
+  if (!attached || attached.conversationId !== conversationId ||
+      (attached.bindingRevision ?? 0) !== ticket.bindingRevision ||
+      sessionAttachmentTransitionPending(ticket.sessionId) || !stillAdmitted() ||
+      !proof.isTicketLive()) return 'refused';
+  const stillUnique = await findSessionByConversation(conversationId, { requireUnique: true });
+  if (!stillUnique || stillUnique.id !== ticket.sessionId ||
+      (stillUnique.bindingRevision ?? 0) !== ticket.bindingRevision ||
+      sessionAttachmentTransitionPending(ticket.sessionId) || !stillAdmitted() ||
+      !proof.isTicketLive()) return 'refused';
+
+  try {
+    const result = await upsertRichMessage(ticket.sessionId, seal.messageId, item.rich, {
+      conversationId: ticket.conversationId,
+      bindingRevision: ticket.bindingRevision,
+      documentId: ticket.documentId,
+      navigationEpoch: ticket.spaEpoch // SPA is distinct from physical documentGeneration.
+    }, ticket.recordingRevision, true, proof.isTicketLive);
+    if (result === 'refused' && originalRecordingCurrent() &&
+        recordingEnabled() && pendingRecordingOffDecision()) throw new RecordingDisabledError();
+    return result;
+  } catch (error) {
+    if (error instanceof Error && error.message === 'page_pixel_ticket_revoked' &&
+        !proof.isTicketLive()) return 'refused';
+    throw error;
+  }
+}
+
+/** Pixel-only, private bridge/worker custody. A current rich tree and a browser URL
+ * cannot create this proof. First commit the exact source incarnation under the
+ * canonical shard queue; only then decode/write pixels and attempt a second exact
+ * slot-version CAS. The first physical prefix remains credited if Off rejects the
+ * optional asset. A stale asset is left for quota-accounted cleanup: content-addressed
+ * hashes may be referenced by another owner, so never blindly unlink one here. */
+async function recordBridgeVerifiedPixel(
+  conversationId: string,
+  item: ChatObservation,
+  proofs: WeakMap<ChatObservation, VerifiedPixelObservation> | undefined,
+  onCommitted: () => void,
+  expectedSessionId?: string
+): Promise<VerifiedPixelResult> {
+  const proof = proofs?.get(item);
+  if (!proof || proof.observation !== item || item.kind !== 'rich_media' ||
+      !item.messageId || !item.providerMessageId || !item.mediaId || !item.nodeId) return 'refused';
+  const { ticket, receipt } = proof;
+  if (!ticket || !receipt || typeof proof.isTicketLive !== 'function' ||
+      ticket.purpose !== 'page_pixel' ||
+      !Number.isSafeInteger(proof.rawIndex) || proof.rawIndex < 0 ||
+      ticket.captureId !== receipt.captureId || ticket.conversationId !== conversationId ||
+      receipt.conversationId !== conversationId || receipt.recordingGeneration !== ticket.recordingGeneration ||
+      receipt.messageId !== ticket.messageId || receipt.messageId !== item.messageId ||
+      receipt.providerMessageId !== ticket.providerMessageId || receipt.providerMessageId !== item.providerMessageId ||
+      receipt.mediaId !== ticket.mediaId || receipt.mediaId !== item.mediaId ||
+      receipt.nodeId !== ticket.nodeId || receipt.nodeId !== item.nodeId ||
+      receipt.tab !== ticket.tab || receipt.documentId !== ticket.documentId ||
+      receipt.documentGeneration !== ticket.documentGeneration || receipt.spaEpoch !== ticket.spaEpoch ||
+      item.previewStatus !== receipt.status ||
+      (receipt.status === 'available' &&
+        (item.pixelBytes !== receipt.pixelBytes || item.pixelSha256 !== receipt.pixelSha256)) ||
+      (expectedSessionId !== undefined && expectedSessionId !== ticket.sessionId) ||
+      !Number.isSafeInteger(ticket.bindingRevision) || ticket.bindingRevision < 0 ||
+      !Number.isSafeInteger(ticket.richRevision) || ticket.richRevision < 1 ||
+      !Number.isSafeInteger(ticket.slotVersion) || ticket.slotVersion < 0 ||
+      !Number.isSafeInteger(ticket.recordingRevision) || ticket.recordingRevision < 0 ||
+      proof.expectedRecordingRevision !== ticket.recordingRevision ||
+      !Number.isSafeInteger(ticket.expiresAt) || ticket.expiresAt <= Date.now() ||
+      typeof receipt.sourceIncarnation !== 'string' ||
+        !/^src_[a-f0-9]{32}_[0-9a-z]{1,11}$/.test(receipt.sourceIncarnation) ||
+      !Number.isSafeInteger(receipt.sourceSequence) || receipt.sourceSequence < 1 ||
+      receipt.sourceIncarnation !==
+        `src_${receipt.sourceIncarnation.slice(4, 36)}_${receipt.sourceSequence.toString(36)}` ||
+      (ticket.sourceIncarnation === receipt.sourceIncarnation &&
+        ticket.sourceSequence !== receipt.sourceSequence) ||
+      (ticket.sourceIncarnation !== receipt.sourceIncarnation && ticket.sourceSequence !== null &&
+        receipt.sourceSequence <= ticket.sourceSequence)) return 'refused';
+
+  // The bridge authenticated this object before admission. Stop can revoke the
+  // private lease after an earlier pending row in this same envelope committed.
+  // Only the caller can decide whether that exact physical source prefix exists.
+  const revokedBeforeSource = (): 'refused' | 'optional_settlement_revoked' =>
+    !proof.isTicketLive() && receipt.status !== 'pending' ? 'optional_settlement_revoked' : 'refused';
+  if (!proof.isTicketLive()) return revokedBeforeSource();
+
+  const stillAdmitted = (): boolean => {
+    if (!proof.isTicketLive() || ticket.expiresAt <= Date.now() ||
+        getRecordingRevision() !== ticket.recordingRevision ||
+        !recordingGenerationMatches(ticket.recordingGeneration)) return false;
+    if (recordingWriteAllowed(ticket.recordingRevision) &&
+        recordingGenerationGrant() === ticket.recordingGeneration) return true;
+    if (recordingEnabled() && pendingRecordingOffDecision()) throw new RecordingDisabledError();
+    return false;
+  };
+  if (!stillAdmitted() || sessionAttachmentTransitionPending(ticket.sessionId)) return revokedBeforeSource();
+  const owner = await findSessionByConversation(conversationId, { requireUnique: true });
+  if (!owner || owner.id !== ticket.sessionId || owner.bindingRevision !== ticket.bindingRevision ||
+      sessionAttachmentTransitionPending(ticket.sessionId) || !stillAdmitted()) return revokedBeforeSource();
+  const attached = await getSession(ticket.sessionId);
+  if (!attached || attached.conversationId !== conversationId ||
+      (attached.bindingRevision ?? 0) !== ticket.bindingRevision ||
+      sessionAttachmentTransitionPending(ticket.sessionId) || !stillAdmitted()) return revokedBeforeSource();
+  const unique = await findSessionByConversation(conversationId, { requireUnique: true });
+  if (!unique || unique.id !== ticket.sessionId || unique.bindingRevision !== ticket.bindingRevision ||
+      sessionAttachmentTransitionPending(ticket.sessionId) || !stillAdmitted()) return revokedBeforeSource();
+  const source = {
+    messageId: ticket.messageId, providerMessageId: ticket.providerMessageId,
+    mediaId: ticket.mediaId, nodeId: ticket.nodeId, richRevision: ticket.richRevision,
+    origin: { conversationId: ticket.conversationId, bindingRevision: ticket.bindingRevision,
+      documentId: ticket.documentId, navigationEpoch: ticket.spaEpoch },
+    expectedRecordingRevision: ticket.recordingRevision,
+    expectedSlotVersion: ticket.slotVersion,
+    sourceIncarnation: receipt.sourceIncarnation, sourceSequence: receipt.sourceSequence
+  };
+  const began = await beginVerifiedPageRichMediaSource(ticket.sessionId, source, proof.isTicketLive);
+  // The canonical rename has already crossed disk. Credit this exact physical
+  // prefix BEFORE any further Off check or optional pixel decode/write.
+  if (began.status === 'stored') onCommitted();
+  // Stop/expiry can revoke the private lease between the first (source→pending)
+  // physical commit and the optional second (pixels→available) write. This is a
+  // partial result of ONE observation, not an uncommitted request. A live ticket
+  // failing for any other reason is not converted into success.
+  const stoppedPrefix = (): 'prefix_only' | 'optional_settlement_revoked' | 'refused' =>
+    !proof.isTicketLive() && receipt.status !== 'pending'
+      ? began.status === 'stored' ? 'prefix_only' : 'optional_settlement_revoked'
+      : 'refused';
+  const settleWithTicket = async (settlement: Parameters<typeof settleVerifiedPageRichMedia>[1]):
+    Promise<VerifiedPixelResult> => {
+    try {
+      return await settleVerifiedPageRichMedia(ticket.sessionId, settlement, proof.isTicketLive);
+    } catch (error) {
+      // This exact store refusal occurs after staging but BEFORE its second
+      // canonical rename. A generic asset EIO, failed rename, or decode error
+      // still propagates so the journal retries instead of inventing a receipt.
+      if (error instanceof Error && error.message === 'page_pixel_ticket_revoked' &&
+          !proof.isTicketLive()) return stoppedPrefix();
+      throw error;
+    }
+  };
+  if (began.status === 'refused' || !Number.isSafeInteger(began.slotVersion)) {
+    if (began.status === 'refused' && recordingEnabled() && pendingRecordingOffDecision())
+      throw new RecordingDisabledError();
+    return stoppedPrefix();
+  }
+  // Pending itself is the whole observation: there are no optional pixels to
+  // suppress even if stop follows this first-and-only physical source rename.
+  if (receipt.status === 'pending' ||
+      (receipt.status === 'unavailable' && item.previewError === 'not_loaded')) return began.status;
+  if (!stillAdmitted()) return stoppedPrefix();
+
+  const expectedSlotVersion = began.slotVersion!;
+  const exact = { ...source, expectedSlotVersion };
+  if (receipt.status === 'unavailable') {
+    if (!item.previewError || item.previewError === 'not_loaded') return 'refused';
+    if (!stillAdmitted()) return stoppedPrefix();
+    const settled = await settleWithTicket({
+      ...exact, status: 'unavailable', reason: item.previewError
+    });
+    if (settled === 'prefix_only' || settled === 'optional_settlement_revoked') return settled;
+    if (settled === 'stored') onCommitted();
+    else if (settled === 'refused' && recordingEnabled() && pendingRecordingOffDecision())
+      throw new RecordingDisabledError();
+    if (settled === 'refused' && stoppedPrefix() !== 'refused') return stoppedPrefix();
+    return settled === 'stored' || began.status === 'stored' ? 'stored' : settled;
+  }
+
+  const settleUnavailablePixel = async (reason: 'invalid' | 'quota'):
+    Promise<VerifiedPixelResult> => {
+    if (!stillAdmitted()) return stoppedPrefix() !== 'refused' ? stoppedPrefix() : began.status;
+    const settled = await settleWithTicket({
+      ...exact, status: 'unavailable', reason
+    });
+    if (settled === 'prefix_only' || settled === 'optional_settlement_revoked') return settled;
+    if (settled === 'stored') onCommitted();
+    else if (settled === 'refused' && recordingEnabled() && pendingRecordingOffDecision())
+      throw new RecordingDisabledError();
+    if (settled === 'refused' && stoppedPrefix() !== 'refused') return stoppedPrefix();
+    return settled === 'stored' || began.status === 'stored' ? 'stored' : settled;
+  };
+
+  let bytes: Buffer;
+  let info: SharpMetadata;
+  try {
+    const dataUrl = item.previewDataUrl;
+    if (!dataUrl || dataUrl.length > 512_100 ||
+        !/^data:image\/webp;base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(dataUrl) ||
+        typeof item.pixelBytes !== 'number' || !Number.isSafeInteger(item.pixelBytes) ||
+        item.pixelBytes < 1 || item.pixelBytes > 384_000 ||
+        !Number.isSafeInteger(item.previewWidth) || !Number.isSafeInteger(item.previewHeight) ||
+        !item.pixelSha256 || !/^[a-f0-9]{64}$/.test(item.pixelSha256)) throw new Error('invalid page WebP');
+    const base64 = dataUrl.slice('data:image/webp;base64,'.length);
+    bytes = Buffer.from(base64, 'base64');
+    if (bytes.length !== item.pixelBytes || bytes.length > 384_000 ||
+        bytes.toString('base64') !== base64 ||
+        createHash('sha256').update(bytes).digest('hex') !== item.pixelSha256) throw new Error('invalid page WebP');
+    const decoded = sharp(bytes, { limitInputPixels: 2_560_000, animated: false });
+    info = await decoded.metadata();
+    if (!stillAdmitted()) return stoppedPrefix() !== 'refused' ? stoppedPrefix() : began.status;
+    if (info.format !== 'webp' || !info.width || !info.height ||
+        info.width > 1600 || info.height > 1600 || info.width * info.height > 2_560_000 ||
+        info.width !== item.previewWidth || info.height !== item.previewHeight) throw new Error('invalid page WebP');
+    await decoded.stats(); // Full pixel decode, not header-only metadata.
+  } catch (error) {
+    if (isRecordingDisabledError(error) || !recordingEnabled() ||
+      getRecordingRevision() !== ticket.recordingRevision) throw error;
+    if (!stillAdmitted()) return stoppedPrefix() !== 'refused' ? stoppedPrefix() : began.status;
+    logWarn(`embedded PAGE image preview unavailable: ${(error as Error).message}`);
+    return settleUnavailablePixel('invalid');
+  }
+  if (!stillAdmitted() || sessionAttachmentTransitionPending(ticket.sessionId))
+    return stoppedPrefix() !== 'refused' ? stoppedPrefix() : began.status;
+  let asset: Awaited<ReturnType<typeof writeAsset>>;
+  try {
+    asset = await writeAsset(ticket.sessionId, bytes, 'image/webp');
+  } catch (error) {
+    // Quota is a durable resource verdict. Storage EIO, a partial write or a
+    // failed canonical rename is transient: keep the journal's original WebP
+    // receipt for an exact retry instead of permanently marking valid bytes bad.
+    if (!/quota/i.test((error as Error).message)) throw error;
+    return settleUnavailablePixel('quota');
+  }
+  if (!stillAdmitted() || sessionAttachmentTransitionPending(ticket.sessionId))
+    return stoppedPrefix() !== 'refused' ? stoppedPrefix() : began.status;
+  const settled = await settleWithTicket({
+    ...exact, status: 'available', previewWidth: info.width, previewHeight: info.height, asset
+  });
+  if (settled === 'prefix_only' || settled === 'optional_settlement_revoked') return settled;
+  if (settled === 'stored') onCommitted();
+  else if (settled === 'refused' && recordingEnabled() && pendingRecordingOffDecision())
+    throw new RecordingDisabledError();
+  if (settled === 'refused' && stoppedPrefix() !== 'refused') return stoppedPrefix();
+  return settled === 'stored' || began.status === 'stored' ? 'stored' : settled;
+}
+
+/**
+ * The private bridge route can attach a Chrome-attested, journal-durable exact-row
+ * WeakMap proof and must revalidate it above. This public raw method has no such
+ * proof: body fields or the currently selected tab cannot authenticate Chrome
+ * MessageSender, document generation or the original DOM/Fiber scan association.
+ * Refuse even valid-looking trees; never create a session or transient rich cache.
+ */
+export async function recordRichObservation(
+  _conversationId: string, _item: ChatObservation
+): Promise<'stored' | 'unchanged' | 'refused'> {
+  if (!recordingEnabled()) return 'refused';
+  return 'refused';
 }
 
 /** Transcript and MCP lifecycle changes share the same per-conversation publication order. */
@@ -1978,10 +2502,21 @@ async function supersededLineage(conversationId: string): Promise<string | null>
 async function recordSupersededMessages(
   sessionId: string,
   observations: readonly ChatObservation[]
-): Promise<number> {
+): Promise<{ stored: number; committedObservations: ChatObservation[]; remainderSuppressed: boolean }> {
   let stored = 0;
+  let processed = 0;
+  const committedObservations: ChatObservation[] = [];
+  const revision = getRecordingRevision();
   for (const item of observations) {
+    if (!recordingEnabled() || getRecordingRevision() !== revision) break;
+    processed++;
     if (!item.messageId) continue;
+    let originalCommitted = false;
+    const countCommitted = (count: number): void => {
+      stored += count;
+      if (!originalCommitted) committedObservations.push(item);
+      originalCommitted = true;
+    };
     const base = {
       time: item.time,
       ...(item.authoredAt !== undefined ? { authoredAt: item.authoredAt } : {}),
@@ -1989,6 +2524,7 @@ async function recordSupersededMessages(
       ...(item.turnId ? { turnId: item.turnId } : {})
     };
     let written: { changed: boolean } | null = null;
+    try {
     if (item.kind === 'user_message') {
       written = await upsertMessageEvent(
         sessionId,
@@ -2003,6 +2539,11 @@ async function recordSupersededMessages(
         { preferTime: item.authoredTime === true, work: false }
       );
     } else if (item.kind === 'assistant_message') {
+      // Rich-only transport must never replace authoritative prose with an empty string.
+      if (item.text === undefined && (item.rich || item.richOnly)) {
+        if (item.rich) await recordRichObservation(item.rich.conversationId, item);
+        continue;
+      }
       const state = item.state ?? (item.final === true ? 'final' : 'streaming');
       written = await upsertMessageEvent(
         sessionId,
@@ -2021,58 +2562,164 @@ async function recordSupersededMessages(
         { preferTime: item.authoredTime === true }
       );
     } else if (item.kind === 'native_image') {
-      stored += await recordNativeImage(sessionId, item, base);
+      // The exact old-chat tuple is transcript-only. Its metadata may be committed
+      // before a preview encounters Off; count each real revision at its own barrier.
+      await recordNativeImage(sessionId, item, base, countCommitted);
+      continue;
+    } else if (item.kind === 'rich_media') {
+      // A superseded frontend may append authored prose, never PAGE pixel/source
+      // custody. Only the unique current binding can settle a rich image slot.
       continue;
     }
-    if (written?.changed) stored++;
+    if (written?.changed) countCommitted(1);
+    } catch (error) {
+      if (isRecordingDisabledError(error) && !recordingEnabled()) {
+        if (!originalCommitted) processed--;
+        break;
+      }
+      throw error;
+    }
   }
   if (stored > 0) notifyChanged();
-  return stored;
+  return { stored, committedObservations, remainderSuppressed: processed < observations.length };
 }
 
 async function recordChatObservationsNow(
   conversationId: string,
   observations: readonly ChatObservation[],
-  agent?: string | null
-): Promise<{
-  sessionId: string | null;
-  stored: number;
-  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; startedAt?: number; endedTurnId?: string };
-  goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
-}> {
+  agent?: string | null,
+  verifiedRichByItem?: WeakMap<ChatObservation, VerifiedRichObservation>,
+  verifiedPixelByItem?: WeakMap<ChatObservation, VerifiedPixelObservation>
+): Promise<RecordedObservationBatch> {
   const activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; startedAt?: number; endedTurnId?: string } = { meaningful: false, working: false, terminal: false };
-  if (!recordingEnabled()) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
+  const empty = { stored: 0, activity, goalCandidates: [], committedObservations: [], remainderSuppressed: false };
+  if (!recordingEnabled()) return { sessionId: null, ...empty };
+  const recordingRevision = getRecordingRevision();
+  // No canonical text/event evidence exists in a rich-only batch; reject before the normal
+  // first-sight path could create an otherwise empty session for an untrusted projection.
+  const isRichOnly = (item: ChatObservation): boolean => item.kind === 'assistant_message' &&
+    item.text === undefined && (item.rich !== undefined || item.richOnly === true);
+  const isPresentationOnly = (item: ChatObservation): boolean => isRichOnly(item) || item.kind === 'rich_media';
+  if (observations.length > 0 && observations.every(isPresentationOnly)) {
+    if (!verifiedRichByItem && !verifiedPixelByItem) return { sessionId: null, ...empty };
+    // A verified projection is supplemental to an EXISTING canonical assistant shard.
+    // Bypass first-sight, lineage, title and every lifecycle/worker/Goal projection.
+    let stored = 0;
+    let sessionId: string | null = null;
+    let processed = 0;
+    let pixelSuffixSuppressed = false;
+    const committedPixelSources = new Set<string>();
+    for (const item of observations) {
+      if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) break;
+      processed++;
+      let physicallyCommitted = false;
+      try {
+        let result: VerifiedPixelResult;
+        if (item.kind === 'rich_media') {
+          const proof = verifiedPixelByItem?.get(item);
+          result = await recordBridgeVerifiedPixel(conversationId, item, verifiedPixelByItem, () => {
+            stored++;
+            physicallyCommitted = true;
+            if (proof) {
+              committedPixelSources.add(pixelSourceKey(proof));
+              sessionId = proof.ticket.sessionId;
+            }
+          });
+          if (result === 'optional_settlement_revoked') {
+            // The current available row committed no bytes; only its own earlier
+            // pending source in this envelope can justify retiring the suffix.
+            if (!proof || !committedPixelSources.has(pixelSourceKey(proof)))
+              throw new Error('page_pixel_ticket_revoked');
+            pixelSuffixSuppressed = true;
+            break;
+          }
+        } else {
+          result = await recordBridgeVerifiedRich(conversationId, item, verifiedRichByItem);
+          if (result === 'stored') {
+            stored++;
+            physicallyCommitted = true;
+            sessionId = verifiedRichByItem!.get(item)!.ticket.sessionId;
+          }
+        }
+        if (result === 'prefix_only') {
+          // The same row already committed B pending, but its optional pixels
+          // lost the original bridge ticket before the second canonical write.
+          // Stop here, retain the physical count, and retire this journal suffix.
+          pixelSuffixSuppressed = true;
+          break;
+        }
+        if (result === 'refused' && !physicallyCommitted &&
+            (!recordingEnabled() || getRecordingRevision() !== recordingRevision)) {
+          processed--;
+          break;
+        }
+      } catch (error) {
+        if (isRecordingDisabledError(error)) {
+          const attemptedOff = pendingRecordingOffDecision();
+          if ((attemptedOff && await attemptedOff.settled) || !recordingEnabled() ||
+              getRecordingRevision() !== recordingRevision) {
+            if (!physicallyCommitted) processed--;
+            break;
+          }
+        }
+        throw error;
+      }
+    }
+    if (stored > 0) notifyChanged();
+    return { sessionId, ...empty, stored, committedObservations: [],
+      remainderSuppressed: pixelSuffixSuppressed || processed < observations.length,
+      ...(stored > 0 ? { presentationOnly: true } : {}) };
+  }
   if (!conversations.has(conversationId)) {
     const lineage = await supersededLineage(conversationId);
     if (lineage) {
-      const stored = await recordSupersededMessages(lineage, observations);
-      return { sessionId: lineage, stored, activity, goalCandidates: [] };
+      const prefix = await recordSupersededMessages(lineage, observations);
+      return { sessionId: lineage, ...prefix, activity, goalCandidates: [] };
     }
   }
-  let firstUser: ChatObservation | undefined;
   let pageTitle: ChatObservation | undefined;
   const explicitEnds = new Set<string>();
-  const batchTurnStarts = new Map<string, number>();
+  const batchTurnStarts = new Map<string, { time: number; seq: number | null }>();
+  // One question identity is admitted from this exact envelope. The canonical
+  // work position survives cold replay; only first physical creation authorizes
+  // a NEW end past a question, while an existing end owns its replay proof.
+  const batchQuestions = new Map<string, { messageId: string; workSeq: number; firstCommitted: boolean }>();
+  const ambiguousBatchQuestions = new Set<string>();
+  let contradictoryEndInBatch = false;
+  let submittedTurnId: string | null = null;
+  // A final without a generation is only a provisional candidate. A later, physically
+  // committed uncertain end may prove its exact same-envelope start < final < end bracket.
+  // In particular, looking ahead at an end that Off might discard is never authority.
+  const bracketFinals = new Map<string, Extract<SessionEvent, { kind: 'assistant_message' }>>();
   let batchUncertainEndId: string | null = null;
-  // This batch is hot while ChatGPT is streaming. Collect the three facts needed before the
-  // write loop in one pass instead of find + find + filter + map (the latter two also allocated
-  // an intermediate array for every batch).
-  for (const item of observations) {
-    if (!firstUser && item.kind === 'user_message') firstUser = item;
-    if (item.kind === 'conversation_title') pageTitle = item;
-    if (item.kind === 'turn_start' && item.turnId) batchTurnStarts.set(item.turnId, item.time);
-    if (item.kind === 'turn_end' && item.turnId) {
-      explicitEnds.add(item.turnId);
-      if (item.outcome !== 'completed' && item.outcome !== 'stopped') batchUncertainEndId = item.turnId;
-    }
+  // Lifecycle premises are accumulated only after their rows pass the durable barrier.
+  // A later end in this envelope cannot authorize an earlier final if Off excludes it.
+  // A title/user appearing later in this HTTP batch has not crossed a durable
+  // admission barrier. The canonical user writer and post-loop title promotion
+  // own naming only AFTER their exact row commits; Off may discard that suffix.
+  const sessionId = await sessionForConversation(conversationId);
+  if (!sessionId) return { sessionId: null, ...empty };
+  if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) {
+    return { sessionId, ...empty, remainderSuppressed: observations.length > 0 };
   }
-  const sessionId = await sessionForConversation(
-    conversationId,
-    pageTitle?.text?.trim() || observedUserTitle(firstUser?.text)
-  );
-  if (!sessionId) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
+  // One original attachment for the entire accepted envelope. An A→B→A move
+  // changes its binding revision even if its final conversation ID looks equal.
+  const originalAttachment = await getSession(sessionId);
+  if (!originalAttachment || originalAttachment.conversationId !== conversationId ||
+      sessionAttachmentTransitionPending(sessionId)) {
+    return { sessionId, ...empty, remainderSuppressed: observations.length > 0 };
+  }
+  const expectedAttachment = {
+    conversationId, bindingRevision: originalAttachment.bindingRevision ?? 0
+  };
   const live = conversations.get(conversationId);
   let stored = 0;
+  let richStored = 0;
+  let workerActivationProved = false;
+  let optionalRichSuppressed = false;
+  const committedPixelSources = new Set<string>();
+  let processed = 0;
+  const committedObservations: ChatObservation[] = [];
   let recoveredGoalSeen = false;
   const goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }> = [];
   // Reload can lose or replace the page's turn id. The canonical message store keeps
@@ -2083,7 +2730,88 @@ async function recordChatObservationsNow(
   const recoverableTurns = new Set(live?.openTurns);
   let recoveredFinal: { turnId: string; time: number; seq: number; origin: number; native: boolean } | undefined;
 
+  const promoteBracketFinal = async (end: Extract<SessionEvent, { kind: 'turn_end' }>, replay: boolean): Promise<void> => {
+    if (!end.turnId || end.outcome === 'completed' || end.outcome === 'stopped' ||
+        submittedTurnId !== end.turnId) return;
+    const start = batchTurnStarts.get(end.turnId);
+    const final = bracketFinals.get(end.turnId);
+    if (!start || !final || final.turnId || final.goalEligible === true ||
+        !final.messageId || final.final !== true || final.state !== 'final' ||
+        !Number.isSafeInteger(final.finalContentSeq)) return;
+    let startSeq = start.seq;
+    const originalAttachment = await getSession(sessionId);
+    if (!originalAttachment || originalAttachment.conversationId !== conversationId) return;
+    // A fresh end and a replay must obey the same durable journal bracket. In
+    // particular, a different end can be committed between this start and end;
+    // a replayed timestamp or in-memory known-turn set is never a substitute.
+    const boundaries = (await readRecentEvents(sessionId, 128, {
+      kinds: ['turn_start', 'turn_end', 'user_message'], maxBytes: 512 * 1024
+    })).sort((left, right) => left.seq - right.seq);
+    const starts = boundaries.filter(row => row.kind === 'turn_start' &&
+      row.source === 'extension' && row.turnId === end.turnId && row.time === start.time);
+    const ends = boundaries.filter(row => row.kind === 'turn_end' &&
+      row.source === 'extension' && row.turnId === end.turnId &&
+      row.time === end.time && row.outcome === end.outcome);
+    if (starts.length !== 1 || ends.length !== 1) return;
+    const durableStart = starts[0]!;
+    const durableEnd = ends[0]!;
+    if ((!replay && (startSeq !== durableStart.seq || end.seq !== durableEnd.seq)) ||
+        boundaries.some(row => (row.kind === 'user_message' ? workSequence(row) : row.seq) > durableEnd.seq &&
+          (row.kind === 'user_message' || row.kind === 'turn_start' || row.kind === 'turn_end'))) return;
+    const question = batchQuestions.get(end.turnId);
+    const intervening = boundaries.filter(row => {
+      const seq = row.kind === 'user_message' ? workSequence(row) : row.seq;
+      return seq > durableStart.seq && seq < durableEnd.seq &&
+        (row.kind === 'user_message' || row.kind === 'turn_start' || row.kind === 'turn_end');
+    });
+    // An absent row in this bounded presentation read cannot silently certify
+    // a question that the current envelope claims. The exact original user must
+    // be present once; a bracket with no user witness must contain no question.
+    if (intervening.some(row => row.kind !== 'user_message') ||
+        intervening.length !== (question ? 1 : 0) ||
+        (question && (intervening[0]!.kind !== 'user_message' ||
+          intervening[0]!.messageId !== question.messageId ||
+          workSequence(intervening[0]!) !== question.workSeq ||
+          question.workSeq >= final.finalContentSeq!))) return;
+    startSeq = durableStart.seq;
+    end = durableEnd as Extract<SessionEvent, { kind: 'turn_end' }>;
+    if (startSeq === null || !(startSeq < final.finalContentSeq! && final.finalContentSeq! < end.seq) ||
+        final.time < start.time) return;
+    // The disk proof yielded independently of the session's metadata queue. Compact
+    // & Resume may have durably moved A→B (or A→B→A) during that read; original
+    // transcript custody is preserved, but historical A cannot grant Goal on B.
+    const currentAttachment = await getSession(sessionId);
+    if (!currentAttachment || currentAttachment.conversationId !== conversationId ||
+        currentAttachment.bindingRevision !== originalAttachment.bindingRevision) return;
+    // This is an optional, separate canonical metadata revision, never a fabricated end
+    // or a rewrite of the original final. The store preserves origin/finalContentSeq and
+    // rechecks Recording at its own physical write barrier.
+    const promoted = await upsertMessageEvent(sessionId, {
+      kind: 'assistant_message', source: final.source, time: final.time,
+      ...(final.agent ? { agent: final.agent } : {}),
+      message: final.message, messageId: final.messageId, state: 'final', final: true,
+      ...(final.providerMessageId ? { providerMessageId: final.providerMessageId } : {}),
+      ...(final.renderedHtml ? { renderedHtml: final.renderedHtml } : {}),
+      goalEligible: true
+    }, { work: false, expectedAttachment: {
+      conversationId, bindingRevision: originalAttachment.bindingRevision ?? 0
+    } });
+    if ('refused' in promoted) return;
+    if (promoted.changed) stored++;
+    if (promoted.event.kind === 'assistant_message' && promoted.event.goalEligible === true && promoted.event.messageId) {
+      goalCandidates.push({
+        replyId: promoted.event.messageId,
+        turnId: `reply:${promoted.event.messageId}`.slice(0, 200),
+        eventSeq: promoted.event.origin ?? promoted.event.seq
+      });
+      recoveredGoalSeen = true;
+    }
+  };
+
   for (const item of observations) {
+    if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) break;
+    processed++;
+    let originalCommitted = false;
     const base = {
       time: item.time,
       source: 'extension' as const,
@@ -2091,17 +2819,38 @@ async function recordChatObservationsNow(
       ...(item.turnId ? { turnId: item.turnId } : {}),
       ...(agent ? { agent } : {})
     };
+    try {
     switch (item.kind) {
+      case 'rich_media': {
+        // Supplemental existing-shard custody, even in a mixed prose batch.
+        // It cannot create turns, Goal candidates, origin, activity or workers.
+        const proof = verifiedPixelByItem?.get(item);
+        const pixel = await recordBridgeVerifiedPixel(conversationId, item, verifiedPixelByItem, () => {
+          stored++;
+          richStored++;
+          originalCommitted = true;
+          if (proof) committedPixelSources.add(pixelSourceKey(proof));
+        }, sessionId);
+        if (pixel === 'prefix_only') optionalRichSuppressed = true;
+        if (pixel === 'optional_settlement_revoked') {
+          if (!proof || !committedPixelSources.has(pixelSourceKey(proof)))
+            throw new Error('page_pixel_ticket_revoked');
+          optionalRichSuppressed = true;
+        }
+        continue;
+      }
       case 'model_selection':
         if (item.model) await observeSessionModel(sessionId, conversationId, item.model, item.time, item.reasoningEffort);
         break;
       case 'conversation_title':
         // Apply after canonical messages so legacy preview proof exists in either batch order.
+        pageTitle = item;
         break;
       case 'user_message': {
+        // A new authored question ends this envelope's provisional anonymous-final bracket.
         // A message with no ChatGPT identity cannot participate in the canonical transcript.
         // Dropping it is safer than minting a local id that can collide on reload.
-        if (!item.messageId) continue;
+        if (!item.messageId) { submittedTurnId = null; continue; }
         const written = await upsertMessageEvent(sessionId, {
           ...base,
           kind: 'user_message',
@@ -2110,7 +2859,29 @@ async function recordChatObservationsNow(
           ...(item.reaction !== undefined ? { reaction: item.reaction } : {}),
           messageId: item.messageId
         }, { preferTime: item.authoredTime === true, work: item.authoredNow === true });
+        const lastStart = [...batchTurnStarts].at(-1);
+        const originalWorkSeq = workSequence(written.event);
+        const belongsToBatchStart = lastStart &&
+            (!item.turnId || item.turnId === lastStart[0]) &&
+            (lastStart[1].seq === null || originalWorkSeq > lastStart[1].seq);
+        if (belongsToBatchStart && written.event.kind === 'user_message') {
+          // Native pages sometimes send start before the first matching user row.
+          // Only this canonical identity and its original work position may
+          // justify a fresh end or optional Goal promotion, including on replay.
+          if (batchQuestions.has(lastStart[0])) {
+            batchQuestions.delete(lastStart[0]);
+            ambiguousBatchQuestions.add(lastStart[0]);
+          } else if (!ambiguousBatchQuestions.has(lastStart[0])) {
+            batchQuestions.set(lastStart[0], {
+              messageId: written.event.messageId!, workSeq: originalWorkSeq,
+              firstCommitted: written.changed && written.event.seq === originalWorkSeq &&
+                (written.event.origin ?? written.event.seq) === originalWorkSeq && lastStart[1].seq !== null
+            });
+          }
+        }
+        if (!belongsToBatchStart || ambiguousBatchQuestions.has(lastStart![0])) submittedTurnId = null;
         if (!written.changed) continue;
+        if (written.contentChanged) workerActivationProved = true;
         if (item.authoredNow === true) {
           activity.meaningful = true; activity.at = Math.max(activity.at ?? 0, item.time);
           activity.working = true;
@@ -2119,6 +2890,16 @@ async function recordChatObservationsNow(
       }
       case 'assistant_message': {
         if (!item.messageId) continue;
+        // A rich-only update has no authored text and no authority to create/change it.
+        if (item.text === undefined && (item.rich || item.richOnly)) {
+          if (item.rich) {
+            const rich = await recordBridgeVerifiedRich(conversationId, item, verifiedRichByItem, sessionId);
+            if (rich === 'stored') { stored++; richStored++; }
+            else if (rich === 'refused' && (!recordingEnabled() || getRecordingRevision() !== recordingRevision))
+              optionalRichSuppressed = true;
+          }
+          continue;
+        }
         const state = item.state ?? (item.final === true ? 'final' : 'streaming');
         // A reload can destroy the document-local generation id after this recorder already
         // made the only honest lifecycle verdict it could: unknown/failed/interrupted/stalled.
@@ -2126,7 +2907,7 @@ async function recordChatObservationsNow(
         // old final seen merely by opening an idle chat is not. The prior uncertain boundary is
         // therefore the exact fence; the stable reply id is the durable exactly-once identity.
         const batchUncertainStartedAt = batchUncertainEndId
-          ? batchTurnStarts.get(batchUncertainEndId) ??
+          ? batchTurnStarts.get(batchUncertainEndId)?.time ??
             (live?.turnId === batchUncertainEndId ? live.turnStartedAt : null)
           : null;
         const priorUncertainStartedAt =
@@ -2144,6 +2925,10 @@ async function recordChatObservationsNow(
         const recoveredGoalEligible =
           state === 'final' &&
           !item.turnId &&
+          // A submitted start makes this an exact same-envelope question: its
+          // anonymous final cannot borrow a previous uncertain end. Wait until
+          // this envelope's matching end crosses disk and proves its bracket.
+          !(submittedTurnId && batchTurnStarts.has(submittedTurnId)) &&
           live !== undefined &&
           uncertainTurnStartedAt !== null &&
           item.time >= uncertainTurnStartedAt;
@@ -2164,21 +2949,30 @@ async function recordChatObservationsNow(
           ...(goalEligible && state === 'final' ? { goalEligible: true } : {})
         }, { preferTime: item.authoredTime === true, work: item.activeNow === true });
         const canonicalTurn = written.event.turnId;
-        // A stopped partial answer stays streaming in history. Re-observing its
-        // DOM after restart cannot renew work, nor can an old message borrow a
-        // newer page turn. Preserve the revision while using its canonical owner
-        // and the recorder's terminal boundary to decide activity.
-        const [uncertainEnd] = canonicalTurn && !live?.turnId
-          ? await readRecentEvents(sessionId, 1, { kinds: ['turn_start', 'turn_end', 'user_message'] }) : [];
-        // A fresh exact interim can resume an uncertain failure without inventing
-        // a new user turn. Old messages and explicit completed/stopped turns cannot.
-        const resumedUncertainTurn = uncertainEnd?.kind === 'turn_end' && uncertainEnd.turnId === canonicalTurn &&
-          uncertainEnd.outcome !== 'completed' && uncertainEnd.outcome !== 'stopped' && item.time > uncertainEnd.time;
-        // HTML, provider identity and authored-time promotion revise history, not work.
-        // In particular a post-failure Fiber backfill must not reopen the dead turn.
-        const workingActivity = written.contentChanged && state !== 'final' && item.activeNow === true &&
-          (!canonicalTurn || canonicalTurn === live?.turnId || resumedUncertainTurn) &&
-          !(live?.turnStartedAt === null && (live.lastTurnOutcome === 'stopped' || live.lastTurnOutcome === 'completed'));
+        if (written.event.kind === 'assistant_message' && state === 'final' &&
+            !item.turnId && !canonicalTurn && written.event.goalEligible !== true &&
+            submittedTurnId && batchTurnStarts.has(submittedTurnId) &&
+            item.time >= batchTurnStarts.get(submittedTurnId)!.time) {
+          // A canonical older reply retains its original finalContentSeq; comparing that
+          // physical position with the eventual start rejects an old final re-observed now.
+          bracketFinals.set(submittedTurnId, written.event);
+        }
+        // The assistant shard has already crossed its physical write barrier. Any rich
+        // revision, recovery read or synthetic lifecycle append below is supplemental and
+        // may independently meet Recording Off, so retain this exact original prefix now.
+        if (written.changed) {
+          stored++;
+          committedObservations.push(item);
+          originalCommitted = true;
+          if (written.contentChanged ||
+              (state === 'final' && written.event.kind === 'assistant_message' &&
+                written.event.finalContentSeq === written.event.seq)) workerActivationProved = true;
+          if (terminalActivity) {
+            activity.meaningful = true;
+            activity.at = Math.max(activity.at ?? 0, item.time);
+            activity.terminal = true;
+          }
+        }
         const turns = state === 'final' && canonicalTurn && live?.turnId && live.turnId !== canonicalTurn && written.event.kind === 'assistant_message' &&
           written.event.providerMessageId ? (await getSession(sessionId))?.timelineTurns : undefined;
         const finishingTurn = canonicalTurn && live?.turnId && (canonicalTurn === live.turnId ||
@@ -2207,13 +3001,35 @@ async function recordChatObservationsNow(
           // can still replay the same obligation even after this stronger final evidence wins.
           recoveredGoalSeen = true;
         }
+        if (item.rich) {
+          const rich = await recordBridgeVerifiedRich(conversationId, item, verifiedRichByItem, sessionId);
+          if (rich === 'stored') { stored++; richStored++; }
+          else if (rich === 'refused' && (!recordingEnabled() || getRecordingRevision() !== recordingRevision))
+            optionalRichSuppressed = true;
+        }
         if (!written.changed) continue;
+        // A stopped partial answer stays streaming in history. Re-observing its
+        // DOM after restart cannot renew work, nor can an old message borrow a
+        // newer page turn. Preserve the revision while using its canonical owner
+        // and the recorder's terminal boundary to decide activity.
+        const [uncertainEnd] = canonicalTurn && !live?.turnId
+          ? await readRecentEvents(sessionId, 1, { kinds: ['turn_start', 'turn_end', 'user_message'] }) : [];
+        // A fresh exact interim can resume an uncertain failure without inventing
+        // a new user turn. Old messages and explicit completed/stopped turns cannot.
+        const resumedUncertainTurn = uncertainEnd?.kind === 'turn_end' && uncertainEnd.turnId === canonicalTurn &&
+          uncertainEnd.outcome !== 'completed' && uncertainEnd.outcome !== 'stopped' && item.time > uncertainEnd.time;
+        // HTML, provider identity and authored-time promotion revise history, not work.
+        // In particular a post-failure Fiber backfill must not reopen the dead turn.
+        const workingActivity = written.contentChanged && state !== 'final' && item.activeNow === true &&
+          (!canonicalTurn || canonicalTurn === live?.turnId || resumedUncertainTurn) &&
+          !(live?.turnStartedAt === null && (live.lastTurnOutcome === 'stopped' || live.lastTurnOutcome === 'completed'));
         if (state === 'final' && written.event.kind === 'assistant_message' && written.event.providerMessageId &&
             uncertainEnd?.kind === 'turn_end' && uncertainEnd.reason === 'thinking_failed' &&
             uncertainEnd.turnId === canonicalTurn && (written.event.finalContentSeq ?? written.event.seq) > uncertainEnd.seq &&
             live && !live.turnId && runningToolCalls(conversationId) === 0) {
           await appendEvent(sessionId, { ...base, kind: 'turn_end', turnId: canonicalTurn, outcome: 'completed',
             detail: 'the exact native final superseded the failed view' });
+          stored++;
           live.lastTurnOutcome = 'completed';
           activity.endedTurnId = canonicalTurn;
           activity.terminal = true;
@@ -2231,14 +3047,41 @@ async function recordChatObservationsNow(
       case 'native_image': {
         // Native media is transcript content only. It does not renew activity, close a turn,
         // create a Goal candidate, or masquerade as a locally executed tool call.
-        stored += await recordNativeImage(sessionId, item, base);
+        await recordNativeImage(sessionId, item, base, (count, firstTuple) => {
+          stored += count;
+          if (firstTuple) workerActivationProved = true;
+          if (!originalCommitted) committedObservations.push(item);
+          originalCommitted = true;
+        });
         continue;
       }
       case 'page_tool': {
-        const newlyObserved = !!live && !!item.messageId && !live.pageTools.has(item.messageId);
-        const written = await recordPageTool(sessionId, live, item, base);
+        const previous = item.messageId ? await durablePageTool(sessionId, live, item.messageId) : null;
+        const newlyObserved = !!live && !!item.messageId && !previous;
+        const written = await recordPageTool(sessionId, live, item, base, previous);
         if (!written) continue;
-        if (newlyObserved && item.activeNow !== false && item.turnId && await reopenThinkingFailure(sessionId, live, item.time, item.turnId)) {
+        // The original page row is durable before its independent app-owned reopen.
+        // A refused reopen cannot turn this physical append into a zero HTTP receipt.
+        stored++;
+        committedObservations.push(item);
+        originalCommitted = true;
+        if (newlyObserved) workerActivationProved = true;
+        let reopened: string | null = null;
+        if (newlyObserved && item.activeNow !== false && item.turnId) {
+          try {
+            reopened = await reopenThinkingFailure(sessionId, live, item.time, item.turnId);
+          } catch (error) {
+            if (!isRecordingDisabledError(error)) throw error;
+            const attemptedOff = pendingRecordingOffDecision();
+            if ((attemptedOff && await attemptedOff.settled) || !recordingEnabled() ||
+                getRecordingRevision() !== recordingRevision) throw error;
+            // The attempted Off failed without changing this generation. Retry only
+            // the exact original turn's app-owned reopen; never replay the page tool.
+            reopened = await reopenThinkingFailure(sessionId, live, item.time, item.turnId);
+          }
+        }
+        if (reopened) {
+          stored++;
           activity.terminal = false;
           activity.working = true;
           activity.meaningful = true;
@@ -2251,7 +3094,7 @@ async function recordChatObservationsNow(
           activity.working = true;
           activity.at = Math.max(activity.at ?? 0, item.time);
         }
-        break;
+        continue;
       }
       case 'chat_error': {
         if (item.reason === 'thinking_failed' && !item.turnId) continue;
@@ -2276,6 +3119,7 @@ async function recordChatObservationsNow(
           ...(typeof item.blocking === 'boolean' ? { blocking: item.blocking } : {}),
           message: await storeText(sessionId, item.text ?? '', 2000)
         });
+        workerActivationProved = true;
         activity.meaningful = true;
         break;
       }
@@ -2290,10 +3134,20 @@ async function recordChatObservationsNow(
         // /events is intentionally at-least-once. A response can be lost after commit, so the
         // service worker may replay the exact same local lifecycle id. Never turn that transport
         // retry into a second durable boundary or reopen a turn that already ended.
-        if (live?.knownTurnStarts.has(item.turnId) || live?.knownTurnEnds.has(item.turnId)) continue;
-        await appendEvent(sessionId, { ...base, kind: 'turn_start' });
+        if (await durableTurnKnown(sessionId, live, item.turnId, 'turn_start') ||
+            await durableTurnKnown(sessionId, live, item.turnId, 'turn_end')) {
+          // The exact original envelope may be retried after the end committed but
+          // optional eligibility met a failed Off. Replays must prove the disk seqs.
+          submittedTurnId = item.turnId;
+          batchTurnStarts.set(item.turnId, { time: item.time, seq: null });
+          continue;
+        }
+        const start = await appendEvent(sessionId, { ...base, kind: 'turn_start' });
+        workerActivationProved = true;
         // Commit before publishing the lifecycle projection. If append rejects, the same
         // browser event remains eligible for its normal at-least-once retry.
+        submittedTurnId = item.turnId;
+        batchTurnStarts.set(item.turnId, { time: item.time, seq: start.seq });
         if (live) {
           live.knownTurnStarts.add(item.turnId);
           // Turn lifecycle is presentation/recovery state only in 1.8. It is never consulted
@@ -2316,33 +3170,65 @@ async function recordChatObservationsNow(
         // turn happened to be live. Ignore it. A stale named end is still useful history for
         // the turn it names, but it must not tear down a newer active generation.
         if (!item.turnId) continue;
-        const stopOverride = live?.knownTurnEnds.has(item.turnId) && item.outcome === 'stopped';
-        if (live?.knownTurnEnds.has(item.turnId)) {
-          // An explicit Stop can arrive after automation's interrupted end or a
-          // failed view. The latest exact source may strengthen to stopped once;
-          // an old stop must never close a new question or generation.
-          if (!stopOverride || (live.turnId && live.turnId !== item.turnId)) continue;
-          const [latest] = await readRecentEvents(sessionId, 1, { kinds: ['turn_start', 'turn_end', 'user_message'] });
-          if (latest?.kind !== 'turn_end' || latest.turnId !== item.turnId ||
-              latest.outcome === 'stopped' || item.time < latest.time) continue;
-        }
-        if (live?.turnId === item.turnId) {
-          const [latest] = await readRecentEvents(sessionId, 1, { kinds: ['turn_start', 'turn_end'] });
-          // A replay of the pre-reopen end cannot undo newer app-owned work.
-          if (latest?.kind === 'turn_start' && latest.source === 'app' && latest.turnId === item.turnId &&
-              latest.time >= item.time) continue;
-        }
-        await appendEvent(sessionId, {
+        // A different claimed end in the SAME envelope cannot be silently dropped
+        // and then let a provisional anonymous final cross that missing boundary.
+        // The absent source start cannot authorize B's terminal event, and A must
+        // arrive again without this contradiction before its own close is safe.
+        if (contradictoryEndInBatch) continue;
+        const result = await appendTurnEndIfCurrent(sessionId, expectedAttachment, {
           ...base,
           kind: 'turn_end',
           outcome: item.outcome ?? 'unknown',
           ...(item.outcome === 'failed' && item.reason === 'thinking_failed' ? { reason: item.reason } : {}),
           ...(item.detail ? { detail: item.detail } : {})
-        });
+        }, recordingRevision, batchQuestions.get(item.turnId)?.firstCommitted
+          ? batchQuestions.get(item.turnId)!.workSeq : undefined);
+        if ('replay' in result) {
+          // An exact already-committed end may complete a previously interrupted
+          // optional Goal metadata revision. Never count or reactivate its lifecycle.
+          const current = await getSession(sessionId);
+          if (conversations.get(conversationId) === live && current?.conversationId === conversationId &&
+              (current.bindingRevision ?? 0) === expectedAttachment.bindingRevision &&
+              !sessionAttachmentTransitionPending(sessionId)) {
+            await promoteBracketFinal(result.replay, true);
+          }
+          continue;
+        }
+        if ('refused' in result) {
+          if (item.turnId !== live?.turnId && live?.turnId) {
+            contradictoryEndInBatch = true;
+            bracketFinals.clear();
+          }
+          continue;
+        }
+        const { appended: end, priorEnd: knownEnd } = result;
+        // The original end is physically committed NOW. A following optional canonical
+        // promotion may hit Off; never report a zero/short prefix or replay this end.
+        stored++;
+        committedObservations.push(item);
+        originalCommitted = true;
+        // A rebind can start after the queue's physical append and before this
+        // continuation. Preserve its honest stored prefix, but old A can no longer
+        // publish terminal activity, Goal or worker evidence onto B (or a later A).
+        const current = await getSession(sessionId);
+        if (conversations.get(conversationId) !== live || !current ||
+            current.conversationId !== conversationId ||
+            (current.bindingRevision ?? 0) !== expectedAttachment.bindingRevision ||
+            sessionAttachmentTransitionPending(sessionId)) {
+          notifyChanged();
+          return { sessionId, stored, activity: { meaningful: false, working: false, terminal: false },
+            goalCandidates: [], committedObservations,
+            remainderSuppressed: processed < observations.length };
+        }
+        // A stronger Stop verdict can revise an older end, but its exact ID is
+        // already on disk and cannot serve as this worker's first activity.
+        if (!knownEnd) workerActivationProved = true;
         // As above, durable journal state owns idempotency; in-memory state follows it.
+        explicitEnds.add(item.turnId);
+        if (item.outcome !== 'completed' && item.outcome !== 'stopped') batchUncertainEndId = item.turnId;
         if (live) {
           const endedStartedAt = live.turnId === item.turnId ? live.turnStartedAt : null;
-          if (live.turnId === item.turnId || stopOverride) activity.endedTurnId = item.turnId;
+          if (live.turnId === item.turnId || (knownEnd && item.outcome === 'stopped')) activity.endedTurnId = item.turnId;
           live.knownTurnEnds.add(item.turnId);
           live.openTurns.delete(item.turnId);
           live.lastTurnOutcome = item.outcome ?? 'unknown';
@@ -2365,41 +3251,95 @@ async function recordChatObservationsNow(
           activity.at = Math.max(activity.at ?? 0, item.time);
           activity.terminal = true;
         }
+        await promoteBracketFinal(end as Extract<SessionEvent, { kind: 'turn_end' }>, false);
         break;
       }
     }
-    stored++;
+    if (!originalCommitted) {
+      stored++;
+      committedObservations.push(item);
+    }
+    } catch (error) {
+      if (isRecordingDisabledError(error)) {
+        // A pending Off rejects the following store write BEFORE config is published.
+        // Wait for that exact decision: successful Off preserves this committed prefix;
+        // failed Off rethrows so the bridge can retry the same batch idempotently.
+        const attemptedOff = pendingRecordingOffDecision();
+        if ((attemptedOff && await attemptedOff.settled) || !recordingEnabled() ||
+            getRecordingRevision() !== recordingRevision) {
+          if ((item.kind === 'assistant_message' && item.rich) || item.kind === 'rich_media')
+            optionalRichSuppressed = true;
+          if (!originalCommitted) processed--;
+          break;
+        }
+      }
+      throw error;
+    }
   }
-  if (pageTitle) await promoteConversationTitle(sessionId, pageTitle.text, conversationId);
-  // Completion and delivery readiness are separate: retain the exact native final
-  // while a tool drains. The input owner keeps its in-flight fence until sending is safe.
-  const completion = recoveredFinal ? await readCompletedFinal(sessionId, conversationId, recoveredFinal.turnId) : null;
-  if (recoveredFinal && completion && live?.turnId === recoveredFinal.turnId && live.openTurns.has(recoveredFinal.turnId)) {
-    const { turnId, time } = recoveredFinal;
-    await appendEvent(sessionId, {
-      time, source: 'extension', kind: 'turn_end', turnId, outcome: 'completed',
-      detail: 'recovered from a final assistant message after the ChatGPT page reloaded',
-      ...(agent ? { agent } : {})
-    });
-    // Commit before publishing, preserving the same late-tool evidence as an explicit end.
-    live.openTurns.delete(turnId);
-    live.knownTurnEnds.add(turnId);
-    live.lastTurnOutcome = 'completed';
-    live.lastTurnStartedAt = live.turnStartedAt;
-    // Native message time may be its creation time, long before this final was observed.
-    live.endedTurn = { turnId, startedAt: live.turnStartedAt, endedAt: Date.now(), requestIds: live.turnRequestIds };
-    live.turnRequestIds = new Set<string>();
-    live.turnStartedAt = null;
-    live.turnId = null;
-    activity.meaningful = true;
-    activity.at = Math.max(activity.at ?? 0, time);
-    activity.terminal = true;
-    activity.endedTurnId = turnId;
-    stored++;
+  const committedPrefix = (): RecordedObservationBatch => {
+    notifyChanged();
+    // A successful Off cannot erase rows that already crossed their real durable barrier.
+    // Retain only the successfully processed prefix for subsequent Goal/worker/recovery work.
+    const presentationOnly = stored > 0 && richStored === stored && committedObservations.length === 0;
+    return { sessionId, stored, activity, goalCandidates: stored > 0 ? goalCandidates : [],
+      committedObservations, remainderSuppressed: processed < observations.length || optionalRichSuppressed,
+      ...(presentationOnly ? { presentationOnly: true } : {}),
+      ...(workerActivationProved ? { workerActivationProved: true as const } : {}) };
+  };
+  if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) return committedPrefix();
+  try {
+    if (pageTitle) await promoteConversationTitle(sessionId, pageTitle.text, conversationId);
+    // Completion and delivery readiness are separate: retain the exact native final
+    // while a tool drains. The input owner keeps its in-flight fence until sending is safe.
+    const completion = recoveredFinal ? await readCompletedFinal(sessionId, conversationId, recoveredFinal.turnId) : null;
+    if (recoveredFinal && !explicitEnds.has(recoveredFinal.turnId) && completion &&
+        live?.turnId === recoveredFinal.turnId && live.openTurns.has(recoveredFinal.turnId)) {
+      const { turnId, time } = recoveredFinal;
+      // The read above awaits disk independently of the original canonical shard.
+      // If Off settles during that await, its synthetic end has no write authority.
+      if (!recordingEnabled() || getRecordingRevision() !== recordingRevision) return committedPrefix();
+      await appendEvent(sessionId, {
+        time, source: 'extension', kind: 'turn_end', turnId, outcome: 'completed',
+        detail: 'recovered from a final assistant message after the ChatGPT page reloaded',
+        ...(agent ? { agent } : {})
+      });
+      // Commit before publishing, preserving the same late-tool evidence as an explicit end.
+      live.openTurns.delete(turnId);
+      live.knownTurnEnds.add(turnId);
+      live.lastTurnOutcome = 'completed';
+      live.lastTurnStartedAt = live.turnStartedAt;
+      // Native message time may be its creation time, long before this final was observed.
+      live.endedTurn = { turnId, startedAt: live.turnStartedAt, endedAt: Date.now(), requestIds: live.turnRequestIds };
+      live.turnRequestIds = new Set<string>();
+      live.turnStartedAt = null;
+      live.turnId = null;
+      activity.meaningful = true;
+      activity.at = Math.max(activity.at ?? 0, time);
+      activity.terminal = true;
+      activity.endedTurnId = turnId;
+      stored++;
+    }
+  } catch (error) {
+    if (isRecordingDisabledError(error)) {
+      // A rejected post-loop synthetic write must never erase a completed original row.
+      // Failed Off still rejects to the bridge's existing idempotent retry path.
+      const attemptedOff = pendingRecordingOffDecision();
+      if ((attemptedOff && await attemptedOff.settled) || !recordingEnabled() ||
+          getRecordingRevision() !== recordingRevision) return committedPrefix();
+    }
+    throw error;
   }
   if (recoveredGoalSeen && live) live.lastTurnOutcome = 'completed';
   notifyChanged();
-  return { sessionId, stored, activity, goalCandidates };
+  const presentationOnly = stored > 0 && richStored === stored && committedObservations.length === 0;
+  return { sessionId, stored, activity, goalCandidates,
+    // Preserve ordinary replay semantics while excluding even a valid rich-only row
+    // from downstream work. A mixed unchanged-prose replay storing only rich is also
+    // presentation-only; no phantom authored row gets downstream authority.
+    committedObservations: presentationOnly ? [] : observations.filter(item => !isPresentationOnly(item)),
+    remainderSuppressed: optionalRichSuppressed,
+    ...(presentationOnly ? { presentationOnly: true } : {}),
+    ...(workerActivationProved ? { workerActivationProved: true as const } : {}) };
 }
 
 /** Records something the app itself decided, e.g. a saved handoff. */

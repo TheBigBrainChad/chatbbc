@@ -259,6 +259,7 @@ interface TurnEvidence {
     createTime?: number | null;
     rawText: string;
     renderedHtml: string;
+    richRoot?: boolean;
   }>;
   activities?: Array<{ messageId: string; label: string; order: number }>;
   thoughtNotifications?: Array<{ messageId: string; kind: 'thought_notification' }>;
@@ -280,6 +281,10 @@ interface TurnFixture {
   messages: Message[];
   /** A visible `.markdown` block: its text, or markup when the test is about the markup. */
   rendered?: Array<string | { html: string; nativeId?: string; fiberProps?: Record<string, unknown>; fiber?: Fiber; staleMessageStamp?: string }>;
+  rich?: Array<{ providerId: string; fiberMessageId?: string; fiberConversationId?: string; duplicate?: boolean }>;
+  forbidBroadRichSelectors?: boolean;
+  auditExactRichSelector?: string;
+  repeatedExactRichRows?: number;
   activities?: Array<{ label: string; fiber: Fiber; staleThoughtStamp?: string }>;
   images?: Array<{ assetId: string; clones?: number }>;
   staleStamp?: string;
@@ -300,6 +305,8 @@ async function scan(
   messageStamps: Array<string | null>;
   thoughtStamps: Array<string | null>;
   imageStamps: Array<string | null>;
+  richStamps: Array<string | null>;
+  exactRichSelectorQueries: number;
   repeatedStampMutations: number;
   turns: TurnEvidence[];
 }> {
@@ -320,10 +327,49 @@ async function scan(
       if (turn.rect === 'throw') throw new Error('unavailable geometry');
       return turn.rect as DOMRect;
     };
-    (section as unknown as Record<string, unknown>)['__reactFiber$qlrmvxwbkkq'] = turnNode(
+    const sectionFiber = turnNode(
       turn.messages,
       turn.conversationProps
     );
+    (section as unknown as Record<string, unknown>)['__reactFiber$qlrmvxwbkkq'] = sectionFiber;
+    for (const entry of turn.rich ?? []) {
+      const copies = entry.duplicate ? 2 : 1;
+      for (let copy = 0; copy < copies; copy++) {
+        const row = document.createElement('div');
+        row.setAttribute('data-message-id', entry.providerId);
+        row.setAttribute('data-message-author-role', 'assistant');
+        const root = document.createElement('div');
+        root.className = 'observed_DilResponseRoot';
+        root.setAttribute('data-clf-fiber-rich', 'old-frame:0:wrong');
+        (root as unknown as Record<string, unknown>)['__reactFiber$qlrmvxwbkkq'] = {
+          memoizedProps: { messageId: entry.fiberMessageId ?? entry.providerId,
+            conversationId: entry.fiberConversationId ?? THREAD }, return: sectionFiber
+        };
+        const surface = document.createElement('div');
+        surface.className = 'puik-root not-prose not-markdown';
+        surface.innerHTML = '<div data-d-component="grid"><button data-d-component="pressable">Forest<img alt="Forest image"></button><button data-d-component="pressable">Coast<img alt="Coast image"></button><button data-d-component="button" disabled>Continue</button></div>';
+        root.append(surface); row.append(root); section.append(row);
+        if (turn.forbidBroadRichSelectors) {
+          const query = row.querySelectorAll.bind(row);
+          row.querySelectorAll = ((selector: string) => {
+            if (selector === '.puik-root.not-prose.not-markdown') throw new Error('unbounded root selector');
+            return query(selector);
+          }) as typeof row.querySelectorAll;
+        }
+      }
+    }
+    if (turn.repeatedExactRichRows && turn.rich?.[0]) {
+      // The 1,025 hostile duplicates need not contain a DIL renderer: duplicate
+      // assistant UUID ownership alone must veto the one otherwise-valid root.
+      const duplicates = document.createDocumentFragment();
+      for (let copy = 0; copy < turn.repeatedExactRichRows; copy++) {
+        const row = document.createElement('div');
+        row.setAttribute('data-message-author-role', 'assistant');
+        row.setAttribute('data-message-id', turn.rich[0].providerId);
+        duplicates.append(row);
+      }
+      section.append(duplicates);
+    }
     for (const entry of turn.rendered ?? []) {
       const block = document.createElement('div');
       block.className = 'markdown';
@@ -369,6 +415,20 @@ async function scan(
     return row;
   });
 
+  let exactRichSelectorQueries = 0;
+  if (turnSections.some(turn => turn.forbidBroadRichSelectors || turn.auditExactRichSelector)) {
+    const query = document.querySelectorAll.bind(document);
+    document.querySelectorAll = ((selector: string) => {
+      if (selector === '[data-message-author-role="assistant"][data-message-id]') {
+        throw new Error('unbounded assistant selector');
+      }
+      if (turnSections.some(turn => turn.auditExactRichSelector &&
+          selector === `[data-message-author-role="assistant"][data-message-id="${turn.auditExactRichSelector}"]`)) {
+        exactRichSelectorQueries++;
+      }
+      return query(selector);
+    }) as typeof document.querySelectorAll;
+  }
   window.eval(source);
 
   const nonce = 'test-nonce';
@@ -404,6 +464,8 @@ async function scan(
     .map(node => node.getAttribute('data-clf-fiber-thought'));
   const imageStamps = [...document.querySelectorAll('.group\\/imagegen-image img')]
     .map(node => node.getAttribute('data-clf-fiber-image'));
+  const richStamps = [...document.querySelectorAll('.puik-root.not-prose.not-markdown')]
+    .map(node => node.parentElement?.getAttribute('data-clf-fiber-rich') ?? null);
   const turnStamps = [...document.querySelectorAll('[data-testid^="conversation-turn-"]')].map((section) =>
     section.getAttribute('data-clf-fiber-turn')
   );
@@ -417,6 +479,8 @@ async function scan(
     messageStamps,
     thoughtStamps,
     imageStamps,
+    richStamps,
+    exactRichSelectorQueries,
     repeatedStampMutations,
     turns: (data.turns ?? []) as TurnEvidence[]
   };
@@ -779,6 +843,67 @@ describe('the calls a turn says it made', () => {
         renderedHtml: ''
       }
     ]);
+  });
+
+  it.each(['exact', 'wrong-provider', 'wrong-conversation', 'duplicate-root', 'duplicate-model'])('stamps only one corroborated DIL response owner (%s)', async mode => {
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const other = '3150f756-bf2d-45fa-ac0f-45010b2239fc';
+    const message = authored(provider, 'Which scene?', {
+      workingTurnId: 'working', turnExchangeId: 'exchange', createTime: 1789552000,
+      status: 'finished_successfully', channel: 'final'
+    });
+    const twin = authored(other, 'Another Continue', { channel: 'final' });
+    const result = await scan([], [{ id: 'rich-turn', messages: [message, twin,
+      ...(mode === 'duplicate-model' ? [message] : [])], conversationProps: { conversationId: THREAD },
+    rich: [{ providerId: provider, ...(mode === 'wrong-provider' ? { fiberMessageId: other } : {}),
+      ...(mode === 'wrong-conversation' ? { fiberConversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' } : {}),
+      ...(mode === 'duplicate-root' ? { duplicate: true } : {}) }] },
+    { id: 'other-turn', messages: [authored('other-assistant', 'Continue')],
+      rendered: [{ html: '<pre><code>&lt;text&gt;Continue&lt;/text&gt;</code></pre>', nativeId: 'other-assistant' }] }]);
+    const match = mode === 'exact';
+    const found = result.turns[0]?.messages.find(row => row.rawMessageId === provider);
+    expect(found?.messageId).toBe('assistant:working:exchange:1789552000000');
+    expect(found?.richRoot).toBe(match ? true : undefined);
+    expect(result.richStamps).toEqual(Array.from({ length: mode === 'duplicate-root' ? 2 : 1 }, () =>
+      match ? `${result.scanToken}:0:${encodeURIComponent(found!.messageId)}:${provider}` : null));
+    expect(result.turns[1]?.messages[0]?.richRoot).toBeUndefined();
+  });
+
+  it.each(['exact', 'missing-root'])('keeps zero-prose nonterminal assistant only with a unique exact rich root (%s)', async mode => {
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const silent = authored(provider, '', { workingTurnId: 'working', turnExchangeId: 'exchange',
+      createTime: 1789552000, status: 'in_progress', endTurn: false, channel: 'final' });
+    const ordinaryEmpty = authored('3150f756-bf2d-45fa-ac0f-45010b2239fc', '',
+      { status: 'in_progress', endTurn: false, channel: 'final' });
+    const result = await scan([], [{ id: 'zero-prose-turn', messages: [silent, ordinaryEmpty],
+      conversationProps: { conversationId: THREAD },
+      ...(mode === 'exact' ? { rich: [{ providerId: provider }] } : {}) }]);
+    expect(result.turns.flatMap(turn => turn.messages)).toEqual(mode === 'exact'
+      ? [expect.objectContaining({ messageId: 'assistant:working:exchange:1789552000000',
+        rawMessageId: provider, rawText: '', richRoot: true })] : []);
+    expect(result.richStamps).toEqual(mode === 'exact'
+      ? [`${result.scanToken}:0:assistant%3Aworking%3Aexchange%3A1789552000000:${provider}`] : []);
+  });
+
+  it('does not enumerate broad assistant/root selectors before admitting a uniquely owned DIL surface', async () => {
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const result = await scan([], [{ id: 'bounded-rich-selectors',
+      messages: [authored(provider, 'Visible', { channel: 'final' })],
+      conversationProps: { conversationId: THREAD }, rich: [{ providerId: provider }],
+      forbidBroadRichSelectors: true }]);
+    expect(result.turns[0]?.messages[0]?.richRoot).toBe(true);
+    expect(result.richStamps).toEqual([`${result.scanToken}:0:${provider}:${provider}`]);
+  });
+
+  it.each([0, 1025])('refuses %i duplicate exact assistant UUID rows without allocating a matching static NodeList', async duplicates => {
+    const provider = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const result = await scan([], [{ id: 'duplicate-rich-uuid',
+      messages: [authored(provider, 'Visible', { channel: 'final' })],
+      conversationProps: { conversationId: THREAD }, rich: [{ providerId: provider }],
+      repeatedExactRichRows: duplicates, auditExactRichSelector: provider }]);
+    expect(result.exactRichSelectorQueries).toBe(0);
+    expect(result.turns[0]?.messages[0]?.richRoot).toBe(duplicates ? undefined : true);
+    expect(result.richStamps[0]).toBe(duplicates ? null : `${result.scanToken}:0:${provider}:${provider}`);
   });
 
   it.each(['native', 'scoped', 'foreign', 'unknown', 'text-only', 'duplicate'])('stamps only exact current native message anchors (%s)', async mode => {
@@ -1154,6 +1279,51 @@ describe('the calls a turn says it made', () => {
     expect(result.imageStamps.every(stamp => stamp?.startsWith(`${result.scanToken}:0:`))).toBe(true);
     expect(result.imageStamps[0]).toContain(encodeURIComponent('file_00000000000000000000000000000001'));
     expect(result.imageStamps[6]).toContain(encodeURIComponent('file_00000000000000000000000000000002'));
+  });
+
+  it.each([
+    { name: 'public tool final', role: 'tool', channel: 'final', recipient: 'all', expected: true },
+    { name: 'public assistant final', role: 'assistant', channel: 'final', recipient: 'all', expected: true },
+    { name: 'user upload', role: 'user', channel: 'final', recipient: 'all', expected: false },
+    { name: 'private assistant analysis', role: 'assistant', channel: 'analysis', recipient: 'all', expected: false },
+    { name: 'private tool analysis', role: 'tool', channel: 'analysis', recipient: 'all', expected: false },
+    { name: 'wrong recipient', role: 'tool', channel: 'final', recipient: 'image_gen', expected: false },
+    { name: 'hidden public tool', role: 'tool', channel: 'final', recipient: 'all', hidden: true, expected: false },
+    { name: 'nonfinal commentary', role: 'tool', channel: 'commentary', recipient: 'all', expected: false }
+  ])('keeps exact generated-image ownership rules for $name', async ({ name, role, channel, recipient, hidden, expected }) => {
+    const messageId = '8150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const assetId = 'file_00000000000000000000000000000004';
+    const message: Message = {
+      id: messageId,
+      author: { role }, recipient, channel, status: 'finished_successfully',
+      content: { content_type: 'multimodal_text', parts: [
+        { content_type: 'image_asset_pointer', asset_pointer: `sediment://${assetId}`, width: 1024, height: 768 },
+        ...(role === 'user' ? ['Inspect this image.'] : [])
+      ] },
+      ...(hidden ? { metadata: { is_visually_hidden_from_conversation: true, private_field: 'secret-hidden' } } : {}),
+      ...(role === 'user' ? { metadata: { attachments: [{ id: 'original-upload', name: 'upload.png',
+        size: 123, mime_type: 'image/png', library_file_id: 'secret-library-id', source: 'secret-source' }] } } : {})
+    };
+    const result = await scan([], [{ id: `exact-image-${name}`, messages: [message], images: [{ assetId }] }]);
+    expect(result.imageStamps).toHaveLength(1);
+    if (expected) {
+      expect(result.turns[0]?.images).toEqual([expect.objectContaining({
+        messageId, assetId, providerRole: role, providerChannel: 'final', providerStatus: 'finished_successfully',
+        order: 0, partOrder: 0, width: 1024, height: 768
+      })]);
+      expect(result.imageStamps[0]).toBe(`${result.scanToken}:0:${encodeURIComponent(messageId)}:${encodeURIComponent(assetId)}`);
+      expect(result.turns[0]?.messages ?? []).toEqual([]);
+    } else {
+      expect(result.turns[0]?.images ?? []).toEqual([]);
+      expect(result.imageStamps).toEqual([null]);
+      expect(JSON.stringify(result.turns)).not.toMatch(/sediment:\/\/|secret-library-id|secret-source|secret-hidden/);
+    }
+    if (role === 'user') {
+      expect(result.turns[0]?.messages).toEqual([expect.objectContaining({
+        messageId, role: 'user', rawText: 'Inspect this image.',
+        attachments: [{ id: 'original-upload', name: 'upload.png', size: 123, mimeType: 'image/png' }]
+      })]);
+    }
   });
 
   it('keeps generated-image metadata but refuses an ambiguous pixel node and private messages', async () => {
