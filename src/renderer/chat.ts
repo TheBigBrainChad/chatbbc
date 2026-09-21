@@ -10,6 +10,7 @@ import { safeExternalLink } from '../shared/external-link.js';
 import { createAgentPanel } from './agent-panel.js';
 import { createFilePanel } from './file-panel.js';
 import { createWorkPanel } from './work-panel.js';
+import { presentationStore } from './presentation-store.js';
 import { renderAgentPlan } from './agent-plan.js';
 import { userPromptText } from '../shared/user-prompt.js';
 import { messageReaction, withoutMessageReaction } from '../shared/message-reaction.js';
@@ -139,7 +140,26 @@ let workspaceTerminal: ReturnType<typeof createWorkspaceTerminal> | null = null;
 
 let sidebarOrder: ReturnType<typeof createSidebarOrder> | undefined;
 function draftKey(): string { return selectedId ?? (selectedProjectId ? `project:${selectedProjectId}` : 'new'); }
-let selectionGeneration = 0;
+let selectionGeneration = presentationStore.getState().selectionGeneration;
+function advanceSelectionGeneration(): void {
+  presentationStore.dispatch({ type: 'selectionGenerationAdvanced' });
+  selectionGeneration = presentationStore.getState().selectionGeneration;
+}
+function publishSelectedSession(sessionId: string | null): void {
+  presentationStore.dispatch({
+    type: 'sessionSelected',
+    sessionId,
+    generation: presentationStore.getState().selectionGeneration
+  });
+  selectedId = presentationStore.getState().selectedSessionId;
+  syncDraftKey();
+}
+function syncDraftKey(): void {
+  const draft = presentationStore.getState().draft;
+  const key = draftKey();
+  if (draft.key === key) return;
+  presentationStore.dispatch({ type: 'draftOwnerChanged', key, generation: draft.generation });
+}
 let selectionReportSequence = 0;
 let reportedSessionId: string | null = null;
 let acknowledgedUiSelection: { sessionId: string | null; rendererGeneration: number; generation: number } | null = null;
@@ -162,13 +182,22 @@ function reportVisibleSelection(force = false): void {
 // Async file import belongs to one visible composer draft, not just to a session key.
 // Replacing that draft retires in-flight imports even when navigation returns to the
 // same key or a send failure later restores the submitted text.
-let composerDraftGeneration = 0;
 type ComposerDraftOwner = { key: string; generation: number };
-function composerDraftOwner(): ComposerDraftOwner { return { key: draftKey(), generation: composerDraftGeneration }; }
-function ownsComposerDraft(owner: ComposerDraftOwner): boolean {
-  return owner.key === draftKey() && owner.generation === composerDraftGeneration;
+function composerDraftOwner(): ComposerDraftOwner {
+  return { key: draftKey(), generation: presentationStore.getState().draft.generation };
 }
-function replaceComposerDraft(): void { composerDraftGeneration++; skillPicker?.close(); }
+function ownsComposerDraft(owner: ComposerDraftOwner): boolean {
+  const draft = presentationStore.getState().draft;
+  return owner.key === draftKey() && owner.generation === draft.generation;
+}
+function replaceComposerDraft(): void {
+  presentationStore.dispatch({
+    type: 'draftOwnerChanged',
+    key: draftKey(),
+    generation: presentationStore.getState().draft.generation + 1
+  });
+  skillPicker?.close();
+}
 let pendingNewInput: { id: string; generation: number } | null = null;
 let agentPanel: ReturnType<typeof createAgentPanel> | null = null;
 let filePanel: ReturnType<typeof createFilePanel> | null = null;
@@ -262,9 +291,9 @@ async function toggleSessionBlock(id: string, blocked: boolean): Promise<void> {
 function clearSelectedSession(): void {
   retireRichImageViewer();
   rememberDraft();
-  selectionGeneration++;
+  advanceSelectionGeneration();
   replaceComposerDraft();
-  selectedId = null;
+  publishSelectedSession(null);
   newChatSelected = true;
   pendingNewInput = null;
   events = [];
@@ -3147,11 +3176,11 @@ function selectSession(id: string): void {
   retireRichImageViewer();
   const ownerChanged = id !== selectedId;
   rememberDraft();
-  selectionGeneration++; replaceComposerDraft();
+  advanceSelectionGeneration(); replaceComposerDraft();
   inputQueueGeneration++;
   $('finishQueue').replaceChildren(); $('finishQueue').hidden = true;
   newChatSelected = false;
-  selectedId = id;
+  publishSelectedSession(id);
   reportVisibleSelection(true);
   const selected = sessions.find(row => row.id === id);
   applyComposerSessionModel(`${id}:${selectionGeneration}`, composerSessionSelection(selected) ?? null);
@@ -3187,10 +3216,10 @@ function selectSession(id: string): void {
 
 function selectNewChat(projectId: string | null = null): void {
   retireRichImageViewer();
-  rememberDraft(); selectionGeneration++; replaceComposerDraft(); pendingNewInput = null;
+  rememberDraft(); advanceSelectionGeneration(); replaceComposerDraft(); pendingNewInput = null;
   inputQueueGeneration++;
   $('finishQueue').replaceChildren(); $('finishQueue').hidden = true;
-  newChatSelected = true; selectedId = null; selectedProjectId = projectId; detailFor = null; detailCursor = null;
+  newChatSelected = true; publishSelectedSession(null); selectedProjectId = projectId; syncDraftKey(); detailFor = null; detailCursor = null;
   reportVisibleSelection(true);
   if (projectId) expandedProjects.add(projectId);
   applyComposerSessionModel(null, null);
@@ -3353,7 +3382,7 @@ async function removeProject(id: string): Promise<void> {
     if (!selectedId) {
       const oldKey = draftKey();
       const authoredDraft = authoredComposerText();
-      selectedProjectId = null; selectionGeneration++; replaceComposerDraft();
+      selectedProjectId = null; advanceSelectionGeneration(); replaceComposerDraft();
       reportVisibleSelection(true);
       // Keep the visible draft and its attachments while moving to unfiled.
       inputDrafts.set(draftKey(), authoredDraft); inputDrafts.delete(oldKey); newChatTasks.delete(oldKey);
@@ -3388,7 +3417,10 @@ export function initChat(next: Deps): void {
   const agentToolGroups = new Map<string, HTMLDetailsElement>();
   const workHost = document.querySelector<HTMLElement>('[data-panel="chat"]')!;
   // The column is created before its tenants so it owns the host from the start.
-  const work = workPanel = createWorkPanel({ host: workHost });
+  const work = workPanel = createWorkPanel({
+    host: workHost,
+    onChange: presentation => presentationStore.dispatch({ type: 'workbenchChanged', open: presentation.open, tab: presentation.tab })
+  });
   agentPanel = createAgentPanel({
     host: workHost, toggle: agentToggle,
     onShow: () => filePanel?.hide(),
@@ -3590,7 +3622,7 @@ export function initChat(next: Deps): void {
   });
   skillPicker = initSkills({ input: $<HTMLTextAreaElement>('chatInput'), host: $('skillPicker'),
     openButton: $('composerSkills'), addButton: $('composerAddSkill'),
-    selectedHost: $('composerSelectedSkills'), owner: () => `${draftKey()}:${composerDraftGeneration}`,
+    selectedHost: $('composerSelectedSkills'), owner: () => `${draftKey()}:${presentationStore.getState().draft.generation}`,
     scope: () => ({ sessionId: selectedId, projectId: selectedLocalProject(sessionHost)?.id ?? selectedProjectId }),
     draft: () => inputDrafts.get(draftKey()), saveDraft: text => inputDrafts.set(draftKey(), text),
     list: scope => api.skillLibrary(scope), command: name => {

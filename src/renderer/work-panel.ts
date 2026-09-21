@@ -49,8 +49,11 @@ const LABEL: Readonly<Record<WorkTab, () => string>> = {
  * survive one. The width is not the strip's business either: `work-panel-resize.ts` stays the one
  * owner of `--work-panel-width`, and the terminal asks it for the column's maximum while selected.
  */
-export function createWorkPanel(options: { host: HTMLElement }): WorkPanel {
-  const { host } = options;
+export function createWorkPanel(options: {
+  host: HTMLElement;
+  onChange?: (presentation: { open: boolean; tab: WorkTab | null }) => void;
+}): WorkPanel {
+  const { host, onChange } = options;
   const panel = el('section', 'work-panel'); panel.id = 'workPanel'; panel.hidden = true;
   const strip = el('div', 'work-panel-tabs'); strip.setAttribute('role', 'tablist');
   const body = el('div', 'work-panel-body'); body.id = 'workPanelBody';
@@ -100,6 +103,7 @@ export function createWorkPanel(options: { host: HTMLElement }): WorkPanel {
     }
     panel.hidden = next === null;
     host.classList.toggle('has-work-panel', next !== null);
+    onChange?.({ open: next !== null, tab: next });
     for (const [tab, button] of buttons) {
       const selected = tab === next;
       button.classList.toggle('is-sel', selected);

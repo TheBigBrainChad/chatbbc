@@ -7,6 +7,7 @@ import { initBrowserPreferences } from './browser-preferences.js';
 import { initConnectionAdvanced } from './connection-popover.js';
 import { initSetupGuide } from './setup-guide.js';
 import { initAppearance } from './appearance.js';
+import { presentationStore } from './presentation-store.js';
 import { initPet } from './pet.js';
 import type { AppearanceSettings } from '../shared/appearance.js';
 /**
@@ -1002,10 +1003,14 @@ function paintSetupFields(): void {
 
 function apply(next: AppState): void {
   // An older key/status response must not restore a profile retired by a newer switch.
-  if ((next.config.tunnel.profileEpoch ?? 0) < (state?.config.tunnel.profileEpoch ?? 0)) return;
+  const acceptedEpoch = presentationStore.getState().app?.config.tunnel.profileEpoch ?? 0;
+  if ((next.config.tunnel.profileEpoch ?? 0) < acceptedEpoch) return;
+  const generation = presentationStore.getState().appGeneration + 1;
+  presentationStore.dispatch({ type: 'appStateReceived', generation, state: next });
+  if (presentationStore.getState().app !== next) return;
   applyPluginsState(next);
   const previousState = state;
-  state = next;
+  state = presentationStore.getState().app;
   applying = true;
   const { config, status } = next;
 
