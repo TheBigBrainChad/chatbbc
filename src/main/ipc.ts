@@ -421,7 +421,7 @@ function handle<T>(channel: string, fn: (payload: unknown) => Promise<T>): void 
   });
 }
 
-export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall: () => void): void {
+export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall: () => void): () => void {
   registerWorkspaceTerminalIpc(getWindow);
   const uiSelection = registerUiSelection(getWindow);
   // This channel must keep Electron's actual event: the ordinary handle() discards sender proof.
@@ -1405,7 +1405,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   };
   onStatusChange(pushState);
   onBridgeChange(pushState);
-  onOmarchyThemeChange(pushState);
+  const stopOmarchyStatePush = onOmarchyThemeChange(pushState);
   // Draft stages belong to session controls; state:changed only refreshes settings.
   onGoalChange(() => push('session:changed'));
   handle('tasks:cancel', async payload => cancelTaskRequest(z.object({ requestId: z.string().uuid() }).parse(payload).requestId));
@@ -1434,4 +1434,5 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   onLog((entry) => push('log:entry', entry));
   onSessionChange(() => push('session:changed'));
   onSwarmChange(() => push('swarm:changed', swarmState()));
+  return stopOmarchyStatePush;
 }

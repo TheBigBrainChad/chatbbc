@@ -101,6 +101,7 @@ let shutdownComplete = false;
 const usageWarmup = new AbortController();
 let stopOmarchyObservation: (() => void) | null = null;
 let stopOmarchyChromeSync: (() => void) | null = null;
+let stopIpcThemePublication: (() => void) | null = null;
 
 // One instance only: two copies would fight over the tunnel and the config file.
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -463,7 +464,7 @@ void app.whenReady().then(async () => {
   // The same quit the tray's Quit performs. It has to go through `quitting` for the window's
   // close-to-tray handler to let go: without it, quitting to install would hide the window and
   // leave the app running, which is exactly the trap the Install button exists to end.
-  registerIpc(
+  stopIpcThemePublication = registerIpc(
     () => window,
     () => {
       quitting = true;
@@ -537,6 +538,8 @@ app.on('will-quit', (event) => {
   stopInputStartup();
   tray?.destroy();
   tray = null;
+  stopIpcThemePublication?.();
+  stopIpcThemePublication = null;
   stopOmarchyChromeSync?.();
   stopOmarchyChromeSync = null;
   stopOmarchyObservation?.();

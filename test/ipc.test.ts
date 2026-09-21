@@ -12,6 +12,7 @@ import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { RichActionRecord } from '../src/main/rich-actions.js';
+import { retryOmarchyThemeObservation, startOmarchyThemeObservation } from '../src/main/omarchy-theme.js';
 
 type Handler = (event: unknown, payload: unknown) => Promise<unknown>;
 const handlers = new Map<string, Handler>();
@@ -2090,6 +2091,38 @@ describe('session IPC contracts', () => {
   });
 });
 
+
+describe('IPC state publication lifetime', () => {
+  it('stops theme-driven state pushes when the main IPC lifetime is disposed', async () => {
+    const home = path.join(dir, 'omarchy-ipc-lifetime');
+    const theme = path.join(home, '.local/state/omarchy/current/theme');
+    await fs.mkdir(theme, { recursive: true });
+    await fs.writeFile(path.join(theme, 'colors.toml'), 'background = "#111c18"\naccent = "#509475"\n');
+    await fs.writeFile(path.join(home, '.local/state/omarchy/current/theme.name'), 'Before');
+    const sent = vi.fn();
+    const dispose = registerIpc(
+      () => ({ isDestroyed: () => false, webContents: { send: sent } }) as never,
+      () => {}
+    ) as unknown as (() => void) | undefined;
+    const stop = startOmarchyThemeObservation({ home });
+    try {
+      await fs.writeFile(path.join(theme, 'colors.toml'), 'background = "#202128"\naccent = "#8e79d6"\n');
+      retryOmarchyThemeObservation();
+      await vi.waitFor(() => expect(sent).toHaveBeenCalledWith('state:changed', expect.anything()));
+      expect(dispose).toBeTypeOf('function');
+      dispose!();
+      sent.mockClear();
+
+      await fs.writeFile(path.join(theme, 'colors.toml'), 'background = "#303138"\naccent = "#a98df4"\n');
+      retryOmarchyThemeObservation();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(sent).not.toHaveBeenCalled();
+    } finally {
+      if (typeof dispose === 'function') dispose();
+      stop();
+    }
+  });
+});
 describe('renderer pushes after the window is gone', () => {
   it('does not touch a destroyed BrowserWindow, whose members all throw', async () => {
     // Electron keeps the object after the window is destroyed, so the existing `?.` on

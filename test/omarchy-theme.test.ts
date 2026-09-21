@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, statSync } from 'node:fs';
 import type { FSWatcher } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -110,22 +110,64 @@ describe('readOmarchyTheme', () => {
 
 type WatchFactory = (directory: string, listener: () => void) => FSWatcher;
 
-function controlledWatch(): { factory: WatchFactory; emit(directory: string): void } {
-  const active = new Map<string, Set<() => void>>();
+interface ControlledWatch {
+  factory: WatchFactory;
+  emit(directory: string): void;
+  fail(directory: string): void;
+}
+
+function directoryIdentity(directory: string): string | null {
+  try {
+    const stat = statSync(directory);
+    return `${stat.dev}:${stat.ino}`;
+  } catch {
+    return null;
+  }
+}
+
+function controlledWatch(): ControlledWatch {
+  interface Entry {
+    listener: () => void;
+    identity: string | null;
+    error: ((error: Error) => void) | null;
+    watcher: FSWatcher;
+  }
+  const active = new Map<string, Set<Entry>>();
   return {
     factory(directory, listener) {
-      let listeners = active.get(directory);
-      if (!listeners) active.set(directory, listeners = new Set());
-      listeners.add(listener);
-      return {
+      let entries = active.get(directory);
+      if (!entries) active.set(directory, entries = new Set());
+      const entry: Entry = {
+        listener,
+        identity: directoryIdentity(directory),
+        error: null,
+        watcher: null as unknown as FSWatcher
+      };
+      const watcher = {
         close: () => {
-          listeners!.delete(listener);
-          if (listeners!.size === 0) active.delete(directory);
+          entries!.delete(entry);
+          if (entries!.size === 0) active.delete(directory);
         }
       } as FSWatcher;
+      watcher.on = ((event: string, callback: (error: Error) => void) => {
+        if (event === 'error') entry.error = callback;
+        return watcher;
+      }) as FSWatcher['on'];
+      entry.watcher = watcher;
+      entries.add(entry);
+      return watcher;
     },
     emit(directory) {
-      for (const listener of [...active.get(directory) ?? []]) listener();
+      const identity = directoryIdentity(directory);
+      for (const entry of [...active.get(directory) ?? []]) {
+        if (entry.identity === identity) entry.listener();
+      }
+    },
+    fail(directory) {
+      for (const entry of [...active.get(directory) ?? []]) {
+        entry.watcher.close();
+        entry.error?.(new Error('watch failed'));
+      }
     }
   };
 }
@@ -191,6 +233,53 @@ describe('live Omarchy theme observation', () => {
       theme: { name: 'Crystal Test', background: '#101218', accent: '#b99aff' },
       diagnostic: null
     });
+  });
+
+  it('re-arms the child watcher when the watched theme directory is atomically replaced', async () => {
+    vi.useFakeTimers();
+    const home = await themeDir(OSAKA);
+    const watched = controlledWatch();
+    const changes: OmarchyThemeState[] = [];
+    observationStops.push(startOmarchyThemeObservation({
+      home, debounceMs: 40, onChange: state => changes.push(state), watchFactory: watched.factory
+    }));
+    const current = path.join(home, '.local/state/omarchy/current');
+    const theme = path.join(current, 'theme');
+    await fs.rename(theme, `${theme}.old`);
+    await fs.mkdir(theme);
+    await fs.writeFile(path.join(theme, 'colors.toml'), 'background = "#202128"\naccent = "#8e79d6"\n');
+    await fs.writeFile(path.join(current, 'theme.name'), 'Replacement');
+    watched.emit(current);
+    await vi.advanceTimersByTimeAsync(40);
+    expect(currentOmarchyThemeState()).toMatchObject({ generation: 2, theme: { name: 'Replacement' } });
+
+    await fs.writeFile(path.join(theme, 'colors.toml'), 'background = "#303138"\naccent = "#a98df4"\n');
+    watched.emit(theme);
+    await vi.advanceTimersByTimeAsync(40);
+    expect(currentOmarchyThemeState()).toMatchObject({ generation: 3, theme: { background: '#303138' } });
+    expect(changes.map(change => change.generation)).toEqual([2, 3]);
+  });
+
+  it('re-arms a watcher that reports an error before later theme changes', async () => {
+    vi.useFakeTimers();
+    const home = await themeDir(OSAKA);
+    const watched = controlledWatch();
+    const changes: OmarchyThemeState[] = [];
+    observationStops.push(startOmarchyThemeObservation({
+      home, debounceMs: 40, onChange: state => changes.push(state), watchFactory: watched.factory
+    }));
+    const current = path.join(home, '.local/state/omarchy/current');
+    const theme = path.join(current, 'theme');
+    await replaceThemeFiles(home, { name: 'After error', background: '#202128', accent: '#8e79d6' });
+    watched.fail(theme);
+    await vi.advanceTimersByTimeAsync(40);
+    expect(currentOmarchyThemeState()).toMatchObject({ generation: 2, theme: { name: 'After error' } });
+
+    await replaceThemeFiles(home, { name: 'Still live', background: '#303138', accent: '#a98df4' });
+    watched.emit(theme);
+    await vi.advanceTimersByTimeAsync(40);
+    expect(currentOmarchyThemeState()).toMatchObject({ generation: 3, theme: { name: 'Still live' } });
+    expect(changes.map(change => change.generation)).toEqual([2, 3]);
   });
 
   it('retains the last valid theme through a transient missing file', async () => {

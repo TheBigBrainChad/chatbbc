@@ -133,8 +133,22 @@ function existingDirectory(candidate: string, floor: string): string | null {
   }
 }
 
+function directoryIdentity(directory: string): string | null {
+  try {
+    const stat = statSync(directory, { throwIfNoEntry: false });
+    return stat?.isDirectory() ? `${stat.dev}:${stat.ino}` : null;
+  } catch {
+    return null;
+  }
+}
+
+interface WatchedDirectory {
+  watcher: FSWatcher;
+  identity: string;
+}
+
 class OmarchyThemeObservation {
-  private readonly watchers = new Map<string, FSWatcher>();
+  private readonly watchers = new Map<string, WatchedDirectory>();
   private timer: NodeJS.Timeout | undefined;
   private stopped = false;
 
@@ -158,7 +172,7 @@ class OmarchyThemeObservation {
     this.stopped = true;
     clearTimeout(this.timer);
     this.timer = undefined;
-    for (const watcher of this.watchers.values()) watcher.close();
+    for (const watched of this.watchers.values()) watched.watcher.close();
     this.watchers.clear();
   }
 
@@ -203,19 +217,30 @@ class OmarchyThemeObservation {
     const theme = path.join(current, 'theme');
     const parent = existingDirectory(current, this.home);
     const themeDirectory = existingDirectory(theme, current);
-    const desired = new Set([parent, themeDirectory].filter((entry): entry is string => entry !== null));
+    const desired = new Map<string, string>();
+    for (const directory of [parent, themeDirectory]) {
+      if (directory === null || desired.has(directory)) continue;
+      const identity = directoryIdentity(directory);
+      if (identity !== null) desired.set(directory, identity);
+    }
 
-    for (const [directory, watcher] of this.watchers) {
-      if (desired.has(directory)) continue;
-      watcher.close();
+    for (const [directory, watched] of this.watchers) {
+      if (desired.get(directory) === watched.identity) continue;
+      watched.watcher.close();
       this.watchers.delete(directory);
     }
-    for (const directory of desired) {
+    for (const [directory, identity] of desired) {
       if (this.watchers.has(directory)) continue;
       try {
         const watcher = this.watchFactory(directory, this.schedule);
-        watcher.on?.('error', this.schedule);
-        this.watchers.set(directory, watcher);
+        this.watchers.set(directory, { watcher, identity });
+        watcher.on?.('error', () => {
+          const watched = this.watchers.get(directory);
+          if (watched?.watcher !== watcher) return;
+          watcher.close();
+          this.watchers.delete(directory);
+          this.schedule();
+        });
       } catch {
         // A rename can remove a directory between stat and watch. Its stable parent remains armed.
       }
