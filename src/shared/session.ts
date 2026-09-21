@@ -296,6 +296,10 @@ export type RichMediaState = {
   nodeId: string;
   source: { kind: 'native'; providerMessageId: string; providerAssetId: string }
     | { kind: 'page'; nodeId: string };
+  /** Store-owned PAGE custody only. Raw observations cannot set it. The slot version is
+   * monotonic across rich hydration/rebind/restart; the opaque isolated-world incarnation
+   * and sequence never include or derive a source URL. A version alone means reacquire. */
+  pageSource?: { slotVersion: number; sequence?: number; incarnation?: string; recordingRevision?: number };
   status: 'pending' | 'available' | 'unavailable';
   reason?: 'not_loaded' | 'unsupported' | 'ambiguous' | 'tainted' | 'oversized' | 'invalid' | 'quota' | 'removed';
   previewWidth?: number;
@@ -368,8 +372,13 @@ export type SessionEvent =
       richOrigin?: RichOrigin;
       /** Store-validated exact image-node metadata only; no rich assets until durable all-owner cleanup exists. */
       richMedia?: RichMediaState[];
+      /** Store-owned version floor survives source-slot omission and authored rich reset.
+       * A reappearing slot cannot return to version zero after a prior capture. */
+      richSourceVersionFloor?: number;
       richMediaUnavailable?: 'unsupported';
       retiredRichImageAssetIds?: string[];
+      /** Durable exact media/node removal fence, including while hydration omits the image. */
+      retiredRichMediaSlots?: Array<{ mediaId: string; nodeId: string }>;
       state?: MessageState;
       /** Compatibility mirror for older consumers; equivalent to state === 'final'. */
       final: boolean;

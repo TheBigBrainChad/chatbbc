@@ -381,6 +381,7 @@
 .rich-diagram > .rich-row > * { min-width: 10rem; }
 .rich-image-slot { display: grid; place-items: center; width: min(100%, 32rem); min-height: 6rem; max-height: 17rem;
   padding: 12px; overflow: hidden; border: 1px solid var(--line); background: var(--wash); color: var(--soft); text-align: center; }
+.rich-image-slot > img { display: block; max-width: 100%; max-height: 12rem; object-fit: contain; }
 .rich-image-slot > span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .rich-image-slot > button { max-width: 100%; min-width: 0; padding: 7px 10px; border: 1px solid var(--edge); border-radius: var(--r-sm);
   background: var(--card); color: var(--ink); font: inherit; cursor: pointer; }

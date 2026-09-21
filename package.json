@@ -51,6 +51,7 @@
     "@codemirror/language": "^6.12.4",
     "@codemirror/language-data": "^6.5.2",
     "@codemirror/state": "6.7.4",
+    "@janhapke/sharp-electron": "0.35.4-electron.1",
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
     "@lezer/highlight": "^1.2.3",
     "@modelcontextprotocol/client": "^2.0.0",

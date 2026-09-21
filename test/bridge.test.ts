@@ -10,10 +10,11 @@
 import http from 'node:http';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
-import sharp from 'sharp';
+// Exercise and intercept the exact main-process image backend used by the recorder.
+import sharp from '../src/main/sharp.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { APP_VERSION, BRIDGE_PROTOCOL } from '../src/main/version.js';
 import { userPromptText } from '../src/shared/user-prompt.js';
@@ -405,6 +406,1394 @@ beforeEach(async () => {
 });
 
 describe('rich observations require capture-time Chrome document authority', () => {
+  const richMessage = (conversationId: string, messageId: string, providerMessageId: string, accessibleText = 'Structured choice') => ({
+    version: 1 as const, status: 'available' as const, reason: null,
+    conversationId, messageId, providerMessageId, revision: 999,
+    accessibleText, nodes: [{ id: 'choice-text', kind: 'text' as const, style: 'body' as const, text: accessibleText }]
+  });
+  const richRow = (conversationId: string, messageId: string, providerMessageId: string, rich = richMessage(conversationId, messageId, providerMessageId)) => ({
+    kind: 'assistant_message', time: Date.now(), messageId, providerMessageId,
+    fiberConversationId: conversationId, rich
+  });
+  async function captureFor(conversationId: string, tab = 42, documentId = 'registered-document',
+    documentGeneration = 1, spaEpoch = 0): Promise<Record<string, any>> {
+    const issued = await request('POST', '/rich/capture/begin', { body: {
+      conversationId, tab, documentId, documentGeneration, spaEpoch,
+      recordingGeneration: recordingGenerationGrant()
+    } });
+    expect(issued.status).toBe(200);
+    return issued.body.capture;
+  }
+  const journalReceipt = (capture: Record<string, any>, messageId: string, providerMessageId: string,
+    scanToken = 'scan-for-exact-row') => ({
+    captureId: capture.captureId, scanToken, messageId, providerMessageId,
+    conversationId: capture.conversationId, recordingGeneration: capture.recordingGeneration,
+    tab: 42, documentId: capture.documentId, documentGeneration: capture.documentGeneration,
+    spaEpoch: capture.spaEpoch
+  });
+  async function seededPagePixel(documentId = 'pixel-proven-document', spaEpoch = 2) {
+    const conversationId = randomUUID(), providerMessageId = randomUUID();
+    const messageId = 'assistant:pixel-canonical';
+    const mediaId = 'media-n-0-1', nodeId = 'n-0-1';
+    const session = await createSession({ conversationId });
+    expect((await sessionStoreModule.upsertMessageEvent(session.id, {
+      kind: 'assistant_message', source: 'extension', time: Date.now(), messageId,
+      providerMessageId, message: { text: 'Unaffected authored prose', chars: 25, truncated: false },
+      state: 'final', final: true
+    })).changed).toBe(true);
+    const rich = { version: 1 as const, status: 'available' as const, reason: null,
+      conversationId, messageId, providerMessageId, revision: 0, accessibleText: 'Image',
+      nodes: [{ id: 'n-0', kind: 'group' as const, layout: 'card' as const,
+        children: [{ id: nodeId, mediaId, kind: 'image' as const, alt: 'Image', width: 800, height: 600 }] }] };
+    const origin = { conversationId, bindingRevision: 0, documentId, navigationEpoch: spaEpoch };
+    expect(await sessionStoreModule.upsertRichMessage(session.id, messageId, rich, origin,
+      (await import('../src/main/config.js')).getRecordingRevision(), true)).toBe('stored');
+    const begin = () => request('POST', '/rich/pixel/begin', { body: {
+      conversationId, tab: 42, documentId, documentGeneration: 1, spaEpoch,
+      recordingGeneration: recordingGenerationGrant(), messageId, providerMessageId, mediaId, nodeId
+    } });
+    const issued = await begin();
+    expect(issued.status).toBe(200);
+    const capture: Record<string, any> = issued.body.capture;
+    const identity = { messageId, providerMessageId, mediaId, nodeId };
+    const pixelReceipt = (scanToken: string, sourceIncarnation: string, sourceSequence: number,
+      status: 'pending'|'available'|'unavailable', bytes: Buffer | null = null) => ({
+      captureId: capture.captureId, scanToken, ...identity,
+      rootStamp: `${scanToken}:0:${encodeURIComponent(messageId)}:${encodeURIComponent(providerMessageId)}`,
+      sourceIncarnation, sourceSequence, status, pixelBytes: bytes?.length ?? null,
+      pixelSha256: bytes ? createHash('sha256').update(bytes).digest('hex') : null,
+      conversationId, recordingGeneration: capture.recordingGeneration, tab: 42,
+      documentId, documentGeneration: 1, spaEpoch
+    });
+    const sendPixel = (event: Record<string, unknown>, receipt: unknown) => request('POST', '/events', {
+      body: { conversationId, events: [event], richPixelReceipts: [receipt] }
+    });
+    return { session, conversationId, providerMessageId, messageId, mediaId, nodeId, origin,
+      capture, begin, identity, pixelReceipt, sendPixel };
+  }
+
+  it('publishes only ticket-correlated rich structure on a preexisting exact assistant shard without worker or Goal effects', async () => {
+    await pair();
+    const conversationId = randomUUID(), providerMessageId = randomUUID();
+    const messageId = 'assistant:rich-existing';
+    const session = await createSession({ conversationId });
+    const original = await sessionStoreModule.upsertMessageEvent(session.id, {
+      kind: 'assistant_message', source: 'extension', time: Date.now(), messageId,
+      providerMessageId, message: { text: 'Original prose', chars: 14, truncated: false },
+      state: 'streaming', final: false, turnId: 'original-turn'
+    });
+    const capture = await captureFor(conversationId);
+    const body = { conversationId, events: [richRow(conversationId, messageId, providerMessageId)],
+      richCaptureReceipts: [journalReceipt(capture, messageId, providerMessageId)] };
+    const beforeGoal = await readDurable(GOAL_REPLIES_STATE);
+    const beforeOpened = opened.length;
+    const first = await request('POST', '/events', { body });
+    expect(first).toMatchObject({ status: 200, body: { sessionId: session.id, stored: 1 } });
+    const [saved] = (await readEvents(session.id)).filter(event => event.kind === 'assistant_message');
+    expect(saved).toMatchObject({ messageId, providerMessageId, turnId: 'original-turn',
+      message: { text: 'Original prose' }, origin: original.event.origin, contentSeq: original.event.contentSeq,
+      rich: { accessibleText: 'Structured choice', revision: 1 },
+      richOrigin: { conversationId, bindingRevision: 0, documentId: 'registered-document', navigationEpoch: 0 } });
+    expect((await readEvents(session.id)).filter(event => event.kind === 'assistant_message')).toHaveLength(1);
+    expect(await readDurable(GOAL_REPLIES_STATE)).toEqual(beforeGoal);
+    expect(opened).toHaveLength(beforeOpened);
+    const replay = await request('POST', '/events', { body });
+    expect(replay).toMatchObject({ status: 200, body: { stored: 0 } });
+    expect((await readEvents(session.id)).filter(event => event.kind === 'assistant_message')).toHaveLength(1);
+  });
+
+  it('revokes an admitted structural rich revision when stop begins at its final assistant-shard write barrier', async () => {
+    await pair();
+    const conversationId = randomUUID(), providerMessageId = randomUUID();
+    const messageId = 'assistant:rich-stop-barrier';
+    const session = await createSession({ conversationId });
+    await sessionStoreModule.upsertMessageEvent(session.id, {
+      kind: 'assistant_message', source: 'extension', time: Date.now(), messageId,
+      providerMessageId, message: { text: 'Canonical prose', chars: 15, truncated: false },
+      state: 'streaming', final: false
+    });
+    const capture = await captureFor(conversationId);
+    const originalWrite = fs.writeFile.bind(fs);
+    const gate = faultGate();
+    let intercepted = false;
+    const spy = vi.spyOn(fs, 'writeFile').mockImplementation((async (file, data, options) => {
+      await Reflect.apply(originalWrite, fs, [file, data, options]);
+      if (!intercepted && String(file).includes(`${path.sep}messages${path.sep}`) &&
+          String(file).endsWith('.tmp')) {
+        intercepted = true;
+        await gate.hold();
+      }
+    }) as typeof fs.writeFile);
+    let inFlight: Promise<Reply> | null = null;
+    let stopping: Promise<void> | null = null;
+    try {
+      inFlight = request('POST', '/events', { body: {
+        conversationId, events: [richRow(conversationId, messageId, providerMessageId)],
+        richCaptureReceipts: [journalReceipt(capture, messageId, providerMessageId)]
+      } });
+      await gate.entered;
+      stopping = stopBridge();
+      gate.release();
+      await Promise.allSettled([inFlight, stopping]);
+      expect(intercepted).toBe(true);
+
+      const restarted = await startBridge();
+      expect(restarted).not.toBeNull();
+      base = `http://127.0.0.1:${restarted}`;
+      const saved = (await readEvents(session.id)).find(row => row.kind === 'assistant_message');
+      expect(saved).toMatchObject({ messageId, providerMessageId,
+        message: { text: 'Canonical prose', chars: 15, truncated: false } });
+      expect(saved).not.toHaveProperty('rich');
+    } finally {
+      gate.release();
+      await Promise.allSettled([inFlight, stopping].filter(Boolean));
+      spy.mockRestore();
+      const restarted = await startBridge();
+      if (restarted !== null) base = `http://127.0.0.1:${restarted}`;
+    }
+  });
+
+  it('rechecks structural rich custody after its final canonical predecessor read before rename', async () => {
+    await pair();
+    const conversationId = randomUUID(), providerMessageId = randomUUID();
+    const messageId = 'assistant:rich-stop-final-read';
+    const session = await createSession({ conversationId });
+    await sessionStoreModule.upsertMessageEvent(session.id, {
+      kind: 'assistant_message', source: 'extension', time: Date.now(), messageId,
+      providerMessageId, message: { text: 'Canonical prose', chars: 15, truncated: false },
+      state: 'streaming', final: false
+    });
+    const capture = await captureFor(conversationId);
+    const key = `assistant_message\u0000${messageId}`;
+    const target = path.join(dir, 'sessions', session.id, 'messages',
+      `${createHash('sha256').update(key).digest('hex')}.json`);
+    const originalOpen = fs.open.bind(fs);
+    const originalRename = fs.rename.bind(fs);
+    const gate = faultGate();
+    let targetReads = 0;
+    let targetRenames = 0;
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation((async (file, flags, mode) => {
+      const handle = await originalOpen(file, flags, mode);
+      if (String(file) === target && ++targetReads === 2) await gate.hold();
+      return handle;
+    }) as typeof fs.open);
+    const renameSpy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (String(to) === target) targetRenames += 1;
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    let inFlight: Promise<Reply> | null = null;
+    let stopping: Promise<void> | null = null;
+    try {
+      inFlight = request('POST', '/events', { body: {
+        conversationId, events: [richRow(conversationId, messageId, providerMessageId)],
+        richCaptureReceipts: [journalReceipt(capture, messageId, providerMessageId)]
+      } });
+      await gate.entered;
+      expect(targetReads).toBe(2);
+      expect(targetRenames).toBe(0);
+      expect((await fs.readdir(path.dirname(target)))
+        .filter(name => name.startsWith(`${path.basename(target)}.`) && name.endsWith('.tmp')))
+        .toHaveLength(1);
+
+      stopping = stopBridge();
+      gate.release();
+      await Promise.allSettled([inFlight, stopping]);
+      expect(targetRenames).toBe(0);
+
+      const restarted = await startBridge();
+      expect(restarted).not.toBeNull();
+      base = `http://127.0.0.1:${restarted}`;
+      const saved = (await readEvents(session.id)).find(row => row.kind === 'assistant_message');
+      expect(saved).toMatchObject({ messageId, providerMessageId,
+        message: { text: 'Canonical prose', chars: 15, truncated: false } });
+      expect(saved).not.toHaveProperty('rich');
+    } finally {
+      gate.release();
+      await Promise.allSettled([inFlight, stopping].filter(Boolean));
+      openSpy.mockRestore();
+      renameSpy.mockRestore();
+      const restarted = await startBridge();
+      if (restarted !== null) base = `http://127.0.0.1:${restarted}`;
+    }
+  });
+
+  it('preserves ORIGINAL raw indices across filtered generations and malformed neighbors, without needing sourceCaptures', async () => {
+    await pair();
+    const conversationId = randomUUID(), oldGeneration = 'A'.repeat(43), generation = recordingGenerationGrant();
+    const session = await createSession({ conversationId });
+    const rows = [0, 2].map(index => ({ messageId: `assistant:positional-${index}`, rawId: randomUUID() }));
+    for (const row of rows) await sessionStoreModule.upsertMessageEvent(session.id, {
+      kind: 'assistant_message', source: 'extension', time: Date.now(), messageId: row.messageId,
+      providerMessageId: row.rawId, message: { text: row.messageId, chars: row.messageId.length, truncated: false },
+      state: 'streaming', final: false
+    });
+    const captureA = await captureFor(conversationId);
+    const captureB = await captureFor(conversationId);
+    const events = [richRow(conversationId, rows[0]!.messageId, rows[0]!.rawId),
+      { kind: 'assistant_message', time: Date.now(), messageId: 'assistant:old-generation', text: 'Must be suppressed' },
+      richRow(conversationId, rows[1]!.messageId, rows[1]!.rawId)];
+    const receiptA = journalReceipt(captureA, rows[0]!.messageId, rows[0]!.rawId);
+    const receiptB = journalReceipt(captureB, rows[1]!.messageId, rows[1]!.rawId);
+    const response = await request('POST', '/events', { body: { conversationId, events,
+      recordingGenerations: [generation, oldGeneration, generation],
+      richCaptureReceipts: [receiptA, null, receiptB] } });
+    expect(response).toMatchObject({ status: 200, body: { sessionId: session.id, stored: 2 } });
+    const assistants = (await readEvents(session.id)).filter(row => row.kind === 'assistant_message');
+    expect(assistants).toHaveLength(2);
+    for (const row of rows) expect(assistants.find(event => event.messageId === row.messageId))
+      .toMatchObject({ providerMessageId: row.rawId, rich: { accessibleText: 'Structured choice', revision: 1 } });
+    expect(await findSessionByConversation(conversationId)).toMatchObject({ id: session.id });
+  });
+
+  it('discards missing, forged, malformed and foreign rich receipts while preserving independent canonical prose', async () => {
+    await pair();
+    const conversationId = randomUUID(), providerMessageId = randomUUID(), messageId = 'assistant:receipt-refused';
+    const session = await createSession({ conversationId });
+    const capture = await captureFor(conversationId);
+    const projection = richRow(conversationId, messageId, providerMessageId);
+    const plain = { ...projection, text: 'Independent authored prose', state: 'streaming' };
+    const valid = journalReceipt(capture, messageId, providerMessageId);
+    const invalid = [undefined, [], [null, valid], [{ ...valid, captureId: 'Z'.repeat(32) }],
+      [{ ...valid, documentGeneration: 2 }], [{ ...valid, spaEpoch: 1 }],
+      [{ ...valid, recordingGeneration: 'Q'.repeat(43) }],
+      [{ ...valid, providerMessageId: randomUUID() }], [{ ...valid, extraAuthority: true }]];
+    for (const receipts of invalid) {
+      const response = await request('POST', '/events', { body: {
+        conversationId, events: [plain], ...(receipts === undefined ? {} : { richCaptureReceipts: receipts }),
+        sourceCaptures: [{ tab: 42, documentId: capture.documentId, navigationEpoch: 1,
+          routeVerified: true, conversationId }]
+      } });
+      expect(response.status).toBe(200);
+      const row = (await readEvents(session.id)).find(event => event.kind === 'assistant_message');
+      expect(row).toMatchObject({ messageId, message: { text: 'Independent authored prose' } });
+      expect(row).not.toHaveProperty('rich');
+    }
+    const foreignOnly = await request('POST', '/events', { body: { conversationId,
+      events: [projection], richCaptureReceipts: [{ ...valid, conversationId: randomUUID() }] } });
+    expect(foreignOnly).toMatchObject({ status: 200, body: { stored: 0 } });
+    expect((await readEvents(session.id)).find(event => event.kind === 'assistant_message')).not.toHaveProperty('rich');
+  });
+
+  it('publishes two independently attested assistant pairs from one ticket and one Fiber scan', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const session = await createSession({ conversationId });
+    const rows = [
+      { messageId: 'assistant:same-scan-first', rawId: randomUUID() },
+      { messageId: 'assistant:same-scan-second', rawId: randomUUID() }
+    ];
+    for (const row of rows) await sessionStoreModule.upsertMessageEvent(session.id, {
+      kind: 'assistant_message', source: 'extension', time: Date.now(), messageId: row.messageId,
+      providerMessageId: row.rawId, message: { text: 'Original', chars: 8, truncated: false }, final: false
+    });
+    const capture = await captureFor(conversationId);
+    const body = { conversationId,
+      events: rows.map(row => richRow(conversationId, row.messageId, row.rawId)),
+      richCaptureReceipts: rows.map(row => journalReceipt(capture, row.messageId, row.rawId, 'shared-fiber-scan'))
+    };
+    expect(await request('POST', '/events', { body })).toMatchObject({
+      status: 200, body: { sessionId: session.id, stored: 2 }
+    });
+    const saved = (await readEvents(session.id)).filter(row => row.kind === 'assistant_message');
+    expect(saved).toHaveLength(2);
+    for (const row of rows) expect(saved.find(event => event.messageId === row.messageId)).toMatchObject({
+      providerMessageId: row.rawId, message: { text: 'Original' }, rich: { revision: 1 }
+    });
+    expect((await request('POST', '/events', { body })).body.stored).toBe(0);
+    expect((await readEvents(session.id)).filter(row => row.kind === 'assistant_message')).toEqual(saved);
+  });
+
+  it('rejects a different scan or conflicting raw ID for one logical message within a ticket', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const session = await createSession({ conversationId });
+    const rowA = { messageId: 'assistant:scan-A', rawId: randomUUID() };
+    const rowB = { messageId: 'assistant:scan-B', rawId: randomUUID() };
+    for (const row of [rowA, rowB]) await sessionStoreModule.upsertMessageEvent(session.id, {
+      kind: 'assistant_message', source: 'extension', time: Date.now(), messageId: row.messageId,
+      providerMessageId: row.rawId, message: { text: 'Original', chars: 8, truncated: false }, final: false
+    });
+    const capture = await captureFor(conversationId);
+    const first = journalReceipt(capture, rowA.messageId, rowA.rawId);
+    expect((await request('POST', '/events', { body: { conversationId,
+      events: [richRow(conversationId, rowA.messageId, rowA.rawId)], richCaptureReceipts: [first] } })).body.stored).toBe(1);
+    const changedScan = await request('POST', '/events', { body: { conversationId,
+      events: [richRow(conversationId, rowB.messageId, rowB.rawId)],
+      richCaptureReceipts: [journalReceipt(capture, rowB.messageId, rowB.rawId, 'another-scan')] } });
+    expect(changedScan.body.stored).toBe(0);
+    const remintedRaw = randomUUID();
+    const conflictingPair = await request('POST', '/events', { body: { conversationId,
+      events: [richRow(conversationId, rowA.messageId, remintedRaw)],
+      richCaptureReceipts: [journalReceipt(capture, rowA.messageId, remintedRaw)] } });
+    expect(conflictingPair.body.stored).toBe(0);
+    // Isolate the bridge association check from the store's own raw-ID guard: bind a
+    // new ticket to a receipt with no shard, then create the shard for the reminted raw.
+    // Without the bridge fence the second receipt would match that shard and persist.
+    const logical = 'assistant:association-conflict';
+    const staleRaw = randomUUID(), currentRaw = randomUUID();
+    const otherCapture = await captureFor(conversationId);
+    expect((await request('POST', '/events', { body: { conversationId,
+      events: [richRow(conversationId, logical, staleRaw)],
+      richCaptureReceipts: [journalReceipt(otherCapture, logical, staleRaw)] } })).body.stored).toBe(0);
+    await sessionStoreModule.upsertMessageEvent(session.id, {
+      kind: 'assistant_message', source: 'extension', time: Date.now(), messageId: logical,
+      providerMessageId: currentRaw, message: { text: 'Original', chars: 8, truncated: false }, final: false
+    });
+    expect((await request('POST', '/events', { body: { conversationId,
+      events: [richRow(conversationId, logical, currentRaw)],
+      richCaptureReceipts: [journalReceipt(otherCapture, logical, currentRaw)] } })).body.stored).toBe(0);
+    const rows = (await readEvents(session.id)).filter(event => event.kind === 'assistant_message');
+    expect(rows.find(row => row.messageId === rowA.messageId)).toMatchObject({ rich: { revision: 1 } });
+    expect(rows.find(row => row.messageId === rowB.messageId)).not.toHaveProperty('rich');
+    expect(rows.find(row => row.messageId === logical)).not.toHaveProperty('rich');
+  });
+
+  it('refuses the old private ticket after A→B→A, and keeps its old G refused after Off→On', async () => {
+    await pair();
+    const conversationA = randomUUID(), conversationB = randomUUID();
+    const messageId = 'assistant:binding-return', providerMessageId = randomUUID();
+    const session = await createSession({ conversationId: conversationA });
+    await sessionStoreModule.upsertMessageEvent(session.id, {
+      kind: 'assistant_message', source: 'extension', time: Date.now(), messageId,
+      providerMessageId, message: { text: 'Original', chars: 8, truncated: false }, final: false
+    });
+    const oldTicket = await captureFor(conversationA);
+    expect(await sessionStoreModule.rebindSession(session.id, conversationA, conversationB)).toBe(true);
+    expect(await sessionStoreModule.rebindSession(session.id, conversationB, conversationA)).toBe(true);
+    const projection = richRow(conversationA, messageId, providerMessageId);
+    const oldBody = { conversationId: conversationA, events: [projection],
+      richCaptureReceipts: [journalReceipt(oldTicket, messageId, providerMessageId)] };
+    const stale = await request('POST', '/events', { body: oldBody });
+    expect(stale.body.stored).toBe(0);
+    expect((await readEvents(session.id)).find(row => row.kind === 'assistant_message')).not.toHaveProperty('rich');
+    const freshTicket = await captureFor(conversationA, 42, 'document-return', 2, 3);
+    expect(freshTicket.bindingRevision).toBe(2);
+    expect((await request('POST', '/events', { body: { conversationId: conversationA, events: [projection],
+      richCaptureReceipts: [journalReceipt(freshTicket, messageId, providerMessageId)] } })).body.stored).toBe(1);
+    expect((await readEvents(session.id)).find(row => row.kind === 'assistant_message')).toMatchObject({
+      richOrigin: { bindingRevision: 2, documentId: 'document-return', navigationEpoch: 3 }
+    });
+    await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: false } }));
+    await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
+    expect((await request('POST', '/events', { body: oldBody })).body.stored).toBe(0);
+    expect((await readEvents(session.id)).find(row => row.kind === 'assistant_message')).toMatchObject({
+      rich: { revision: 1 }, richOrigin: { bindingRevision: 2 }
+    });
+  });
+
+  it('issues a bounded main-owned pre-scan capture for exactly one existing current session, never from body-selected ownership', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const recordingGeneration = recordingGenerationGrant();
+    const attested = { conversationId, tab: 42, documentId: 'registered-document',
+      documentGeneration: 1, spaEpoch: 0, recordingGeneration };
+    expect((await request('POST', '/rich/capture/begin', { body: attested })).status).toBe(409);
+    expect(await findSessionByConversation(conversationId)).toBeNull();
+    const session = await createSession({ conversationId });
+    const forged = await request('POST', '/rich/capture/begin', { body: {
+      ...attested, sessionId: 'foreign-session', bindingRevision: 777, captureId: 'forged'
+    } });
+    expect(forged.status).toBe(400);
+    const first = await request('POST', '/rich/capture/begin', { body: attested });
+    expect(first).toMatchObject({ status: 200, body: { capture: {
+      conversationId, sessionId: session.id, bindingRevision: 0,
+      documentId: 'registered-document', documentGeneration: 1, spaEpoch: 0, recordingGeneration
+    } } });
+    expect(first.body.capture.captureId).toMatch(/^[A-Za-z0-9_-]{22,}$/);
+    const second = await request('POST', '/rich/capture/begin', { body: attested });
+    expect(second.body.capture.captureId).not.toBe(first.body.capture.captureId);
+    await createSession({ conversationId });
+    expect((await request('POST', '/rich/capture/begin', { body: attested })).status).toBe(409);
+  });
+
+  it('fences pre-scan issuance at auth, protocol, Recording Off, source generation and A→B→A binding', async () => {
+    await pair();
+    const a = randomUUID();
+    const b = randomUUID();
+    const session = await createSession({ conversationId: a });
+    const g0 = recordingGenerationGrant();
+    const attested = { conversationId: a, tab: 42, documentId: 'registered-document',
+      documentGeneration: 1, spaEpoch: 0, recordingGeneration: g0 };
+    expect((await request('POST', '/rich/capture/begin', { auth: null, body: attested })).status).toBe(401);
+    expect((await request('POST', '/rich/capture/begin', { protocol: 16, body: attested })).status).toBe(426);
+    const first = await request('POST', '/rich/capture/begin', { body: attested });
+    expect(first.body.capture.bindingRevision).toBe(0);
+    expect(await sessionStoreModule.rebindSession(session.id, a, b)).toBe(true);
+    expect((await request('POST', '/rich/capture/begin', { body: attested })).status).toBe(409);
+    expect(await sessionStoreModule.rebindSession(session.id, b, a)).toBe(true);
+    const returned = await request('POST', '/rich/capture/begin', { body: attested });
+    expect(returned).toMatchObject({ status: 200, body: { capture: { sessionId: session.id, bindingRevision: 2 } } });
+    expect(returned.body.capture.captureId).not.toBe(first.body.capture.captureId);
+    await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: false } }));
+    expect((await request('POST', '/rich/capture/begin', { body: attested })).status).toBe(409);
+    await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
+    expect(recordingGenerationGrant()).not.toBe(g0);
+    expect((await request('POST', '/rich/capture/begin', { body: attested })).status).toBe(409);
+    expect((await request('POST', '/rich/capture/begin', { body: {
+      ...attested, recordingGeneration: recordingGenerationGrant()
+    } })).status).toBe(200);
+  });
+
+  it('refuses capture while B is physically committed but its rebind is not yet published', async () => {
+    await pair();
+    const a = randomUUID(), b = randomUUID();
+    const session = await createSession({ conversationId: a });
+    const attested = { conversationId: a, tab: 42, documentId: 'registered-document',
+      documentGeneration: 1, spaEpoch: 0, recordingGeneration: recordingGenerationGrant() };
+    const metaPath = path.join(dir, 'sessions', session.id, 'meta.json');
+    const actualRename = fs.rename.bind(fs);
+    let reached!: () => void, release!: () => void;
+    const entered = new Promise<void>(resolve => { reached = resolve; });
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    let intercepted = false;
+    const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (!intercepted && String(to) === metaPath) {
+        intercepted = true;
+        await actualRename(from, to); // Genuine on-disk B1, BEFORE live A0 changes.
+        reached();
+        await hold;
+        return;
+      }
+      return actualRename(from, to);
+    }) as typeof fs.rename);
+    let moving: Promise<boolean> | null = null;
+    try {
+      moving = sessionStoreModule.rebindSession(session.id, a, b);
+      await entered;
+      expect(JSON.parse(await fs.readFile(metaPath, 'utf8'))).toMatchObject({
+        conversationId: b, bindingRevision: 1
+      });
+      expect(sessionStoreModule.sessionAttachmentTransitionPending(session.id)).toBe(true);
+      expect((await request('POST', '/rich/capture/begin', { body: attested })).status).toBe(409);
+      release();
+      expect(await moving).toBe(true);
+      expect(sessionStoreModule.sessionAttachmentTransitionPending(session.id)).toBe(false);
+      expect((await request('POST', '/rich/capture/begin', { body: attested })).status).toBe(409);
+      expect((await request('POST', '/rich/capture/begin', {
+        body: { ...attested, conversationId: b }
+      })).body.capture).toMatchObject({ sessionId: session.id, bindingRevision: 1 });
+    } finally {
+      release();
+      await Promise.allSettled([moving].filter(Boolean));
+      spy.mockRestore();
+    }
+  });
+
+  it('does not issue from live-only creation before its initial metadata checkpoint completes', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const attested = { conversationId, tab: 42, documentId: 'registered-document',
+      documentGeneration: 1, spaEpoch: 0, recordingGeneration: recordingGenerationGrant() };
+    const actualRename = fs.rename.bind(fs);
+    let reached!: () => void, release!: () => void;
+    const entered = new Promise<void>(resolve => { reached = resolve; });
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    let intercepted = false;
+    const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (!intercepted && String(to).endsWith(`${path.sep}meta.json`) &&
+          String(to).startsWith(path.join(dir, 'sessions') + path.sep)) {
+        intercepted = true;
+        await actualRename(from, to);
+        reached();
+        await hold;
+        return;
+      }
+      return actualRename(from, to);
+    }) as typeof fs.rename);
+    let creating: Promise<Awaited<ReturnType<typeof createSession>>> | null = null;
+    try {
+      creating = createSession({ conversationId });
+      await entered;
+      const liveOwner = await findSessionByConversation(conversationId, { requireUnique: true });
+      expect(liveOwner).not.toBeNull();
+      expect(sessionStoreModule.sessionAttachmentTransitionPending(liveOwner!.id)).toBe(true);
+      expect((await request('POST', '/rich/capture/begin', { body: attested })).status).toBe(409);
+      release();
+      const committed = await creating;
+      expect(sessionStoreModule.sessionAttachmentTransitionPending(committed.id)).toBe(false);
+      expect((await request('POST', '/rich/capture/begin', { body: attested })).body.capture)
+        .toMatchObject({ sessionId: committed.id, bindingRevision: 0 });
+    } finally {
+      release();
+      await Promise.allSettled([creating].filter(Boolean));
+      spy.mockRestore();
+    }
+  });
+
+  it('retires an awaited capture when stop begins and does not resurrect it after restart', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const session = await createSession({ conversationId });
+    const attested = { conversationId, tab: 42, documentId: 'registered-document',
+      documentGeneration: 1, spaEpoch: 0, recordingGeneration: recordingGenerationGrant() };
+    const findOriginal = sessionStoreModule.findSessionByConversation.bind(sessionStoreModule);
+    let reached!: () => void, release!: () => void;
+    const entered = new Promise<void>(resolve => { reached = resolve; });
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    let intercepted = false;
+    const spy = vi.spyOn(sessionStoreModule, 'findSessionByConversation').mockImplementation((async (id, opts) => {
+      if (!intercepted && id === conversationId) {
+        intercepted = true;
+        reached();
+        await hold;
+      }
+      return findOriginal(id, opts);
+    }) as typeof sessionStoreModule.findSessionByConversation);
+    let old: Promise<Reply> | null = null;
+    let stopping: Promise<void> | null = null;
+    try {
+      old = request('POST', '/rich/capture/begin', { body: attested });
+      await entered;
+      stopping = stopBridge(); // Synchronously invalidates ingress epoch before queued socket drain.
+      release();
+      expect(await old).toMatchObject({ status: 409, body: { error: 'capture_unavailable' } });
+      await stopping;
+      const restarted = await startBridge();
+      expect(restarted).not.toBeNull();
+      base = `http://127.0.0.1:${restarted}`;
+      expect((await request('POST', '/rich/capture/begin', { body: attested })).body.capture)
+        .toMatchObject({ sessionId: session.id });
+    } finally {
+      release();
+      await Promise.allSettled([old, stopping].filter(Boolean));
+      spy.mockRestore();
+    }
+  });
+
+  it('bounds one document to 64 short-lived pre-scan tickets without stealing another document capacity', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    await createSession({ conversationId });
+    const attested = { conversationId, tab: 42, documentId: 'registered-document',
+      documentGeneration: 1, spaEpoch: 0, recordingGeneration: recordingGenerationGrant() };
+    const issued = new Set<string>();
+    for (let i = 0; i < 64; i++) {
+      const result = await request('POST', '/rich/capture/begin', { body: attested });
+      expect(result.status).toBe(200);
+      issued.add(result.body.capture.captureId);
+    }
+    expect(issued.size).toBe(64);
+    expect((await request('POST', '/rich/capture/begin', { body: attested })))
+      .toMatchObject({ status: 409, body: { error: 'capture_capacity' } });
+    expect((await request('POST', '/rich/capture/begin', { body: {
+      ...attested, tab: 43, documentId: 'another-registered-document'
+    } })).status).toBe(200);
+  });
+
+  it('issues a purpose-scoped pixel ticket only for a preexisting, seeded, exact current rich-image slot', async () => {
+    await pair();
+    const conversationId = randomUUID(), providerMessageId = randomUUID();
+    const messageId = 'assistant:exact-page-pixel';
+    const session = await createSession({ conversationId });
+    const stamp = { conversationId, tab: 42, documentId: 'page-pixel-document',
+      documentGeneration: 2, spaEpoch: 3, recordingGeneration: recordingGenerationGrant() };
+    const target = { messageId, providerMessageId, mediaId: 'media-n-0-1', nodeId: 'n-0-1' };
+    const requestPixel = (body: Record<string, unknown>) => request('POST', '/rich/pixel/begin', { body });
+    const early = await requestPixel({ ...stamp, ...target });
+    expect(early.status).toBe(409);
+    expect(await findSessionByConversation(conversationId, { requireUnique: true })).toMatchObject({ id: session.id });
+    await sessionStoreModule.upsertMessageEvent(session.id, {
+      kind: 'assistant_message', source: 'extension', time: Date.now(), messageId,
+      providerMessageId, message: { text: 'Original prose', chars: 14, truncated: false },
+      state: 'streaming', final: false
+    });
+    const rich = { version: 1 as const, status: 'available' as const, reason: null,
+      conversationId, messageId, providerMessageId, revision: 0,
+      accessibleText: 'Exact image', nodes: [
+        { id: 'n-0', kind: 'group' as const, layout: 'card' as const, children: [
+          { id: target.nodeId, kind: 'image' as const, mediaId: target.mediaId,
+            alt: 'Reference image', width: 800, height: 600 }
+        ] }
+      ] };
+    const origin = { conversationId, bindingRevision: 0,
+      documentId: stamp.documentId, navigationEpoch: stamp.spaEpoch };
+    expect(await sessionStoreModule.upsertRichMessage(session.id, messageId, rich, origin,
+      (await import('../src/main/config.js')).getRecordingRevision(), true)).toBe('stored');
+    const seeded = (await readEvents(session.id)).find(row => row.kind === 'assistant_message');
+    expect(seeded).toMatchObject({ messageId, rich: { revision: 1 }, richMedia: [
+      { mediaId: target.mediaId, nodeId: target.nodeId, status: 'pending',
+        source: { kind: 'page', nodeId: target.nodeId } }
+    ] });
+
+    // Neither a request body nor a structural capture ticket supplies pixel authority.
+    const malformed = [
+      { ...stamp, ...target, sessionId: session.id },
+      { ...stamp, ...target, bindingRevision: 0 },
+      { ...stamp, ...target, slotVersion: 100 },
+      { ...stamp, ...target, sourceIncarnation: 'page-forged' },
+      { ...stamp, ...target, mediaId: 'media-other' },
+      { ...stamp, ...target, url: 'https://example.test/private.png' }
+    ];
+    for (const body of malformed) expect((await requestPixel(body)).status).toBe(400);
+    for (const body of [
+      { ...stamp, ...target, nodeId: 'n-0-2', mediaId: 'media-n-0-2' },
+      { ...stamp, ...target, providerMessageId: randomUUID() },
+      { ...stamp, ...target, messageId: 'assistant:other' },
+      { ...stamp, ...target, documentId: 'wrong-document' },
+      { ...stamp, ...target, spaEpoch: 4 },
+      { ...stamp, ...target, conversationId: randomUUID() }
+    ]) expect((await requestPixel(body)).status).toBe(409);
+    const issued = await requestPixel({ ...stamp, ...target });
+    expect(issued).toMatchObject({ status: 200, body: { capture: {
+      purpose: 'page_pixel', conversationId, sessionId: session.id, bindingRevision: 0,
+      documentId: stamp.documentId, documentGeneration: stamp.documentGeneration,
+      spaEpoch: stamp.spaEpoch, recordingGeneration: stamp.recordingGeneration,
+      messageId, providerMessageId, mediaId: target.mediaId, nodeId: target.nodeId, richRevision: 1
+    } } });
+    expect(issued.body.capture.captureId).toMatch(/^[A-Za-z0-9_-]{32}$/);
+    expect(issued.body.capture).not.toHaveProperty('recordingRevision');
+    expect(issued.body.capture).not.toHaveProperty('url');
+    const next = await requestPixel({ ...stamp, ...target });
+    expect(next.body.capture.captureId).not.toBe(issued.body.capture.captureId);
+    expect((await readEvents(session.id)).filter(row => row.kind === 'assistant_message')).toHaveLength(1);
+    expect((await readEvents(session.id)).filter(row => row.kind === 'native_image')).toHaveLength(0);
+  });
+
+  it('admits an exact positional worker pixel receipt only through the private ticket and commits a pending source without a new turn', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const incarnation = `src_${'a'.repeat(32)}_1`, scan = 'independent-pixel-scan';
+    const event = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'pending' };
+    const receipt = fixture.pixelReceipt(scan, incarnation, 1, 'pending');
+    const original = await readEvents(fixture.session.id);
+    const invalid = [
+      { ...receipt, captureId: 'N'.repeat(32) },
+      { ...receipt, purpose: 'page_pixel' },
+      { ...receipt, recordingGeneration: 'Z'.repeat(43) },
+      { ...receipt, documentId: 'wrong-document' },
+      { ...receipt, documentGeneration: 3 },
+      { ...receipt, spaEpoch: 3 },
+      { ...receipt, nodeId: 'n-0-2' },
+      { ...receipt, sourceSequence: 2 },
+      { ...receipt, scanToken: 'shifted-scan' }
+    ];
+    for (const forged of invalid) {
+      expect((await fixture.sendPixel(event, forged)).body).toMatchObject({
+        sessionId: null, stored: 0, recordingSuppressed: true
+      });
+      expect(await readEvents(fixture.session.id)).toEqual(original);
+    }
+    expect((await request('POST', '/events', { body: { conversationId: fixture.conversationId,
+      events: [event], richPixelReceipts: [] } })).body.stored).toBe(0);
+    expect(await readEvents(fixture.session.id)).toEqual(original);
+    const accepted = await fixture.sendPixel(event, receipt);
+    expect(accepted).toMatchObject({ status: 200, body: { sessionId: fixture.session.id,
+      stored: 1 } });
+    const rows = await readEvents(fixture.session.id);
+    expect(rows.filter(row => row.kind === 'assistant_message')).toHaveLength(1);
+    expect(rows.filter(row => row.kind === 'native_image')).toHaveLength(0);
+    expect(rows.find(row => row.kind === 'assistant_message')).toMatchObject({
+      messageId: fixture.messageId, message: { text: 'Unaffected authored prose' },
+      richMedia: [{ mediaId: fixture.mediaId, nodeId: fixture.nodeId, status: 'pending',
+        pageSource: { slotVersion: expect.any(Number), incarnation, sequence: 1 } }]
+    });
+    expect((await fixture.sendPixel(event, receipt)).body.stored).toBe(0);
+    expect(await readEvents(fixture.session.id)).toEqual(rows);
+  });
+
+  it('keeps pending receipt indexes aligned with non-pixel prose and rejects forged digest or borrowed neighbor receipts', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const scan = 'pixel-index-scan', incarnation = `src_${'b'.repeat(32)}_1`;
+    const pixel = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'pending' };
+    const realReceipt = fixture.pixelReceipt(scan, incarnation, 1, 'pending');
+    const normal = { kind: 'user_message', time: Date.now(),
+      messageId: 'exact-additional-user', text: 'Keep normal prose independent' };
+    const missing = await request('POST', '/events', { body: { conversationId: fixture.conversationId,
+      events: [pixel, normal, pixel], richPixelReceipts: [null, realReceipt, null] } });
+    expect(missing.status).toBe(200);
+    expect(missing.body).toMatchObject({ sessionId: fixture.session.id, stored: 1 });
+    expect((await readEvents(fixture.session.id)).filter(row => row.kind === 'assistant_message')[0]!)
+      .not.toHaveProperty('richSourceVersionFloor');
+    const valid = await request('POST', '/events', { body: { conversationId: fixture.conversationId,
+      events: [pixel, normal, pixel], richPixelReceipts: [realReceipt, null, realReceipt] } });
+    expect(valid.status).toBe(200);
+    expect(valid.body).toMatchObject({ sessionId: fixture.session.id, stored: 1 });
+    const row = (await readEvents(fixture.session.id)).find(item => item.kind === 'assistant_message');
+    expect(row).toMatchObject({ richMedia: [{ status: 'pending',
+      pageSource: { incarnation, sequence: 1 } }] });
+    expect((await readEvents(fixture.session.id)).filter(item => item.kind === 'user_message')).toHaveLength(1);
+    expect((await fixture.sendPixel({ ...pixel, previewDataUrl: 'data:image/webp;base64,AAAA' }, realReceipt)).body.stored).toBe(0);
+  });
+
+  it('fully decodes a page WebP before publication and fails closed to unavailable on synthetic header-only bytes', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const scan = 'pixel-sharp-decode', incarnation = `src_${'c'.repeat(32)}_1`;
+    const headerOnly = Buffer.from('524946460400000057454250', 'hex');
+    const sha = createHash('sha256').update(headerOnly).digest('hex');
+    const pending = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'pending' };
+    const event = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'available',
+      previewDataUrl: `data:image/webp;base64,${headerOnly.toString('base64')}`,
+      previewWidth: 2, previewHeight: 2, pixelBytes: headerOnly.length, pixelSha256: sha };
+    const validPending = fixture.pixelReceipt(scan, incarnation, 1, 'pending');
+    const availableReceipt = fixture.pixelReceipt(scan, incarnation, 1, 'available', headerOnly);
+    const accepted = await request('POST', '/events', { body: {
+      conversationId: fixture.conversationId, events: [pending, event],
+      richPixelReceipts: [validPending, availableReceipt]
+    } });
+    expect(accepted.status).toBe(200);
+    expect(accepted.body).toMatchObject({ sessionId: fixture.session.id, stored: 2 });
+    const original = (await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message');
+    expect(original).toMatchObject({ message: { text: 'Unaffected authored prose' },
+      richMedia: [{ status: 'unavailable', reason: 'invalid', pageSource: {
+        incarnation, sequence: 1, slotVersion: expect.any(Number)
+      } }] });
+    expect((original as any)?.richMedia?.[0]).not.toHaveProperty('asset');
+    const retry = await fixture.sendPixel(event, availableReceipt);
+    expect(retry.status).toBe(200);
+    expect((await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message'))
+      .toEqual(original);
+  });
+
+  it('publishes actual fully decoded WebP bytes only after exact pending source and durable asset custody', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const scan = 'verified-pixel-byte-scan', incarnation = `src_${'d'.repeat(32)}_1`;
+    // This is a test-generated WebP, not ChatGPT pixels or installed-app evidence.
+    const bytes = await sharp({ create: { width: 8, height: 6, channels: 4,
+      background: { r: 110, g: 45, b: 170, alpha: 1 } } }).webp().toBuffer();
+    const pending = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'pending' };
+    const available = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'available',
+      previewDataUrl: `data:image/webp;base64,${bytes.toString('base64')}`,
+      previewWidth: 8, previewHeight: 6, pixelBytes: bytes.length,
+      pixelSha256: createHash('sha256').update(bytes).digest('hex') };
+    const first = await fixture.sendPixel(pending, fixture.pixelReceipt(scan, incarnation, 1, 'pending'));
+    expect(first).toMatchObject({ status: 200, body: { sessionId: fixture.session.id, stored: 1 } });
+    let row = (await readEvents(fixture.session.id)).find(event => event.kind === 'assistant_message');
+    expect(row).toMatchObject({ richMedia: [{ status: 'pending', pageSource: {
+      incarnation, sequence: 1, recordingRevision: (await import('../src/main/config.js')).getRecordingRevision()
+    } }] });
+    expect((row as any).richMedia[0]).not.toHaveProperty('asset');
+    const published = await fixture.sendPixel(available,
+      fixture.pixelReceipt(scan, incarnation, 1, 'available', bytes));
+    expect(published).toMatchObject({ status: 200, body: { sessionId: fixture.session.id, stored: 1 } });
+    row = (await readEvents(fixture.session.id)).find(event => event.kind === 'assistant_message');
+    expect(row).toMatchObject({ messageId: fixture.messageId,
+      message: { text: 'Unaffected authored prose' },
+      richMedia: [{ mediaId: fixture.mediaId, nodeId: fixture.nodeId,
+        status: 'available', previewWidth: 8, previewHeight: 6,
+        source: { kind: 'page', nodeId: fixture.nodeId },
+        pageSource: { incarnation, sequence: 1 }, asset: {
+          mimeType: 'image/webp', bytes: bytes.length, id: expect.stringMatching(/^[a-f0-9]{32}\.bin$/)
+        } }] });
+    const asset = (row as any).richMedia[0].asset;
+    expect(await sessionStoreModule.readAsset(fixture.session.id, asset.id)).toEqual(bytes);
+    expect((await fixture.sendPixel(available,
+      fixture.pixelReceipt(scan, incarnation, 1, 'available', bytes))).body.stored).toBe(0);
+    expect((await readEvents(fixture.session.id)).find(event => event.kind === 'assistant_message'))
+      .toEqual(row);
+    expect((await readEvents(fixture.session.id)).filter(event => event.kind === 'native_image')).toHaveLength(0);
+  });
+
+  it('retains the exact available pixel journal row on transient asset EIO and retries without invalidating its pending source', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const scan = 'retryable-pixel-asset-eio', incarnation = `src_${'e'.repeat(32)}_1`;
+    const bytes = await sharp({ create: { width: 8, height: 6, channels: 4,
+      background: { r: 65, g: 35, b: 125, alpha: 1 } } }).webp().toBuffer();
+    const available = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'available',
+      previewDataUrl: `data:image/webp;base64,${bytes.toString('base64')}`,
+      previewWidth: 8, previewHeight: 6, pixelBytes: bytes.length,
+      pixelSha256: createHash('sha256').update(bytes).digest('hex') };
+    expect((await fixture.sendPixel({ kind: 'rich_media', time: Date.now(),
+      ...fixture.identity, status: 'pending' },
+    fixture.pixelReceipt(scan, incarnation, 1, 'pending'))).body.stored).toBe(1);
+    const before = (await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message');
+    expect(before).toMatchObject({ richMedia: [{ status: 'pending' }] });
+
+    const originalLink = fs.link.bind(fs);
+    let failed = false;
+    const link = vi.spyOn(fs, 'link').mockImplementation((async (from, to) => {
+      if (!failed && String(to).includes(`${path.sep}assets${path.sep}`)) {
+        failed = true;
+        throw Object.assign(new Error('transient pixel asset EIO'), { code: 'EIO' });
+      }
+      return originalLink(from, to);
+    }) as typeof fs.link);
+    try {
+      const first = await fixture.sendPixel(available,
+        fixture.pixelReceipt(scan, incarnation, 1, 'available', bytes));
+      expect(failed).toBe(true);
+      expect(first.status).not.toBe(200);
+      expect((await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message'))
+        .toEqual(before);
+    } finally {
+      link.mockRestore();
+    }
+    const retried = await fixture.sendPixel(available,
+      fixture.pixelReceipt(scan, incarnation, 1, 'available', bytes));
+    expect(retried).toMatchObject({ status: 200, body: { sessionId: fixture.session.id, stored: 1 } });
+    const row = (await readEvents(fixture.session.id)).find(event => event.kind === 'assistant_message');
+    expect(row).toMatchObject({ richMedia: [{ status: 'available',
+      pageSource: { incarnation, sequence: 1 }, asset: { bytes: bytes.length } }] });
+    expect((await readEvents(fixture.session.id)).filter(event => event.kind === 'native_image')).toEqual([]);
+  });
+
+  it('revokes an already-dispatched pixel when stop begins during an asset write, then accepts a fresh ticket after restart', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const firstSource = `src_${'e'.repeat(32)}_1`;
+    const bytes = await sharp({ create: { width: 9, height: 7, channels: 4,
+      background: { r: 12, g: 44, b: 88, alpha: 1 } } }).webp().toBuffer();
+    const pending = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'pending' };
+    const available = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'available',
+      previewDataUrl: `data:image/webp;base64,${bytes.toString('base64')}`,
+      previewWidth: 9, previewHeight: 7, pixelBytes: bytes.length,
+      pixelSha256: createHash('sha256').update(bytes).digest('hex') };
+    expect((await fixture.sendPixel(pending,
+      fixture.pixelReceipt('stop-source', firstSource, 1, 'pending'))).body.stored).toBe(1);
+    const original = (await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message');
+    expect(original).toMatchObject({ richMedia: [{ status: 'pending' }] });
+
+    const originalLink = fs.link.bind(fs);
+    let entered!: () => void, release!: () => void;
+    const writing = new Promise<void>(resolve => { entered = resolve; });
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    let blocked = false;
+    const spy = vi.spyOn(fs, 'link').mockImplementation((async (from, to) => {
+      if (!blocked && String(to).includes(`${path.sep}assets${path.sep}`)) {
+        blocked = true;
+        entered();
+        await hold;
+      }
+      return originalLink(from, to);
+    }) as typeof fs.link);
+    let oldRequest: Promise<Reply> | null = null;
+    let stopping: Promise<void> | null = null;
+    try {
+      oldRequest = fixture.sendPixel(available,
+        fixture.pixelReceipt('stop-source', firstSource, 1, 'available', bytes));
+      await writing;
+      stopping = stopBridge();
+      release();
+      await Promise.allSettled([oldRequest, stopping]);
+      const retained = (await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message');
+      expect(retained).toEqual(original);
+      expect((retained as any)?.richMedia?.[0]).not.toHaveProperty('asset');
+
+      const restarted = await startBridge();
+      expect(restarted).not.toBeNull();
+      base = `http://127.0.0.1:${restarted}`;
+      expect((await fixture.sendPixel(available,
+        fixture.pixelReceipt('stop-source', firstSource, 1, 'available', bytes))).body.stored).toBe(0);
+      const fresh = await fixture.begin();
+      expect(fresh.status).toBe(200);
+      const secondSource = `src_${'f'.repeat(32)}_2`;
+      const secondReceipt = (status: 'pending' | 'available', data: Buffer | null = null) => ({
+        ...fixture.pixelReceipt('restarted-source', secondSource, 2, status, data),
+        captureId: fresh.body.capture.captureId
+      });
+      expect((await fixture.sendPixel(pending, secondReceipt('pending'))).body.stored).toBe(1);
+      expect((await fixture.sendPixel(available, secondReceipt('available', bytes))).body.stored).toBe(1);
+      expect((await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message'))
+        .toMatchObject({ richMedia: [{ status: 'available',
+          pageSource: { incarnation: secondSource, sequence: 2 } }] });
+    } finally {
+      release();
+      await Promise.allSettled([oldRequest, stopping].filter(Boolean));
+      spy.mockRestore();
+      const restored = await startBridge();
+      if (restored !== null) base = `http://127.0.0.1:${restored}`;
+    }
+  });
+
+  it('counts a canonical pixel rename admitted before stop as a real committed prefix', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const source = `src_${'b'.repeat(32)}_1`;
+    const pending = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'pending' };
+    const bytes = await sharp({ create: { width: 8, height: 8, channels: 4,
+      background: { r: 37, g: 65, b: 93, alpha: 1 } } }).webp().toBuffer();
+    const available = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'available',
+      previewDataUrl: `data:image/webp;base64,${bytes.toString('base64')}`,
+      previewWidth: 8, previewHeight: 8, pixelBytes: bytes.length,
+      pixelSha256: createHash('sha256').update(bytes).digest('hex') };
+    expect((await fixture.sendPixel(pending,
+      fixture.pixelReceipt('rename-prefix', source, 1, 'pending'))).body.stored).toBe(1);
+
+    const originalRename = fs.rename.bind(fs);
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let intercepted = false;
+    const rename = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (!intercepted && String(to).includes(`${path.sep}messages${path.sep}`) &&
+          String(to).endsWith('.json')) {
+        intercepted = true;
+        entered();
+        await gate;
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    let inFlight: Promise<Reply> | null = null;
+    let stopping: Promise<void> | null = null;
+    try {
+      inFlight = fixture.sendPixel(available,
+        fixture.pixelReceipt('rename-prefix', source, 1, 'available', bytes));
+      await started;
+      stopping = stopBridge();
+      release();
+      const accepted = await inFlight;
+      await stopping;
+      expect(intercepted).toBe(true);
+      expect(accepted).toMatchObject({ status: 200, body: {
+        sessionId: fixture.session.id, stored: 1 } });
+      const row = (await readEvents(fixture.session.id)).find(item => item.kind === 'assistant_message');
+      expect(row).toMatchObject({ richMedia: [{ status: 'available', pageSource: {
+        incarnation: source, sequence: 1 }, asset: { bytes: bytes.length } }] });
+      expect(await sessionStoreModule.readAsset(fixture.session.id, (row as any).richMedia[0].asset.id))
+        .toEqual(bytes);
+    } finally {
+      release();
+      await Promise.allSettled([inFlight, stopping].filter(Boolean));
+      rename.mockRestore();
+      const restarted = await startBridge();
+      if (restarted !== null) base = `http://127.0.0.1:${restarted}`;
+    }
+  });
+
+  it('refuses an available pixel when stop revokes custody before its final canonical rename admission', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const source = `src_${'c'.repeat(32)}_1`;
+    const pending = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'pending' };
+    const bytes = await sharp({ create: { width: 7, height: 5, channels: 4,
+      background: { r: 22, g: 66, b: 99, alpha: 1 } } }).webp().toBuffer();
+    const available = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'available',
+      previewDataUrl: `data:image/webp;base64,${bytes.toString('base64')}`,
+      previewWidth: 7, previewHeight: 5, pixelBytes: bytes.length,
+      pixelSha256: createHash('sha256').update(bytes).digest('hex') };
+    expect((await fixture.sendPixel(pending,
+      fixture.pixelReceipt('before-rename', source, 1, 'pending'))).body.stored).toBe(1);
+    const original = (await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message');
+
+    const originalWrite = fs.writeFile.bind(fs);
+    let entered!: () => void, release!: () => void;
+    const writing = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let blocked = false;
+    const write = vi.spyOn(fs, 'writeFile').mockImplementation((async (file, data, options) => {
+      const result = await originalWrite(file, data, options as any);
+      if (!blocked && String(file).includes(`${path.sep}messages${path.sep}`) &&
+          String(file).endsWith('.tmp')) {
+        blocked = true;
+        entered();
+        await gate;
+      }
+      return result;
+    }) as typeof fs.writeFile);
+    let inFlight: Promise<Reply> | null = null, stopping: Promise<void> | null = null;
+    try {
+      inFlight = fixture.sendPixel(available,
+        fixture.pixelReceipt('before-rename', source, 1, 'available', bytes));
+      await writing;
+      stopping = stopBridge();
+      release();
+      const response = await inFlight;
+      await stopping;
+      expect(blocked).toBe(true);
+      expect(response.status).not.toBe(200);
+      expect((await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message'))
+        .toEqual(original);
+    } finally {
+      release();
+      await Promise.allSettled([inFlight, stopping].filter(Boolean));
+      write.mockRestore();
+      const restarted = await startBridge();
+      if (restarted !== null) base = `http://127.0.0.1:${restarted}`;
+    }
+  });
+
+  it('acknowledges a single B available row whose pending prefix commits before stop revokes its second canonical write', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const sourceA = `src_${'a'.repeat(32)}_1`, sourceB = `src_${'b'.repeat(32)}_2`;
+    const bytesA = await sharp({ create: { width: 8, height: 7, channels: 4,
+      background: { r: 11, g: 22, b: 33, alpha: 1 } } }).webp().toBuffer();
+    const bytesB = await sharp({ create: { width: 7, height: 9, channels: 4,
+      background: { r: 44, g: 55, b: 66, alpha: 1 } } }).webp().toBuffer();
+    const pending = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'pending' };
+    const available = (bytes: Buffer, width: number, height: number) => ({
+      kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'available',
+      previewDataUrl: `data:image/webp;base64,${bytes.toString('base64')}`,
+      previewWidth: width, previewHeight: height, pixelBytes: bytes.length,
+      pixelSha256: createHash('sha256').update(bytes).digest('hex')
+    });
+    expect((await fixture.sendPixel(pending,
+      fixture.pixelReceipt('initial-a', sourceA, 1, 'pending'))).body.stored).toBe(1);
+    expect((await fixture.sendPixel(available(bytesA, 8, 7),
+      fixture.pixelReceipt('initial-a', sourceA, 1, 'available', bytesA))).body.stored).toBe(1);
+    const original = (await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message');
+    expect(original).toMatchObject({ richMedia: [{ status: 'available',
+      pageSource: { incarnation: sourceA, sequence: 1 } }] });
+
+    const ticketB = await fixture.begin();
+    expect(ticketB.status).toBe(200);
+    const receiptB = (captureId: string) => ({
+      ...fixture.pixelReceipt('replacement-b', sourceB, 2, 'available', bytesB), captureId
+    });
+    const originalWrite = fs.writeFile.bind(fs);
+    let entered!: () => void, release!: () => void;
+    const writing = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let canonicalWrites = 0;
+    const spy = vi.spyOn(fs, 'writeFile').mockImplementation((async (file, data, options) => {
+      const result = await originalWrite(file, data, options as any);
+      if (String(file).includes(`${path.sep}messages${path.sep}`) && String(file).endsWith('.tmp') &&
+          ++canonicalWrites === 2) {
+        entered();
+        await gate;
+      }
+      return result;
+    }) as typeof fs.writeFile);
+    let inFlight: Promise<Reply> | null = null, stopping: Promise<void> | null = null;
+    try {
+      inFlight = fixture.sendPixel(available(bytesB, 7, 9), receiptB(ticketB.body.capture.captureId));
+      await writing;
+      // The one incoming row has already replaced A with canonical B pending.
+      // A normal readEvents() flushes the session queue and would wait for our held write.
+      const canonical = path.join(dir, 'sessions', fixture.session.id, 'messages',
+        `${createHash('sha256').update(`assistant_message\u0000${fixture.messageId}`).digest('hex')}.json`);
+      const committed = JSON.parse(await fs.readFile(canonical, 'utf8'));
+      expect(committed).toMatchObject({ richMedia: [{ status: 'pending', reason: 'not_loaded',
+        pageSource: { incarnation: sourceB, sequence: 2 } }] });
+      stopping = stopBridge();
+      release();
+      const response = await inFlight;
+      await stopping;
+      expect(canonicalWrites).toBe(2);
+      expect(response).toMatchObject({ status: 200, body: { sessionId: fixture.session.id,
+        stored: 1, partialCommitted: true, remainderSuppressed: true } });
+      const retained = (await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message');
+      expect(retained).toMatchObject({ richMedia: [{ status: 'pending', reason: 'not_loaded',
+        pageSource: { incarnation: sourceB, sequence: 2 } }] });
+      expect((retained as any)?.richMedia?.[0]).not.toHaveProperty('asset');
+
+      const restarted = await startBridge();
+      expect(restarted).not.toBeNull();
+      base = `http://127.0.0.1:${restarted}`;
+      expect((await fixture.sendPixel(available(bytesB, 7, 9),
+        receiptB(ticketB.body.capture.captureId))).body.stored).toBe(0);
+      const fresh = await fixture.begin();
+      expect(fresh.status).toBe(200);
+      expect((await fixture.sendPixel(available(bytesB, 7, 9),
+        receiptB(fresh.body.capture.captureId))).body.stored).toBe(1);
+      expect((await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message'))
+        .toMatchObject({ richMedia: [{ status: 'available',
+          pageSource: { incarnation: sourceB, sequence: 2 }, asset: { bytes: bytesB.length } }] });
+    } finally {
+      release();
+      await Promise.allSettled([inFlight, stopping].filter(Boolean));
+      spy.mockRestore();
+      const restarted = await startBridge();
+      if (restarted !== null) base = `http://127.0.0.1:${restarted}`;
+    }
+  });
+
+  it('credits a physically committed B pending row when its same-envelope B available settlement is revoked before rename', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const sourceA = `src_${'a'.repeat(32)}_1`, sourceB = `src_${'b'.repeat(32)}_2`;
+    const bytesA = await sharp({ create: { width: 8, height: 7, channels: 4,
+      background: { r: 11, g: 22, b: 33, alpha: 1 } } }).webp().toBuffer();
+    const bytesB = await sharp({ create: { width: 7, height: 9, channels: 4,
+      background: { r: 44, g: 55, b: 66, alpha: 1 } } }).webp().toBuffer();
+    const pending = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'pending' };
+    const available = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'available',
+      previewDataUrl: `data:image/webp;base64,${bytesB.toString('base64')}`,
+      previewWidth: 7, previewHeight: 9, pixelBytes: bytesB.length,
+      pixelSha256: createHash('sha256').update(bytesB).digest('hex') };
+    expect((await fixture.sendPixel(pending,
+      fixture.pixelReceipt('initial-a', sourceA, 1, 'pending'))).body.stored).toBe(1);
+    expect((await fixture.sendPixel({ ...available, previewDataUrl: `data:image/webp;base64,${bytesA.toString('base64')}`,
+      previewWidth: 8, previewHeight: 7, pixelBytes: bytesA.length,
+      pixelSha256: createHash('sha256').update(bytesA).digest('hex') },
+    fixture.pixelReceipt('initial-a', sourceA, 1, 'available', bytesA))).body.stored).toBe(1);
+    const ticketB = await fixture.begin();
+    expect(ticketB.status).toBe(200);
+    const captureId = ticketB.body.capture.captureId as string;
+    const receiptB = (status: 'pending' | 'available', bytes: Buffer | null = null) => ({
+      ...fixture.pixelReceipt('replacement-b', sourceB, 2, status, bytes), captureId
+    });
+    const originalWrite = fs.writeFile.bind(fs);
+    let entered!: () => void, release!: () => void;
+    const writing = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let canonicalWrites = 0;
+    const spy = vi.spyOn(fs, 'writeFile').mockImplementation((async (file, data, options) => {
+      const result = await originalWrite(file, data, options as any);
+      if (String(file).includes(`${path.sep}messages${path.sep}`) && String(file).endsWith('.tmp') &&
+          ++canonicalWrites === 2) {
+        entered();
+        await held;
+      }
+      return result;
+    }) as typeof fs.writeFile);
+    let inFlight: Promise<Reply> | null = null, stopping: Promise<void> | null = null;
+    try {
+      inFlight = request('POST', '/events', { body: {
+        conversationId: fixture.conversationId, events: [pending, available],
+        richPixelReceipts: [receiptB('pending'), receiptB('available', bytesB)]
+      } });
+      await writing;
+      const canonical = path.join(dir, 'sessions', fixture.session.id, 'messages',
+        `${createHash('sha256').update(`assistant_message\u0000${fixture.messageId}`).digest('hex')}.json`);
+      expect(JSON.parse(await fs.readFile(canonical, 'utf8'))).toMatchObject({ richMedia: [{
+        status: 'pending', pageSource: { incarnation: sourceB, sequence: 2 }
+      }] });
+      stopping = stopBridge();
+      release();
+      expect(await inFlight).toMatchObject({ status: 200, body: {
+        sessionId: fixture.session.id, stored: 1, partialCommitted: true, remainderSuppressed: true
+      } });
+      await stopping;
+      const retained = (await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message');
+      expect(retained).toMatchObject({ richMedia: [{ status: 'pending',
+        pageSource: { incarnation: sourceB, sequence: 2 } }] });
+      expect((retained as any)?.richMedia?.[0]).not.toHaveProperty('asset');
+      const restarted = await startBridge();
+      expect(restarted).not.toBeNull();
+      base = `http://127.0.0.1:${restarted}`;
+      expect((await fixture.sendPixel(available, receiptB('available', bytesB))).body.stored).toBe(0);
+      const fresh = await fixture.begin();
+      expect(fresh.status).toBe(200);
+      expect((await fixture.sendPixel(available, {
+        ...receiptB('available', bytesB), captureId: fresh.body.capture.captureId
+      })).body.stored).toBe(1);
+    } finally {
+      release();
+      await Promise.allSettled([inFlight, stopping].filter(Boolean));
+      spy.mockRestore();
+      const restarted = await startBridge();
+      if (restarted !== null) base = `http://127.0.0.1:${restarted}`;
+    }
+  });
+
+  it('reports a partial pixel envelope when stop occurs strictly between its two authenticated rows', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const source = `src_${'e'.repeat(32)}_1`;
+    const bytes = await sharp({ create: { width: 7, height: 5, channels: 3,
+      background: '#112233' } }).webp().toBuffer();
+    const pending = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'pending' };
+    const available = { ...pending, status: 'available', previewWidth: 7, previewHeight: 5,
+      previewDataUrl: `data:image/webp;base64,${bytes.toString('base64')}`,
+      pixelBytes: bytes.length, pixelSha256: createHash('sha256').update(bytes).digest('hex') };
+    const originalRename = fs.rename.bind(fs);
+    let stopping: Promise<void> | null = null;
+    let count = 0;
+    const rename = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      const result = await originalRename(from, to);
+      if (String(to).includes(`${path.sep}messages${path.sep}`) && String(to).endsWith('.json') &&
+          ++count === 1) {
+        // First source rename physically finished. Stop revokes the lease before
+        // the recorder advances to the second row, without holding the HTTP drain.
+        stopping = stopBridge();
+      }
+      return result;
+    }) as typeof fs.rename);
+    try {
+      const response = await request('POST', '/events', { body: {
+        conversationId: fixture.conversationId, events: [pending, available],
+        richPixelReceipts: [
+          fixture.pixelReceipt('between-rows', source, 1, 'pending'),
+          fixture.pixelReceipt('between-rows', source, 1, 'available', bytes)
+        ]
+      } });
+      await stopping;
+      expect(count).toBe(1);
+      expect(response).toMatchObject({ status: 200, body: {
+        sessionId: fixture.session.id, stored: 1, partialCommitted: true, remainderSuppressed: true
+      } });
+      const row = (await readEvents(fixture.session.id)).find(event => event.kind === 'assistant_message');
+      expect(row).toMatchObject({ richMedia: [{ status: 'pending',
+        pageSource: { incarnation: source, sequence: 1 } }] });
+      expect((row as any).richMedia[0]).not.toHaveProperty('asset');
+    } finally {
+      await stopping;
+      rename.mockRestore();
+      const restarted = await startBridge();
+      if (restarted !== null) base = `http://127.0.0.1:${restarted}`;
+    }
+  });
+
+  it('keeps a two-row pending prefix but returns a retryable failure on generic second-rename EIO', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const source = `src_${'f'.repeat(32)}_1`;
+    const bytes = await sharp({ create: { width: 7, height: 5, channels: 3,
+      background: '#334455' } }).webp().toBuffer();
+    const pending = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'pending' };
+    const available = { ...pending, status: 'available', previewWidth: 7, previewHeight: 5,
+      previewDataUrl: `data:image/webp;base64,${bytes.toString('base64')}`,
+      pixelBytes: bytes.length, pixelSha256: createHash('sha256').update(bytes).digest('hex') };
+    const envelope = { conversationId: fixture.conversationId, events: [pending, available],
+      richPixelReceipts: [fixture.pixelReceipt('two-row-eio', source, 1, 'pending'),
+        fixture.pixelReceipt('two-row-eio', source, 1, 'available', bytes)] };
+    const originalRename = fs.rename.bind(fs);
+    let count = 0;
+    const rename = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (String(to).includes(`${path.sep}messages${path.sep}`) && String(to).endsWith('.json') &&
+          ++count === 2) throw Object.assign(new Error('two-row canonical rename EIO'), { code: 'EIO' });
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    try {
+      const failed = await request('POST', '/events', { body: envelope });
+      expect(count).toBe(2);
+      expect(failed.status).not.toBe(200);
+      const row = (await readEvents(fixture.session.id)).find(event => event.kind === 'assistant_message');
+      expect(row).toMatchObject({ richMedia: [{ status: 'pending',
+        pageSource: { incarnation: source, sequence: 1 } }] });
+      expect((row as any).richMedia[0]).not.toHaveProperty('asset');
+    } finally {
+      rename.mockRestore();
+    }
+    const retry = await request('POST', '/events', { body: envelope });
+    expect(retry).toMatchObject({ status: 200, body: { sessionId: fixture.session.id, stored: 1 } });
+    expect((await readEvents(fixture.session.id)).find(event => event.kind === 'assistant_message'))
+      .toMatchObject({ richMedia: [{ status: 'available', asset: { bytes: bytes.length } }] });
+  });
+
+  it('does not acknowledge B when stop revokes its first canonical source write before any new prefix commits', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const sourceA = `src_${'a'.repeat(32)}_1`, sourceB = `src_${'b'.repeat(32)}_2`;
+    const bytes = await sharp({ create: { width: 7, height: 8, channels: 3,
+      background: '#224466' } }).webp().toBuffer();
+    const pending = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'pending' };
+    const available = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'available',
+      previewDataUrl: `data:image/webp;base64,${bytes.toString('base64')}`,
+      previewWidth: 7, previewHeight: 8, pixelBytes: bytes.length,
+      pixelSha256: createHash('sha256').update(bytes).digest('hex') };
+    expect((await fixture.sendPixel(pending,
+      fixture.pixelReceipt('source-a-before-stop', sourceA, 1, 'pending'))).body.stored).toBe(1);
+    expect((await fixture.sendPixel(available,
+      fixture.pixelReceipt('source-a-before-stop', sourceA, 1, 'available', bytes))).body.stored).toBe(1);
+    const original = (await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message');
+    const ticketB = await fixture.begin();
+    expect(ticketB.status).toBe(200);
+    const originalWrite = fs.writeFile.bind(fs);
+    let entered!: () => void, release!: () => void;
+    const writing = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let intercepted = false;
+    const spy = vi.spyOn(fs, 'writeFile').mockImplementation((async (file, data, options) => {
+      const result = await originalWrite(file, data, options as any);
+      if (!intercepted && String(file).includes(`${path.sep}messages${path.sep}`) &&
+          String(file).endsWith('.tmp')) {
+        intercepted = true;
+        entered();
+        await gate;
+      }
+      return result;
+    }) as typeof fs.writeFile);
+    let inFlight: Promise<Reply> | null = null, stopping: Promise<void> | null = null;
+    try {
+      inFlight = fixture.sendPixel(available, { ...fixture.pixelReceipt('source-b-before-stop', sourceB, 2,
+        'available', bytes), captureId: ticketB.body.capture.captureId });
+      await writing;
+      stopping = stopBridge();
+      release();
+      const response = await inFlight;
+      await stopping;
+      expect(intercepted).toBe(true);
+      expect(response.status).not.toBe(200);
+      expect((await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message'))
+        .toEqual(original);
+    } finally {
+      release();
+      await Promise.allSettled([inFlight, stopping].filter(Boolean));
+      spy.mockRestore();
+      const restarted = await startBridge();
+      if (restarted !== null) base = `http://127.0.0.1:${restarted}`;
+    }
+  });
+
+  it('does not disguise a failed second canonical pixel rename as a successful partial stop receipt', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const sourceA = `src_${'a'.repeat(32)}_1`, sourceB = `src_${'b'.repeat(32)}_2`;
+    const bytes = await sharp({ create: { width: 6, height: 5, channels: 3,
+      background: '#335577' } }).webp().toBuffer();
+    const pending = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'pending' };
+    const available = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'available',
+      previewDataUrl: `data:image/webp;base64,${bytes.toString('base64')}`,
+      previewWidth: 6, previewHeight: 5, pixelBytes: bytes.length,
+      pixelSha256: createHash('sha256').update(bytes).digest('hex') };
+    expect((await fixture.sendPixel(pending,
+      fixture.pixelReceipt('eio-source-a', sourceA, 1, 'pending'))).body.stored).toBe(1);
+    expect((await fixture.sendPixel(available,
+      fixture.pixelReceipt('eio-source-a', sourceA, 1, 'available', bytes))).body.stored).toBe(1);
+    const ticketB = await fixture.begin();
+    expect(ticketB.status).toBe(200);
+    const receiptB = { ...fixture.pixelReceipt('eio-source-b', sourceB, 2, 'available', bytes),
+      captureId: ticketB.body.capture.captureId };
+    const originalRename = fs.rename.bind(fs);
+    let canonicalRenames = 0;
+    const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (String(to).includes(`${path.sep}messages${path.sep}`) && String(to).endsWith('.json') &&
+          ++canonicalRenames === 2)
+        throw Object.assign(new Error('second pixel canonical rename EIO'), { code: 'EIO' });
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    try {
+      const failed = await fixture.sendPixel(available, receiptB);
+      expect(failed.status).not.toBe(200);
+      expect(canonicalRenames).toBe(2);
+      expect((await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message'))
+        .toMatchObject({ richMedia: [{ status: 'pending', reason: 'not_loaded',
+          pageSource: { incarnation: sourceB, sequence: 2 } }] });
+    } finally {
+      spy.mockRestore();
+    }
+    const retried = await fixture.sendPixel(available, receiptB);
+    expect(retried).toMatchObject({ status: 200, body: { sessionId: fixture.session.id, stored: 1 } });
+    expect((await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message'))
+      .toMatchObject({ richMedia: [{ status: 'available',
+        pageSource: { incarnation: sourceB, sequence: 2 }, asset: { bytes: bytes.length } }] });
+  });
+
+  it('never revives stale A pixels after a newer same-slot B→A source sequence and keeps removed slots closed', async () => {
+    await pair();
+    const fixture = await seededPagePixel();
+    const a = `src_${'a'.repeat(32)}_1`, b = `src_${'b'.repeat(32)}_2`, back = `src_${'c'.repeat(32)}_3`;
+    const pending = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'pending' };
+    const ticketA = fixture.capture;
+    const aReceipt = fixture.pixelReceipt('scan-a', a, 1, 'pending');
+    expect((await fixture.sendPixel(pending, aReceipt)).body.stored).toBe(1);
+    const ticketB = (await fixture.begin()).body.capture as Record<string, any>;
+    const forTicket = (ticket: Record<string, any>, token: string, sequence: number, scan: string) => ({
+      ...fixture.pixelReceipt(scan, token, sequence, 'pending'), captureId: ticket.captureId
+    });
+    expect((await fixture.sendPixel(pending, forTicket(ticketB, b, 2, 'scan-b'))).body.stored).toBe(1);
+    const bytes = Buffer.from('524946460400000057454250', 'hex');
+    const oldEvent = { kind: 'rich_media', time: Date.now(), ...fixture.identity, status: 'available',
+      previewDataUrl: `data:image/webp;base64,${bytes.toString('base64')}`,
+      previewWidth: 2, previewHeight: 2, pixelBytes: bytes.length,
+      pixelSha256: createHash('sha256').update(bytes).digest('hex') };
+    expect((await fixture.sendPixel(oldEvent, { ...fixture.pixelReceipt('scan-a', a, 1, 'available', bytes),
+      captureId: ticketA.captureId })).body.stored).toBe(0);
+    const ticketC = (await fixture.begin()).body.capture as Record<string, any>;
+    expect((await fixture.sendPixel(pending, forTicket(ticketC, back, 3, 'scan-c'))).body.stored).toBe(1);
+    const current = (await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message');
+    expect(current).toMatchObject({ richMedia: [{ status: 'pending',
+      pageSource: { incarnation: back, sequence: 3 } }] });
+    expect((current as any)?.richMedia?.[0]).not.toHaveProperty('asset');
+    if (current?.kind !== 'assistant_message' || !current.rich) throw new Error('expected canonical image slot');
+    const removed = await sessionStoreModule.upsertRichMedia(fixture.session.id, fixture.messageId,
+      { mediaId: fixture.mediaId, nodeId: fixture.nodeId, source: { kind: 'page', nodeId: fixture.nodeId },
+        status: 'unavailable', reason: 'removed' }, fixture.origin,
+      current.rich.revision,
+      (await import('../src/main/config.js')).getRecordingRevision());
+    expect(removed).toBe('stored');
+    expect((await fixture.begin()).status).toBe(409);
+    expect((await fixture.sendPixel(pending,
+      forTicket(ticketC, `src_${'d'.repeat(32)}_4`, 4, 'scan-c'))).body.stored).toBe(0);
+    expect((await readEvents(fixture.session.id)).find(row => row.kind === 'assistant_message'))
+      .toMatchObject({ richMedia: [{ status: 'unavailable', reason: 'removed' }] });
+  });
+
   it('does not admit rich_media from an authenticated HTTP body while live provenance is unproven', async () => {
     await pair();
     const conversationId = randomUUID();
@@ -430,7 +1819,7 @@ describe('rich observations require capture-time Chrome document authority', () 
     expect(before.find(row => row.kind === 'assistant_message')).not.toHaveProperty('richMedia');
   });
 
-  it('validates the rich tree and aligned sender envelope field-wise before the recorder', async () => {
+  it('parses rich structure field-wise without treating diagnostic sourceCaptures as ownership', async () => {
     const { parseObservations } = await import('../src/main/bridge.js');
     const conversationId = randomUUID();
     const messageId = 'logical-a';
@@ -460,10 +1849,11 @@ describe('rich observations require capture-time Chrome document authority', () 
       { ...capture, navigationEpoch: -1 },
       { ...capture, routeVerified: false },
       { ...capture, conversationId: randomUUID() }]) {
-      expect(parseObservations([raw], [forged], conversationId)[0]).not.toHaveProperty('rich');
+      expect(parseObservations([raw], [forged], conversationId)[0]).toMatchObject({ rich });
     }
-    expect(parseObservations([raw], undefined, conversationId)[0]).not.toHaveProperty('rich');
-    expect(parseObservations([raw], [capture, capture], conversationId)[0]).not.toHaveProperty('rich');
+    expect(parseObservations([raw], undefined, conversationId)[0]).toMatchObject({ rich });
+    expect(parseObservations([raw], [capture, capture], conversationId)[0]).toMatchObject({ rich });
+    expect(parseObservations([raw], [capture], conversationId)[0]).toMatchObject({ rich });
   });
 
   it('rejects protocol-16 /events even with a valid old bearer before creating a session', async () => {
@@ -2177,6 +3567,208 @@ describe('activity feed', () => {
       }
     }
   );
+
+  it('does not promote same-batch Goal when Off excludes its not-yet-durable uncertain end', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const turnId = `goal-off-before-end-${conversationId}`;
+    const messageId = `goal-off-final-${conversationId}`;
+    const now = Date.now();
+    const grant = recordingGenerationGrant();
+    const payload = { conversationId, events: [
+      { kind: 'turn_start', time: now, turnId },
+      { kind: 'assistant_message', time: now + 1, messageId,
+        text: 'Durable final without a durable end', state: 'final', final: true },
+      { kind: 'turn_end', time: now + 2, turnId, outcome: 'unknown' }
+    ], recordingGenerations: [grant, grant, grant] };
+    const originalRename = fs.rename.bind(fs);
+    const configTarget = path.join(dir, 'config.json');
+    let finalPath: string | null = null;
+    let finalRenames = 0;
+    let reachedFinal!: () => void, releaseFinal!: () => void;
+    let reachedConfig!: () => void, releaseConfig!: () => void;
+    const finalReached = new Promise<void>(resolve => { reachedFinal = resolve; });
+    const finalGate = new Promise<void>(resolve => { releaseFinal = resolve; });
+    const configReached = new Promise<void>(resolve => { reachedConfig = resolve; });
+    const configGate = new Promise<void>(resolve => { releaseConfig = resolve; });
+    let heldConfig = false;
+    const renameSpy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      const target = String(to);
+      if (!finalPath && target.includes(`${path.sep}messages${path.sep}`) && target.endsWith('.json')) {
+        finalPath = target;
+        finalRenames++;
+        await originalRename(from, to); // Actual bytes and rename precede the Off decision.
+        reachedFinal();
+        await finalGate;
+        return;
+      }
+      if (target === finalPath) finalRenames++;
+      if (!heldConfig && target === configTarget) {
+        heldConfig = true;
+        reachedConfig();
+        await configGate;
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    let batch: Promise<Reply> | null = null;
+    let disabling: Promise<unknown> | null = null;
+    try {
+      batch = request('POST', '/events', { body: payload });
+      await finalReached;
+      const canonical = JSON.parse(await fs.readFile(finalPath!, 'utf8'));
+      expect(canonical).toMatchObject({ messageId, final: true });
+      expect(canonical).not.toHaveProperty('goalEligible', true);
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+      releaseFinal();
+      await configReached;
+      releaseConfig();
+      await disabling;
+      const response = await batch;
+      const sessionId = response.body.sessionId as string;
+      expect(response).toMatchObject({ status: 200, body: {
+        sessionId, stored: 2, partialCommitted: true, remainderSuppressed: true
+      } });
+      const rows = await readEvents(sessionId);
+      expect(rows.filter(row => row.kind === 'turn_start' && row.turnId === turnId)).toHaveLength(1);
+      expect(rows.filter(row => row.kind === 'turn_end' && row.turnId === turnId)).toEqual([]);
+      expect(rows.filter(row => row.kind === 'assistant_message' && row.messageId === messageId))
+        .toMatchObject([{ final: true }]);
+      expect(rows.find(row => row.kind === 'assistant_message' && row.messageId === messageId))
+        .not.toHaveProperty('goalEligible', true);
+      expect((await readDurable<{ replies: Array<{ conversationId: string }> }>(GOAL_REPLIES_STATE))?.replies
+        .filter(reply => reply.conversationId === conversationId) ?? []).toEqual([]);
+      expect(finalRenames).toBe(1);
+      await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
+      expect(recordingGenerationGrant()).not.toBe(grant);
+      expect(await request('POST', '/events', { body: payload })).toMatchObject({
+        status: 200, body: { stored: 0, recordingSuppressed: true }
+      });
+      expect((await readEvents(sessionId)).filter(row => row.kind === 'turn_end')).toEqual([]);
+    } finally {
+      releaseFinal(); releaseConfig();
+      await Promise.allSettled([batch, disabling].filter(promise => promise !== null));
+      renameSpy.mockRestore();
+      await updateConfig(() => suiteConfig);
+    }
+  });
+
+  it.each([true, false])('counts the real end before %s Off interrupts optional same-batch Goal promotion', async offSucceeds => {
+    await pair();
+    const conversationId = randomUUID();
+    const turnId = `goal-end-failed-off-${conversationId}`;
+    const messageId = `goal-end-final-${conversationId}`;
+    const now = Date.now();
+    const grant = recordingGenerationGrant();
+    const payload = { conversationId, events: [
+      { kind: 'turn_start', time: now, turnId },
+      { kind: 'assistant_message', time: now + 1, messageId,
+        text: 'The original durable end must survive the failed Off', state: 'final', final: true },
+      { kind: 'turn_end', time: now + 2, turnId, outcome: 'unknown' }
+    ], recordingGenerations: [grant, grant, grant] };
+    const originalAppend = fs.appendFile.bind(fs);
+    const originalRename = fs.rename.bind(fs);
+    const configTarget = path.join(dir, 'config.json');
+    let endAppends = 0;
+    let finalPath: string | null = null;
+    let finalRenames = 0;
+    let reachedEnd!: () => void, releaseEnd!: () => void;
+    let reachedConfig!: () => void, releaseConfig!: () => void;
+    const endReached = new Promise<void>(resolve => { reachedEnd = resolve; });
+    const endGate = new Promise<void>(resolve => { releaseEnd = resolve; });
+    const configReached = new Promise<void>(resolve => { reachedConfig = resolve; });
+    const configGate = new Promise<void>(resolve => { releaseConfig = resolve; });
+    let heldEnd = false, heldConfig = false;
+    const appendSpy = vi.spyOn(fs, 'appendFile').mockImplementation((async (file, data, options) => {
+      if (!heldEnd && String(file).endsWith(`${path.sep}events.jsonl`) &&
+          String(data).includes('"kind":"turn_end"') && String(data).includes(turnId)) {
+        heldEnd = true;
+        endAppends++;
+        await originalAppend(file, data, options); // Real journal line must be physically present.
+        reachedEnd();
+        await endGate;
+        return;
+      }
+      if (String(file).endsWith(`${path.sep}events.jsonl`) && String(data).includes('"kind":"turn_end"') &&
+          String(data).includes(turnId)) endAppends++;
+      return originalAppend(file, data, options);
+    }) as typeof fs.appendFile);
+    const renameSpy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      const target = String(to);
+      if (target.includes(`${path.sep}messages${path.sep}`) && target.endsWith('.json')) {
+        if (!finalPath) finalPath = target;
+        if (target === finalPath) finalRenames++;
+      }
+      if (!heldConfig && target === configTarget) {
+        heldConfig = true;
+        reachedConfig();
+        await configGate;
+        if (!offSucceeds) throw Object.assign(new Error('Goal end Off EIO'), { code: 'EIO' });
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    let batch: Promise<Reply> | null = null;
+    let disabling: Promise<unknown> | null = null;
+    try {
+      batch = request('POST', '/events', { body: payload });
+      void batch.catch(() => undefined);
+      await endReached;
+      expect(finalPath).not.toBeNull();
+      const journal = await fs.readFile(path.join(path.dirname(path.dirname(finalPath!)), 'events.jsonl'), 'utf8');
+      expect(journal.split('\n').filter(Boolean).map(line => JSON.parse(line))
+        .filter(row => row.kind === 'turn_end' && row.turnId === turnId))
+        .toMatchObject([{ outcome: 'unknown' }]);
+      disabling = saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: false } });
+      void disabling.catch(() => undefined);
+      await vi.waitFor(() => expect(pendingRecordingOffDecision()).not.toBeNull());
+      releaseEnd();
+      await configReached;
+      expect(getConfig().sessions.record).toBe(true);
+      releaseConfig();
+      if (offSucceeds) await disabling;
+      else await expect(disabling).rejects.toThrow('Goal end Off EIO');
+      const reply = await batch;
+      const sessionId = reply.body.sessionId as string;
+      expect(reply).toMatchObject({ status: 200, body: {
+        sessionId, ...(offSucceeds ? { stored: 3 } : {})
+      } });
+      const rows = await readEvents(sessionId);
+      const starts = rows.filter(row => row.kind === 'turn_start' && row.turnId === turnId);
+      const ends = rows.filter(row => row.kind === 'turn_end' && row.turnId === turnId);
+      const finals = rows.filter(row => row.kind === 'assistant_message' && row.messageId === messageId);
+      expect(starts).toHaveLength(1);
+      expect(ends).toMatchObject([{ outcome: 'unknown' }]);
+      expect(finals).toMatchObject([{ final: true, ...(offSucceeds ? {} : { goalEligible: true }) }]);
+      if (offSucceeds) expect(finals[0]).not.toHaveProperty('goalEligible', true);
+      expect(starts[0]!.seq).toBeLessThan(finals[0]!.kind === 'assistant_message' ? finals[0]!.finalContentSeq! : 0);
+      expect(finals[0]!.kind === 'assistant_message' ? finals[0]!.finalContentSeq! : 0).toBeLessThan(ends[0]!.seq);
+      expect(endAppends).toBe(1);
+      expect(finalRenames).toBe(offSucceeds ? 1 : 2);
+      const beforeReplay = (await readDurable<{ replies: Array<{ conversationId: string; replyId: string; eventSeq: number }> }>(GOAL_REPLIES_STATE))?.replies
+        .filter(reply => reply.conversationId === conversationId) ?? [];
+      if (offSucceeds) expect(beforeReplay).toEqual([]);
+      else expect(beforeReplay).toMatchObject([{
+        replyId: messageId, eventSeq: finals[0]!.kind === 'assistant_message' ? finals[0]!.origin! : -1
+      }]);
+      if (offSucceeds) {
+        await updateConfig(latest => ({ ...latest, sessions: { ...latest.sessions, record: true } }));
+        expect(recordingGenerationGrant()).not.toBe(grant);
+        expect(await request('POST', '/events', { body: payload })).toMatchObject({
+          status: 200, body: { stored: 0, recordingSuppressed: true }
+        });
+      } else expect((await request('POST', '/events', { body: payload })).status).toBe(200);
+      expect((await readEvents(sessionId))).toEqual(rows);
+      expect(endAppends).toBe(1);
+      expect(finalRenames).toBe(offSucceeds ? 1 : 2);
+      expect((await readDurable<{ replies: Array<{ conversationId: string; replyId: string; eventSeq: number }> }>(GOAL_REPLIES_STATE))?.replies
+        .filter(reply => reply.conversationId === conversationId) ?? []).toEqual(beforeReplay);
+    } finally {
+      releaseEnd(); releaseConfig();
+      await Promise.allSettled([batch, disabling].filter(promise => promise !== null));
+      renameSpy.mockRestore(); appendSpy.mockRestore();
+      await updateConfig(() => suiteConfig);
+    }
+  });
 
   it.each([
     { owner: 'goal', offSucceeds: true },
@@ -4470,6 +6062,25 @@ describe('delivering a bootstrap', () => {
     const worker = swarmState().agents.find((agent) => agent.id === 'worker-1')!;
     expect(worker.state).toBe('active');
     expect(worker.conversationId).toBe(conversationId);
+
+    // A genuine lost-ACK progress receipt may be replayed at least once. Its
+    // command cannot gain a second conversation or resurrect a different run.
+    const replayed = await request('POST', '/events', { body: {
+      conversationId, agent: 'worker-1', agentCommandId: command.id,
+      events: [{ kind: 'progress', time: Date.now(), text: 'same-run recovery' }]
+    } });
+    expect(replayed.status).toBe(200);
+    expect(swarmState().agents.find(agent => agent.id === 'worker-1'))
+      .toMatchObject({ state: 'active', conversationId });
+    const foreign = 'dddddddd-1111-2222-3333-444444444444';
+    const foreignReplay = await request('POST', '/events', { body: {
+      conversationId: foreign, agent: 'worker-1', agentCommandId: command.id,
+      events: [{ kind: 'progress', time: Date.now(), text: 'borrowed command' }]
+    } });
+    expect(foreignReplay.status).toBe(200);
+    expect(swarmState().agents.find(agent => agent.id === 'worker-1'))
+      .toMatchObject({ state: 'active', conversationId });
+    expect(await findSessionByConversation(foreign)).toBeNull();
   });
 
   it('cannot activate an exact claimed worker from a malformed current-generation observation', async () => {
@@ -4502,6 +6113,248 @@ describe('delivering a bootstrap', () => {
     expect(swarmState().agents.find(agent => agent.id === 'worker-1')).toMatchObject({ state: 'invited', conversationId: null });
     expect(pendingCommands().find(entry => entry.id === command.id)).toMatchObject({ id: command.id });
     expect(await findSessionByConversation(LOST_ACK_CHAT)).toBeNull();
+  });
+
+  it('does not activate a pending worker from metadata or an unchanged canonical replay', async () => {
+    await pair();
+    spawn({ workers: [{ task: 'wait for a newly committed canonical row' }], caller: { conversationId: PRIME_CHAT } });
+    const command = await redeem();
+    const conversationId = randomUUID();
+    const session = await createSession({ conversationId });
+    const originalUser = { kind: 'user_message' as const, source: 'extension' as const,
+      time: Date.now(), messageId: 'worker-duplicate-user',
+      message: { text: 'Already recorded', chars: 16, truncated: false } };
+    expect((await sessionStoreModule.upsertMessageEvent(session.id, originalUser)).changed).toBe(true);
+    const envelope = { conversationId, agent: 'worker-1', agentCommandId: command.id };
+    const metadata = await request('POST', '/events', { body: { ...envelope, events: [
+      { kind: 'model_selection', time: Date.now(), model: 'gpt-5.6-sol', reasoningEffort: 'high' },
+      { kind: 'conversation_title', time: Date.now(), text: 'Metadata alone' }
+    ] } });
+    expect(metadata.status).toBe(200);
+    expect(swarmState().agents.find(agent => agent.id === 'worker-1'))
+      .toMatchObject({ state: 'invited', conversationId: null });
+    expect(pendingCommands().find(entry => entry.id === command.id)).toMatchObject({ id: command.id });
+
+    const replay = await request('POST', '/events', { body: { ...envelope, events: [
+      { kind: 'user_message', time: originalUser.time, messageId: originalUser.messageId,
+        text: originalUser.message.text }
+    ] } });
+    expect(replay.status).toBe(200);
+    expect(swarmState().agents.find(agent => agent.id === 'worker-1'))
+      .toMatchObject({ state: 'invited', conversationId: null });
+    expect(pendingCommands().find(entry => entry.id === command.id)).toMatchObject({ id: command.id });
+    const fresh = await request('POST', '/events', { body: { ...envelope, events: [
+      { kind: 'user_message', time: Date.now() + 1, messageId: 'worker-genuine-new-user',
+        text: 'Newly authored work', authoredNow: true }
+    ] } });
+    expect(fresh).toMatchObject({ status: 200, body: { sessionId: session.id, stored: 1 } });
+    expect(swarmState().agents.find(agent => agent.id === 'worker-1')?.conversationId).toBe(conversationId);
+  });
+
+  it.each(['native_image', 'page_tool'] as const)(
+    'records %s presentation enrichment without binding an invited worker, but its first new identity activates', async kind => {
+      await pair();
+      const conversationId = randomUUID();
+      const providerMessageId = randomUUID();
+      const originalAssetId = `file_${randomUUID().replaceAll('-', '')}`;
+      const originalToolId = `page-tool-${randomUUID()}`;
+      const original = kind === 'native_image'
+        ? { kind, time: Date.now(), messageId: providerMessageId, providerAssetId: originalAssetId,
+          providerRole: 'tool', providerStatus: 'finished_successfully', previewStatus: 'pending' }
+        : { kind, time: Date.now(), messageId: originalToolId, text: 'Loading files', activeNow: false };
+      const seeded = await request('POST', '/events', { body: { conversationId, events: [original] } });
+      expect(seeded).toMatchObject({ status: 200, body: { stored: 1 } });
+      const sessionId = seeded.body.sessionId as string;
+      const beforeOrigin = (await getSession(sessionId))?.origin;
+      const pixels = await sharp({ create: { width: 7, height: 5, channels: 3,
+        background: '#336699' } }).webp().toBuffer();
+
+      spawn({ workers: [{ task: `prove first ${kind} separately from its presentation` }],
+        caller: { conversationId: PRIME_CHAT } });
+      const command = await redeem();
+      const envelope = { conversationId, agent: 'worker-1', agentCommandId: command.id };
+      const enrichment = kind === 'native_image'
+        ? { ...original, time: Date.now() + 1, previewStatus: 'available',
+          previewWidth: 7, previewHeight: 5,
+          previewDataUrl: `data:image/webp;base64,${pixels.toString('base64')}` }
+        : { ...original, time: Date.now() + 1, text: 'Loaded files', activeNow: false };
+      const enriched = await request('POST', '/events', { body: { ...envelope, events: [enrichment] } });
+      expect(enriched).toMatchObject({ status: 200, body: { sessionId } });
+      expect(enriched.body.stored).toBeGreaterThan(0);
+      if (kind === 'native_image') {
+        const [image] = await readEvents(sessionId, { kinds: ['native_image'] });
+        expect(image).toMatchObject({ providerAssetId: originalAssetId, previewStatus: 'available',
+          asset: { mimeType: 'image/webp', bytes: pixels.length } });
+      } else {
+        expect(await readEvents(sessionId, { kinds: ['page_tool'] }))
+          .toContainEqual(expect.objectContaining({ messageId: originalToolId, label: 'Loaded files' }));
+      }
+      expect(swarmState().agents.find(agent => agent.id === 'worker-1'))
+        .toMatchObject({ state: 'invited', conversationId: null });
+      expect(pendingCommands().find(entry => entry.id === command.id)).toMatchObject({ id: command.id });
+      expect((await getSession(sessionId))?.origin).toEqual(beforeOrigin);
+
+      const newIdentity = kind === 'native_image'
+        ? { ...original, time: Date.now() + 2, providerAssetId: `file_${randomUUID().replaceAll('-', '')}` }
+        : { ...original, time: Date.now() + 2, messageId: `page-tool-${randomUUID()}`,
+          text: 'New work', activeNow: true };
+      const fresh = await request('POST', '/events', { body: { ...envelope, events: [newIdentity] } });
+      expect(fresh).toMatchObject({ status: 200, body: { sessionId, stored: 1 } });
+      expect(swarmState().agents.find(agent => agent.id === 'worker-1'))
+        .toMatchObject({ state: 'active', conversationId });
+    }
+  );
+
+  it('still activates an invited worker from a newly committed turn_start, not prior presentation', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const session = await createSession({ conversationId });
+    spawn({ workers: [{ task: 'prove a fresh turn boundary' }], caller: { conversationId: PRIME_CHAT } });
+    const command = await redeem();
+    const turnId = `fresh-worker-turn-${randomUUID()}`;
+    const reply = await request('POST', '/events', { body: { conversationId,
+      agent: 'worker-1', agentCommandId: command.id,
+      events: [{ kind: 'turn_start', time: Date.now(), turnId }] } });
+    expect(reply).toMatchObject({ status: 200, body: { sessionId: session.id, stored: 1 } });
+    expect(swarmState().agents.find(agent => agent.id === 'worker-1'))
+      .toMatchObject({ state: 'active', conversationId });
+  });
+
+  it('does not mistake old page-tool and lifecycle IDs beyond the bounded restart tail for first worker activity', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const toolId = `evicted-page-tool-${randomUUID()}`;
+    const oldTurnId = `evicted-turn-${randomUUID()}`;
+    const original = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: Date.now(), turnId: oldTurnId },
+      { kind: 'page_tool', time: Date.now(), turnId: oldTurnId, messageId: toolId,
+        text: 'Original tool label', activeNow: false },
+      { kind: 'turn_end', time: Date.now(), turnId: oldTurnId, outcome: 'completed' }
+    ] } });
+    expect(original).toMatchObject({ status: 200, body: { stored: 3 } });
+    const sessionId = original.body.sessionId as string;
+    const originalOrigin = (await getSession(sessionId))?.origin;
+    const originalRows = await readEvents(sessionId, { kinds: ['turn_start', 'turn_end', 'page_tool'] });
+    const firstTool = originalRows.find((row): row is Extract<SessionEvent, { kind: 'page_tool' }> =>
+      row.kind === 'page_tool' && row.messageId === toolId)!;
+    expect(firstTool).toBeDefined();
+    // A historical presentation revision can carry stale worker metadata. A
+    // future label update must recover the first event's provenance, not copy it.
+    await sessionStoreModule.appendEvent(sessionId, {
+      kind: 'page_tool', source: 'extension', time: firstTool.time, turnId: oldTurnId,
+      messageId: toolId, label: 'Older revised label', origin: firstTool.seq,
+      agent: 'obsolete-page-label-owner'
+    });
+    // Six real 390 KiB journal rows put all three identities beyond storedHistory's
+    // 2 MiB read budget while preserving the session store's 512 KiB per-line bound.
+    const filler = 'x'.repeat(390 * 1024);
+    for (let i = 0; i < 6; i++) await sessionStoreModule.appendEvent(sessionId, {
+      kind: 'note', source: 'app', time: Date.now() + i,
+      message: { text: filler, chars: filler.length, truncated: false }
+    });
+    resetRecorderForTests();
+    spawn({ workers: [{ task: 'wait for genuinely new activity after a deep history restart' }],
+      caller: { conversationId: PRIME_CHAT } });
+    const command = await redeem();
+    const envelope = { conversationId, agent: 'worker-1', agentCommandId: command.id };
+    const replayTool = await request('POST', '/events', { body: { ...envelope, events: [
+      { kind: 'page_tool', time: Date.now() + 100, turnId: oldTurnId, messageId: toolId,
+        text: 'Updated tool label', activeNow: false }
+    ] } });
+    expect(replayTool).toMatchObject({ status: 200, body: { sessionId, stored: 1 } });
+    const afterTool = await readEvents(sessionId, { kinds: ['page_tool', 'turn_start', 'turn_end'] });
+    const toolRows = afterTool.filter(row => row.kind === 'page_tool' && row.messageId === toolId);
+    expect(toolRows).toHaveLength(3);
+    expect(toolRows.at(-1)).toMatchObject({ label: 'Updated tool label', origin: firstTool.origin ?? firstTool.seq,
+      time: firstTool.time });
+    expect(toolRows.at(-1)).not.toHaveProperty('agent');
+    expect(swarmState().agents.find(worker => worker.id === 'worker-1'))
+      .toMatchObject({ state: 'invited', conversationId: null });
+    expect(pendingCommands().find(entry => entry.id === command.id)).toMatchObject({ id: command.id });
+    expect((await getSession(sessionId))?.origin).toEqual(originalOrigin);
+
+    const replayLifecycle = await request('POST', '/events', { body: { ...envelope, events: [
+      { kind: 'turn_start', time: Date.now() + 101, turnId: oldTurnId },
+      { kind: 'turn_end', time: Date.now() + 102, turnId: oldTurnId, outcome: 'completed' }
+    ] } });
+    expect(replayLifecycle).toMatchObject({ status: 200, body: { sessionId, stored: 0 } });
+    const afterReplay = await readEvents(sessionId, { kinds: ['page_tool', 'turn_start', 'turn_end'] });
+    expect(afterReplay.filter(row => row.kind === 'turn_start' && row.turnId === oldTurnId)).toHaveLength(1);
+    expect(afterReplay.filter(row => row.kind === 'turn_end' && row.turnId === oldTurnId)).toHaveLength(1);
+    expect(swarmState().agents.find(worker => worker.id === 'worker-1'))
+      .toMatchObject({ state: 'invited', conversationId: null });
+    expect(pendingCommands().find(entry => entry.id === command.id)).toMatchObject({ id: command.id });
+    expect((await getSession(sessionId))?.origin).toEqual(originalOrigin);
+
+    // An old completed end cannot be rewritten into a Stop by a later replay.
+    // Its historical identity still must not become worker-first-sight evidence.
+    const strengthened = await request('POST', '/events', { body: { ...envelope, events: [
+      { kind: 'turn_end', time: Date.now() + 102, turnId: oldTurnId, outcome: 'stopped' }
+    ] } });
+    expect(strengthened).toMatchObject({ status: 200, body: { sessionId, stored: 0 } });
+    expect((await readEvents(sessionId, { kinds: ['turn_end'] })).filter(row => row.turnId === oldTurnId))
+      .toMatchObject([{ outcome: 'completed' }]);
+    expect(swarmState().agents.find(worker => worker.id === 'worker-1'))
+      .toMatchObject({ state: 'invited', conversationId: null });
+    expect(pendingCommands().find(entry => entry.id === command.id)).toMatchObject({ id: command.id });
+
+    const fresh = await request('POST', '/events', { body: { ...envelope, events: [
+      { kind: 'turn_start', time: Date.now() + 103, turnId: `new-turn-${randomUUID()}` }
+    ] } });
+    expect(fresh).toMatchObject({ status: 200, body: { sessionId, stored: 1 } });
+    expect(swarmState().agents.find(worker => worker.id === 'worker-1'))
+      .toMatchObject({ state: 'active', conversationId });
+  });
+
+  it('recovers original page-tool provenance when only a later revision survives the restart tail', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const toolId = `split-tail-tool-${randomUUID()}`;
+    const first = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'page_tool', time: Date.now(), messageId: toolId,
+        text: 'Original unassociated activity', activeNow: false }
+    ] } });
+    expect(first).toMatchObject({ status: 200, body: { stored: 1 } });
+    const sessionId = first.body.sessionId as string;
+    const originalOrigin = (await getSession(sessionId))?.origin;
+    const [original] = await readEvents(sessionId, { kinds: ['page_tool'] });
+    expect(original).toMatchObject({ kind: 'page_tool', messageId: toolId });
+    expect(original).not.toHaveProperty('turnId');
+    expect(original).not.toHaveProperty('agent');
+
+    // The original is outside the 2 MiB restoration window, but an untrusted
+    // later label revision is IN it. This must not become the first owner.
+    const filler = 'x'.repeat(390 * 1024);
+    for (let i = 0; i < 6; i++) await sessionStoreModule.appendEvent(sessionId, {
+      kind: 'note', source: 'app', time: Date.now() + i,
+      message: { text: filler, chars: filler.length, truncated: false }
+    });
+    await sessionStoreModule.appendEvent(sessionId, {
+      kind: 'page_tool', source: 'extension', time: original!.time,
+      messageId: toolId, label: 'Old revised label', origin: original!.seq,
+      turnId: 'fabricated-late-turn', agent: 'fabricated-late-worker'
+    });
+    resetRecorderForTests();
+    spawn({ workers: [{ task: 'wait for authentic original page-tool provenance' }],
+      caller: { conversationId: PRIME_CHAT } });
+    const command = await redeem();
+    const replay = await request('POST', '/events', { body: {
+      conversationId, agent: 'worker-1', agentCommandId: command.id,
+      events: [{ kind: 'page_tool', time: Date.now() + 100, messageId: toolId,
+        turnId: 'fabricated-replay-turn', text: 'Newest label', activeNow: false }]
+    } });
+    expect(replay).toMatchObject({ status: 200, body: { sessionId, stored: 1 } });
+    const rows = (await readEvents(sessionId, { kinds: ['page_tool'] })).filter(row =>
+      row.kind === 'page_tool' && row.messageId === toolId);
+    expect(rows).toHaveLength(3);
+    expect(rows.at(-1)).toMatchObject({ kind: 'page_tool', label: 'Newest label',
+      origin: original!.seq, time: original!.time });
+    expect(rows.at(-1)).not.toHaveProperty('turnId');
+    expect(rows.at(-1)).not.toHaveProperty('agent');
+    expect(swarmState().agents.find(worker => worker.id === 'worker-1'))
+      .toMatchObject({ state: 'invited', conversationId: null });
+    expect(pendingCommands().find(entry => entry.id === command.id)).toMatchObject({ id: command.id });
+    expect((await getSession(sessionId))?.origin).toEqual(originalOrigin);
   });
 
   it('detaches an active worker when the browser reports its final chat tab closed', async () => {

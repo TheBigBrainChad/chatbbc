@@ -1,4 +1,4 @@
-import sharp from 'sharp';
+import sharp from '../sharp.js';
 import { createHash } from 'node:crypto';
 import type { InputImage } from '../../shared/input.js';
 // Outbox history retries reuse immutable normalized bytes. In particular, a full

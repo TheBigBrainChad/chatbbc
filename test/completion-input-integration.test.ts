@@ -19,7 +19,7 @@ vi.mock('../src/main/connection.js', async (importOriginal) => {
   return { ...actual, connect: async () => {}, getStatus: () => ({ ...actual.getStatus(), state: 'connected' }) };
 });
 vi.mock('../src/main/browser.js', () => ({ openInPreferredBrowser: async () => 'chrome.exe', isPreferredBrowserRunning: async () => null }));
-const { defaultConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
+const { defaultConfig, initConfigPath, loadConfig, recordingGenerationGrant, saveConfig, updateConfig } = await import('../src/main/config.js');
 const { initSecretsPath } = await import('../src/main/secrets.js');
 const { initDurableStore, flushDurable, resetDurableForTests, writeDurableNow } = await import('../src/main/durable.js');
 const { initSessionStore, resetSessionStoreForTests } = await import('../src/main/session/store.js');
@@ -32,15 +32,20 @@ let directory: string;
 let bearer: string;
 const pushed = vi.fn();
 async function post(route: string, body: unknown) {
+  const payload = route === '/events' && body && typeof body === 'object' && !Array.isArray(body) &&
+    Array.isArray((body as Record<string, unknown>).events) && !Object.hasOwn(body, 'recordingGenerations')
+    ? { ...body, recordingGenerations: (body as { events: unknown[] }).events.map(() => recordingGenerationGrant()) }
+    : body;
   const response = await fetch(`http://127.0.0.1:${bridgePort()}${route}`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-extension-version': APP_VERSION,
-      'x-extension-protocol': String(BRIDGE_PROTOCOL), ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) }, body: JSON.stringify(body)
+      'x-extension-protocol': String(BRIDGE_PROTOCOL), ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) }, body: JSON.stringify(payload)
   });
   return { status: response.status, body: await response.json() as any };
 }
 beforeAll(async () => {
   directory = await makeTempDir('clf-completion-integration-');
   initConfigPath(directory); initSecretsPath(directory); initDurableStore(directory); initSessionStore(directory);
+  await loadConfig();
   await saveConfig(defaultConfig());
   registerIpc(() => ({ isDestroyed: () => false, webContents: { send: pushed } }) as never, () => undefined);
   await startBridge();
@@ -52,7 +57,7 @@ beforeEach(async () => {
   await writeDurableNow('session-input', []);
   await writeDurableNow('plugin-refresh', []);
   goal.resetGoalStateForTests(); input.resetInputForTests(); pushed.mockClear();
-  await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: false } });
+  await updateConfig(() => ({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: false } }));
 });
 afterAll(async () => {
   await stopBridge(); await flushDurable(); resetSessionStoreForTests(); resetDurableForTests();

@@ -55,6 +55,9 @@ afterPack: scripts/afterpack-macos-adhoc-seal.mjs
 asarUnpack:
   - '**/node_modules/node-pty/**'
   - '**/node_modules/sharp/**'
+  # The Linux x64 image backend keeps its patched addon and matching libvips
+  # physically together so the native loader can honor the addon's $ORIGIN RPATH.
+  - '**/node_modules/@janhapke/sharp-electron/**'
   - '**/node_modules/@img/**'
   - '**/node_modules/tree-sitter/**'
   - '**/node_modules/tree-sitter-bash/**'
@@ -155,6 +158,8 @@ linux:
   extraResources:
     - from: build/runtime-icon.png
       to: runtime-icon.png
+    - from: node_modules/@janhapke/sharp-electron/README.md
+      to: THIRD-PARTY-NOTICES-sharp-electron.md
     - from: resources/packaging/native/linux/${arch}/node_modules/@img/sharp-libvips-linux-${arch}/README.md
       to: THIRD-PARTY-NOTICES-sharp-libvips-linux-${arch}.md
     - from: resources/packaging/tunnel/linux/${arch}
@@ -177,3 +182,8 @@ deb:
     - libatspi2.0-0 | libatspi2.0-0t64
     - libuuid1
     - libsecret-1-0
+    # Ubuntu 24.04 exposes the real ALSA runtime as libasound2t64 while the
+    # libasound2 virtual package can resolve to an incompatible OSS4 shim.
+    # Prefer the t64 package there; older Ubuntu/Debian fall back to libasound2.
+    - libasound2t64 | libasound2
+    - libgbm1

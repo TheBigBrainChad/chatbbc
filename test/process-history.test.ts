@@ -96,10 +96,16 @@ it('reads only an exact already-hydrated call revision without opening or scanni
     await expect(readHydratedActivityCall(a.id, 'owner-a', 'ordinary-a', ordinary.seq)).resolves.toEqual(ordinary);
     await expect(readHydratedActivityCall(a.id, 'owner-b', 'ordinary-a', ordinary.seq)).resolves.toBeNull();
     await expect(readHydratedActivityCall(a.id, 'owner-a', 'missing', ordinary.seq)).resolves.toBeNull();
+    expect(openFile).not.toHaveBeenCalled();
+    expect(readFile).not.toHaveBeenCalled();
 
     await completeProcessCall(a.id, 'process-a', { completedAt: 200, durationMs: 100, exitCode: 9 });
     const completed = (await readActivityEvents(a.id, processLaunch.seq + 1)).events
       .find(event => event.kind === 'tool_call' && event.call.callId === 'process-a')!;
+    // The canonical WRITE checks its physical predecessor. The hydration read
+    // must still use only the already-loaded exact revision after that write.
+    openFile.mockClear();
+    readFile.mockClear();
     await expect(readHydratedActivityCall(a.id, 'owner-a', 'process-a', processLaunch.seq)).resolves.toBeNull();
     await expect(readHydratedActivityCall(a.id, 'owner-a', 'process-a', completed.seq)).resolves.toEqual(completed);
     expect(openFile).not.toHaveBeenCalled();

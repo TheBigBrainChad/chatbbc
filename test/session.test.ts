@@ -1139,7 +1139,8 @@ describe('session store', () => {
   });
 
   it('uses the stable final when it and the uncertain end arrive in the same browser batch', async () => {
-    const recovered = await recordChatObservations('c-goal-final-same-batch', [
+    const conversationId = 'c-goal-final-same-batch';
+    const envelope = [
       { kind: 'turn_start', time: 10, turnId: 'g-same-batch' },
       {
         kind: 'assistant_message',
@@ -1150,12 +1151,280 @@ describe('session store', () => {
         final: true
       },
       { kind: 'turn_end', time: 20, turnId: 'g-same-batch', outcome: 'unknown' }
-    ]);
+    ] as const;
+    const recovered = await recordChatObservations(conversationId, envelope);
+    const sessionId = recovered.sessionId!;
+    const rows = await readEvents(sessionId);
+    const start = rows.find(row => row.kind === 'turn_start' && row.turnId === 'g-same-batch')!;
+    const end = rows.find(row => row.kind === 'turn_end' && row.turnId === 'g-same-batch')!;
+    const final = rows.find(row => row.kind === 'assistant_message' && row.messageId === 'assistant-final-same-batch')!;
+    expect(start.seq).toBeLessThan(final.kind === 'assistant_message' ? final.finalContentSeq! : 0);
+    expect(final.kind === 'assistant_message' ? final.finalContentSeq! : 0).toBeLessThan(end.seq);
+    expect(end).toMatchObject({ outcome: 'unknown' });
+    expect(rows.filter(row => row.kind === 'turn_end')).toHaveLength(1);
+    expect(final).toMatchObject({ goalEligible: true });
+    expect(final).not.toHaveProperty('turnId');
 
-    expect(recovered.goalCandidates).toEqual([expect.objectContaining({
+    expect(recovered.goalCandidates).toEqual([{
       replyId: 'assistant-final-same-batch',
-      turnId: 'reply:assistant-final-same-batch'
-    })]);
+      turnId: 'reply:assistant-final-same-batch',
+      eventSeq: final.kind === 'assistant_message' ? final.origin! : -1
+    }]);
+    const replay = await recordChatObservations(conversationId, envelope);
+    expect(replay.goalCandidates).toEqual(recovered.goalCandidates);
+    expect(await readEvents(sessionId)).toEqual(rows);
+    resetRecorderForTests();
+    resetSessionStoreForTests();
+    const coldReplay = await recordChatObservations(conversationId, envelope);
+    expect(coldReplay.sessionId).toBe(sessionId);
+    expect(coldReplay.goalCandidates).toEqual(recovered.goalCandidates);
+    expect(await readEvents(sessionId)).toEqual(rows);
+  });
+
+  it('refuses to promote an old final revised within a newer uncertain turn', async () => {
+    const conversationId = 'c-goal-old-final-new-bracket';
+    const original = await recordChatObservations(conversationId, [{
+      kind: 'assistant_message', time: 15, messageId: 'old-goal-answer',
+      text: 'The original completed reply', state: 'final', final: true
+    }]);
+    const sessionId = original.sessionId!;
+    const prior = (await readEvents(sessionId)).find(row => row.kind === 'assistant_message')!;
+    const attempted = await recordChatObservations(conversationId, [
+      { kind: 'turn_start', time: 10, turnId: 'newer-turn' },
+      { kind: 'assistant_message', time: 25, messageId: 'old-goal-answer',
+        text: 'The original completed reply', renderedHtml: '<p>The original completed reply</p>', state: 'final', final: true },
+      { kind: 'turn_end', time: 30, turnId: 'newer-turn', outcome: 'unknown' }
+    ]);
+    const rows = await readEvents(sessionId);
+    const start = rows.find(row => row.kind === 'turn_start' && row.turnId === 'newer-turn')!;
+    const final = rows.find(row => row.kind === 'assistant_message')!;
+    expect(prior.seq).toBeLessThan(start.seq);
+    expect(final).toMatchObject({ origin: prior.seq, finalContentSeq: prior.seq });
+    expect(final).not.toHaveProperty('goalEligible', true);
+    expect(attempted.goalCandidates).toEqual([]);
+    expect(rows.filter(row => row.kind === 'turn_end')).toMatchObject([{ turnId: 'newer-turn', outcome: 'unknown' }]);
+  });
+
+  it('rejects an anonymous-final bracket contradicted by an end with no current source, including on replay', async () => {
+    const conversationId = 'c-goal-intervening-end';
+    const envelope = [
+      { kind: 'turn_start', time: 10, turnId: 'bracket-A' },
+      { kind: 'assistant_message', time: 15, messageId: 'bracket-final',
+        text: 'This final cannot cross a different end', state: 'final', final: true },
+      { kind: 'turn_end', time: 18, turnId: 'bracket-B', outcome: 'unknown' },
+      { kind: 'turn_end', time: 20, turnId: 'bracket-A', outcome: 'unknown' }
+    ] as const;
+    const fresh = await recordChatObservations(conversationId, envelope);
+    const rows = await readEvents(fresh.sessionId!);
+    // Neither an unstarted B end nor A's close after that untrusted contradiction
+    // may claim a physical receipt or make the anonymous final Goal-eligible.
+    expect(rows.filter(row => row.kind === 'turn_end')).toEqual([]);
+    expect((await getSession(fresh.sessionId!))?.activeTurnId).toBe('bracket-A');
+    expect(fresh.goalCandidates).toEqual([]);
+    expect(rows.find(row => row.kind === 'assistant_message' && row.messageId === 'bracket-final'))
+      .not.toHaveProperty('goalEligible', true);
+    const replay = await recordChatObservations(conversationId, envelope);
+    expect(replay.goalCandidates).toEqual([]);
+    expect(await readEvents(fresh.sessionId!)).toEqual(rows);
+    // A later unambiguous source end may close the same still-open A generation.
+    const accepted = await recordChatObservations(conversationId, [{
+      kind: 'turn_end', time: 30, turnId: 'bracket-A', outcome: 'unknown'
+    }]);
+    expect(accepted.stored).toBe(1);
+    expect((await readEvents(fresh.sessionId!, { kinds: ['turn_end'] })).map(row => row.turnId))
+      .toEqual(['bracket-A']);
+    expect(accepted.goalCandidates).toEqual([]);
+  });
+
+  it('refuses A Goal promotion when a real A→B rebind commits during its post-end disk proof', async () => {
+    const source = 'c-bracket-binding-A';
+    const successor = 'c-bracket-binding-B';
+    const turnId = 'binding-turn-A';
+    const messageId = 'binding-final-A';
+    const initial = await recordChatObservations(source, [
+      { kind: 'user_message', time: 5, messageId: 'binding-question-A', text: 'The original task' }
+    ]);
+    const sessionId = initial.sessionId!;
+    const journal = path.join(sessionsRoot(), sessionId, 'events.jsonl');
+    const originalOpen = fs.open.bind(fs);
+    let reached!: () => void, release!: () => void;
+    const entered = new Promise<void>(resolve => { reached = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let intercepted = false;
+    const spy = vi.spyOn(fs, 'open').mockImplementation((async (file, flags, mode) => {
+      if (!intercepted && String(file) === journal && flags === 'r' &&
+          (await fs.readFile(journal, 'utf8')).split('\n').some(line =>
+            line.includes('"kind":"turn_end"') && line.includes(`"turnId":"${turnId}"`))) {
+        // The real turn_end append has completed. Hold ONLY its subsequent real
+        // bounded read; rebind remains free to finish its independent metadata queue.
+        intercepted = true;
+        reached();
+        await held;
+      }
+      return originalOpen(file, flags, mode);
+    }) as typeof fs.open);
+    let batch: ReturnType<typeof recordChatObservations> | null = null;
+    try {
+      batch = recordChatObservations(source, [
+        { kind: 'turn_start', time: 10, turnId },
+        { kind: 'assistant_message', time: 15, messageId, text: 'Final owned by A', state: 'final', final: true },
+        { kind: 'turn_end', time: 20, turnId, outcome: 'unknown' }
+      ]);
+      await entered;
+      const physical = (await fs.readFile(journal, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
+      expect(physical.filter(row => row.kind === 'turn_end' && row.turnId === turnId))
+        .toMatchObject([{ outcome: 'unknown' }]);
+      expect(await rebindSession(sessionId, source, successor)).toBe(true);
+      expect((await getSession(sessionId))?.conversationId).toBe(successor);
+      release();
+      const outcome = await batch;
+      expect(outcome.goalCandidates).toEqual([]);
+      const stored = await readEvents(sessionId);
+      expect(stored.filter(row => row.kind === 'turn_end' && row.turnId === turnId)).toHaveLength(1);
+      expect(stored.find(row => row.kind === 'assistant_message' && row.messageId === messageId))
+        .not.toHaveProperty('goalEligible', true);
+      expect((await getSession(sessionId))?.conversationId).toBe(successor);
+    } finally {
+      release();
+      await Promise.allSettled(batch ? [batch] : []);
+      spy.mockRestore();
+    }
+  });
+
+  it('refuses queued A Goal eligibility after a rebind passed its external attachment check', async () => {
+    const source = 'c-bracket-queued-A';
+    const successor = 'c-bracket-queued-B';
+    const turnId = 'queued-binding-turn-A';
+    const messageId = 'queued-binding-final-A';
+    const initial = await recordChatObservations(source, [
+      { kind: 'user_message', time: 5, messageId: 'queued-binding-question-A', text: 'Original task' }
+    ]);
+    const sessionId = initial.sessionId!;
+    const journal = path.join(sessionsRoot(), sessionId, 'events.jsonl');
+    const meta = path.join(sessionsRoot(), sessionId, 'meta.json');
+    const originalOpen = fs.open.bind(fs);
+    const originalRename = fs.rename.bind(fs);
+    let rebind: ReturnType<typeof rebindSession> | null = null;
+    let metaCommitted!: () => void, releaseRebind!: () => void, readFinished!: () => void;
+    const committed = new Promise<void>(resolve => { metaCommitted = resolve; });
+    const heldRebind = new Promise<void>(resolve => { releaseRebind = resolve; });
+    const closed = new Promise<void>(resolve => { readFinished = resolve; });
+    let intercepted = false;
+    let assistantRenames = 0;
+    const renameSpy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      const target = String(to);
+      if (target === meta && JSON.parse(await fs.readFile(from, 'utf8')).conversationId === successor) {
+        // The actual metadata replacement precedes B publication in memory. While its
+        // promise is held, the external getSession snapshot can still report A.
+        await originalRename(from, to);
+        metaCommitted();
+        await heldRebind;
+        return;
+      }
+      if (target.includes(`${path.sep}messages${path.sep}`) && target.endsWith('.json')) {
+        assistantRenames++;
+        if (assistantRenames > 1) {
+          // This is the optional eligibility revision, not the original final.
+          expect(JSON.parse(await fs.readFile(meta, 'utf8')).conversationId).toBe(successor);
+        }
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation((async (file, flags, mode) => {
+      const handle = await originalOpen(file, flags, mode);
+      if (!intercepted && String(file) === journal && flags === 'r' &&
+          (await fs.readFile(journal, 'utf8')).split('\n').some(line =>
+            line.includes('"kind":"turn_end"') && line.includes(`"turnId":"${turnId}"`))) {
+        intercepted = true;
+        const originalClose = handle.close.bind(handle);
+        const closeSpy = vi.spyOn(handle, 'close').mockImplementation(async () => {
+          closeSpy.mockRestore();
+          await originalClose(); // Keep the bounded reader and its physical close real.
+          rebind = rebindSession(sessionId, source, successor);
+          void rebind.catch(() => undefined);
+          await committed; // Enqueue rebind before the recorder's final external check.
+          readFinished();
+        });
+      }
+      return handle;
+    }) as typeof fs.open);
+    let batch: ReturnType<typeof recordChatObservations> | null = null;
+    try {
+      batch = recordChatObservations(source, [
+        { kind: 'turn_start', time: 10, turnId },
+        { kind: 'assistant_message', time: 15, messageId, text: 'Final owned by A', state: 'final', final: true },
+        { kind: 'turn_end', time: 20, turnId, outcome: 'unknown' }
+      ]);
+      void batch.catch(() => undefined);
+      await closed;
+      const physical = (await fs.readFile(journal, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
+      expect(physical.filter(row => row.kind === 'turn_end' && row.turnId === turnId))
+        .toMatchObject([{ outcome: 'unknown' }]);
+      expect(JSON.parse(await fs.readFile(meta, 'utf8')).conversationId).toBe(successor);
+      expect((await getSession(sessionId))?.conversationId).toBe(source);
+      // The reader is closed, so the only remaining awaits are getSession and entry.queue.
+      // Let the optional upsert enqueue behind the held physical rebind, then publish B.
+      for (let i = 0; i < 16; i++) await Promise.resolve();
+      releaseRebind();
+      expect(await rebind).toBe(true);
+      const outcome = await batch;
+      expect(outcome.stored).toBe(3); // Original start, final and end only.
+      expect(outcome.goalCandidates).toEqual([]);
+      const rows = await readEvents(sessionId);
+      expect(rows.filter(row => row.kind === 'turn_end' && row.turnId === turnId)).toHaveLength(1);
+      expect(rows.find(row => row.kind === 'assistant_message' && row.messageId === messageId))
+        .not.toHaveProperty('goalEligible', true);
+      expect(assistantRenames).toBe(1);
+      expect((await getSession(sessionId))).toMatchObject({ conversationId: successor, bindingRevision: 1 });
+    } finally {
+      releaseRebind();
+      await Promise.allSettled([batch, rebind].filter(promise => promise !== null));
+      openSpy.mockRestore(); renameSpy.mockRestore();
+    }
+  });
+
+  it('does not promote an old full-envelope retry after a newer question committed', async () => {
+    const conversationId = 'c-goal-stale-full-envelope';
+    const turnId = 'stale-goal-turn';
+    const messageId = 'stale-goal-final';
+    const envelope = [
+      { kind: 'turn_start', time: 10, turnId },
+      { kind: 'assistant_message', time: 15, messageId, text: 'Durable old final', state: 'final', final: true },
+      { kind: 'turn_end', time: 20, turnId, outcome: 'unknown' }
+    ] as const;
+    const originalRename = fs.rename.bind(fs);
+    let canonicalRenames = 0;
+    const spy = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+      if (String(to).includes(`${path.sep}messages${path.sep}`) && String(to).endsWith('.json')) {
+        canonicalRenames++;
+        // The first physical final is real; refuse only the subsequent optional revision.
+        if (canonicalRenames === 2) throw Object.assign(new Error('eligibility rename EIO'), { code: 'EIO' });
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename);
+    try {
+      await expect(recordChatObservations(conversationId, envelope)).rejects.toThrow('eligibility rename EIO');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(canonicalRenames).toBe(2);
+    const sessionId = (await findSessionByConversation(conversationId))!.id;
+    const firstRows = await readEvents(sessionId);
+    expect(firstRows.filter(row => row.kind === 'turn_start' && row.turnId === turnId)).toHaveLength(1);
+    expect(firstRows.filter(row => row.kind === 'turn_end' && row.turnId === turnId))
+      .toMatchObject([{ outcome: 'unknown' }]);
+    expect(firstRows.find(row => row.kind === 'assistant_message' && row.messageId === messageId))
+      .not.toHaveProperty('goalEligible', true);
+    await recordChatObservations(conversationId, [
+      // A later authored question may commit before its local generation start reaches us.
+      { kind: 'user_message', time: 30, messageId: 'newer-question', text: 'A different question' }
+    ]);
+    const beforeRetry = await readEvents(sessionId);
+    const oldRetry = await recordChatObservations(conversationId, envelope);
+    expect(oldRetry.goalCandidates).toEqual([]);
+    expect(await readEvents(sessionId)).toEqual(beforeRetry);
+    expect(beforeRetry.find(row => row.kind === 'assistant_message' && row.messageId === messageId))
+      .not.toHaveProperty('goalEligible', true);
   });
 
   it('does not spend an earlier uncertain boundary while a newer turn is still open', async () => {

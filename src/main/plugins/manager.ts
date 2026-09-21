@@ -13,7 +13,7 @@ import type { PluginConfigPatch, PluginInstallRequest, PluginSnapshot, PluginVie
 import { installSource, pluginEnvironment, resolveGithub, stopInstallers, type InstalledLaunch } from './installer.js';
 import { terminateProcessTree } from '../exec.js';
 import { pluginCatalog, reviewedPluginLicense } from './catalog.js';
-import sharp from 'sharp';
+import sharp from '../sharp.js';
 import { pluginExposure } from './exposure.js';
 import { PluginOAuth, PluginNeedsAuth, PluginOAuthSetupError, clearPluginOAuth } from './oauth.js';
 import { APP_TITLE } from '../version.js';

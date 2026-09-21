@@ -230,8 +230,13 @@ export function writeDurableSnapshotSoon(name: string, snapshot: () => unknown):
  * Used for transaction intent immediately before another durable commit: a debounced
  * snapshot is correct for ordinary progress, but cannot close a crash window between two
  * files when recovery needs to know which side of the boundary the process reached.
+ * A caller that quarantines an ambiguous failed checkpoint can explicitly opt out of the
+ * usual automatic retry; a rejected transition must not later become a physical mutation.
+ * This does not undo a rename that succeeded before its acknowledgment was lost.
  */
-export async function writeDurableNow(name: string, value: unknown): Promise<void> {
+export async function writeDurableNow(
+  name: string, value: unknown, options: { retryOnFailure?: false } = {}
+): Promise<void> {
   if (!root) return;
   const timer = timers.get(name);
   if (timer) {
@@ -246,9 +251,20 @@ export async function writeDurableNow(name: string, value: unknown): Promise<voi
     // not merely that some later state happened to be written instead.
     await enqueueSlot(name, slot);
   } catch (err) {
-    // Keep the newest pending generation recoverable. Callers which deliberately roll a
-    // failed staged transition back can supersede it by queueing their safe snapshot.
-    scheduleRetry(name);
+    if (options.retryOnFailure === false) {
+      // Only the rejected generation is ours to discard. An independent newer write may
+      // have arrived during the awaited rename and must retain its own retry/timer.
+      if (pending.get(name) === slot) {
+        pending.delete(name);
+        retryAttempts.delete(name);
+        const retry = timers.get(name);
+        if (retry) { clearTimeout(retry); timers.delete(name); }
+      }
+    } else {
+      // Normal durable state still retries exact failed generations. Transaction callers
+      // that quarantine on any uncertain disk outcome must use the explicit no-retry mode.
+      scheduleRetry(name);
+    }
     throw err;
   }
 }

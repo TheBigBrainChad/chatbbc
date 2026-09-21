@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import sharp from 'sharp';
+import sharp from '../sharp.js';
 import { sessionsRoot } from './store.js';
 import type { InputAttachment } from '../../shared/input.js';
 import { injectableAttachments } from '../../shared/input.js';

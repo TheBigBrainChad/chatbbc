@@ -1,14 +1,175 @@
 import { parseRichResponse, type RichNode, type RichResponse } from '../shared/rich-response.js';
 import type { RichMediaState } from '../shared/session.js';
-import { isViewableRichImage, openRichImageViewer } from './rich-image.js';
+import { isViewableRichImage, localDataUrl, openRichImageViewer } from './rich-image.js';
 
 export type RichImageContext = {
   sessionId: string;
   media: readonly RichMediaState[];
   current: () => boolean;
+  /** A fixed, main-verified manual history opener, not an action/Continue/retry. */
+  openOriginal?: () => Promise<boolean>;
 };
 
 type ImageRender = RichImageContext & { rich: RichResponse; imageCounts: Map<string, number> };
+
+/**
+ * A rich answer can own 64 images. Never decode all resident history rows at once:
+ * viewport admission, a four-reader limit, and a measured data-URL residency budget
+ * keep image bytes separate from the transcript's text-only budget. An image that is
+ * evicted remains available through its explicit, independently checked local viewer.
+ */
+const MAX_INLINE_READS = 4;
+const INLINE_READ_TIMEOUT_MS = 12_000;
+const MAX_INLINE_DATA_URL_CHARS = 24 * 1024 * 1024;
+// Decoded RGBA surfaces have their own cost, even for highly compressible WebP.
+const MAX_INLINE_DECODED_PIXELS = 8_000_000;
+type InlinePreview = {
+  slot: HTMLElement;
+  current: () => boolean;
+  read: () => Promise<void>;
+  observer: IntersectionObserver | null;
+  near: boolean;
+  queued: boolean;
+  reading: boolean;
+  retired: boolean;
+  image: HTMLImageElement | null;
+  residentChars: number;
+  pixelCost: number;
+  lastChars: number;
+  deferred: boolean;
+  failures: number;
+};
+
+const inlinePreviews = new Set<InlinePreview>();
+const inlineQueue: InlinePreview[] = [];
+let inlineReads = 0;
+// A timeout retires the UI request, not Electron's already-issued invoke. Never
+// replace a hung native IPC with unlimited new physical invokes.
+let inlineOutstandingIpc = 0;
+let inlineResidentChars = 0;
+let inlineResidentPixels = 0;
+let inlineRemovalObserver: MutationObserver | null = null;
+let deferredInlineScheduled = false;
+
+function retryDeferredInlinePreviews(): void {
+  if (deferredInlineScheduled) return;
+  deferredInlineScheduled = true;
+  void Promise.resolve().then(() => {
+    deferredInlineScheduled = false;
+    pruneInlinePreviews();
+    let freeChars = MAX_INLINE_DATA_URL_CHARS - inlineResidentChars;
+    let freePixels = MAX_INLINE_DECODED_PIXELS - inlineResidentPixels;
+    // Budget-evicted visible slots receive another chance only when some other
+    // preview actually frees capacity, not immediately (which would thrash).
+    for (const state of inlinePreviews) {
+      if (!state.deferred || !state.near || state.retired || !state.current() ||
+          state.queued || state.reading || state.image ||
+          state.lastChars > freeChars || state.pixelCost > freePixels) continue;
+      state.deferred = false;
+      freeChars -= state.lastChars;
+      freePixels -= state.pixelCost;
+      queueInlinePreview(state);
+    }
+  });
+}
+
+function evictInlinePreview(state: InlinePreview, forBudget = false): void {
+  if (!state.image) return;
+  state.image.removeAttribute('src');
+  state.image.remove();
+  state.image = null;
+  inlineResidentChars -= state.residentChars;
+  inlineResidentPixels -= state.pixelCost;
+  state.residentChars = 0;
+  state.deferred = forBudget && state.near;
+  if (!forBudget) retryDeferredInlinePreviews();
+}
+
+function retireInlinePreview(state: InlinePreview): void {
+  if (state.retired) return;
+  state.retired = true;
+  state.observer?.disconnect();
+  evictInlinePreview(state);
+  inlinePreviews.delete(state);
+  const queued = inlineQueue.indexOf(state);
+  if (queued !== -1) inlineQueue.splice(queued, 1);
+  if (inlinePreviews.size === 0) {
+    inlineRemovalObserver?.disconnect();
+    inlineRemovalObserver = null;
+  }
+}
+
+function pruneInlinePreviews(): void {
+  for (const state of inlinePreviews) {
+    if (!state.current()) retireInlinePreview(state);
+  }
+}
+
+function reserveInlinePreview(state: InlinePreview, chars: number): boolean {
+  pruneInlinePreviews();
+  if (state.retired || chars > MAX_INLINE_DATA_URL_CHARS ||
+      state.pixelCost > MAX_INLINE_DECODED_PIXELS) return false;
+  // Prefer old images that have left the viewport; if the entire gallery fits on
+  // screen, the oldest preview is released rather than exceeding the byte budget.
+  while (inlineResidentChars + chars > MAX_INLINE_DATA_URL_CHARS ||
+      inlineResidentPixels + state.pixelCost > MAX_INLINE_DECODED_PIXELS) {
+    const victim = [...inlinePreviews].find(item => item !== state && item.image && !item.near) ??
+      [...inlinePreviews].find(item => item !== state && item.image);
+    if (!victim) return false;
+    evictInlinePreview(victim, true);
+  }
+  return true;
+}
+
+function pumpInlinePreviews(): void {
+  pruneInlinePreviews();
+  while (inlineReads < MAX_INLINE_READS && inlineOutstandingIpc < MAX_INLINE_READS && inlineQueue.length) {
+    const state = inlineQueue.shift()!;
+    state.queued = false;
+    if (state.retired || !state.current() || !state.near || state.image || state.reading) continue;
+    state.reading = true;
+    inlineReads++;
+    void state.read().finally(() => {
+      state.reading = false;
+      inlineReads--;
+      pumpInlinePreviews();
+    });
+  }
+}
+
+function queueInlinePreview(state: InlinePreview): void {
+  if (state.retired || !state.near || !state.current() || state.image || state.reading ||
+      state.queued || state.failures >= 2) return;
+  state.queued = true;
+  inlineQueue.push(state);
+  pumpInlinePreviews();
+}
+
+function registerInlinePreview(state: InlinePreview): void {
+  pruneInlinePreviews();
+  inlinePreviews.add(state);
+  if (!inlineRemovalObserver && typeof window.MutationObserver === 'function' && document.body) {
+    inlineRemovalObserver = new window.MutationObserver(records => {
+      if (records.some(record => record.removedNodes.length > 0)) pruneInlinePreviews();
+    });
+    inlineRemovalObserver.observe(document.body, { childList: true, subtree: true });
+  }
+  if (typeof window.IntersectionObserver !== 'function') {
+    // jsdom has no viewport; still enforce the same concurrency and residency caps.
+    state.near = true;
+    queueInlinePreview(state);
+    return;
+  }
+  state.observer = new window.IntersectionObserver(entries => {
+    if (state.retired || !state.current()) { retireInlinePreview(state); return; }
+    const entry = entries.find(item => item.target === state.slot);
+    if (!entry) return;
+    state.near = entry.isIntersecting;
+    if (state.near) queueInlinePreview(state);
+    else evictInlinePreview(state);
+  }, { rootMargin: '256px' });
+  state.observer.observe(state.slot);
+}
 
 /** IPC metadata is still untrusted presentation data: inspect own data descriptors once. */
 function fields(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> | null {
@@ -26,6 +187,27 @@ function fields(value: unknown, required: readonly string[], optional: readonly 
   return required.every(key => Object.hasOwn(clean, key)) ? clean : null;
 }
 
+const pageSourceToken = /^src_[a-f0-9]{32}_([0-9a-z]{1,11})$/;
+
+/** Validate store-private PAGE custody without exposing it to presentation code. */
+function validPageSource(value: unknown, requireWitness = false): boolean {
+  const source = fields(value, ['slotVersion'], ['sequence', 'incarnation', 'recordingRevision']);
+  if (!source || !Number.isSafeInteger(source.slotVersion) || (source.slotVersion as number) < 1 ||
+      (source.slotVersion as number) >= Number.MAX_SAFE_INTEGER ||
+      (requireWitness && (!Object.hasOwn(source, 'sequence') ||
+        !Object.hasOwn(source, 'incarnation') || !Object.hasOwn(source, 'recordingRevision'))) ||
+      (Object.hasOwn(source, 'incarnation') && !Object.hasOwn(source, 'sequence')) ||
+      (Object.hasOwn(source, 'incarnation') && !Object.hasOwn(source, 'recordingRevision')) ||
+      (Object.hasOwn(source, 'recordingRevision') && (!Number.isSafeInteger(source.recordingRevision) ||
+        (source.recordingRevision as number) < 0)) ||
+      (Object.hasOwn(source, 'sequence') && (!Number.isSafeInteger(source.sequence) ||
+        (source.sequence as number) < 1))) return false;
+  if (!Object.hasOwn(source, 'incarnation')) return true;
+  if (typeof source.incarnation !== 'string') return false;
+  const match = pageSourceToken.exec(source.incarnation);
+  return Boolean(match && (source.sequence as number).toString(36) === match[1]);
+}
+
 /** Refuse the entire adjunct if any entry is malformed; a partial array cannot grant a viewer. */
 function validatedMedia(value: unknown): RichMediaState[] | null {
   try {
@@ -39,7 +221,7 @@ function validatedMedia(value: unknown): RichMediaState[] | null {
       const item = Object.getOwnPropertyDescriptor(value, String(index));
       if (!item?.enumerable || !('value' in item)) return null;
       const media = fields(item.value, ['mediaId', 'nodeId', 'source', 'status'],
-        ['reason', 'previewWidth', 'previewHeight', 'asset']);
+        ['reason', 'previewWidth', 'previewHeight', 'asset', 'pageSource']);
       if (!media || !opaque(media.mediaId) || !opaque(media.nodeId)) return null;
       const source = fields(media.source, ['kind'], ['nodeId', 'providerMessageId', 'providerAssetId']);
       if (!source) return null;
@@ -51,6 +233,8 @@ function validatedMedia(value: unknown): RichMediaState[] | null {
           opaque(source.providerAssetId)) {
         cleanSource = { kind: 'native', providerMessageId: source.providerMessageId, providerAssetId: source.providerAssetId };
       } else return null;
+      if (Object.hasOwn(media, 'pageSource') &&
+          (cleanSource.kind !== 'page' || !validPageSource(media.pageSource, media.status === 'available'))) return null;
 
       const clean: RichMediaState = { mediaId: media.mediaId, nodeId: media.nodeId,
         source: cleanSource, status: media.status as RichMediaState['status'] };
@@ -100,7 +284,7 @@ function imageLabel(media: RichMediaState | undefined): string {
 }
 
 /** Canonical source is retained, but component syntax is never executed to recreate a UI. */
-function renderUnavailableRichResponse(source: string, accessibleText = ''): HTMLElement {
+function renderUnavailableRichResponse(source: string, accessibleText = '', context?: RichImageContext): HTMLElement {
   const box = document.createElement('div');
   box.className = 'msg rich-response rich-unavailable';
   box.setAttribute('dir', 'auto');
@@ -125,7 +309,37 @@ function renderUnavailableRichResponse(source: string, accessibleText = ''): HTM
     box.append(visible);
   }
   box.append(disclosure);
+  appendManualOriginal(box, context);
   return box;
+}
+
+/** Only the app-owned direct button's actual trusted click may request history navigation. */
+function appendManualOriginal(box: HTMLElement, context?: RichImageContext): void {
+  if (!context?.openOriginal) return;
+  const button = document.createElement('button');
+  button.className = 'rich-open-original';
+  button.type = 'button';
+  button.textContent = 'Open original in ChatGPT';
+  const feedback = document.createElement('span');
+  feedback.className = 'rich-original-feedback';
+  feedback.setAttribute('role', 'status');
+  button.addEventListener('click', event => {
+    if (!event.isTrusted || !context.current() || !button.isConnected || button.disabled) return;
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    // A renderer-supplied conversation id, synthetic click, history load or timed
+    // hydration can never reach this fixed callback. Main derives the URL from disk.
+    void (async () => {
+      let opened = false;
+      try { opened = await context.openOriginal!(); } catch { /* No claimed browser open. */ }
+      if (!context.current() || !button.isConnected) return;
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+      feedback.textContent = opened ? 'Original chat opened in your browser' :
+        'Original chat could not be opened';
+    })();
+  });
+  box.append(button, feedback);
 }
 
 /** Presentation only: a visually recognizable control is NOT native-action authority. */
@@ -258,10 +472,90 @@ function renderNode(node: RichNode, images?: ImageRender): HTMLElement {
       button.textContent = 'View saved preview';
       slot.append(button);
       const current = () => images.current() && slot.isConnected && button.isConnected;
+      let inlineState: InlinePreview | null = null;
+      // The fixed main-process reader checks asset membership and decodes the saved preview.
+      // Never use authored URLs; offscreen images do not consume preview memory, and an
+      // obsolete selection cannot paint on a later A→B→A visit.
+      void (async () => {
+        await Promise.resolve(); // The caller attaches the freshly rendered row synchronously.
+        if (!current()) return;
+        const state: InlinePreview = {
+          slot, current, observer: null, near: false, queued: false, reading: false,
+          retired: false, image: null, residentChars: 0,
+          pixelCost: media.previewWidth! * media.previewHeight!, lastChars: 0,
+          deferred: false, failures: 0,
+          read: async () => {
+            let data: unknown = null;
+            let readerUnavailable = false;
+            let timeout: ReturnType<typeof setTimeout> | null = null;
+            try {
+              const source = window.api.getSessionImage(images.sessionId, media.asset!.id);
+              inlineOutstandingIpc++;
+              // Observe *physical* completion separately from the UI deadline. The
+              // timed-out invoke cannot be canceled by Promise.race; only its actual
+              // settle frees backend capacity. Both paths are observed, no late paint.
+              void source.then(() => {
+                inlineOutstandingIpc--;
+                pumpInlinePreviews();
+              }, () => {
+                inlineOutstandingIpc--;
+                pumpInlinePreviews();
+              });
+              // Even a disconnected owner must eventually release the shared reader slot.
+              // A late IPC reply after this deadline is discarded by Promise.race and
+              // must never hydrate another message or gain retry/capture authority.
+              const reply = await Promise.race([
+                source,
+                new Promise<null>(resolve => {
+                  timeout = setTimeout(() => resolve(null), INLINE_READ_TIMEOUT_MS);
+                })
+              ]);
+              if (reply?.ok) data = reply.data;
+              else readerUnavailable = true;
+            } catch { readerUnavailable = true; }
+            finally { if (timeout !== null) clearTimeout(timeout); }
+            if (state.retired || !state.near || !current()) return;
+            if (readerUnavailable || data === null) {
+              // A transport error or a temporarily missing local reader is not proof
+              // the recorded asset was deleted. Keep the explicit viewer, allow one
+              // more viewport re-entry, and never infer new capture authority.
+              state.failures++;
+              label.textContent = node.alt ? `${node.alt} — Saved preview could not load inline` :
+                'Saved preview could not load inline';
+              return;
+            }
+            if (!localDataUrl(data, media.asset!.mimeType)) {
+              label.textContent = node.alt ? `${node.alt} — Image preview unavailable` : 'Image preview unavailable';
+              button.remove();
+              slot.setAttribute('role', 'img');
+              slot.setAttribute('aria-label', label.textContent);
+              retireInlinePreview(state);
+              return;
+            }
+            if (!reserveInlinePreview(state, data.length)) return;
+            const preview = document.createElement('img');
+            preview.src = data;
+            preview.alt = node.alt;
+            label.textContent = node.alt ? `${node.alt} — Saved preview` : 'Saved preview';
+            state.image = preview;
+            state.residentChars = data.length;
+            state.lastChars = data.length;
+            state.deferred = false;
+            inlineResidentChars += data.length;
+            inlineResidentPixels += state.pixelCost;
+            slot.insertBefore(preview, button);
+          }
+        };
+        inlineState = state;
+        registerInlinePreview(state);
+      })();
       button.addEventListener('click', () => void openRichImageViewer(images.sessionId, media, node.alt, {
         trigger: button, current,
         unavailable: () => {
           if (!current()) return;
+          // A failed explicit local read must retire any previously hydrated pixels
+          // synchronously, even if MutationObserver is unavailable in an embedder.
+          if (inlineState) retireInlinePreview(inlineState);
           label.textContent = node.alt ? `${node.alt} — Image preview unavailable` : 'Image preview unavailable';
           button.remove();
           slot.setAttribute('role', 'img');
@@ -307,7 +601,7 @@ function renderNode(node: RichNode, images?: ImageRender): HTMLElement {
 export function renderRichResponse(rich: RichResponse, fallback: string, media?: RichImageContext): HTMLElement {
   const clean = parseRichResponse(rich);
   if (!clean || clean.status !== 'available' || clean.nodes.length === 0)
-    return renderUnavailableRichResponse(fallback, clean?.status === 'unavailable' ? clean.accessibleText : '');
+    return renderUnavailableRichResponse(fallback, clean?.status === 'unavailable' ? clean.accessibleText : '', media);
   const box = document.createElement('div');
   box.className = 'msg rich-response';
   box.setAttribute('dir', 'auto');
@@ -316,5 +610,6 @@ export function renderRichResponse(rich: RichResponse, fallback: string, media?:
     ? { sessionId: media.sessionId, current: media.current, media: safeMedia, rich: clean,
       imageCounts: countImages(clean.nodes) } : undefined;
   for (const node of clean.nodes) box.append(renderNode(node, images));
+  appendManualOriginal(box, media);
   return box;
 }

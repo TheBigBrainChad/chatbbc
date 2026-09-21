@@ -5,6 +5,21 @@ Some upstream source archives contain optional or test dependencies; inclusion h
 Full source archives, their original notices and build recipes are available in the matching release native-source download.
 
 ================================================================================
+@janhapke/sharp-electron 0.35.4-electron.1 — Linux x64 patched image backend
+Source: https://github.com/janhapke/sharp-electron/tree/f7afa507bfc6975bad73ed9c6a8ee5c3be88b848
+Source archive SHA-256: 5826538e26d76f7db44b1adfe0766e6f00c86ce3c9495225d26386198d0247de
+Published npm tarball integrity: sha512-a8G1T2Cs+SND8Be61gJspHNoUXXVQujbfnHr1+a6IxsPgDNSId58LjiL+HMPg0pCxyMY7aC8U/INRWRp7G7RXQ==
+The fork's own package and source patches are Apache-2.0 licensed. Its modified
+Sharp addon and libvips bundle retain the corresponding upstream Sharp, libvips,
+GLib and bundled-dependency copyrights and applicable Apache/LGPL/MPL notices
+from the source archives and the license supplements below. The fork builds a
+paired addon and libvips: both must be replaced together; do not swap either
+binary independently with the official @img distribution. The matching source
+archive retains the two patch files, GLib wrapper code, build/linker scripts,
+submodule identities and exact build/replacement instructions.
+
+
+================================================================================
 proxy-libintl 0.5
 Source: https://github.com/frida/proxy-libintl/archive/0.5.tar.gz
 Source SHA-256: f7a1cbd7579baaf575c66f9d99fb6295e9b0684a28b095967cfda17857595303
@@ -194311,4 +194326,3 @@ third-party archives.
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
-

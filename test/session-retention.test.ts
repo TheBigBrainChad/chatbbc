@@ -4,6 +4,7 @@ import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { expect, it } from 'vitest';
 import sharp from 'sharp';
+import { initConfigPath, loadConfig } from '../src/main/config.js';
 import { createSession, deleteSession, flushSessions, initSessionStore, readAsset, resetSessionStoreForTests,
   sessionsRoot, upsertMessageEvent, upsertNativeImageEvent, upsertRichMessage, writeAsset } from '../src/main/session/store.js';
 
@@ -17,6 +18,8 @@ it('has no startup age-retention owner or recurring prune timer', async () => {
 it('explicit session deletion removes its own shared image assets without deleting another session content-hash twin', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'chatbbc-retention-'));
   try {
+    initConfigPath(dir);
+    await loadConfig();
     initSessionStore(dir);
     const first = await createSession({ conversationId: randomUUID() });
     const second = await createSession({ conversationId: randomUUID() });

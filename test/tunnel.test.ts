@@ -61,7 +61,10 @@ describe('cross-platform tunnel executable discovery', () => {
       await writeFile(allowed, '#!/bin/sh\n', { mode: 0o644 });
       await chmod(allowed, 0o755);
 
-      expect(locateBinary('tunnel-client', blocked)).toBeNull();
+      // An unusable explicit path cannot win, but a valid bundled/PATH binary may
+      // legitimately satisfy discovery after packaging has staged the bundle.
+      // Requiring null made this test depend on unrelated host packaging state.
+      expect(locateBinary('tunnel-client', blocked)).not.toBe(blocked);
       expect(locateBinary('tunnel-client', allowed)).toBe(allowed);
     } finally {
       await removeTempDir(root);

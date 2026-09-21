@@ -83,6 +83,61 @@ it('closes on Escape and backdrop and does not restore focus to a detached trigg
   expect(document.activeElement).not.toBe(trigger);
 });
 
+it('contains keyboard and outside focus while open, then releases focus containment on close and retirement', async () => {
+  const outside = document.createElement('button');
+  outside.textContent = 'Other action';
+  document.body.append(outside);
+  await openRichImageViewer(sessionId, available(), 'Focus-safe preview', owner());
+  const dialog = document.querySelector<HTMLDialogElement>('.rich-image-viewer')!;
+  const close = dialog.querySelector<HTMLButtonElement>('button')!;
+  expect(dialog.getAttribute('aria-modal')).toBe('true');
+  for (const shiftKey of [false, true]) {
+    const tab = new dom.window.KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
+    close.dispatchEvent(tab);
+    expect(tab.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(close);
+  }
+  outside.focus();
+  expect(document.activeElement).toBe(close);
+  close.click();
+  outside.focus();
+  expect(document.activeElement).toBe(outside);
+
+  await openRichImageViewer(sessionId, available(), 'Focus-safe preview', owner());
+  retireRichImageViewer();
+  outside.focus();
+  expect(document.activeElement).toBe(outside);
+  expect(document.querySelector('.rich-image-viewer')).toBeNull();
+});
+
+it('does not leak a focus guard if selection retires the viewer during initial modal focus', async () => {
+  const added = vi.spyOn(document, 'addEventListener');
+  const removed = vi.spyOn(document, 'removeEventListener');
+  const originalFocus = dom.window.HTMLElement.prototype.focus;
+  const retiringFocus = vi.spyOn(dom.window.HTMLElement.prototype, 'focus').mockImplementation(function (
+    this: HTMLElement, options?: FocusOptions
+  ) {
+    originalFocus.call(this, options);
+    if (this.closest('.rich-image-viewer') && this.tagName === 'BUTTON') retireRichImageViewer();
+  });
+  await openRichImageViewer(sessionId, available(), 'Retired while opening', owner());
+  const focusListeners = (spy: typeof added) => spy.mock.calls
+    .filter(([name]) => name === 'focusin').map(([, listener]) => listener);
+  expect(document.querySelector('.rich-image-viewer')).toBeNull();
+  expect(focusListeners(removed)).toEqual(focusListeners(added));
+
+  retiringFocus.mockRestore();
+  const outside = document.createElement('button');
+  document.body.append(outside);
+  await openRichImageViewer(sessionId, available(), 'Next current preview', owner());
+  const dialog = document.querySelector<HTMLDialogElement>('.rich-image-viewer')!;
+  const close = dialog.querySelector<HTMLButtonElement>('button')!;
+  outside.focus();
+  expect(document.activeElement).toBe(close);
+  retireRichImageViewer();
+  expect(focusListeners(removed)).toEqual(focusListeners(added));
+});
+
 it('does not fetch without available asset metadata or on an invalid retained geometry', async () => {
   for (const media of [
     { ...available(), status: 'pending', asset: undefined },

@@ -1,4 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -124,6 +126,113 @@ describe('cross-platform packaging targets', () => {
     expect(smoke).toContain('const expectedElectronVersion = sourcePackage.devDependencies?.electron;');
     expect(smoke).toContain('electron: process.versions.electron');
     expect(smoke).toContain('runtime.electron !== expectedElectronVersion');
+  });
+
+  it('pins the isolated Linux x64 image backend and provides its modified corresponding source', () => {
+    const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
+    const lock = JSON.parse(readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
+    const sources = JSON.parse(readFileSync(path.join(root, 'docs/licenses/native/sources.json'), 'utf8'));
+    const backend = readFileSync(path.join(root, 'src/main/sharp.ts'), 'utf8');
+    const packaging = readFileSync(path.join(root, 'scripts/package.mjs'), 'utf8');
+    const smoke = readFileSync(path.join(root, 'scripts/smoke-packaged-runtime.mjs'), 'utf8');
+    const builder = yamlFile('electron-builder.yml');
+
+    expect(pkg.dependencies.sharp).toBe('0.35.4');
+    expect(pkg.dependencies['@janhapke/sharp-electron']).toBe('0.35.4-electron.1');
+    expect(lock.packages['node_modules/@janhapke/sharp-electron'].integrity)
+      .toBe('sha512-a8G1T2Cs+SND8Be61gJspHNoUXXVQujbfnHr1+a6IxsPgDNSId58LjiL+HMPg0pCxyMY7aC8U/INRWRp7G7RXQ==');
+    expect(sources.packages['@janhapke/sharp-electron']).toBe('0.35.4-electron.1');
+    expect(sources.sources).toContainEqual(expect.objectContaining({
+      id: 'sharp-electron-patched-build',
+      sha256: '5826538e26d76f7db44b1adfe0766e6f00c86ce3c9495225d26386198d0247de',
+      bytes: 50967
+    }));
+    expect(backend).toContain("process.platform === 'linux' && process.arch === 'x64'");
+    expect(backend).toContain("require('@janhapke/sharp-electron')");
+    expect(backend).toContain("require('sharp')");
+    expect(packaging).toContain('target-builder-config.cjs');
+    expect(builder.asarUnpack).toContain('**/node_modules/@janhapke/sharp-electron/**');
+    expect(smoke).toContain("const decoded = await sharp(png).metadata()");
+    expect(smoke).toContain("const webp = await sharp(png).resize(1, 1).webp().toBuffer()");
+  });
+
+  it('reconstructs the modified Linux x64 source from verified release archives and identifies its paired replacement files', () => {
+    const sources = JSON.parse(readFileSync(path.join(root, 'docs/licenses/native/sources.json'), 'utf8'));
+    const document = readFileSync(path.join(root, 'docs/licenses/native/SOURCE-BUILD.md'), 'utf8');
+    const section = document.match(/### Linux x64 fork: archive-only reconstruction\n([\s\S]*?)(?=\n## |\n### |$)/)?.[1];
+    expect(section, 'source recipient needs a runnable archive-only fork reconstruction procedure').toBeDefined();
+    const recipe = section?.match(/```bash\n([\s\S]*?)\n```/)?.[1];
+    expect(recipe, 'documented reconstruction recipe must be runnable verbatim').toBeDefined();
+
+    const sourcePins = [
+      { id: 'sharp-electron-patched-build', file: 'sharp-electron-f7afa507.tar.gz', version: 'f7afa507bfc6975bad73ed9c6a8ee5c3be88b848', sha256: '5826538e26d76f7db44b1adfe0766e6f00c86ce3c9495225d26386198d0247de' },
+      { id: 'sharp-source', file: 'sharp-source-903128da.tar.gz', version: '7f1a0a22cc285fe180766f4935d50b55af6e8432', sha256: '9e84202dc927f0c0dfda583301f245b6d92bdd8c5af7bd4dae436c608f01785f' },
+      { id: 'sharp-libvips-build', file: 'sharp-libvips-build-f6fad46c.tar.gz', version: '6e5971d333377743163edc3ad9e5d0b897abcbc9', sha256: 'aea60d36644f88b47a3998564f12264fd7638dc4559f083e9ff3fb25c9caa87b' }
+    ];
+    for (const pin of sourcePins) {
+      expect(sources.sources).toContainEqual(expect.objectContaining({
+        id: pin.id, file: pin.file, version: expect.stringContaining(pin.version), sha256: pin.sha256
+      }));
+      expect(recipe).toContain(pin.file);
+      expect(recipe).toContain(`${pin.sha256}  ${pin.file}`);
+    }
+
+    const installed = 'app.asar.unpacked/node_modules/@janhapke/sharp-electron/linux-x64/sharp/src/build/Release/';
+    expect(section).toContain('vendor/sharp/src/build/Release/sharp-linux-x64-0.35.4.node');
+    expect(section).toContain('dist/linux-x64/lib/libvips-cpp.so.8.18.6');
+    expect(section).toContain(`${installed}sharp-linux-x64-0.35.4.node`);
+    expect(section).toContain(`${installed}libvips-cpp.so.8.18.6`);
+
+    const archives = path.join(root, 'release/native-sources/archives');
+    const available = sourcePins.map(({ file }) => existsSync(path.join(archives, file)));
+    if (!available.some(Boolean)) return; // CI's source job generates release archives separately.
+    expect(available, 'a partially staged native-source bundle must never be accepted').toEqual([true, true, true]);
+
+    const scratch = mkdtempSync(path.join(tmpdir(), 'chatbbc-sharp-source-'));
+    const checkout = path.join(scratch, 'fork');
+    try {
+      execFileSync('bash', ['-euo', 'pipefail', '-c', recipe!, '--', archives, checkout], {
+        cwd: root, timeout: 90_000, stdio: 'pipe'
+      });
+      for (const [vendor, patch] of [
+        ['sharp', 'sharp-glib-calls.patch'],
+        ['sharp-libvips', 'sharp-libvips-glib-wrapper.patch']
+      ] as const) {
+        expect(existsSync(path.join(checkout, 'vendor', vendor, '.git'))).toBe(true);
+        execFileSync('git', ['-C', path.join(checkout, 'vendor', vendor), 'apply', '--reverse', '--check',
+          path.join(checkout, 'patches', patch)], { timeout: 15_000, stdio: 'pipe' });
+      }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }, 100_000);
+
+  it('runs fork reconstruction unconditionally in the native-sources release job before upload', () => {
+    const steps = yamlFile('.github/workflows/release.yml').jobs.sources.steps as Array<Record<string, unknown>>;
+    const archive = steps.findIndex((step) => step.run === 'node scripts/package-native-sources.mjs');
+    const dependencies = steps.findIndex((step) => step.run === 'npm ci');
+    const reconstruct = steps.findIndex((step) => step.name === 'Reconstruct supplied Linux x64 Sharp fork');
+    const upload = steps.findIndex((step) => step.name === 'Upload source artifact');
+    expect(archive).toBeGreaterThanOrEqual(0);
+    expect(dependencies).toBeGreaterThan(archive);
+    expect(reconstruct).toBeGreaterThan(dependencies);
+    expect(upload).toBeGreaterThan(reconstruct);
+
+    const verification = steps[reconstruct];
+    if (!verification) throw new Error('Native-source reconstruction step is missing');
+    expect(verification.if).toBeUndefined();
+    expect(verification['continue-on-error']).toBeUndefined();
+    expect(verification.shell).toBe('bash');
+    const command = verification.run as string;
+    expect(command).toContain('set -euo pipefail');
+    expect(command).toContain('test -f "$archives/$archive"');
+    for (const file of [
+      'sharp-electron-f7afa507.tar.gz',
+      'sharp-source-903128da.tar.gz',
+      'sharp-libvips-build-f6fad46c.tar.gz'
+    ]) expect(command).toContain(file);
+    expect(command).toContain("./node_modules/.bin/vitest run test/packaging.test.ts -t 'reconstructs the modified Linux x64 source from verified release archives and identifies its paired replacement files'");
+    expect(command).not.toMatch(/\|\|\s*(?:true|:)|\bexit 0\b/);
   });
 
   it('grants sandbox read access only to the Windows install tree and fails on ACL errors', () => {
@@ -312,6 +421,9 @@ describe('cross-platform packaging targets', () => {
     expect(builder.linux.artifactName).toBe('ChatBBC-Linux-${env.COS_PACKAGE_ARCH}.${ext}');
     expect(builder.deb.depends).toContain('libgtk-3-0 | libgtk-3-0t64');
     expect(builder.deb.depends).toContain('libatspi2.0-0 | libatspi2.0-0t64');
+    // The disposable DEB smoke owns ALSA provider resolution; a source-string
+    // assertion passed while apt selected an incompatible libasound2 provider.
+    expect(builder.deb.depends).toContain('libgbm1');
     expect(builder.linux.syncDesktopName).toBe(true);
     expect(builder.linux.maintainer).toMatch(/^ChatBBC <[^>]+@users\.noreply\.github\.com>$/);
     expect(pkg.desktopName).toBe('com.chatbbc.app.desktop');
@@ -337,6 +449,8 @@ describe('cross-platform packaging targets', () => {
     expect(releaseWorkflow).toContain('installed_executable="$(readlink -f /usr/bin/chatbbc)"');
     expect(releaseWorkflow).toContain('test -x "$installed_executable"');
     expect(releaseWorkflow).toContain('dpkg-query -S "$installed_executable"');
+    expect(releaseWorkflow).toContain("printf '%s\\n' \"$depends\" | grep -Eq 'libasound2");
+    expect(releaseWorkflow).toContain("printf '%s\\n' \"$depends\" | grep -Eq '(^|, )libgbm1(,|$)'");
     expect(releaseWorkflow).toContain("node scripts/smoke-packaged-runtime.mjs --platform linux --arch '${{ matrix.arch }}' --root \"$(dirname \"$installed_executable\")\"");
 
     const appImageSection = releaseWorkflow.slice(

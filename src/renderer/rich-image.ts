@@ -24,13 +24,21 @@ export type RichImageViewerOwner = {
   unavailable: () => void;
 };
 
-type Viewer = { owner: RichImageViewerOwner; dialog: HTMLDialogElement | null };
+type Viewer = {
+  owner: RichImageViewerOwner;
+  dialog: HTMLDialogElement | null;
+  focusGuard: ((event: FocusEvent) => void) | null;
+};
 let active: Viewer | null = null;
 
 function closeViewer(viewer: Viewer, restoreFocus: boolean): void {
   if (active !== viewer) return;
   active = null;
   const dialog = viewer.dialog;
+  if (viewer.focusGuard) {
+    document.removeEventListener('focusin', viewer.focusGuard);
+    viewer.focusGuard = null;
+  }
   if (dialog) {
     if (dialog.open) dialog.close();
     dialog.remove();
@@ -55,7 +63,8 @@ export function retireStaleRichImageViewer(): void {
   if (active && (!active.owner.current() || !active.owner.trigger.isConnected)) closeViewer(active, false);
 }
 
-function localDataUrl(value: unknown, mimeType: string): value is string {
+/** A local reader reply, never an authored provider URL; shared by inline and modal previews. */
+export function localDataUrl(value: unknown, mimeType: string): value is string {
   if (typeof value !== 'string' || value.length > MAX_DATA_URL_LENGTH) return false;
   const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
   return !!match && match[1] === mimeType && match[2]!.length % 4 === 0;
@@ -63,8 +72,8 @@ function localDataUrl(value: unknown, mimeType: string): value is string {
 
 /**
  * Viewer only: it never opens ChatGPT, fetches a URL, retries capture or grants browser input.
- * Assistant-rich membership is not enabled yet; a synthetic available record alone cannot
- * make an assistant-only asset readable through the fixed main-process getter.
+ * The fixed main-process getter independently checks canonical assistant-rich membership,
+ * valid recorded asset bytes and cleanup epochs; a synthetic available record grants nothing.
  */
 export async function openRichImageViewer(
   sessionId: string, media: RichMediaState, alt: string, owner: RichImageViewerOwner
@@ -73,7 +82,7 @@ export async function openRichImageViewer(
   const assetId = media.asset!.id;
   const mimeType = media.asset!.mimeType;
   const width = media.previewWidth!, height = media.previewHeight!;
-  const viewer: Viewer = { owner, dialog: null };
+  const viewer: Viewer = { owner, dialog: null, focusGuard: null };
   active = viewer;
   let data: unknown;
   try {
@@ -92,6 +101,7 @@ export async function openRichImageViewer(
   dialog.className = 'rich-image-viewer';
   dialog.setAttribute('role', 'dialog');
   dialog.setAttribute('aria-label', 'Saved preview');
+  dialog.setAttribute('aria-modal', 'true');
   dialog.style.setProperty('--rich-preview-width', `${width}px`);
   dialog.style.setProperty('--rich-preview-height', `${height}px`);
   const title = document.createElement('h2');
@@ -108,12 +118,31 @@ export async function openRichImageViewer(
   dialog.addEventListener('cancel', event => { event.preventDefault(); closeViewer(viewer, true); });
   dialog.addEventListener('click', event => { if (event.target === dialog) closeViewer(viewer, true); });
   dialog.addEventListener('close', () => closeViewer(viewer, true));
+  // This modal has exactly one actionable descendant. Explicitly contain both Tab
+  // directions and outside focus, including embedders without native dialog focus
+  // containment. Remove the document listener on every close/retirement path.
+  dialog.addEventListener('keydown', event => {
+    if (active !== viewer || event.key !== 'Tab') return;
+    event.preventDefault();
+    if (document.activeElement !== close) close.focus({ preventScroll: true });
+  });
   viewer.dialog = dialog;
   document.body.append(dialog);
+  // showModal() and focus() can synchronously dispatch focus events. Install the
+  // guard before either operation so a reentrant selection retirement can remove
+  // it; never register a listener for a viewer which has already been retired.
+  viewer.focusGuard = event => {
+    if (active !== viewer || !dialog.open || dialog.contains(event.target as Node)) return;
+    if (!owner.current() || !owner.trigger.isConnected) { closeViewer(viewer, false); return; }
+    close.focus({ preventScroll: true });
+  };
+  document.addEventListener('focusin', viewer.focusGuard);
   try {
     dialog.showModal();
+    if (active !== viewer || !dialog.isConnected) return;
     close.focus({ preventScroll: true });
   } catch {
+    if (active !== viewer) return;
     closeViewer(viewer, false);
     if (owner.current() && owner.trigger.isConnected) owner.unavailable();
   }

@@ -54,5 +54,41 @@ it('exposes a read-only rich-status wrapper with only the exact two identifiers'
   });
   expect(api.invoke).toBeUndefined();
   expect(api.richAction).toBeUndefined();
-  expect(api.openRichOriginal).toBeUndefined();
+  expect(api.openRichOriginal).toBeDefined(); // Fixed manual navigation, not richAction.
+});
+
+it('exposes only exact session/message identifiers for fixed manual original navigation, never a URL or command', async () => {
+  vi.resetModules();
+  invoke.mockReset().mockResolvedValue({ ok: true, data: true });
+  expose.mockClear();
+  await import('../src/preload/index.js');
+  const api = expose.mock.calls[0]![1];
+  expect(await api.openRichOriginal('2026-09-19-aaaaaaaa', 'assistant:working:exchange:1789552000000'))
+    .toEqual({ ok: true, data: true });
+  expect(invoke).toHaveBeenCalledExactlyOnceWith('sessions:richOpenOriginal', {
+    sessionId: '2026-09-19-aaaaaaaa', messageId: 'assistant:working:exchange:1789552000000'
+  });
+  expect(api.invoke).toBeUndefined();
+  expect(api.richAction).toBeUndefined();
+});
+
+it('exposes a fixed read-only PAGE eligibility request without browser, URL, or retry command authority', async () => {
+  vi.resetModules();
+  invoke.mockReset().mockResolvedValue({ ok: true, data: {
+    status: 'unavailable', reason: 'removed', requiresRemovalConfirmation: true, eligibilityOnly: true
+  } });
+  expose.mockClear();
+  await import('../src/preload/index.js');
+  const api = expose.mock.calls[0]![1];
+  expect(await api.richRetryEligibility('2026-09-19-aaaaaaaa', 'assistant:working:exchange:1789552000000',
+    'card-image-b', 'image-node-b', 1)).toEqual({ ok: true, data: {
+      status: 'unavailable', reason: 'removed', requiresRemovalConfirmation: true, eligibilityOnly: true
+    } });
+  expect(invoke).toHaveBeenCalledExactlyOnceWith('sessions:richRetryEligibility', {
+    sessionId: '2026-09-19-aaaaaaaa', messageId: 'assistant:working:exchange:1789552000000',
+    mediaId: 'card-image-b', nodeId: 'image-node-b', richRevision: 1
+  });
+  expect(api.invoke).toBeUndefined();
+  expect(api.retryRichImage).toBeUndefined();
+  expect(api.richAction).toBeUndefined();
 });

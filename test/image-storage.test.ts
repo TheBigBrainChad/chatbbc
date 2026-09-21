@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
+import { getRecordingRevision, initConfigPath, loadConfig } from '../src/main/config.js';
 import {
   appendEvent,
   clearImageStorage,
@@ -15,6 +16,7 @@ import {
   MAX_GLOBAL_ASSET_BYTES,
   readAsset,
   readEvents,
+  rebindSession,
   resetSessionStoreForTests,
   sessionsRoot,
   upsertMessageEvent,
@@ -28,6 +30,10 @@ let directory: string;
 
 beforeEach(async () => {
   directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cos-image-storage-'));
+  // Asset writes are recording-gated: initialize the same persisted admission
+  // generation as the app instead of implicitly relying on another test suite.
+  initConfigPath(directory);
+  await loadConfig();
   initSessionStore(directory);
 });
 
@@ -38,6 +44,21 @@ afterEach(async () => {
 });
 
 const text = (value: string) => ({ text: value, chars: value.length, truncated: false });
+const REMOVAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function assertCleanupMarkers(row: { retiredRichMediaSlots?: Array<{ mediaId: string; nodeId: string }> },
+  assetId: string): string[] {
+  const markers = row.retiredRichMediaSlots as Array<{ mediaId: string; nodeId: string;
+    removalIncarnation?: string; retiredAssetId?: string }> | undefined;
+  expect(markers).toHaveLength(2);
+  const ids = markers!.map(marker => {
+    expect(marker).toEqual({ mediaId: marker.mediaId, nodeId: marker.nodeId,
+      removalIncarnation: expect.stringMatching(REMOVAL_UUID), retiredAssetId: assetId });
+    return marker.removalIncarnation!;
+  });
+  expect(new Set(ids).size).toBe(2);
+  return ids;
+}
 
 /** Future available refs seeded in a real canonical shard ONLY for cleanup compatibility.
  * Production upsertRichMedia must continue refusing assets and available status. */
@@ -88,6 +109,11 @@ it('retires a native and two future rich owners of one asset once, keeping metad
   expect(assistant).toMatchObject({ messageId, retiredRichImageAssetIds: [shared.id] });
   if (assistant?.kind !== 'assistant_message') throw new Error('assistant missing');
   expect(assistant.richMedia).toHaveLength(2);
+  expect(assistant.retiredRichMediaSlots).toMatchObject([
+    { mediaId: 'media-one-left', nodeId: 'node-one-left' },
+    { mediaId: 'media-one-right', nodeId: 'node-one-right' }
+  ]);
+  const incarnations = assertCleanupMarkers(assistant, shared.id);
   expect(assistant.richMedia?.every(media => media.status === 'unavailable' && media.reason === 'removed' && !media.asset)).toBe(true);
   expect(assistant.rich?.nodes).toEqual(before?.kind === 'assistant_message' ? before.rich?.nodes : undefined);
   expect(assistant.message).toEqual(before?.kind === 'assistant_message' ? before.message : undefined);
@@ -98,6 +124,9 @@ it('retires a native and two future rich owners of one asset once, keeping metad
     retiredRichImageAssetIds: [shared.id], richMedia: [
       { status: 'unavailable', reason: 'removed' }, { status: 'unavailable', reason: 'removed' }
     ] });
+  const restored = (await readEvents(session.id)).find(row => row.kind === 'assistant_message');
+  if (restored?.kind !== 'assistant_message') throw new Error('missing restored assistant');
+  expect(assertCleanupMarkers(restored, shared.id)).toEqual(incarnations);
   expect(await upsertRichMedia(session.id, messageId, {
     mediaId: 'media-one-left', nodeId: 'node-one-left', source: { kind: 'page', nodeId: 'node-one-left' },
     status: 'available', asset: shared
@@ -108,14 +137,33 @@ it('retires a native and two future rich owners of one asset once, keeping metad
   }, origin, 1)).toBe('refused');
   const { seq: _seq, origin: _origin, ...replay } = native.event;
   expect((await upsertNativeImageEvent(session.id, { ...replay, previewStatus: 'available', asset: shared })).accepted).toBe(false);
+  // A user-cleared reference must never return as an auto-captured pending slot
+  // when an old answer reappears after an actual physical A→B→A handover.
+  const nextConversation = randomUUID();
+  expect(await rebindSession(session.id, conversationId, nextConversation)).toBe(true);
+  expect(await rebindSession(session.id, nextConversation, conversationId)).toBe(true);
+  if (!assistant.rich) throw new Error('rich predecessor missing');
+  expect(await upsertRichMessage(session.id, messageId, assistant.rich,
+    { ...origin, bindingRevision: 2, documentId: 'reopened-after-clear', navigationEpoch: 0 },
+    getRecordingRevision(), true)).toBe('stored');
+  const returned = (await readEvents(session.id)).find(row => row.kind === 'assistant_message');
+  if (returned?.kind !== 'assistant_message') throw new Error('missing replayed assistant');
+  expect(assertCleanupMarkers(returned, shared.id)).toEqual(incarnations);
+  expect(returned?.kind === 'assistant_message' && returned.richMedia).toEqual([
+    { mediaId: 'media-one-left', nodeId: 'node-one-left', source: { kind: 'page', nodeId: 'node-one-left' },
+      status: 'unavailable', reason: 'removed' },
+    { mediaId: 'media-one-right', nodeId: 'node-one-right', source: { kind: 'page', nodeId: 'node-one-right' },
+      status: 'unavailable', reason: 'removed' }
+  ]);
+  expect(await readAsset(session.id, shared.id)).toBeNull();
 });
 
 it('a failure on the SECOND owner shard vetoes every physical deletion and a later retry converges', async () => {
   const session = await createSession({ conversationId: randomUUID() });
   const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#556677' } }).png().toBuffer();
   const shared = await writeAsset(session.id, pixels, 'image/png');
-  await seedFutureRichOwner(session.id, shared, 'first');
-  await seedFutureRichOwner(session.id, shared, 'second');
+  const first = await seedFutureRichOwner(session.id, shared, 'first');
+  const second = await seedFutureRichOwner(session.id, shared, 'second');
   const rename = fs.rename.bind(fs);
   let shardWrites = 0;
   const failure = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
@@ -125,13 +173,203 @@ it('a failure on the SECOND owner shard vetoes every physical deletion and a lat
   await expect(clearImageStorage('all')).rejects.toThrow('second shard failed');
   expect(shardWrites).toBe(2);
   expect(await readAsset(session.id, shared.id)).toEqual(pixels);
+  const firstCommitted = JSON.parse(await fs.readFile(first.file, 'utf8'));
+  const firstIncarnations = assertCleanupMarkers(firstCommitted, shared.id);
+  expect(JSON.parse(await fs.readFile(second.file, 'utf8')).retiredRichMediaSlots).toBeUndefined();
   failure.mockRestore();
   expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 1, freedBytes: pixels.length });
   await flushSessions(); resetSessionStoreForTests(); initSessionStore(directory);
   const assistants = (await readEvents(session.id)).filter(row => row.kind === 'assistant_message');
   expect(assistants).toHaveLength(2);
-  for (const row of assistants) expect(row).toMatchObject({ retiredRichImageAssetIds: [shared.id],
-    richMedia: [{ reason: 'removed' }, { reason: 'removed' }] });
+  for (const row of assistants) {
+    expect(row).toMatchObject({ retiredRichImageAssetIds: [shared.id],
+      richMedia: [{ reason: 'removed' }, { reason: 'removed' }] });
+    if (row.kind !== 'assistant_message') throw new Error('missing assistant');
+    assertCleanupMarkers(row, shared.id);
+  }
+  const finalFirst = JSON.parse(await fs.readFile(first.file, 'utf8'));
+  expect(assertCleanupMarkers(finalFirst, shared.id)).toEqual(firstIncarnations);
+});
+
+it('reconciles a physically committed first cleanup rename whose acknowledgment was lost before metadata or another cleanup', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#446699' } }).png().toBuffer();
+  const asset = await writeAsset(session.id, pixels, 'image/png');
+  const { file, messageId, origin } = await seedFutureRichOwner(session.id, asset);
+  const rename = fs.rename.bind(fs);
+  let injected = false;
+  const lostAck = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+    if (!injected && String(to) === file) {
+      await rename(from, to);
+      injected = true;
+      throw new Error('cleanup rename committed but acknowledgment lost');
+    }
+    return rename(from, to);
+  }) as typeof fs.rename);
+  await expect(clearImageStorage('all')).rejects.toThrow('acknowledgment lost');
+  lostAck.mockRestore();
+  expect(injected).toBe(true);
+  expect(await readAsset(session.id, asset.id)).toEqual(pixels); // Uncertain cleanup never unlinks.
+  const committed = JSON.parse(await fs.readFile(file, 'utf8'));
+  const incarnations = assertCleanupMarkers(committed, asset.id);
+
+  // Same process and same cached session: stale available media must not erase a
+  // physically committed removal through ordinary metadata or a second cleanup.
+  await upsertMessageEvent(session.id, { time: 201, source: 'extension', kind: 'assistant_message',
+    messageId, providerMessageId: committed.providerMessageId,
+    message: text('Retain the authored answer.'), final: true,
+    renderedHtml: text('<p>Different presentation metadata</p>') });
+  const afterMetadata = JSON.parse(await fs.readFile(file, 'utf8'));
+  expect(assertCleanupMarkers(afterMetadata, asset.id)).toEqual(incarnations);
+  expect(afterMetadata.richMedia.every((media: { status: string; reason: string; asset?: unknown }) =>
+    media.status === 'unavailable' && media.reason === 'removed' && !media.asset)).toBe(true);
+  expect(await upsertRichMedia(session.id, messageId, {
+    mediaId: 'media-one-left', nodeId: 'node-one-left', source: { kind: 'page', nodeId: 'node-one-left' },
+    status: 'pending'
+  }, origin, 1)).toBe('refused');
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 1, freedBytes: pixels.length });
+  expect(assertCleanupMarkers(JSON.parse(await fs.readFile(file, 'utf8')), asset.id)).toEqual(incarnations);
+});
+
+it('preserves both physical owner tombstones when the second rename commits but its acknowledgment is lost', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#5577aa' } }).png().toBuffer();
+  const asset = await writeAsset(session.id, pixels, 'image/png');
+  const first = await seedFutureRichOwner(session.id, asset, 'first');
+  const second = await seedFutureRichOwner(session.id, asset, 'second');
+  const rename = fs.rename.bind(fs);
+  let injected = false;
+  const lostAck = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+    if (!injected && String(to) === second.file) {
+      await rename(from, to);
+      injected = true;
+      throw new Error('second cleanup ACK lost');
+    }
+    return rename(from, to);
+  }) as typeof fs.rename);
+  await expect(clearImageStorage('all')).rejects.toThrow('second cleanup ACK lost');
+  lostAck.mockRestore();
+  expect(injected).toBe(true);
+  expect(await readAsset(session.id, asset.id)).toEqual(pixels);
+  const originalFirst = assertCleanupMarkers(JSON.parse(await fs.readFile(first.file, 'utf8')), asset.id);
+  const originalSecond = assertCleanupMarkers(JSON.parse(await fs.readFile(second.file, 'utf8')), asset.id);
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 1, freedBytes: pixels.length });
+  expect(assertCleanupMarkers(JSON.parse(await fs.readFile(first.file, 'utf8')), asset.id)).toEqual(originalFirst);
+  expect(assertCleanupMarkers(JSON.parse(await fs.readFile(second.file, 'utf8')), asset.id)).toEqual(originalSecond);
+});
+
+it('preserves an indeterminate cleanup shard through restart without blocking valid or new message keys', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#447799' } }).png().toBuffer();
+  const asset = await writeAsset(session.id, pixels, 'image/png');
+  const { file, messageId, origin } = await seedFutureRichOwner(session.id, asset);
+  const healthy = await seedFutureRichOwner(session.id, asset, 'healthy');
+  const original = JSON.parse(await fs.readFile(file, 'utf8'));
+  const providerMessageId: string = original.providerMessageId;
+  const rename = fs.rename.bind(fs);
+  let injected = false;
+  const damaged = '{"corrupt":"no provable committed canonical owner"}';
+  const lostAck = vi.spyOn(fs, 'rename').mockImplementation((async (from, to) => {
+    if (!injected && String(to) === file) {
+      await rename(from, to);
+      await fs.writeFile(file, damaged, 'utf8');
+      injected = true;
+      throw new Error('cleanup physical owner indeterminate');
+    }
+    return rename(from, to);
+  }) as typeof fs.rename);
+  await expect(clearImageStorage('all')).rejects.toThrow('indeterminate');
+  lostAck.mockRestore();
+  expect(injected).toBe(true);
+  const metadata = upsertMessageEvent(session.id, { time: 201, source: 'extension', kind: 'assistant_message',
+    messageId, providerMessageId,
+    message: text('Retain the authored answer.'), final: true,
+    renderedHtml: text('<p>Must not replace an unprovable physical owner</p>') });
+  await expect(metadata).rejects.toThrow('Canonical cleanup ownership is uncertain');
+  await expect(upsertRichMessage(session.id, messageId, {
+    ...original.rich, accessibleText: 'Changed rich content cannot bypass cleanup quarantine'
+  }, origin, getRecordingRevision(), true)).rejects.toThrow('Canonical cleanup ownership is uncertain');
+  await expect(clearImageStorage('all')).rejects.toThrow('Canonical cleanup ownership is uncertain');
+  expect(await fs.readFile(file, 'utf8')).toBe(damaged);
+  expect(await readAsset(session.id, asset.id)).toEqual(pixels);
+
+  // The process quarantine is deliberately cleared by real initialization. A
+  // permissive history read skips the damaged SHA shard; it must not make that
+  // same physical path available for ordinary re-observation after restart.
+  resetSessionStoreForTests(); initSessionStore(directory);
+  await expect(upsertMessageEvent(session.id, {
+    time: 202, source: 'extension', kind: 'assistant_message', messageId, providerMessageId,
+    message: text('Retain the authored answer.'), final: true,
+    renderedHtml: text('<p>Restart cannot overwrite an unprovable owner</p>')
+  })).rejects.toThrow('Canonical message predecessor is uncertain');
+  expect(await upsertRichMessage(session.id, messageId, original.rich, origin,
+    getRecordingRevision(), true)).toBe('refused');
+  expect(await fs.readFile(file, 'utf8')).toBe(damaged);
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 0, freedBytes: 0 });
+  expect(await readAsset(session.id, asset.id)).toEqual(pixels);
+
+  // A corrupt owner must not turn into a session-wide write ban after restart:
+  // the untouched valid shard can advance and a truly absent key can be created.
+  const healthyBefore = JSON.parse(await fs.readFile(healthy.file, 'utf8'));
+  expect((await upsertMessageEvent(session.id, {
+    time: 203, source: 'extension', kind: 'assistant_message', messageId: healthy.messageId,
+    providerMessageId: healthyBefore.providerMessageId,
+    message: text('Retain the authored answer.'), final: true,
+    renderedHtml: text('<p>Valid predecessor revision</p>')
+  })).changed).toBe(true);
+  expect(JSON.parse(await fs.readFile(healthy.file, 'utf8')).renderedHtml).toEqual(text('<p>Valid predecessor revision</p>'));
+  const freshId = 'new-after-corrupt-owner';
+  expect((await upsertMessageEvent(session.id, {
+    time: 204, source: 'extension', kind: 'user_message', messageId: freshId,
+    message: text('New legitimate message')
+  })).changed).toBe(true);
+  const freshFile = path.join(sessionsRoot(), session.id, 'messages',
+    `${createHash('sha256').update(`user_message\u0000${freshId}`).digest('hex')}.json`);
+  expect(JSON.parse(await fs.readFile(freshFile, 'utf8')).messageId).toBe(freshId);
+  expect(await fs.readFile(file, 'utf8')).toBe(damaged);
+  expect(await readAsset(session.id, asset.id)).toEqual(pixels);
+});
+
+it('rejects forged four-field cleanup provenance without rewriting the owner or restoring removed pixels', async () => {
+  const session = await createSession({ conversationId: randomUUID() });
+  const pixels = await sharp({ create: { width: 5, height: 4, channels: 3, background: '#445588' } }).png().toBuffer();
+  const asset = await writeAsset(session.id, pixels, 'image/png');
+  const { file, messageId, origin } = await seedFutureRichOwner(session.id, asset);
+  expect(await clearImageStorage('all')).toMatchObject({ removedFiles: 1, freedBytes: pixels.length });
+  const valid = JSON.parse(await fs.readFile(file, 'utf8'));
+  const original = valid.retiredRichMediaSlots as Array<{
+    mediaId: string; nodeId: string; removalIncarnation: string; retiredAssetId: string
+  }>;
+  expect(assertCleanupMarkers(valid, asset.id)).toHaveLength(2);
+  const altered = [
+    [{ ...original[0], removalIncarnation: undefined }, original[1]],
+    [{ ...original[0], retiredAssetId: undefined }, original[1]],
+    [{ ...original[0], removalIncarnation: original[1]!.removalIncarnation }, original[1]],
+    [{ ...original[0], removalIncarnation: original[1]!.removalIncarnation.toUpperCase() }, original[1]],
+    [{ ...original[0], removalIncarnation: randomUUID() + '-extra' }, original[1]],
+    [{ ...original[0], retiredAssetId: 'f'.repeat(32) + '.bin' }, original[1]],
+    [{ ...original[0], url: 'https://example.test/unsafe' }, original[1]]
+  ];
+  for (const markers of altered) {
+    const invalid = JSON.stringify({ ...valid, retiredRichMediaSlots: markers });
+    await fs.writeFile(file, invalid, 'utf8');
+    resetSessionStoreForTests(); initSessionStore(directory);
+    expect(await upsertRichMessage(session.id, messageId, valid.rich, origin,
+      getRecordingRevision(), true)).toBe('refused');
+    expect(await fs.readFile(file, 'utf8')).toBe(invalid);
+    expect(await readAsset(session.id, asset.id)).toBeNull();
+  }
+  const withoutRetiredList = JSON.stringify({ ...valid, retiredRichImageAssetIds: undefined });
+  await fs.writeFile(file, withoutRetiredList, 'utf8');
+  resetSessionStoreForTests(); initSessionStore(directory);
+  expect(await upsertRichMessage(session.id, messageId, valid.rich, origin,
+    getRecordingRevision(), true)).toBe('refused');
+  expect(await fs.readFile(file, 'utf8')).toBe(withoutRetiredList);
+  await fs.writeFile(file, JSON.stringify(valid), 'utf8');
+  resetSessionStoreForTests(); initSessionStore(directory);
+  const recovered = (await readEvents(session.id)).find(row => row.kind === 'assistant_message');
+  if (recovered?.kind !== 'assistant_message') throw new Error('missing recovered assistant');
+  expect(assertCleanupMarkers(recovered, asset.id)).toEqual(original.map(marker => marker.removalIncarnation));
 });
 
 it('vetoes deletion if a future canonical owner shard or the legacy owner map is unreadable', async () => {

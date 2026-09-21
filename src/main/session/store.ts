@@ -26,7 +26,7 @@ import { isUtf8 } from 'node:buffer';
 import { isProModel } from '../../shared/chat-models.js';
 import { constants as fsConstants, promises as fs } from 'node:fs';
 import path from 'node:path';
-import sharp from 'sharp';
+import sharp from '../sharp.js';
 import type {
   AssetRef,
   Handoff,
@@ -43,13 +43,14 @@ import type {
   StoredText
 } from '../../shared/session.js';
 import { continuationMarkerOf, eventTokens, MAX_TOOL_RESULT_TOKENS, normalizedToolOutcome, storedTextTokens, workSequence } from '../../shared/session.js';
-import { parseRichResponse, type RichResponse } from '../../shared/rich-response.js';
+import { parseRichResponse, type RichNode, type RichResponse } from '../../shared/rich-response.js';
 import { parseRichOrigin } from './rich-response.js';
 import { chronological, positionOf } from '../../shared/chronology.js';
 import { automaticTitle, firstTitleMessage, legacyContextTitle, refreshUserTitle } from './title.js';
 import { agentPlanSchema, agentPlanUpdateSchema, MAX_AGENT_PLAN_BYTES, type AgentPlan, type AgentPlanUpdate } from '../../shared/agent-plan.js';
-import { getConfig, getRecordingRevision, recordingWriteAllowed, registerRecordingWriteDrain } from '../config.js';
+import { getConfig, getRecordingRevision, recordingGenerationGrant, recordingWriteAllowed, registerRecordingWriteDrain } from '../config.js';
 import { logError, logInfo, logWarn } from '../logger.js';
+import { isChatBlocked } from './blocked-chats.js';
 
 /**
  * Caps on how much of a value is written *inline*, into the JSONL line itself.
@@ -132,6 +133,7 @@ export function initSessionStore(userDataDir: string): void {
   assetMutationEpoch = 0;
   assetWrittenEpoch.clear();
   removedAssetEpoch.clear();
+  uncertainCleanupSessions.clear();
   sessionDeletionEpoch = 0;
   deletingSessions.clear();
   missingCurrentConversations.clear();
@@ -191,6 +193,11 @@ interface OpenSession {
 }
 
 const open = new Map<string, OpenSession>();
+/** Synchronous admission fence across durable rebind and delayed live attachment publication. */
+const pendingAttachmentTransitions = new Map<string, number>();
+export function sessionAttachmentTransitionPending(id: string): boolean {
+  return (pendingAttachmentTransitions.get(id) ?? 0) > 0;
+}
 /** One disk reconstruction per session; direct concurrent callers must share it. */
 const opening = new Map<string, Promise<OpenSession>>();
 interface DurableSessionSnapshot {
@@ -215,6 +222,10 @@ let assetWriteQueue = Promise.resolve();
 let assetMutationEpoch = 0;
 const assetWrittenEpoch = new Map<string, number>();
 const removedAssetEpoch = new Map<string, number>();
+/** A cleanup rename with an unprovable physical outcome must never leave a
+ * cached pre-cleanup owner free to overwrite its canonical shard. This fence
+ * covers the shared physical publication gate, including direct queue writers. */
+const uncertainCleanupSessions = new Set<string>();
 /** An explicit session deletion must also invalidate image reads already awaiting a queue. */
 let sessionDeletionEpoch = 0;
 const deletingSessions = new Set<string>();
@@ -341,6 +352,39 @@ function richMediaFields(value: unknown, required: readonly string[], allowed: r
 const richMediaOpaque = (value: unknown): value is string =>
   typeof value === 'string' && /^[a-z0-9:_-]{1,190}$/i.test(value);
 const richMediaReasons = new Set(['not_loaded', 'unsupported', 'ambiguous', 'tainted', 'oversized', 'invalid', 'quota', 'removed']);
+const pageSourceToken = /^src_[a-f0-9]{32}_([0-9a-z]{1,11})$/;
+
+/** The isolated source observer uses a fresh random identity and its monotonic counter.
+ * URLs, arbitrary caller aliases and a token paired with a different counter are invalid. */
+function validPageSourceWitness(incarnation: unknown, sequence: unknown): incarnation is string {
+  if (typeof incarnation !== 'string' || !Number.isSafeInteger(sequence) ||
+      (sequence as number) < 1) return false;
+  const match = pageSourceToken.exec(incarnation);
+  return Boolean(match && (sequence as number).toString(36) === match[1]);
+}
+
+/** The complete persisted slot barrier is store-owned; legacy slots have no barrier.
+ * A version alone means a new document must reacquire the source. A version plus
+ * sequence but no incarnation means a same-document SPA transition must reacquire. */
+function parsePageSource(value: unknown): NonNullable<RichMediaState['pageSource']> | null {
+  const fields = richMediaFields(value, ['slotVersion'],
+    ['slotVersion', 'sequence', 'incarnation', 'recordingRevision']);
+  if (!fields || !Number.isSafeInteger(fields.slotVersion) || (fields.slotVersion as number) < 1 ||
+      (fields.slotVersion as number) >= Number.MAX_SAFE_INTEGER ||
+      (Object.hasOwn(fields, 'incarnation') && !Object.hasOwn(fields, 'sequence')) ||
+      (Object.hasOwn(fields, 'incarnation') && !Object.hasOwn(fields, 'recordingRevision')) ||
+      (Object.hasOwn(fields, 'recordingRevision') && (!Number.isSafeInteger(fields.recordingRevision) ||
+        (fields.recordingRevision as number) < 0)) ||
+      (Object.hasOwn(fields, 'sequence') && (!Number.isSafeInteger(fields.sequence) ||
+        (fields.sequence as number) < 1))) return null;
+  if (Object.hasOwn(fields, 'incarnation') &&
+      !validPageSourceWitness(fields.incarnation, fields.sequence)) return null;
+  return { slotVersion: fields.slotVersion as number,
+    ...(Object.hasOwn(fields, 'sequence') ? { sequence: fields.sequence as number } : {}),
+    ...(Object.hasOwn(fields, 'incarnation') ? { incarnation: fields.incarnation as string } : {}),
+    ...(Object.hasOwn(fields, 'recordingRevision')
+      ? { recordingRevision: fields.recordingRevision as number } : {}) };
+}
 
 /** Only metadata may enter this store seam. Task 6/10 must precede pixels and asset references. */
 function parseMetadataRichMedia(value: unknown): RichMediaState | null {
@@ -368,6 +412,42 @@ function parseMetadataRichMedia(value: unknown): RichMediaState | null {
     ...(Object.hasOwn(fields, 'reason') ? { reason: fields.reason as RichMediaState['reason'] } : {}) };
 }
 
+/** Persisted adjuncts may contain a private source barrier and future validated assets;
+ * the public raw metadata parser above continues to reject both. */
+function parseDurableRichMedia(value: unknown): RichMediaState | null {
+  const fields = richMediaFields(value, ['mediaId', 'nodeId', 'source', 'status'],
+    ['mediaId', 'nodeId', 'source', 'status', 'reason', 'previewWidth', 'previewHeight', 'asset', 'pageSource']);
+  if (!fields) return null;
+  const base = parseMetadataRichMedia({ mediaId: fields.mediaId, nodeId: fields.nodeId,
+    source: fields.source, status: 'pending' });
+  if (!base) return null;
+  const hasBarrier = Object.hasOwn(fields, 'pageSource');
+  if (hasBarrier && base.source.kind !== 'page') return null;
+  const pageSource = hasBarrier ? parsePageSource(fields.pageSource) : null;
+  if (hasBarrier && !pageSource) return null;
+  const source = pageSource ? { pageSource } : {};
+  if (fields.status === 'available') {
+    // An available slot carrying a version-only (unwitnessed) barrier is invalid:
+    // no future writer may publish bytes before a committed source incarnation.
+    if (pageSource && !pageSource.incarnation) return null;
+    if (Object.hasOwn(fields, 'reason') || !Number.isSafeInteger(fields.previewWidth) ||
+        !Number.isSafeInteger(fields.previewHeight) || (fields.previewWidth as number) < 1 ||
+        (fields.previewHeight as number) < 1 || (fields.previewWidth as number) > 1600 ||
+        (fields.previewHeight as number) > 1600 ||
+        (fields.previewWidth as number) * (fields.previewHeight as number) > 2_560_000) return null;
+    const asset = richMediaFields(fields.asset, ['id', 'mimeType', 'bytes'], ['id', 'mimeType', 'bytes']);
+    if (!asset || typeof asset.id !== 'string' || !/^[a-f0-9]{8,64}\.(?:bin|png|jpg)$/.test(asset.id) ||
+        !['image/png', 'image/jpeg', 'image/webp'].includes(asset.mimeType as string) ||
+        !Number.isSafeInteger(asset.bytes) || (asset.bytes as number) < 1 ||
+        (asset.bytes as number) > MAX_ASSET_BYTES) return null;
+    return { ...base, ...source, status: 'available', previewWidth: fields.previewWidth as number,
+      previewHeight: fields.previewHeight as number, asset: asset as unknown as AssetRef };
+  }
+  const { pageSource: _barrier, ...metadata } = fields;
+  const clean = parseMetadataRichMedia(metadata);
+  return clean ? { ...clean, ...source } : null;
+}
+
 /** One opaque media identity must resolve to precisely one validated rich image node. */
 function exactRichImageNode(rich: RichResponse, mediaId: string, nodeId: string): boolean {
   if (rich.status !== 'available') return false;
@@ -385,7 +465,8 @@ function exactRichImageNode(rich: RichResponse, mediaId: string, nodeId: string)
 }
 
 /** Null means corrupt or mismatched durable predecessor; [] is a valid absent adjunct. */
-function validatedRichMedia(value: unknown, rich: RichResponse, providerMessageId: string): RichMediaState[] | null {
+function validatedRichMedia(value: unknown, rich: RichResponse, providerMessageId: string,
+  maxVersion = Number.MAX_SAFE_INTEGER): RichMediaState[] | null {
   if (value === undefined) return [];
   try {
     if (!Array.isArray(value)) return null;
@@ -398,14 +479,143 @@ function validatedRichMedia(value: unknown, rich: RichResponse, providerMessageI
     for (let index = 0; index < length.value; index++) {
       const field = Object.getOwnPropertyDescriptor(value, String(index));
       if (!field?.enumerable || !('value' in field)) return null;
-      const media = parseMetadataRichMedia(field.value);
+      const media = parseDurableRichMedia(field.value);
       if (!media || ids.has(media.mediaId) || !exactRichImageNode(rich, media.mediaId, media.nodeId) ||
+          (media.pageSource && media.pageSource.slotVersion > maxVersion) ||
           (media.source.kind === 'native' && media.source.providerMessageId !== providerMessageId)) return null;
       ids.add(media.mediaId);
       clean.push(media);
     }
     return clean;
   } catch { return null; }
+}
+
+/** Legacy metadata-only removals have exactly two fields and NEVER acquire a
+ * cleanup credential on read, hydration or generic metadata upsert. Only physical
+ * explicit cleanup may persist the four-field variant. This local subtype remains
+ * structurally compatible with the narrower shared session display type. */
+type RetiredRichMediaSlot = { mediaId: string; nodeId: string } &
+  ({ removalIncarnation?: never; retiredAssetId?: never } |
+   { removalIncarnation: string; retiredAssetId: string });
+const MAX_RETIRED_RICH_MEDIA_SLOTS = 4096;
+const removalIncarnationUUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const retiredRichImageAssetId = /^[a-f0-9]{8,64}\.(?:bin|png|jpg)$/;
+
+/** Removal is a canonical logical-slot fact, not a byte hash or a currently mounted IMG.
+ * A temporarily absent node must not drop this fence and permit passive recapture later. */
+function parsedRetiredRichMediaSlots(value: unknown): RetiredRichMediaSlot[] | null {
+  if (value === undefined) return [];
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype ||
+        value.length > MAX_RETIRED_RICH_MEDIA_SLOTS ||
+        Reflect.ownKeys(value).length !== value.length + 1) return null;
+    const clean: RetiredRichMediaSlot[] = [];
+    const seen = new Set<string>();
+    const incarnations = new Set<string>();
+    for (let index = 0; index < value.length; index++) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !('value' in descriptor) || !descriptor.value ||
+          typeof descriptor.value !== 'object' || Array.isArray(descriptor.value) ||
+          ![null, Object.prototype].includes(Object.getPrototypeOf(descriptor.value))) return null;
+      const fields = richMediaFields(descriptor.value, ['mediaId', 'nodeId'],
+        ['mediaId', 'nodeId', 'removalIncarnation', 'retiredAssetId']);
+      if (!fields || !richMediaOpaque(fields.mediaId) || !richMediaOpaque(fields.nodeId) ||
+          seen.has(fields.mediaId)) return null;
+      seen.add(fields.mediaId);
+      const hasIncarnation = Object.hasOwn(fields, 'removalIncarnation');
+      const hasAsset = Object.hasOwn(fields, 'retiredAssetId');
+      if (hasIncarnation !== hasAsset || (hasIncarnation &&
+          (typeof fields.removalIncarnation !== 'string' ||
+           !removalIncarnationUUID.test(fields.removalIncarnation) ||
+           incarnations.has(fields.removalIncarnation.toLowerCase()) ||
+           typeof fields.retiredAssetId !== 'string' ||
+           !retiredRichImageAssetId.test(fields.retiredAssetId)))) return null;
+      if (hasIncarnation) {
+        incarnations.add((fields.removalIncarnation as string).toLowerCase());
+        clean.push({ mediaId: fields.mediaId, nodeId: fields.nodeId,
+          removalIncarnation: fields.removalIncarnation as string,
+          retiredAssetId: fields.retiredAssetId as string });
+      } else clean.push({ mediaId: fields.mediaId, nodeId: fields.nodeId });
+    }
+    return clean;
+  } catch { return null; }
+}
+
+function mergedRetiredRichMediaSlots(
+  prior: readonly RetiredRichMediaSlot[], additions: readonly RetiredRichMediaSlot[]
+): RetiredRichMediaSlot[] | null {
+  const merged = [...prior];
+  const known = new Map(prior.map(slot => [slot.mediaId, slot.nodeId]));
+  for (const slot of additions) {
+    const existing = known.get(slot.mediaId);
+    if (existing !== undefined && existing !== slot.nodeId) return null;
+    if (existing === undefined) {
+      if (merged.length >= MAX_RETIRED_RICH_MEDIA_SLOTS) return null;
+      known.set(slot.mediaId, slot.nodeId);
+      // Preserve the exact previously parsed two- or four-field value. Merging
+      // metadata must never manufacture or silently upgrade a legacy tombstone.
+      merged.push({ ...slot });
+    }
+  }
+  return merged;
+}
+
+/** An assistant-wide floor closes the gap when a rich revision omits a PAGE slot,
+ * or a changed authored message removes rich entirely. The slot can reappear later,
+ * but a stale earlier expectedVersion=0 must never become valid again. */
+function richSourceVersionFloor(row: Extract<SessionEvent, { kind: 'assistant_message' }>): number | null {
+  if (row.richSourceVersionFloor === undefined) return 0;
+  return Number.isSafeInteger(row.richSourceVersionFloor) && row.richSourceVersionFloor > 0 &&
+    Number.isSafeInteger(row.seq) && row.richSourceVersionFloor <= row.seq
+    ? row.richSourceVersionFloor : null;
+}
+
+/** Derive inert PAGE slots solely from a validated rich tree on an explicitly verified write.
+ * Prior same-document metadata has already been validated against its original tree. A reused
+ * media id on another image is ambiguous: neither old state nor a fresh pending slot may win. */
+function seededPageRichMedia(
+  rich: RichResponse, prior: readonly RichMediaState[], removed: readonly RetiredRichMediaSlot[],
+  sameOrigin: boolean, sameDocument: boolean, sourceFloor: number, recordingRevision: number
+): RichMediaState[] | null {
+  const priorById = new Map(prior.map(item => [item.mediaId, item]));
+  const removedById = new Map(removed.map(item => [item.mediaId, item.nodeId]));
+  const seen = new Set<string>();
+  const media: RichMediaState[] = [];
+  const nodes = [...rich.nodes].reverse();
+  while (nodes.length) {
+    const node = nodes.pop()!;
+    if (node.kind === 'group' || node.kind === 'control') {
+      for (let index = node.children.length - 1; index >= 0; index--) nodes.push(node.children[index]!);
+    } else if (node.kind === 'image') {
+      if (seen.has(node.mediaId) || media.length >= 64) return null;
+      seen.add(node.mediaId);
+      const existing = priorById.get(node.mediaId);
+      if (existing && existing.nodeId !== node.id) return null;
+      const removedNode = removedById.get(node.mediaId);
+      if (removedNode !== undefined && (removedNode !== node.id || existing?.status === 'available')) return null;
+      const sameSourceOwner = sameOrigin && (!existing?.pageSource ||
+        existing.pageSource.recordingRevision === undefined ||
+        existing.pageSource.recordingRevision === recordingRevision);
+      // A source witness belongs to its original physical document and SPA. Never carry
+      // previously available pixels into an independently observed owner; retain only
+      // the store version so a late old capture cannot publish after A→B→A.
+      const staleSource = existing?.pageSource && !sameSourceOwner
+        ? { slotVersion: existing.pageSource.slotVersion,
+          ...(sameDocument && existing.pageSource.sequence !== undefined
+            ? { sequence: existing.pageSource.sequence } : {}) }
+        : !existing && sourceFloor > 0 ? { slotVersion: sourceFloor } : null;
+      const pending: RichMediaState = { mediaId: node.mediaId, nodeId: node.id,
+        source: { kind: 'page', nodeId: node.id }, status: 'pending', reason: 'not_loaded',
+        ...(staleSource ? { pageSource: staleSource } : {}) };
+      media.push(removedNode !== undefined
+        ? existing?.status === 'unavailable' && existing.reason === 'removed' ? existing :
+          { mediaId: node.mediaId, nodeId: node.id, source: { kind: 'page', nodeId: node.id },
+            status: 'unavailable', reason: 'removed',
+            ...(existing?.pageSource ? { pageSource: staleSource ?? existing.pageSource } : {}) }
+        : sameSourceOwner && existing ? existing : pending);
+    }
+  }
+  return media;
 }
 
 function emptySummary(id: string, title: string, conversationId: string | null): SessionSummary {
@@ -634,6 +844,10 @@ async function createSessionFiles(options: Parameters<typeof createSession>[0]):
     metaDirty: false,
     metaTimer: null
   };
+  // An opening becomes visible in `open` before its first metadata checkpoint.
+  // A capture may resolve that live A, but must not mint attachment authority
+  // until the first durable meta and attachment index publication are complete.
+  pendingAttachmentTransitions.set(id, (pendingAttachmentTransitions.get(id) ?? 0) + 1);
   open.set(id, entry);
   try {
     await fs.mkdir(sessionDir(id), { recursive: true });
@@ -651,6 +865,10 @@ async function createSessionFiles(options: Parameters<typeof createSession>[0]):
   } catch (error) {
     if (open.get(id) === entry) open.delete(id);
     throw error;
+  } finally {
+    const remaining = (pendingAttachmentTransitions.get(id) ?? 1) - 1;
+    if (remaining > 0) pendingAttachmentTransitions.set(id, remaining);
+    else pendingAttachmentTransitions.delete(id);
   }
   return { ...summary };
 }
@@ -792,11 +1010,54 @@ async function readCanonicalMessages(id: string, aliasesCollapsed?: () => void):
   return out;
 }
 
-async function writeCanonicalMessage(id: string, key: string, event: CanonicalEvent): Promise<void> {
+/** History reads may omit a damaged SHA shard, but a canonical write must inspect
+ * its physical predecessor independently. ENOENT is the only absent owner; an
+ * unreadable, mismatched or malformed existing shard remains forensic evidence. */
+async function canonicalWritePredecessor(target: string, key: string, proposed: CanonicalEvent): Promise<{
+  raw: string; dev: number; ino: number; mtimeMs: number; ctimeMs: number
+} | null> {
+  const uncertain = (): Error => new Error('Canonical message predecessor is uncertain');
+  let stat: Awaited<ReturnType<typeof fs.lstat>>;
+  try { stat = await fs.lstat(target); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw uncertain();
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CANONICAL_MESSAGE_BYTES) throw uncertain();
+  const raw = await readBoundedOwnerSource(target, stat);
+  if (raw === null) throw uncertain();
+  try {
+    const stored: unknown = JSON.parse(raw);
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) throw uncertain();
+    const owner = stored as CanonicalEvent;
+    if (!Number.isSafeInteger(owner.seq) || messageKey(owner) !== key) throw uncertain();
+    if (owner.kind === 'assistant_message') {
+      const removed = parsedRetiredRichMediaSlots(owner.retiredRichMediaSlots);
+      const retiredAssets = owner.retiredRichImageAssetIds;
+      const hasRetirementFields = owner.retiredRichMediaSlots !== undefined || retiredAssets !== undefined;
+      if (removed === null || (retiredAssets !== undefined &&
+          (!Array.isArray(retiredAssets) || retiredAssets.some(id => typeof id !== 'string'))) ||
+          (cleanupRichMedia(owner) === null && (hasRetirementFields ||
+            proposed.kind !== 'assistant_message' || proposed.richMedia !== undefined ||
+            proposed.retiredRichMediaSlots !== undefined || proposed.retiredRichImageAssetIds !== undefined))) {
+        throw uncertain();
+      }
+      // An ordinary text observation may scrub malformed legacy media only by
+      // dropping it, and only when NO retirement field exists on either side.
+      // A malformed retired owner remains physical deletion evidence.
+    }
+  } catch { throw uncertain(); }
+  return { raw, dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs };
+}
+
+async function writeCanonicalMessage(id: string, key: string, event: CanonicalEvent,
+  stillAuthorized?: () => boolean): Promise<void> {
+  if (uncertainCleanupSessions.has(id)) throw new Error('Canonical cleanup ownership is uncertain');
   const dir = path.join(sessionDir(id), 'messages');
   await fs.mkdir(dir, { recursive: true });
   const name = `${createHash('sha256').update(key).digest('hex')}.json`;
   const target = path.join(dir, name);
+  const predecessor = await canonicalWritePredecessor(target, key, event);
   const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
   const text = JSON.stringify(event);
   if (Buffer.byteLength(text, 'utf8') > MAX_CANONICAL_MESSAGE_BYTES) {
@@ -804,6 +1065,17 @@ async function writeCanonicalMessage(id: string, key: string, event: CanonicalEv
   }
   try {
     await fs.writeFile(tmp, text, 'utf8');
+    // A private bridge lease can be revoked while this async temp write is in
+    // progress. Check at the final atomic rename, not only when entering the
+    // session queue. Canonical writers without private custody remain unchanged.
+    if (uncertainCleanupSessions.has(id)) throw new Error('Canonical cleanup ownership is uncertain');
+    if (stillAuthorized && !stillAuthorized()) throw new Error('page_pixel_ticket_revoked');
+    const current = await canonicalWritePredecessor(target, key, event);
+    if (JSON.stringify(current) !== JSON.stringify(predecessor)) {
+      throw new Error('Canonical message predecessor is uncertain');
+    }
+    if (uncertainCleanupSessions.has(id)) throw new Error('Canonical cleanup ownership is uncertain');
+    if (stillAuthorized && !stillAuthorized()) throw new Error('page_pixel_ticket_revoked');
     await fs.rename(tmp, target);
   } finally {
     await fs.rm(tmp, { force: true }).catch(() => undefined);
@@ -1182,80 +1454,184 @@ export async function refuseAutomaticCompactionNow(id: string, conversationId: s
   });
 }
 
-/**
- * Appends one event and returns it with its assigned sequence number.
- *
- * The sequence number, not the timestamp, defines order: the extension and the MCP
- * server both feed this store and their clocks are the same clock, but events can
- * arrive out of order when the browser batches its observations.
- */
+/** The sole physical event writer. Call only while this entry's queue is owned; a
+ * conditional lifecycle commit needs the same uncertain-write reconciliation as appendEvent. */
+async function appendEventWithinQueue(
+  sessionId: string, entry: OpenSession, event: NewSessionEvent, revision: number
+): Promise<SessionEvent> {
+  if (!isRecordingControl(event)) requireRecording(revision);
+  let admitted = event;
+  if (event.kind === 'tool_call') {
+    const denied = deniedAssetIds(sessionId, event.call.assets);
+    admitted = { ...event, call: {
+      ...event.call,
+      assets: admittedAssets(sessionId, event.call.assets),
+      ...(denied.length ? { retiredImageAssetIds: mergedRetiredAssetIds(event.call.retiredImageAssetIds, denied) } : {})
+    } };
+  } else if (event.kind === 'user_message') {
+    const denied = deniedAssetIds(sessionId, event.assets);
+    admitted = {
+      ...event,
+      assets: admittedAssets(sessionId, event.assets),
+      ...(denied.length ? { retiredImageAssetIds: mergedRetiredAssetIds(event.retiredImageAssetIds, denied) } : {})
+    };
+  }
+  const full = { ...admitted, seq: entry.nextSeq } as SessionEvent;
+  const line = `${JSON.stringify(full)}\n`;
+  if (Buffer.byteLength(line, 'utf8') > MAX_LINE_BYTES) {
+    throw new Error('Session event is too large to store');
+  }
+  try {
+    await fs.appendFile(path.join(sessionDir(sessionId), 'events.jsonl'), line, 'utf8');
+  } catch (error) {
+    // The write may have reached disk before it rejected. Reconcile before the
+    // next queued writer; neither an uncertain commit nor a torn line changes counts.
+    await sealTornTail(sessionId);
+    const durableSeq = await lastSeqOnDisk(sessionId);
+    if (durableSeq < full.seq) {
+      entry.nextSeq = Math.max(entry.nextSeq, durableSeq + 1);
+      throw error;
+    }
+    logWarn(`session ${sessionId}: append reported an error after sequence ${full.seq} was already durable`);
+  }
+  entry.nextSeq += 1;
+  entry.tail.push(full);
+  if (entry.tail.length > MAX_EVENT_TAIL) {
+    const removed = entry.tail.splice(0, entry.tail.length - MAX_EVENT_TAIL);
+    entry.tailFrom = removed[removed.length - 1]!.seq + 1;
+  }
+  applyToSummary(entry.summary, full);
+  entry.historySeq = full.seq;
+  scheduleMeta(entry);
+  return full;
+}
+
+/** Assigns sequence, writes and projects one event in the session queue. Sequence,
+ * rather than producer timestamps, defines the order of independently arriving events. */
 export function appendEvent(sessionId: string, event: NewSessionEvent): Promise<SessionEvent> {
-  const control = isRecordingControl(event);
   const revision = getRecordingRevision();
-  if (!control && !getConfig().sessions.record) return Promise.reject(new RecordingDisabledError());
-  return ensureOpen(sessionId).then((entry) => {
-    // Sequence assignment, durable append and projection update are one serial operation.
-    // The previous implementation incremented nextSeq and mutated the summary *before* the
-    // append succeeded. A disk failure therefore created a permanent seq gap and could even
-    // persist meta.json claiming events/tool calls/tokens that never existed in events.jsonl.
-    // Keep the append-only journal authoritative: nothing in memory advances until the line
-    // is on disk.
-    const write = entry.queue.then(async () => {
-      if (!control) requireRecording(revision);
-      let admitted = event;
-      if (event.kind === 'tool_call') {
-        const denied = deniedAssetIds(sessionId, event.call.assets);
-        admitted = { ...event, call: {
-          ...event.call,
-          assets: admittedAssets(sessionId, event.call.assets),
-          ...(denied.length ? { retiredImageAssetIds: mergedRetiredAssetIds(event.call.retiredImageAssetIds, denied) } : {})
-        } };
-      } else if (event.kind === 'user_message') {
-        const denied = deniedAssetIds(sessionId, event.assets);
-        admitted = {
-          ...event,
-          assets: admittedAssets(sessionId, event.assets),
-          ...(denied.length ? { retiredImageAssetIds: mergedRetiredAssetIds(event.retiredImageAssetIds, denied) } : {})
-        };
-      }
-      const full = { ...admitted, seq: entry.nextSeq } as SessionEvent;
-      const line = `${JSON.stringify(full)}\n`;
-      if (Buffer.byteLength(line, 'utf8') > MAX_LINE_BYTES) {
-        throw new Error('Session event is too large to store');
-      }
-      try {
-        await fs.appendFile(path.join(sessionDir(sessionId), 'events.jsonl'), line, 'utf8');
-      } catch (error) {
-        // Windows/filesystem errors are allowed to be uncertain commits: the write may have
-        // reached disk before the promise rejected. Reconcile the authoritative tail before
-        // another queued writer is admitted. A complete line is treated as committed; a torn
-        // line is sealed and the normal browser/MCP retry may safely reuse that absent seq.
-        await sealTornTail(sessionId);
-        const durableSeq = await lastSeqOnDisk(sessionId);
-        if (durableSeq < full.seq) {
-          entry.nextSeq = Math.max(entry.nextSeq, durableSeq + 1);
-          throw error;
-        }
-        logWarn(`session ${sessionId}: append reported an error after sequence ${full.seq} was already durable`);
-      }
-      entry.nextSeq += 1;
-      entry.tail.push(full);
-      if (entry.tail.length > MAX_EVENT_TAIL) {
-        const removed = entry.tail.splice(0, entry.tail.length - MAX_EVENT_TAIL);
-        entry.tailFrom = removed[removed.length - 1]!.seq + 1;
-      }
-      applyToSummary(entry.summary, full);
-      entry.historySeq = full.seq;
-      scheduleMeta(entry);
-      return full;
+  if (!isRecordingControl(event) && !getConfig().sessions.record) return Promise.reject(new RecordingDisabledError());
+  return ensureOpen(sessionId).then(entry =>
+    enqueueSessionOperation(entry, 'append', () => appendEventWithinQueue(sessionId, entry, event, revision)));
+}
+
+/**
+ * An end is authority over the CURRENT session turn, not simply a journal row.
+ * Session rebinds, newly authored questions and other lifecycle writers share this queue.
+ * Its strict read and physical append must therefore be one operation. A refusal never
+ * creates a receipt or updates the live/Goal/worker projections in the recorder.
+ */
+export async function appendTurnEndIfCurrent(
+  sessionId: string,
+  expectedAttachment: { conversationId: string; bindingRevision: number },
+  event: Extract<NewSessionEvent, { kind: 'turn_end' }>,
+  revision: number,
+  sameEnvelopeUserWorkSeq?: number
+): Promise<
+  | { appended: Extract<SessionEvent, { kind: 'turn_end' }>; priorEnd: boolean }
+  | { replay: Extract<SessionEvent, { kind: 'turn_end' }> }
+  | { refused: true }
+> {
+  assertSessionId(sessionId);
+  // A provisional Off may fail. Preserve the recorder's existing wait-and-retry
+  // behavior: only an ownership/lifecycle refusal returns an ordinary zero receipt.
+  requireRecording(revision);
+  if (!event.turnId || sessionAttachmentTransitionPending(sessionId) || deletingSessions.has(sessionId))
+    return { refused: true };
+  const entry = await ensureOpen(sessionId);
+  return enqueueSessionOperation(entry, 'conditional turn end', async () => {
+    const authorized = () => !deletingSessions.has(sessionId) && !sessionAttachmentTransitionPending(sessionId) &&
+      entry.summary.conversationId === expectedAttachment.conversationId &&
+      (entry.summary.bindingRevision ?? 0) === expectedAttachment.bindingRevision;
+    if (!authorized()) return { refused: true };
+    requireRecording(revision);
+    // Infinity removes the UI reader's 8 MiB cap. A damaged line or missing journal
+    // cannot prove absence of a newer question; strictIdentity throws, preserving retry.
+    const [latest] = await readRecentEventsFromDisk(sessionId, 1, {
+      kinds: ['turn_start', 'turn_end', 'user_message'], before: Number.POSITIVE_INFINITY,
+      strictIdentity: true
     });
-    entry.queue = write.then(
-      () => undefined,
-      (err: Error) => {
-        logError(`session append failed: ${err.message}`);
+    if (!latest) return { refused: true };
+    let lifecycle: SessionEvent = latest;
+    if (latest.kind === 'user_message') {
+      // A tool-input handout is a local delivery correction to the ALREADY running
+      // model turn, not a newly authored native question. It is recorded as a
+      // canonical app user row after the start, sometimes after a separate HTTP
+      // /events batch. Only its exact stable input identity, original tool turn
+      // and app-owned receipt distinguish it; a recycled turnId alone never does.
+      const exactToolInput = (row: SessionEvent): boolean => row.kind === 'user_message' &&
+        row.source === 'app' && typeof row.inputId === 'string' && row.inputId.length > 0 &&
+        row.messageId === `input:${row.inputId}` && row.turnId === event.turnId &&
+        (row.inputDelivery === 'offered' || row.inputDelivery === 'confirmed');
+      if (exactToolInput(latest)) {
+        const [preceding] = await readRecentEventsFromDisk(sessionId, 1, {
+          kinds: ['turn_start', 'turn_end'], before: Number.POSITIVE_INFINITY,
+          strictIdentity: true
+        });
+        if (!preceding || preceding.kind !== 'turn_start' || preceding.turnId !== event.turnId ||
+            preceding.seq >= workSequence(latest)) return { refused: true };
+        // The latest app correction could obscure a different real question V
+        // between the start and this end. Scan the strict canonical history for
+        // the newest NON-correction question, not just the latest user row. A
+        // genuinely same-envelope U is permitted only by its immutable workSeq.
+        const [authored] = await readRecentEventsFromDisk(sessionId, 1, {
+          kinds: ['user_message'], before: Number.POSITIVE_INFINITY, strictIdentity: true,
+          acceptEvent: row => row.kind === 'user_message' &&
+            workSequence(row) > preceding.seq && !exactToolInput(row)
+        });
+        if (authored && ((authored.turnId && authored.turnId !== event.turnId) ||
+            !Number.isSafeInteger(sameEnvelopeUserWorkSeq) ||
+            sameEnvelopeUserWorkSeq !== workSequence(authored))) return { refused: true };
+        lifecycle = preceding;
+      } else {
+        // A page may report its question AFTER its turn_start in the same envelope.
+        // A recycled page turn ID is not question identity. Only this envelope's
+        // freshly committed canonical question permits crossing that boundary.
+        if ((latest.turnId && latest.turnId !== event.turnId) ||
+            !Number.isSafeInteger(sameEnvelopeUserWorkSeq) ||
+            sameEnvelopeUserWorkSeq !== workSequence(latest))
+          return { refused: true };
+        const [preceding] = await readRecentEventsFromDisk(sessionId, 1, {
+          kinds: ['turn_start', 'turn_end'], before: Number.POSITIVE_INFINITY,
+          strictIdentity: true
+        });
+        if (!preceding || preceding.kind !== 'turn_start' || preceding.turnId !== event.turnId ||
+            preceding.seq >= workSequence(latest)) return { refused: true };
+        lifecycle = preceding;
       }
-    );
-    return write;
+    }
+    if (lifecycle.turnId !== event.turnId) return { refused: true };
+    let priorEnd = false;
+    if (lifecycle.kind === 'turn_end') {
+      // Exact replay can finish a separately admitted optional canonical promotion
+      // after a failed Recording Off. It still has zero physical event count.
+      if (lifecycle.source === event.source && lifecycle.time === event.time &&
+          lifecycle.outcome === event.outcome && lifecycle.reason === event.reason &&
+          lifecycle.detail === event.detail) {
+        return authorized() ? { replay: lifecycle } : { refused: true };
+      }
+      // A later native Stop can strengthen the latest interrupted/failed verdict once.
+      // It cannot overwrite an already stopped/completed turn or a newer question.
+      if (event.outcome !== 'stopped' ||
+          (lifecycle.outcome !== 'interrupted' && lifecycle.outcome !== 'failed') ||
+          event.time < lifecycle.time) return { refused: true };
+      priorEnd = true;
+    } else if (lifecycle.kind === 'turn_start') {
+      if (event.time < lifecycle.time) return { refused: true };
+      const [previousEnd] = await readRecentEventsFromDisk(sessionId, 1, {
+        kinds: ['turn_end'], before: Number.POSITIVE_INFINITY, strictIdentity: true,
+        acceptEvent: row => row.kind === 'turn_end' && row.turnId === event.turnId
+      });
+      priorEnd = !!previousEnd;
+      if (priorEnd && (lifecycle.source !== 'app' || previousEnd!.seq >= lifecycle.seq ||
+          event.time <= lifecycle.time)) return { refused: true };
+    } else return { refused: true };
+    // The other owner may have requested a rebind/delete while this async read ran.
+    // Refuse even before its queued metadata commit, and again at the write boundary.
+    if (!authorized()) return { refused: true };
+    const appended = await appendEventWithinQueue(sessionId, entry, event, revision);
+    if (appended.kind !== 'turn_end') throw new Error('Conditional turn end wrote the wrong event');
+    return { appended, priorEnd };
   });
 }
 
@@ -1266,11 +1642,24 @@ export function appendEvent(sessionId: string, event: NewSessionEvent): Promise<
  * preserves the sequence/time position where that stable website message first appeared, so
  * revisions cannot move either a user response boundary or assistant prose through later work.
  */
+type MessageUpsertSuccess = { event: MessageEvent; changed: boolean; contentChanged: boolean };
+type MessageUpsertAttachment = { conversationId: string; bindingRevision: number };
+
+// Optional, narrow owner predicate for a supplemental canonical revision. Ordinary
+// message writers retain their unchanged success contract and recording guard.
+export function upsertMessageEvent(
+  sessionId: string, event: NewMessageEvent,
+  options: { preferTime?: boolean; work?: boolean; expectedAttachment: MessageUpsertAttachment }
+): Promise<MessageUpsertSuccess | { refused: 'binding_changed' }>;
+export function upsertMessageEvent(
+  sessionId: string, event: NewMessageEvent,
+  options?: { preferTime?: boolean; work?: boolean }
+): Promise<MessageUpsertSuccess>;
 export function upsertMessageEvent(
   sessionId: string,
   event: NewMessageEvent,
-  options: { preferTime?: boolean; work?: boolean } = {}
-): Promise<{ event: MessageEvent; changed: boolean; contentChanged: boolean }> {
+  options: { preferTime?: boolean; work?: boolean; expectedAttachment?: MessageUpsertAttachment } = {}
+): Promise<MessageUpsertSuccess | { refused: 'binding_changed' }> {
   const directKey = messageKey(event as MessageEvent);
   if (!directKey) throw new Error('Canonical message update requires ChatGPT messageId');
   const revision = getRecordingRevision();
@@ -1278,10 +1667,19 @@ export function upsertMessageEvent(
   return ensureOpen(sessionId).then((entry) => {
     const write = entry.queue.then(async () => {
       requireRecording(revision);
+      // This check and the eventual canonical write own one session-queue slot,
+      // exactly like rebindSession. A queued A→B (or A→B→A) commit cannot
+      // interleave after this predicate and before the shard replacement.
+      if (options.expectedAttachment &&
+          (entry.summary.conversationId !== options.expectedAttachment.conversationId ||
+           (entry.summary.bindingRevision ?? 0) !== options.expectedAttachment.bindingRevision)) {
+        return { refused: 'binding_changed' as const };
+      }
       // Rich is store-owned: ordinary text upserts cannot insert page-claimed structure.
       if (event.kind === 'assistant_message') {
         const { rich: _rich, richOrigin: _richOrigin, richMedia: _media, richMediaUnavailable: _unavailable,
-          retiredRichImageAssetIds: _retired, ...plain } = event;
+          richSourceVersionFloor: _sourceFloor, retiredRichImageAssetIds: _retired,
+          retiredRichMediaSlots: _retiredSlots, ...plain } = event;
         event = plain as NewMessageEvent;
       }
       // Provider create_time can change after a tab reload while the actual message
@@ -1296,6 +1694,18 @@ export function upsertMessageEvent(
       const key = !entry.messages.has(directKey) && providerMatches.length === 1 ? providerMatches[0]![0] : directKey;
       const candidate = entry.messages.get(key);
       const previous = candidate?.kind === 'tool_call' ? undefined : candidate;
+      const oldSourceFloor = previous?.kind === 'assistant_message' ? richSourceVersionFloor(previous) : 0;
+      const previousMedia = previous?.kind === 'assistant_message' && previous.richMedia !== undefined
+        ? cleanupRichMedia(previous) : [];
+      const sourceProtected = previous?.kind === 'assistant_message' &&
+        ((oldSourceFloor ?? 0) > 0 || (Array.isArray(previous.richMedia) &&
+          previous.richMedia.some(media => media?.pageSource !== undefined)));
+      // Malformed durable source custody cannot be erased by an ordinary page text
+      // revision and subsequently reacquired as a brand-new version-zero slot.
+      if (previous?.kind === 'assistant_message' &&
+          (oldSourceFloor === null || (sourceProtected && previousMedia === null))) {
+        return { event: previous, changed: false, contentChanged: false };
+      }
       // A changed provider timestamp caused this alias; it is not a correction of
       // the original anchor. Same-key DOM-to-Fiber timestamp promotion still applies.
       const preferTime = options.preferTime === true && key === directKey;
@@ -1324,7 +1734,7 @@ export function upsertMessageEvent(
         sameMessage && previous.providerMessageId === (event.providerMessageId ?? previous.providerMessageId);
       const retainedRichMedia = sameRichOwner && previous.rich && previous.richOrigin &&
         parseRichOrigin(previous.richOrigin) && parseRichResponse(previous.rich) && previous.providerMessageId
-          ? validatedRichMedia(previous.richMedia, previous.rich, previous.providerMessageId)
+          ? validatedRichMedia(previous.richMedia, previous.rich, previous.providerMessageId, previous.seq)
           : null;
 
       const nextEvent: NewMessageEvent =
@@ -1351,9 +1761,12 @@ export function upsertMessageEvent(
                 : {}),
               ...(sameRichOwner && previous.rich ? { rich: previous.rich, richOrigin: previous.richOrigin } : {}),
               ...(retainedRichMedia?.length ? { richMedia: retainedRichMedia } : {}),
+              ...((oldSourceFloor ?? 0) > 0 ? { richSourceVersionFloor: !sameRichOwner
+                ? entry.nextSeq : oldSourceFloor! } : {}),
               ...(sameRichOwner && previous.richMediaUnavailable ? { richMediaUnavailable: previous.richMediaUnavailable } : {}),
               // Removal tombstones survive ordinary re-observations even if authored text changes.
-              ...(previous.retiredRichImageAssetIds ? { retiredRichImageAssetIds: previous.retiredRichImageAssetIds } : {})
+              ...(previous.retiredRichImageAssetIds ? { retiredRichImageAssetIds: previous.retiredRichImageAssetIds } : {}),
+              ...(previous.retiredRichMediaSlots ? { retiredRichMediaSlots: previous.retiredRichMediaSlots } : {})
             }
           : previous?.kind === 'user_message' && event.kind === 'user_message'
             ? { ...event, inputId: event.inputId ?? previous.inputId,
@@ -1493,11 +1906,18 @@ export function upsertMessageEvent(
  * checks the supplied origin against the durable binding under the SAME queue as rebind.
  */
 export function upsertRichMessage(
-  sessionId: string, messageId: string, rich: RichResponse, origin: RichOrigin
+  sessionId: string, messageId: string, rich: RichResponse, origin: RichOrigin,
+  expectedRecordingRevision?: number, seedPageMedia = false, stillAuthorized?: () => boolean
 ): Promise<'stored' | 'unchanged' | 'refused'> {
   const revision = getRecordingRevision();
   return ensureOpen(sessionId).then(entry => enqueueSessionOperation(entry, 'rich message upsert', async () => {
-    if (!getConfig().sessions.record || !recordingWriteAllowed(revision)) return 'refused';
+    // The acquisition's original revision may predate this *invocation* after a
+    // journal replay or restart. Compare it with current config inside this queue,
+    // before even inspecting or replacing the existing canonical shard.
+    if (!getConfig().sessions.record || !recordingWriteAllowed(revision) ||
+        (seedPageMedia && expectedRecordingRevision === undefined) ||
+        (expectedRecordingRevision !== undefined && expectedRecordingRevision !== getRecordingRevision()) ||
+        (stillAuthorized && !stillAuthorized())) return 'refused';
     const capture = parseRichOrigin(origin);
     if (!capture) return 'refused';
     const clean = parseRichResponse(rich);
@@ -1510,6 +1930,8 @@ export function upsertRichMessage(
     const previous = entry.messages.get(key);
     if (!previous || previous.kind !== 'assistant_message' || previous.messageId !== messageId ||
         !previous.providerMessageId || previous.providerMessageId !== clean.providerMessageId) return 'refused';
+    const priorSourceFloor = richSourceVersionFloor(previous);
+    if (priorSourceFloor === null) return 'refused';
     // A provider UUID claimed by two logical rows cannot corroborate either one.
     if ([...entry.messages.entries()].some(([otherKey, other]) => otherKey !== key &&
         other.kind === 'assistant_message' && other.providerMessageId === clean.providerMessageId)) return 'refused';
@@ -1518,33 +1940,74 @@ export function upsertRichMessage(
     const priorOrigin = previous.richOrigin ? parseRichOrigin(previous.richOrigin) : null;
     if (previous.richOrigin && !priorOrigin) return 'refused';
     if (previous.rich && !priorOrigin) return 'refused';
+    // Shards and legacy snapshots are read as JSON without an eager rich schema pass.
+    // Reject corruption inside this serialized queue before assigning a revision or
+    // seeding any media. Never coerce a persisted revision (e.g. "3" + 1 => "31")
+    // or let a prior projection claim a different logical/raw assistant identity.
+    const priorRich = previous.rich === undefined ? null : parseRichResponse(previous.rich);
+    if (previous.rich !== undefined && (!priorRich || !priorOrigin ||
+        priorRich.conversationId !== capture.conversationId ||
+        priorRich.messageId !== messageId ||
+        priorRich.providerMessageId !== previous.providerMessageId)) return 'refused';
     if (priorOrigin) {
       if (priorOrigin.conversationId !== capture.conversationId ||
           priorOrigin.bindingRevision > capture.bindingRevision) return 'refused';
       if (priorOrigin.bindingRevision === capture.bindingRevision &&
           (priorOrigin.documentId !== capture.documentId || priorOrigin.navigationEpoch > capture.navigationEpoch)) return 'refused';
     }
-    if ((previous.rich?.revision ?? 0) >= Number.MAX_SAFE_INTEGER) return 'refused';
-    const nextRevision = (previous.rich?.revision ?? 0) + 1;
+    if ((priorRich?.revision ?? 0) >= Number.MAX_SAFE_INTEGER) return 'refused';
+    const nextRevision = (priorRich?.revision ?? 0) + 1;
     // Store, never the extension, assigns revision. A re-observation of identical structure
     // from a newer navigation may refresh provenance without claiming changed content.
     const storedRich = { ...clean, revision: nextRevision };
-    const sameContent = previous.rich && JSON.stringify({ ...previous.rich, revision: 0 }) ===
+    const sameContent = priorRich && JSON.stringify({ ...priorRich, revision: 0 }) ===
       JSON.stringify({ ...storedRich, revision: 0 });
     const sameOrigin = priorOrigin && priorOrigin.conversationId === capture.conversationId &&
       priorOrigin.bindingRevision === capture.bindingRevision && priorOrigin.documentId === capture.documentId &&
       priorOrigin.navigationEpoch === capture.navigationEpoch;
-    const keptMedia = sameContent && sameOrigin && previous.rich && previous.providerMessageId
-      ? validatedRichMedia(previous.richMedia, previous.rich, previous.providerMessageId) : [];
-    if (sameContent && sameOrigin && keptMedia !== null) return 'unchanged';
+    const keptMedia = sameContent && sameOrigin && priorRich && previous.providerMessageId
+      ? validatedRichMedia(previous.richMedia, priorRich, previous.providerMessageId, previous.seq) : [];
+    // A private verified recorder opts in explicitly. Derive every page slot before the ONE
+    // canonical rename; a later metadata write may be refused by Recording Off after this
+    // rich prefix physically commits, so a separate seeding step could lose its image slots.
+    // Preserve same-owner validated metadata (including unavailable/removed and future saved
+    // previews) through changes to unrelated layout nodes. A changed attachment starts fresh.
+    const priorMedia = previous.richMedia !== undefined ? cleanupRichMedia(previous) : [];
+    const priorRemoved = parsedRetiredRichMediaSlots(previous.retiredRichMediaSlots);
+    if (priorMedia === null || priorRemoved === null || priorMedia.some(media =>
+      (media.pageSource?.slotVersion ?? 0) > priorSourceFloor)) return 'refused';
+    // Legacy shards can have a removed current slot but no separately persisted slot
+    // fence. Materialize it before a changed rich tree can omit the image entirely.
+    const nextRemoved = mergedRetiredRichMediaSlots(priorRemoved, priorMedia
+      .filter(item => item.status === 'unavailable' && item.reason === 'removed')
+      .map(item => ({ mediaId: item.mediaId, nodeId: item.nodeId })));
+    if (nextRemoved === null) return 'refused';
+    const sameDocument = priorOrigin && priorOrigin.conversationId === capture.conversationId &&
+      priorOrigin.bindingRevision === capture.bindingRevision && priorOrigin.documentId === capture.documentId;
+    const seededMedia = seedPageMedia
+      ? seededPageRichMedia(clean, priorMedia, nextRemoved, Boolean(sameOrigin), Boolean(sameDocument),
+        priorSourceFloor, revision) : null;
+    if (seedPageMedia && seededMedia === null) return 'refused';
+    const sourceInvalidated = priorMedia.some(media => media.pageSource &&
+      !(seededMedia ?? []).some(next => next.mediaId === media.mediaId &&
+        next.nodeId === media.nodeId && next.pageSource?.slotVersion === media.pageSource?.slotVersion &&
+        next.pageSource?.incarnation === media.pageSource?.incarnation));
+    const nextSourceFloor = sourceInvalidated ? entry.nextSeq : priorSourceFloor;
+    if (sameContent && sameOrigin && (seedPageMedia
+      ? JSON.stringify(priorMedia) === JSON.stringify(seededMedia)
+      : keptMedia !== null) && JSON.stringify(priorRemoved) === JSON.stringify(nextRemoved)) return 'unchanged';
 
-    const { richMedia: _priorMedia, ...priorWithoutMedia } = previous;
+    const { richMedia: _priorMedia, retiredRichMediaSlots: _priorRemoved,
+      richSourceVersionFloor: _priorSourceFloor, ...priorWithoutMedia } = previous;
     const full: Extract<SessionEvent, { kind: 'assistant_message' }> = {
-      ...priorWithoutMedia, rich: sameContent && previous.rich ? previous.rich : storedRich,
+      ...priorWithoutMedia, rich: sameContent && priorRich ? priorRich : storedRich,
       richOrigin: capture,
+      ...(seedPageMedia && seededMedia?.length ? { richMedia: seededMedia } : {}),
+      ...(nextSourceFloor > 0 ? { richSourceVersionFloor: nextSourceFloor } : {}),
+      ...(nextRemoved.length ? { retiredRichMediaSlots: nextRemoved } : {}),
       seq: entry.nextSeq // presentation delivery cursor only; never advance content/work/Goal.
     };
-    await writeCanonicalMessage(sessionId, key, full);
+    await writeCanonicalMessage(sessionId, key, full, stillAuthorized);
     entry.nextSeq += 1;
     entry.messages.set(key, full);
     entry.historySeq = full.seq;
@@ -1554,17 +2017,18 @@ export function upsertRichMessage(
 }
 
 /**
- * Synthetic/internal metadata-only boundary. A caller must establish trusted native capture
- * provenance separately; the live recorder currently refuses rich_media entirely. This API
- * does not create sessions, messages, image rows, asset references or pixels.
+ * Synthetic/internal metadata-only boundary. Verified PAGE pixel observations use the
+ * separate source-begin/settlement APIs; this generic setter grants no pixel custody.
+ * It does not create sessions, messages, image rows, asset references or pixels.
  */
 export function upsertRichMedia(
   sessionId: string, messageId: string, media: RichMediaState, origin: RichOrigin,
-  expectedRichRevision: number
+  expectedRichRevision: number, expectedRecordingRevision?: number
 ): Promise<'stored' | 'unchanged' | 'refused'> {
   const revision = getRecordingRevision();
   return ensureOpen(sessionId).then(entry => enqueueSessionOperation(entry, 'rich media upsert', async () => {
-    if (!getConfig().sessions.record || !recordingWriteAllowed(revision)) return 'refused';
+    if (!getConfig().sessions.record || !recordingWriteAllowed(revision) ||
+        (expectedRecordingRevision !== undefined && expectedRecordingRevision !== getRecordingRevision())) return 'refused';
     const capture = parseRichOrigin(origin);
     const clean = parseMetadataRichMedia(media);
     if (!capture || !clean || !messageId || !Number.isSafeInteger(expectedRichRevision) ||
@@ -1591,18 +2055,33 @@ export function upsertRichMedia(
     if ([...entry.messages.entries()].some(([otherKey, other]) => otherKey !== key &&
         other.kind === 'assistant_message' && other.providerMessageId === previous.providerMessageId)) return 'refused';
 
-    const current = validatedRichMedia(previous.richMedia, storedRich, previous.providerMessageId);
-    if (!current) return 'refused';
+    const current = validatedRichMedia(previous.richMedia, storedRich, previous.providerMessageId, previous.seq);
+    const sourceFloor = richSourceVersionFloor(previous);
+    const priorRemoved = parsedRetiredRichMediaSlots(previous.retiredRichMediaSlots);
+    if (!current || priorRemoved === null || sourceFloor === null || current.some(media =>
+      (media.pageSource?.slotVersion ?? 0) > sourceFloor)) return 'refused';
+    const alreadyRemoved = priorRemoved.find(slot => slot.mediaId === clean.mediaId);
+    if (alreadyRemoved && (alreadyRemoved.nodeId !== clean.nodeId ||
+        clean.status !== 'unavailable' || clean.reason !== 'removed')) return 'refused';
+    const nextRemoved = clean.status === 'unavailable' && clean.reason === 'removed'
+      ? mergedRetiredRichMediaSlots(priorRemoved, [{ mediaId: clean.mediaId, nodeId: clean.nodeId }])
+      : priorRemoved;
+    if (nextRemoved === null) return 'refused';
     const existing = current.find(item => item.mediaId === clean.mediaId);
     if (existing && (existing.nodeId !== clean.nodeId ||
         JSON.stringify(existing.source) !== JSON.stringify(clean.source) ||
         (existing.status === 'unavailable' && clean.status === 'pending') ||
+        (existing.status === 'available' && clean.status === 'pending') ||
         (existing.reason === 'removed' && clean.reason !== 'removed'))) return 'refused';
-    if (existing && JSON.stringify(existing) === JSON.stringify(clean)) return 'unchanged';
+    // Public metadata cannot choose, replace or delete the store-owned PAGE barrier.
+    const next = existing?.pageSource ? { ...clean, pageSource: existing.pageSource } : clean;
+    if (existing && JSON.stringify(existing) === JSON.stringify(next) &&
+        JSON.stringify(priorRemoved) === JSON.stringify(nextRemoved)) return 'unchanged';
     if (!existing && current.length >= 64) return 'refused';
-    const nextMedia = existing ? current.map(item => item.mediaId === clean.mediaId ? clean : item) : [...current, clean];
+    const nextMedia = existing ? current.map(item => item.mediaId === clean.mediaId ? next : item) : [...current, next];
     const full: Extract<SessionEvent, { kind: 'assistant_message' }> = {
       ...previous, richMedia: nextMedia,
+      ...(nextRemoved.length ? { retiredRichMediaSlots: nextRemoved } : {}),
       seq: entry.nextSeq // Presentation cursor only; content/Goal/turn/summary are untouched.
     };
     await writeCanonicalMessage(sessionId, key, full);
@@ -1612,6 +2091,265 @@ export function upsertRichMedia(
     scheduleMeta(entry);
     return 'stored';
   }), () => 'refused' as const);
+}
+
+/** A read of one existing canonical PAGE slot. The caller still has to acquire a
+ * separate Chrome-attested, purpose-bound ticket before treating this as a capture
+ * target; these fields carry no permission to scan or publish pixels. */
+export type PageRichPixelTarget = Readonly<{
+  richRevision: number;
+  richOrigin: RichOrigin;
+  slotVersion: number;
+  sourceIncarnation: string | null;
+  sourceSequence: number | null;
+  status: RichMediaState['status'];
+  removed: false;
+}>;
+
+function canonicalPageRichTarget(
+  entry: OpenSession, messageId: string, providerMessageId: string, mediaId: string, nodeId: string
+): { row: Extract<SessionEvent, { kind: 'assistant_message' }>;
+     rich: RichResponse; origin: RichOrigin; media: RichMediaState; index: number;
+     all: RichMediaState[] } | null {
+  if (!messageId || !providerMessageId || !richMediaOpaque(mediaId) || !richMediaOpaque(nodeId) ||
+      !Number.isSafeInteger(entry.summary.bindingRevision ?? 0)) return null;
+  const key = `assistant_message\u0000${messageId}`;
+  const row = entry.messages.get(key);
+  if (!row || row.kind !== 'assistant_message' || row.messageId !== messageId ||
+      row.providerMessageId !== providerMessageId || !row.rich || !row.richOrigin ||
+      !Number.isSafeInteger(row.seq) || row.seq < 1) return null;
+  const sourceFloor = richSourceVersionFloor(row);
+  if (sourceFloor === null) return null;
+  const rich = parseRichResponse(row.rich);
+  const origin = parseRichOrigin(row.richOrigin);
+  if (!rich || rich.status !== 'available' || rich.revision < 1 ||
+      rich.messageId !== messageId || rich.providerMessageId !== providerMessageId ||
+      !origin || rich.conversationId !== origin.conversationId ||
+      entry.summary.conversationId !== origin.conversationId ||
+      (entry.summary.bindingRevision ?? 0) !== origin.bindingRevision ||
+      !exactRichImageNode(rich, mediaId, nodeId) ||
+      [...entry.messages.entries()].some(([otherKey, other]) => otherKey !== key &&
+        other.kind === 'assistant_message' && other.providerMessageId === providerMessageId)) return null;
+  const all = cleanupRichMedia(row);
+  const removed = parsedRetiredRichMediaSlots(row.retiredRichMediaSlots);
+  if (!all || removed === null || removed.some(slot => slot.mediaId === mediaId)) return null;
+  const index = all.findIndex(media => media.mediaId === mediaId && media.nodeId === nodeId);
+  if (index < 0 || all[index]!.source.kind !== 'page' ||
+      (all[index]!.pageSource?.slotVersion ?? 0) > sourceFloor) return null;
+  return { row, rich, origin, media: all[index]!, index, all };
+}
+
+export function readPageRichPixelTarget(
+  sessionId: string, messageId: string, providerMessageId: string, mediaId: string, nodeId: string
+): Promise<PageRichPixelTarget | null> {
+  if (sessionAttachmentTransitionPending(sessionId) || deletingSessions.has(sessionId)) return Promise.resolve(null);
+  return ensureOpen(sessionId).then(entry => enqueueSessionOperation(entry, 'page rich pixel target', async () => {
+    if (sessionAttachmentTransitionPending(sessionId) || deletingSessions.has(sessionId) ||
+        !getConfig().sessions.record || !recordingWriteAllowed(getRecordingRevision())) return null;
+    const target = canonicalPageRichTarget(entry, messageId, providerMessageId, mediaId, nodeId);
+    if (!target) return null;
+    const { media, rich, origin } = target;
+    return Object.freeze({ richRevision: rich.revision, richOrigin: Object.freeze({ ...origin }),
+      slotVersion: media.pageSource?.slotVersion ?? richSourceVersionFloor(target.row) ?? 0,
+      sourceIncarnation: media.pageSource?.incarnation ?? null,
+      sourceSequence: media.pageSource?.sequence ?? null,
+      status: media.status, removed: false as const });
+  }), () => null);
+}
+
+/** Bridge/recorder-only proposed seam: the future caller must construct these fields
+ * from its PRIVATE pixel ticket and worker journal receipt plus the isolated source
+ * witness. Supplying matching fields to this method alone does NOT authenticate Chrome,
+ * authorize a pixel, create an asset, or publish available status. */
+export type VerifiedPageRichMediaSourceBegin = Readonly<{
+  messageId: string; providerMessageId: string; mediaId: string; nodeId: string;
+  richRevision: number; origin: RichOrigin; expectedRecordingRevision: number;
+  expectedSlotVersion: number; sourceIncarnation: string; sourceSequence: number;
+}>;
+
+export function beginVerifiedPageRichMediaSource(
+  sessionId: string, proof: VerifiedPageRichMediaSourceBegin, stillAuthorized?: () => boolean
+): Promise<{ status: 'stored' | 'unchanged' | 'refused'; slotVersion?: number }> {
+  const refused = { status: 'refused' as const };
+  const keys = ['messageId', 'providerMessageId', 'mediaId', 'nodeId', 'richRevision', 'origin',
+    'expectedRecordingRevision', 'expectedSlotVersion', 'sourceIncarnation', 'sourceSequence'];
+  const fields = richMediaFields(proof, keys, keys);
+  const origin = fields ? parseRichOrigin(fields.origin) : null;
+  if (!fields || !origin || typeof fields.messageId !== 'string' ||
+      typeof fields.providerMessageId !== 'string' ||
+      !richMediaOpaque(fields.mediaId) || !richMediaOpaque(fields.nodeId) ||
+      !Number.isSafeInteger(fields.richRevision) || (fields.richRevision as number) < 1 ||
+      !Number.isSafeInteger(fields.expectedSlotVersion) || (fields.expectedSlotVersion as number) < 0 ||
+      !Number.isSafeInteger(fields.expectedRecordingRevision) || (fields.expectedRecordingRevision as number) < 0 ||
+      !validPageSourceWitness(fields.sourceIncarnation, fields.sourceSequence) ||
+      sessionAttachmentTransitionPending(sessionId) || deletingSessions.has(sessionId) ||
+      (stillAuthorized && !stillAuthorized())) return Promise.resolve(refused);
+  const revision = fields.expectedRecordingRevision as number;
+  if (revision !== getRecordingRevision() || !getConfig().sessions.record || !recordingWriteAllowed(revision))
+    return Promise.resolve(refused);
+  return ensureOpen(sessionId).then(entry => enqueueSessionOperation(entry, 'page source begin', async () => {
+    if ((stillAuthorized && !stillAuthorized()) || sessionAttachmentTransitionPending(sessionId) || deletingSessions.has(sessionId) ||
+        getRecordingRevision() !== revision || !getConfig().sessions.record ||
+        !recordingWriteAllowed(revision)) return refused;
+    const target = canonicalPageRichTarget(entry, fields.messageId as string,
+      fields.providerMessageId as string, fields.mediaId as string, fields.nodeId as string);
+    if ((stillAuthorized && !stillAuthorized()) || !target || target.rich.revision !== fields.richRevision ||
+        target.origin.conversationId !== origin.conversationId ||
+        target.origin.bindingRevision !== origin.bindingRevision ||
+        target.origin.documentId !== origin.documentId ||
+        target.origin.navigationEpoch !== origin.navigationEpoch) return refused;
+    const { row, media, index, all } = target;
+    const old = media.pageSource;
+    const token = fields.sourceIncarnation as string;
+    const sequence = fields.sourceSequence as number;
+    // At-least-once journal delivery may replay after a successful physical write.
+    // This is idempotent only for the exact same current source, owner and revision.
+    if (old?.incarnation === token && old.sequence === sequence && old.recordingRevision === revision) {
+      return { status: 'unchanged' as const, slotVersion: old.slotVersion };
+    }
+    if ((old?.slotVersion ?? richSourceVersionFloor(row)) !== fields.expectedSlotVersion ||
+        (old?.sequence !== undefined && sequence <= old.sequence) ||
+        (old?.incarnation === token) ||
+        all.some((other, otherIndex) => otherIndex !== index && other.pageSource?.incarnation === token) ||
+        !Number.isSafeInteger(entry.nextSeq) || entry.nextSeq >= Number.MAX_SAFE_INTEGER) return refused;
+    const slotVersion = entry.nextSeq;
+    const replacement: RichMediaState = { mediaId: media.mediaId, nodeId: media.nodeId,
+      source: { kind: 'page', nodeId: media.nodeId }, status: 'pending', reason: 'not_loaded',
+      pageSource: { slotVersion, incarnation: token, sequence, recordingRevision: revision } };
+    const full: Extract<SessionEvent, { kind: 'assistant_message' }> = {
+      ...row, richMedia: all.map((item, at) => at === index ? replacement : item),
+      richSourceVersionFloor: slotVersion, seq: slotVersion
+    };
+    await writeCanonicalMessage(sessionId, `assistant_message\u0000${fields.messageId}`, full, stillAuthorized);
+    entry.messages.set(`assistant_message\u0000${fields.messageId}`, full);
+    entry.nextSeq += 1;
+    entry.historySeq = full.seq;
+    scheduleMeta(entry);
+    return { status: 'stored' as const, slotVersion };
+  }), () => refused);
+}
+
+/** The verified recorder owns the pixel decode and writeAsset call. This narrowly
+ * scoped store settlement accepts only its already admitted AssetRef or reason and
+ * commits a supplemental canonical revision under the original PAGE source barrier.
+ * A raw rich_media observation cannot call this path or grant its own revision. */
+export type VerifiedPageRichMediaSettlement = VerifiedPageRichMediaSourceBegin & Readonly<
+  { status: 'available'; asset: AssetRef; previewWidth: number; previewHeight: number } |
+  { status: 'unavailable'; reason: Exclude<NonNullable<RichMediaState['reason']>, 'not_loaded' | 'removed'> }
+>;
+
+export function settleVerifiedPageRichMedia(
+  sessionId: string, proof: VerifiedPageRichMediaSettlement, stillAuthorized?: () => boolean
+): Promise<'stored' | 'unchanged' | 'refused'> {
+  const refused = 'refused' as const;
+  const common = ['messageId', 'providerMessageId', 'mediaId', 'nodeId', 'richRevision', 'origin',
+    'expectedRecordingRevision', 'expectedSlotVersion', 'sourceIncarnation', 'sourceSequence', 'status'];
+  const fields = richMediaFields(proof, common,
+    [...common, 'asset', 'previewWidth', 'previewHeight', 'reason']);
+  if (!fields || (fields.status !== 'available' && fields.status !== 'unavailable')) return Promise.resolve(refused);
+  const required = fields.status === 'available'
+    ? [...common, 'asset', 'previewWidth', 'previewHeight'] : [...common, 'reason'];
+  if (!richMediaFields(proof, required, required)) return Promise.resolve(refused);
+  const origin = parseRichOrigin(fields.origin);
+  if (!origin || typeof fields.messageId !== 'string' || typeof fields.providerMessageId !== 'string' ||
+      !richMediaOpaque(fields.mediaId) || !richMediaOpaque(fields.nodeId) ||
+      !Number.isSafeInteger(fields.richRevision) || (fields.richRevision as number) < 1 ||
+      !Number.isSafeInteger(fields.expectedSlotVersion) || (fields.expectedSlotVersion as number) < 1 ||
+      !Number.isSafeInteger(fields.expectedRecordingRevision) || (fields.expectedRecordingRevision as number) < 0 ||
+      !validPageSourceWitness(fields.sourceIncarnation, fields.sourceSequence) ||
+      sessionAttachmentTransitionPending(sessionId) || deletingSessions.has(sessionId) ||
+      (stillAuthorized && !stillAuthorized())) return Promise.resolve(refused);
+  const revision = fields.expectedRecordingRevision as number;
+  if (revision !== getRecordingRevision() || !getConfig().sessions.record || !recordingWriteAllowed(revision))
+    return Promise.resolve(refused);
+  let validatedAsset: AssetRef | null = null;
+  if (fields.status === 'available') {
+    const asset = richMediaFields(fields.asset, ['id', 'mimeType', 'bytes'], ['id', 'mimeType', 'bytes']);
+    if (!asset || typeof asset.id !== 'string' || !/^[a-f0-9]{32}\.bin$/.test(asset.id) ||
+        asset.mimeType !== 'image/webp' || !Number.isSafeInteger(asset.bytes) ||
+        (asset.bytes as number) < 1 || (asset.bytes as number) > 384_000 ||
+        !Number.isSafeInteger(fields.previewWidth) || !Number.isSafeInteger(fields.previewHeight) ||
+        (fields.previewWidth as number) < 1 || (fields.previewHeight as number) < 1 ||
+        (fields.previewWidth as number) > 1600 || (fields.previewHeight as number) > 1600 ||
+        (fields.previewWidth as number) * (fields.previewHeight as number) > 2_560_000) return Promise.resolve(refused);
+    validatedAsset = { id: asset.id, mimeType: 'image/webp', bytes: asset.bytes as number };
+  } else if (typeof fields.reason !== 'string' || !richMediaReasons.has(fields.reason) ||
+      fields.reason === 'not_loaded' || fields.reason === 'removed') return Promise.resolve(refused);
+
+  // The explicit image-cleanup owner holds assetQueue → sessionQueue. Match that
+  // order for publication, preventing its selection epoch from advancing between
+  // an asset check and the canonical reference rename. No session queue awaits an
+  // asset queue. A later cleanup waits for this commit and retires its reference.
+  const requestedAssetEpoch = assetMutationEpoch;
+  const requestedDeletionEpoch = sessionDeletionEpoch;
+  return enqueueAssetOperation(async () => {
+    if ((stillAuthorized && !stillAuthorized()) ||
+        assetMutationEpoch !== requestedAssetEpoch || sessionDeletionEpoch !== requestedDeletionEpoch ||
+        deletingSessions.has(sessionId)) return refused;
+    return ensureOpen(sessionId).then(entry => enqueueSessionOperation(entry, 'page rich pixel settlement', async () => {
+      if ((stillAuthorized && !stillAuthorized()) ||
+          assetMutationEpoch !== requestedAssetEpoch || sessionDeletionEpoch !== requestedDeletionEpoch ||
+          deletingSessions.has(sessionId) || sessionAttachmentTransitionPending(sessionId) ||
+          getRecordingRevision() !== revision || !getConfig().sessions.record ||
+          !recordingWriteAllowed(revision)) return refused;
+      const target = canonicalPageRichTarget(entry, fields.messageId as string,
+        fields.providerMessageId as string, fields.mediaId as string, fields.nodeId as string);
+      if (!target || target.rich.revision !== fields.richRevision ||
+          target.origin.conversationId !== origin.conversationId ||
+          target.origin.bindingRevision !== origin.bindingRevision ||
+          target.origin.documentId !== origin.documentId ||
+          target.origin.navigationEpoch !== origin.navigationEpoch) return refused;
+      const { row, media, index, all } = target;
+      if (!media.pageSource || media.pageSource.slotVersion !== fields.expectedSlotVersion ||
+          media.pageSource.incarnation !== fields.sourceIncarnation ||
+          media.pageSource.sequence !== fields.sourceSequence ||
+          media.pageSource.recordingRevision !== revision) return refused;
+      if (validatedAsset) {
+        const retired = row.retiredRichImageAssetIds;
+        if (retired !== undefined && (!Array.isArray(retired) || retired.length > 4096 ||
+            retired.some(id => typeof id !== 'string' || !/^[a-f0-9]{8,64}\.(?:bin|png|jpg)$/.test(id)) ||
+            new Set(retired).size !== retired.length || retired.includes(validatedAsset.id))) return refused;
+        const key = localAssetKey(sessionId, validatedAsset.id);
+        const removedAt = removedAssetEpoch.get(key);
+        const writtenAt = assetWrittenEpoch.get(key);
+        if ((removedAt !== undefined && (writtenAt === undefined || writtenAt < removedAt)) ||
+            !admittedAssets(sessionId, [validatedAsset])?.length) return refused;
+      }
+      const replacement: RichMediaState = validatedAsset
+        ? { mediaId: media.mediaId, nodeId: media.nodeId, source: media.source,
+          pageSource: media.pageSource, status: 'available',
+          previewWidth: fields.previewWidth as number, previewHeight: fields.previewHeight as number,
+          asset: validatedAsset }
+        : { mediaId: media.mediaId, nodeId: media.nodeId, source: media.source,
+          pageSource: media.pageSource, status: 'unavailable',
+          reason: fields.reason as NonNullable<RichMediaState['reason']> };
+      if (media.status !== 'pending') {
+        // The durable parser and publisher may enumerate the same fields in a
+        // different order. Replay identity is the exact immutable source and
+        // semantic payload, not JSON property insertion order.
+        const sameAvailable = media.status === 'available' && replacement.status === 'available' &&
+          media.reason === undefined && media.previewWidth === replacement.previewWidth &&
+          media.previewHeight === replacement.previewHeight &&
+          media.asset?.id === replacement.asset?.id &&
+          media.asset?.mimeType === replacement.asset?.mimeType &&
+          media.asset?.bytes === replacement.asset?.bytes;
+        const sameUnavailable = media.status === 'unavailable' && replacement.status === 'unavailable' &&
+          media.reason === replacement.reason;
+        return sameAvailable || sameUnavailable ? 'unchanged' : refused;
+      }
+      if (media.reason !== 'not_loaded' || !Number.isSafeInteger(entry.nextSeq) ||
+          entry.nextSeq >= Number.MAX_SAFE_INTEGER) return refused;
+      const full: Extract<SessionEvent, { kind: 'assistant_message' }> = {
+        ...row, richMedia: all.map((item, at) => at === index ? replacement : item), seq: entry.nextSeq
+      };
+      await writeCanonicalMessage(sessionId, `assistant_message\u0000${fields.messageId}`, full, stillAuthorized);
+      entry.messages.set(`assistant_message\u0000${fields.messageId}`, full);
+      entry.nextSeq += 1;
+      entry.historySeq = full.seq;
+      scheduleMeta(entry);
+      return 'stored' as const;
+    }), () => refused);
+  });
 }
 
 /**
@@ -1881,6 +2619,599 @@ export async function readEvents(sessionId: string, options: ReadOptions = {}): 
 }
 
 /**
+ * Manual history navigation only: an exact physically persisted assistant shard,
+ * never the permissive merged transcript reader, an old JSONL event or a model URL.
+ * This gives no browser/native-action authority; the sender and current selection
+ * are separate main-process checks at the eventual fixed IPC boundary.
+ */
+export type CanonicalRichMessageOrigin = Readonly<{
+  messageId: string;
+  providerMessageId: string;
+  conversationId: string;
+  richRevision: number;
+  bindingRevision: number;
+}>;
+
+const richMessageIdValid = (id: unknown): id is string =>
+  typeof id === 'string' && id.length > 0 && id.length <= 190 && !/[\u0000-\u001f\u007f]/.test(id);
+
+/** Historical navigation and inert control inspection must not mistake a permissively
+ * alias-collapsed transcript for unique physical provider ownership. All checks happen
+ * inside the session queue; an unreadable or oversized custody set is unavailable. */
+async function strictRichAssistantShard(
+  sessionId: string, key: string, providerMessageId: string
+): Promise<SessionEvent | null> {
+  const base = sessionDir(sessionId);
+  const directory = path.join(base, 'messages');
+  const filename = `${createHash('sha256').update(key).digest('hex')}.json`;
+  const ancestry = [root, base, directory];
+  const directoryStats: Array<Awaited<ReturnType<typeof fs.lstat>>> = [];
+  try {
+    const realPaths: string[] = [];
+    for (const component of ancestry) {
+      const stat = await fs.lstat(component);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return null;
+      directoryStats.push(stat);
+      realPaths.push(await fs.realpath(component));
+    }
+    if (!sameFilesystemPath(path.dirname(realPaths[1]!), realPaths[0]!) ||
+        !sameFilesystemPath(path.dirname(realPaths[2]!), realPaths[1]!) ||
+        path.basename(realPaths[1]!) !== sessionId || path.basename(realPaths[2]!) !== 'messages') return null;
+
+    const target = path.join(directory, filename);
+    const targetStat = await fs.lstat(target);
+    if (!targetStat.isFile() || targetStat.isSymbolicLink() || targetStat.size < 2 ||
+        targetStat.size > MAX_CANONICAL_MESSAGE_BYTES ||
+        !sameFilesystemPath(path.dirname(await fs.realpath(target)), realPaths[2]!)) return null;
+    const raw = await readBoundedOwnerSource(target, targetStat);
+    if (raw === null) return null;
+    const persisted: SessionEvent = JSON.parse(raw);
+    if (persisted.kind !== 'assistant_message' || messageKey(persisted) !== key ||
+        persisted.providerMessageId !== providerMessageId) return null;
+
+    // The migration-era whole-map snapshot can still claim another logical owner.
+    // Do not use readCanonicalMessages(): that reader silently folds physical aliases.
+    const legacy = path.join(base, 'messages.json');
+    let legacyBefore: Awaited<ReturnType<typeof fs.lstat>> | null = null;
+    try {
+      const legacyStat = await fs.lstat(legacy);
+      if (!legacyStat.isFile() || legacyStat.isSymbolicLink() ||
+          legacyStat.size > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
+      legacyBefore = legacyStat;
+      const legacyRaw = await readBoundedOwnerSource(legacy, legacyStat);
+      if (legacyRaw === null) return null;
+      const values: unknown = JSON.parse(legacyRaw);
+      if (!values || typeof values !== 'object' || Array.isArray(values)) return null;
+      for (const [legacyKey, value] of Object.entries(values)) {
+        const row = value as CanonicalEvent;
+        if (!row || typeof row !== 'object' || messageKey(row) !== legacyKey) return null;
+        if (legacyKey !== key && row.kind === 'assistant_message' &&
+            row.providerMessageId === providerMessageId) return null;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+    }
+
+    const listing = await fs.opendir(directory);
+    try {
+      let entries = 0;
+      let bytes = 0;
+      let foundTarget = false;
+      for await (const item of listing) {
+        if (++entries > 8192) return null;
+        if (!item.name.endsWith('.json')) continue; // queued atomic writers use .tmp
+        if (!/^[a-f0-9]{64}\.json$/.test(item.name)) return null;
+        const file = path.join(directory, item.name);
+        const stat = await fs.lstat(file);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 ||
+            stat.size > MAX_CANONICAL_MESSAGE_BYTES ||
+            (bytes += stat.size) > MAX_CLEANUP_OWNER_SCAN_BYTES) return null;
+        const content = await readBoundedOwnerSource(file, stat);
+        if (content === null) return null;
+        const row: CanonicalEvent = JSON.parse(content);
+        const rowKey = messageKey(row);
+        if (!rowKey || !Number.isSafeInteger(row.seq) ||
+            `${createHash('sha256').update(rowKey).digest('hex')}.json` !== item.name) return null;
+        if (rowKey === key) {
+          if (foundTarget || JSON.stringify(row) !== JSON.stringify(persisted)) return null;
+          foundTarget = true;
+        } else if (row.kind === 'assistant_message' && row.providerMessageId === providerMessageId) return null;
+      }
+      if (!foundTarget) return null;
+    } finally { await listing.close().catch(() => undefined); }
+
+    // A rename during an awaited read must not silently change the custody path.
+    // Detect replacement of an already-read target and newly inserted physical aliases
+    // even when the directory inode itself remains unchanged.
+    const targetAfter = await fs.lstat(target);
+    if (!targetAfter.isFile() || targetAfter.isSymbolicLink() ||
+        targetAfter.dev !== targetStat.dev || targetAfter.ino !== targetStat.ino ||
+        targetAfter.size !== targetStat.size || targetAfter.mtimeMs !== targetStat.mtimeMs ||
+        targetAfter.ctimeMs !== targetStat.ctimeMs) return null;
+    // Checking an absent legacy map only once is insufficient: an alias can be
+    // inserted in the session parent during our awaited shard enumeration.
+    // Require its final existence and exact file identity to match that first read.
+    try {
+      const legacyAfter = await fs.lstat(legacy);
+      if (!legacyBefore || !legacyAfter.isFile() || legacyAfter.isSymbolicLink() ||
+          legacyAfter.dev !== legacyBefore.dev || legacyAfter.ino !== legacyBefore.ino ||
+          legacyAfter.size !== legacyBefore.size || legacyAfter.mtimeMs !== legacyBefore.mtimeMs ||
+          legacyAfter.ctimeMs !== legacyBefore.ctimeMs) return null;
+    } catch (error) {
+      if (legacyBefore || (error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+    }
+    for (let index = 0; index < ancestry.length; index++) {
+      const after = await fs.lstat(ancestry[index]!);
+      const before = directoryStats[index]!;
+      if (!after.isDirectory() || after.isSymbolicLink() ||
+          after.dev !== before.dev || after.ino !== before.ino ||
+          (index > 0 && (after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs)) ||
+          !sameFilesystemPath(await fs.realpath(ancestry[index]!), realPaths[index]!)) return null;
+    }
+    return persisted;
+  } catch { return null; }
+}
+
+/** Shared strict physical proof for historical navigation and the inert control descriptor.
+ * Caller MUST hold this session's queue. Neither result authenticates a browser gesture. */
+async function verifiedRichAssistant(
+  entry: OpenSession, sessionId: string, messageId: string
+): Promise<{ rich: RichResponse; origin: RichOrigin; providerMessageId: string } | null> {
+  if (deletingSessions.has(sessionId) || sessionAttachmentTransitionPending(sessionId)) return null;
+  const key = `assistant_message\u0000${messageId}`;
+  const current = entry.messages.get(key);
+  if (!current || current.kind !== 'assistant_message' || current.messageId !== messageId ||
+      !current.providerMessageId || !current.rich || !current.richOrigin ||
+      !Number.isSafeInteger(current.seq) || current.seq < 1) return null;
+  // Never substitute a permissive JSONL/legacy fallback or an alias-collapsed memory row
+  // when the exact SHA-named modern shard is absent, replaced or corrupt.
+  const persisted = await strictRichAssistantShard(sessionId, key, current.providerMessageId);
+  if (!persisted || persisted.kind !== 'assistant_message' ||
+      JSON.stringify(persisted) !== JSON.stringify(current) ||
+      persisted.messageId !== messageId ||
+      persisted.providerMessageId !== current.providerMessageId) return null;
+  const rich = parseRichResponse(persisted.rich);
+  const origin = parseRichOrigin(persisted.richOrigin);
+  if (!rich || !origin || !rich.providerMessageId || rich.revision < 1 ||
+      rich.messageId !== messageId || rich.providerMessageId !== persisted.providerMessageId ||
+      rich.conversationId !== origin.conversationId ||
+      !entry.summary.chatIds.includes(origin.conversationId) ||
+      !Number.isSafeInteger(entry.summary.bindingRevision ?? 0) ||
+      origin.bindingRevision > (entry.summary.bindingRevision ?? 0) ||
+      [...entry.messages.entries()].some(([otherKey, row]) => otherKey !== key &&
+        row.kind === 'assistant_message' && row.providerMessageId === persisted.providerMessageId)) return null;
+  return { rich, origin, providerMessageId: persisted.providerMessageId! };
+}
+
+export function readCanonicalRichMessageOrigin(
+  sessionId: string, messageId: string
+): Promise<CanonicalRichMessageOrigin | null> {
+  if (!richMessageIdValid(messageId) || deletingSessions.has(sessionId)) return Promise.resolve(null);
+  assertSessionId(sessionId);
+  return ensureOpen(sessionId).then(entry => enqueueSessionOperation(entry, 'manual rich origin read', async () => {
+    const exact = await verifiedRichAssistant(entry, sessionId, messageId);
+    if (!exact) return null;
+    return Object.freeze({ messageId, providerMessageId: exact.providerMessageId,
+      conversationId: exact.origin.conversationId, richRevision: exact.rich.revision,
+      bindingRevision: exact.origin.bindingRevision });
+  })).catch(() => null);
+}
+
+/** Current canonical PAGE image metadata suitable for displaying an explicit Retry choice.
+ * This is a snapshot, not a capture ticket, deletion override, browser-opening permission,
+ * native tuple association or grant. A later consumer must acquire its own one-use authority
+ * and reprove every identity after each await; native generated-image reuse is not enabled. */
+export type CanonicalRichMediaRetryEligibility = Readonly<{
+  sessionId: string;
+  conversationId: string;
+  messageId: string;
+  providerMessageId: string;
+  bindingRevision: number;
+  documentId: string;
+  navigationEpoch: number;
+  richRevision: number;
+  recordingRevision: number;
+  cleanupEpoch: number;
+  presentationSeq: number;
+  mediaId: string;
+  nodeId: string;
+  source: 'page';
+  status: 'pending' | 'unavailable';
+  reason: RichMediaState['reason'] | null;
+  requiresRemovalConfirmation: boolean;
+  eligibilityOnly: true;
+}>;
+
+/** @internal A purely in-memory admission fence. Never hydrate, repair metadata,
+ * seal a journal tail or build the attachment catalog for a Retry inquiry. A
+ * cold or ambiguous owner is unavailable until ordinary session recovery runs. */
+export function readWarmRichRetrySession(sessionId: string): SessionSummary | null {
+  const entry = open.get(sessionId);
+  const catalog = attachmentCatalog;
+  const conversationId = entry?.summary.conversationId;
+  if (!entry || !conversationId || !catalog || attachmentCatalogLoading ||
+      opening.has(sessionId) || reconciling.has(sessionId) ||
+      deletingSessions.has(sessionId) || sessionAttachmentTransitionPending(sessionId)) return null;
+  const owners = catalog.current.get(conversationId);
+  if (!owners || owners.size !== 1 || !owners.has(sessionId) ||
+      [...open].some(([id, other]) => id !== sessionId &&
+        other.summary.conversationId === conversationId)) return null;
+  return { ...entry.summary };
+}
+
+export function readCanonicalRichMediaRetryEligibility(
+  sessionId: string, messageId: string, mediaId: string, nodeId: string, expectedRichRevision: number,
+  options: Readonly<{ warmOnly?: boolean }> = {}
+): Promise<CanonicalRichMediaRetryEligibility | null> {
+  if (!richMessageIdValid(messageId) || !richMediaOpaque(mediaId) || !richMediaOpaque(nodeId) ||
+      !Number.isSafeInteger(expectedRichRevision) || expectedRichRevision < 1 ||
+      deletingSessions.has(sessionId) || sessionAttachmentTransitionPending(sessionId)) return Promise.resolve(null);
+  assertSessionId(sessionId);
+  // Cleanup revokes eligibility synchronously at its request edge, even before it
+  // reaches the session queue to persist the removed-slot and asset tombstones.
+  const cleanupEpoch = assetMutationEpoch;
+  const deletionEpoch = sessionDeletionEpoch;
+  const recordingRevision = getRecordingRevision();
+  const stillReadable = (): boolean => assetMutationEpoch === cleanupEpoch &&
+    sessionDeletionEpoch === deletionEpoch && !deletingSessions.has(sessionId) &&
+    !sessionAttachmentTransitionPending(sessionId) && recordingWriteAllowed(recordingRevision);
+  if (!stillReadable() || (options.warmOnly === true && !readWarmRichRetrySession(sessionId)))
+    return Promise.resolve(null);
+  // The warm-only path must NEVER run ensureOpen: it seals torn journals,
+  // reconciles metadata and changes retention lifetime for cold sessions.
+  const initial = options.warmOnly === true ? Promise.resolve(open.get(sessionId)!) : ensureOpen(sessionId);
+  return initial.then(entry => enqueueSessionOperation(entry, 'inert rich media retry read', async () => {
+    if (!stillReadable()) return null;
+    const exact = await verifiedRichAssistant(entry, sessionId, messageId);
+    if (!exact || !stillReadable() || exact.rich.status !== 'available' ||
+        exact.rich.revision !== expectedRichRevision ||
+        entry.summary.conversationId !== exact.origin.conversationId ||
+        (entry.summary.bindingRevision ?? 0) !== exact.origin.bindingRevision ||
+        isChatBlocked(exact.origin.conversationId)) return null;
+    const row = entry.messages.get(`assistant_message\u0000${messageId}`);
+    if (!row || row.kind !== 'assistant_message' || row.source !== 'extension' ||
+        !Number.isSafeInteger(row.seq) || row.seq < 1) return null;
+    const media = cleanupRichMedia(row);
+    const retiredSlots = parsedRetiredRichMediaSlots(row.retiredRichMediaSlots);
+    const retiredAssets = row.retiredRichImageAssetIds;
+    if (!media || retiredSlots === null || (retiredAssets !== undefined &&
+        (!Array.isArray(retiredAssets) || retiredAssets.length > 4096 ||
+         retiredAssets.some(id => typeof id !== 'string' ||
+           !/^[a-f0-9]{8,64}\.(?:bin|png|jpg)$/.test(id)) ||
+         new Set(retiredAssets).size !== retiredAssets.length))) return null;
+    const matches = media.filter(slot => slot.mediaId === mediaId && slot.nodeId === nodeId);
+    if (matches.length !== 1 || !exactRichImageNode(exact.rich, mediaId, nodeId)) return null;
+    const slot = matches[0]!;
+    // Native metadata can be entered synthetically. It is not proof that the
+    // provider's typed image pointer belongs to this specific rendered rich node.
+    if (slot.source.kind !== 'page' || slot.source.nodeId !== nodeId || slot.asset ||
+        (slot.status !== 'pending' && slot.status !== 'unavailable')) return null;
+    const removed = retiredSlots.find(item => item.mediaId === mediaId);
+    const requiresRemovalConfirmation = slot.status === 'unavailable' && slot.reason === 'removed';
+    if (requiresRemovalConfirmation
+      ? !removed || removed.nodeId !== nodeId
+      : removed !== undefined) return null;
+    return Object.freeze({ sessionId, conversationId: exact.origin.conversationId,
+      messageId, providerMessageId: exact.providerMessageId,
+      bindingRevision: exact.origin.bindingRevision, documentId: exact.origin.documentId,
+      navigationEpoch: exact.origin.navigationEpoch, richRevision: exact.rich.revision,
+      recordingRevision, cleanupEpoch,
+      presentationSeq: row.seq, mediaId, nodeId, source: 'page' as const,
+      status: slot.status, reason: slot.reason ?? null, requiresRemovalConfirmation,
+      eligibilityOnly: true as const });
+  })).then(async candidate => {
+    if (!candidate || !stillReadable() || isChatBlocked(candidate.conversationId)) return null;
+    const ownerEpoch = attachmentEpoch;
+    // findSessionByConversation may recover/write a cold catalog or cold owner.
+    // A passive inquiry instead requires an already indexed, warm unique owner.
+    const owner = options.warmOnly === true
+      ? readWarmRichRetrySession(sessionId)
+      : await findSessionByConversation(candidate.conversationId, { requireUnique: true });
+    if (owner?.id !== sessionId || await conversationWasSuperseded(candidate.conversationId) ||
+        !stillReadable() || isChatBlocked(candidate.conversationId) || attachmentEpoch !== ownerEpoch ||
+        [...open].some(([id, entry]) => id !== sessionId &&
+          entry.summary.conversationId === candidate.conversationId)) return null;
+    const finalOwners = attachmentCatalog?.current.get(candidate.conversationId);
+    if (!finalOwners || finalOwners.size !== 1 || !finalOwners.has(sessionId)) return null;
+    const live = open.get(sessionId);
+    const latest = live?.messages.get(`assistant_message\u0000${messageId}`);
+    if (!live || live.summary.conversationId !== candidate.conversationId ||
+        (live.summary.bindingRevision ?? 0) !== candidate.bindingRevision ||
+        latest?.kind !== 'assistant_message' || latest.seq !== candidate.presentationSeq ||
+        latest.providerMessageId !== candidate.providerMessageId ||
+        latest.rich?.revision !== candidate.richRevision ||
+        latest.richOrigin?.documentId !== candidate.documentId ||
+        latest.richOrigin?.navigationEpoch !== candidate.navigationEpoch ||
+        !stillReadable() || isChatBlocked(candidate.conversationId)) return null;
+    // Unique-owner/catalog verification awaited independently of the original
+    // SHA shard read. An external replacement during that wait must not leave a
+    // stale eligibility descriptor that a future user-action owner could mistake
+    // for current source proof. Reacquire the session queue and inspect the exact
+    // physical assistant AGAIN; this is still read-only, not browser authority.
+    return enqueueSessionOperation(live, 'final inert rich media retry source recheck', async () => {
+      if (!stillReadable() || isChatBlocked(candidate.conversationId) ||
+          attachmentEpoch !== ownerEpoch || sessionAttachmentTransitionPending(sessionId)) return null;
+      const verified = await verifiedRichAssistant(live, sessionId, messageId);
+      if (!verified || verified.providerMessageId !== candidate.providerMessageId ||
+          verified.origin.conversationId !== candidate.conversationId ||
+          verified.origin.bindingRevision !== candidate.bindingRevision ||
+          verified.origin.documentId !== candidate.documentId ||
+          verified.origin.navigationEpoch !== candidate.navigationEpoch ||
+          verified.rich.revision !== candidate.richRevision) return null;
+      const current = live.messages.get(`assistant_message\u0000${messageId}`);
+      const media = current?.kind === 'assistant_message' ? cleanupRichMedia(current) : null;
+      const removedSlots = current?.kind === 'assistant_message'
+        ? parsedRetiredRichMediaSlots(current.retiredRichMediaSlots) : null;
+      const matches = media?.filter(slot => slot.mediaId === mediaId && slot.nodeId === nodeId);
+      const slot = matches?.length === 1 ? matches[0] : null;
+      const removed = removedSlots?.find(item => item.mediaId === mediaId);
+      if (current?.kind !== 'assistant_message' || current.seq !== candidate.presentationSeq ||
+          !slot || slot.source.kind !== 'page' || slot.source.nodeId !== nodeId || slot.asset ||
+          slot.status !== candidate.status || (slot.reason ?? null) !== candidate.reason ||
+          !exactRichImageNode(verified.rich, mediaId, nodeId) || removedSlots === null ||
+          (candidate.requiresRemovalConfirmation
+            ? !removed || removed.nodeId !== nodeId : removed !== undefined) ||
+          live.summary.conversationId !== candidate.conversationId ||
+          (live.summary.bindingRevision ?? 0) !== candidate.bindingRevision ||
+          attachmentEpoch !== ownerEpoch || !stillReadable() ||
+          isChatBlocked(candidate.conversationId)) return null;
+      const owners = attachmentCatalog?.current.get(candidate.conversationId);
+      return owners?.size === 1 && owners.has(sessionId) &&
+        ![...open].some(([otherId, entry]) => otherId !== sessionId &&
+          entry.summary.conversationId === candidate.conversationId) ? candidate : null;
+    });
+  }).catch(() => null);
+}
+
+/** @internal A caller's expected fields are comparisons, NOT a Retry Capture claim.
+ * This never reads the action ledger, creates a ticket, admits bytes, changes a
+ * tombstone or establishes a browser gesture. Only the current physical PAGE
+ * source can match; a future owner must independently establish action authority. */
+export type InertRichRetrySourceExpectation = Readonly<{
+  sessionId: string; conversationId: string; bindingRevision: number;
+  messageId: string; providerMessageId: string; richRevision: number;
+  presentationSeq: number; mediaId: string; nodeId: string;
+  originDocumentId: string; originNavigationEpoch: number;
+  recordingRevision: number; recordingGeneration: string; cleanupEpoch: number;
+}>;
+
+export function inspectInertRichRetrySource(
+  expectation: InertRichRetrySourceExpectation,
+  options: Readonly<{ warmOnly?: boolean }> = {}
+): Promise<Readonly<{ kind: 'source_matches'; authority: 'none' }> | null> {
+  const names = ['sessionId', 'conversationId', 'bindingRevision', 'messageId',
+    'providerMessageId', 'richRevision', 'presentationSeq', 'mediaId', 'nodeId',
+    'originDocumentId', 'originNavigationEpoch', 'recordingRevision',
+    'recordingGeneration', 'cleanupEpoch'];
+  const expected = richMediaFields(expectation, names, names);
+  const nonnegative = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
+  if (!expected || typeof expected.sessionId !== 'string' ||
+      !/^[0-9a-z-]{8,64}$/i.test(expected.sessionId) ||
+      typeof expected.conversationId !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(expected.conversationId) ||
+      !nonnegative(expected.bindingRevision) || !richMessageIdValid(expected.messageId) ||
+      typeof expected.providerMessageId !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(expected.providerMessageId) ||
+      !nonnegative(expected.richRevision) || expected.richRevision === 0 ||
+      !nonnegative(expected.presentationSeq) || expected.presentationSeq === 0 ||
+      !richMediaOpaque(expected.mediaId) || !richMediaOpaque(expected.nodeId) ||
+      expected.mediaId !== `media-${expected.nodeId}` ||
+      typeof expected.originDocumentId !== 'string' ||
+      !/^[a-z0-9_-]{1,128}$/i.test(expected.originDocumentId) ||
+      !nonnegative(expected.originNavigationEpoch) || !nonnegative(expected.recordingRevision) ||
+      typeof expected.recordingGeneration !== 'string' ||
+      !/^[A-Za-z0-9_-]{43}$/.test(expected.recordingGeneration) ||
+      !nonnegative(expected.cleanupEpoch)) return Promise.resolve(null);
+
+  // Freeze before any await. The recording token is continuity evidence only:
+  // its equality neither authenticates the caller nor permits a browser action.
+  const recordingRevision = getRecordingRevision();
+  const recordingGeneration = recordingGenerationGrant();
+  const cleanupEpoch = assetMutationEpoch;
+  const deletionEpoch = sessionDeletionEpoch;
+  const ownerEpoch = attachmentEpoch;
+  const sessionId = expected.sessionId;
+  const conversationId = expected.conversationId;
+  const current = (): boolean => recordingGeneration !== null &&
+    expected.recordingRevision === recordingRevision &&
+    expected.recordingGeneration === recordingGeneration &&
+    expected.cleanupEpoch === cleanupEpoch &&
+    recordingGenerationGrant() === recordingGeneration &&
+    getRecordingRevision() === recordingRevision && recordingWriteAllowed(recordingRevision) &&
+    assetMutationEpoch === cleanupEpoch && sessionDeletionEpoch === deletionEpoch &&
+    attachmentEpoch === ownerEpoch && !deletingSessions.has(sessionId) &&
+    !uncertainCleanupSessions.has(sessionId) && !sessionAttachmentTransitionPending(sessionId) &&
+    !isChatBlocked(conversationId);
+  if (!current()) return Promise.resolve(null);
+
+  // The existing reader twice inspects the exact SHA-named assistant, validates
+  // source floor/media/tombstones and proves the unique current conversation owner
+  // across its catalog awaits. Do not return or expose its display descriptor.
+  return readCanonicalRichMediaRetryEligibility(sessionId, expected.messageId as string,
+    expected.mediaId as string, expected.nodeId as string, expected.richRevision as number, options)
+    .then(source => {
+      if (!current() || !source || source.eligibilityOnly !== true || source.source !== 'page' ||
+          source.requiresRemovalConfirmation ||
+          (source.status !== 'pending' && source.status !== 'unavailable') ||
+          source.reason === 'removed' || source.sessionId !== sessionId ||
+          source.conversationId !== conversationId ||
+          source.bindingRevision !== expected.bindingRevision ||
+          source.messageId !== expected.messageId ||
+          source.providerMessageId !== expected.providerMessageId ||
+          source.richRevision !== expected.richRevision ||
+          source.presentationSeq !== expected.presentationSeq ||
+          source.mediaId !== expected.mediaId || source.nodeId !== expected.nodeId ||
+          source.documentId !== expected.originDocumentId ||
+          source.navigationEpoch !== expected.originNavigationEpoch ||
+          source.recordingRevision !== recordingRevision ||
+          source.cleanupEpoch !== cleanupEpoch) return null;
+      return Object.freeze({ kind: 'source_matches' as const, authority: 'none' as const });
+    }).catch(() => null);
+}
+
+/** Historical presentation is not native selection or permission to click. This read-only
+ * descriptor is valid solely for the exact CURRENT physical assistant, source and binding;
+ * the caller must re-prove them after any await and independently establish human input. */
+export type CanonicalRichControlDescriptor = Readonly<{
+  sessionId: string;
+  conversationId: string;
+  messageId: string;
+  providerMessageId: string;
+  bindingRevision: number;
+  documentId: string;
+  navigationEpoch: number;
+  richRevision: number;
+  nodeId: string;
+  groupId: string;
+  kind: 'select' | 'continue';
+  value: string | null;
+  expectedSelected: boolean;
+  expectedGroupSelection: string | null;
+  historicalSelectionOnly: true;
+}>;
+
+type SavedRichControl = Extract<RichNode, { kind: 'control' }>;
+
+/** The schema guarantees unique node IDs, not unique native form/group membership. Reject
+ * two forms sharing an id, duplicate values, ambiguous selection or mixed control families. */
+function describeInertRichControl(
+  rich: RichResponse, targetId: string
+): Pick<CanonicalRichControlDescriptor,
+  'nodeId' | 'groupId' | 'kind' | 'value' | 'expectedSelected' |
+  'expectedGroupSelection' | 'historicalSelectionOnly'> | null {
+  if (rich.status !== 'available') return null;
+  const formGroups = new Map<string, string>();
+  const formControls = new Map<string, SavedRichControl[]>();
+  const rootControls = new Map<string, Array<{ form: string; control: SavedRichControl }>>();
+  let target: SavedRichControl | null = null;
+  let targetForm: string | null = null;
+  let targetRoot: string | null = null;
+  const visit = (nodes: readonly RichNode[], form: string | null, rootGroup: string | null): boolean => {
+    for (const node of nodes) {
+      if (node.kind === 'group') {
+        // Row/grid/column are presentation wrappers, not independently proven native
+        // form boundaries. A nested layout inside a card inherits its card's form;
+        // distinct sibling cards under a wrapper remain independently scoped.
+        const nextForm = node.layout === 'card' || !form ? node.id : form;
+        if (!visit(node.children, nextForm, rootGroup ?? node.id)) return false;
+        continue;
+      }
+      if (node.kind !== 'control') continue;
+      // Nested controls cannot establish a single original native form.
+      if (node.children.some(child => child.kind === 'control' || child.kind === 'group')) return false;
+      if (node.id === targetId) {
+        target = node;
+        targetForm = form;
+        targetRoot = rootGroup;
+      }
+      if (form) {
+        const members = formControls.get(form) ?? [];
+        members.push(node);
+        formControls.set(form, members);
+        if (rootGroup) {
+          const rootMembers = rootControls.get(rootGroup) ?? [];
+          rootMembers.push({ form, control: node });
+          rootControls.set(rootGroup, rootMembers);
+        }
+      }
+      if (node.groupId !== null) {
+        if (!form || !/^[a-z0-9:._-]{1,190}$/i.test(node.groupId)) return false;
+        const priorForm = formGroups.get(node.groupId);
+        if (priorForm && priorForm !== form) return false;
+        formGroups.set(node.groupId, form);
+      }
+    }
+    return true;
+  };
+  if (!visit(rich.nodes, null, null) || !target || !targetForm || !targetRoot) return null;
+  const selectedTarget = target as SavedRichControl;
+  if ((selectedTarget.control !== 'choice' && selectedTarget.control !== 'continue') ||
+      selectedTarget.disabled || !selectedTarget.groupId ||
+      formGroups.get(selectedTarget.groupId) !== targetForm) return null;
+  // Direct controls in a generic wrapper and controls inside one of its child
+  // cards have no authenticated distinct form membership. Refuse the mixture
+  // instead of silently ignoring a competing outer Continue/default choice.
+  const rootMembers = rootControls.get(targetRoot) ?? [];
+  if (rootMembers.some(member => member.form !== targetForm &&
+      (member.form === targetRoot || targetForm === targetRoot))) return null;
+  const siblings = formControls.get(targetForm) ?? [];
+  const values = new Set<string>();
+  let selected: string | null = null;
+  let continues = 0;
+  let choices = 0;
+  for (const sibling of siblings) {
+    // All physical-form members, including ungrouped and differently grouped ones,
+    // must belong to this single identifiable choice/Continue family.
+    if (sibling.groupId !== selectedTarget.groupId) return null;
+    if (sibling.control === 'choice') {
+      if (!sibling.value || sibling.value.length > 512 || values.has(sibling.value)) return null;
+      choices++;
+      values.add(sibling.value);
+      if (sibling.selected) {
+        if (sibling.disabled || selected !== null) return null;
+        selected = sibling.value;
+      }
+    } else if (sibling.control === 'continue') {
+      if (++continues > 1 || sibling.value !== null || sibling.selected) return null;
+    } else return null;
+  }
+  if (!choices || (selectedTarget.control === 'choice' &&
+      (selectedTarget.value === null || !values.has(selectedTarget.value))) ||
+      (selectedTarget.control === 'continue' && (!continues || selected === null))) return null;
+  return { nodeId: selectedTarget.id, groupId: selectedTarget.groupId,
+    kind: selectedTarget.control === 'continue' ? 'continue' : 'select',
+    value: selectedTarget.value, expectedSelected: selectedTarget.selected,
+    expectedGroupSelection: selected, historicalSelectionOnly: true };
+}
+
+export function readCanonicalRichControlDescriptor(
+  sessionId: string, messageId: string, nodeId: string
+): Promise<CanonicalRichControlDescriptor | null> {
+  if (!richMessageIdValid(messageId) || !richMessageIdValid(nodeId) ||
+      deletingSessions.has(sessionId)) return Promise.resolve(null);
+  assertSessionId(sessionId);
+  return ensureOpen(sessionId).then(entry => enqueueSessionOperation(entry, 'inert rich control read', async () => {
+    const exact = await verifiedRichAssistant(entry, sessionId, messageId);
+    if (!exact || entry.summary.conversationId !== exact.origin.conversationId ||
+        (entry.summary.bindingRevision ?? 0) !== exact.origin.bindingRevision) return null;
+    const control = describeInertRichControl(exact.rich, nodeId);
+    if (!control) return null;
+    return Object.freeze({ sessionId, conversationId: exact.origin.conversationId, messageId,
+      providerMessageId: exact.providerMessageId, bindingRevision: exact.origin.bindingRevision,
+      documentId: exact.origin.documentId, navigationEpoch: exact.origin.navigationEpoch,
+      richRevision: exact.rich.revision, ...control });
+  })).then(async candidate => {
+    if (!candidate) return null;
+    // The physical shard is verified inside its queue; the unique current owner and
+    // superseded lineage are catalog-owned facts. Recheck the live source after those
+    // asynchronous reads. This remains a structural snapshot, never action authority.
+    const ownerEpoch = attachmentEpoch;
+    const owner = await findSessionByConversation(candidate.conversationId, { requireUnique: true });
+    if (owner?.id !== sessionId || await conversationWasSuperseded(candidate.conversationId) ||
+        deletingSessions.has(sessionId) || sessionAttachmentTransitionPending(sessionId)) return null;
+    // A second session can acquire the same conversation while the supersession
+    // query awaits. Its first creation is exposed in `open` before its durable
+    // attachment publication; published mutations also increment attachmentEpoch.
+    // Neither the old owner result nor the target's own unchanged row proves
+    // uniqueness across that intervening await.
+    if (attachmentEpoch !== ownerEpoch ||
+        [...open].some(([id, entry]) => id !== sessionId &&
+          entry.summary.conversationId === candidate.conversationId)) return null;
+    const finalOwners = attachmentCatalog?.current.get(candidate.conversationId);
+    if (!finalOwners || finalOwners.size !== 1 || !finalOwners.has(sessionId)) return null;
+    const live = open.get(sessionId);
+    const row = live?.messages.get(`assistant_message\u0000${messageId}`);
+    if (!live || live.summary.conversationId !== candidate.conversationId ||
+        (live.summary.bindingRevision ?? 0) !== candidate.bindingRevision ||
+        row?.kind !== 'assistant_message' || row.providerMessageId !== candidate.providerMessageId ||
+        row.rich?.revision !== candidate.richRevision ||
+        row.richOrigin?.documentId !== candidate.documentId ||
+        row.richOrigin?.navigationEpoch !== candidate.navigationEpoch) return null;
+    return candidate;
+  }).catch(() => null);
+}
+
+/**
  * Reads only the newest matching presentation window without materialising the whole JSONL journal.
  *
  * This exists for UI/default-history tails. Full-text search, call expansion and explicit old
@@ -1897,6 +3228,54 @@ export async function readRecentEvents(
   assertSessionId(sessionId);
   await flushSession(sessionId);
   return readRecentEventsFromDisk(sessionId, limit, options);
+}
+
+/**
+ * An absent ID in a recent history window is not evidence that a worker's page tool
+ * or lifecycle row is new. Search the exact durable session in fixed-size backwards
+ * chunks until this ID is found or the entire journal has been read. Unlike a UI
+ * history tail, a damaged row makes negative identity proof unavailable and throws;
+ * the browser can retry without getting a false first-sight receipt.
+ */
+export async function readExactNativeHistoryIdentity(
+  sessionId: string,
+  kind: 'page_tool' | 'turn_start' | 'turn_end',
+  id: string
+): Promise<{ original: SessionEvent; latest: SessionEvent } | null> {
+  assertSessionId(sessionId);
+  if (!id || id.length > 200) throw new Error('Invalid native history identity');
+  await flushSession(sessionId);
+  // A page-tool label can be revised many times. Its latest text is presentation,
+  // while the earliest physical row owns origin, timestamp, turn and agent. Keep
+  // just those two rows and scan to the start; later revisions cannot invent the
+  // provenance of a pending worker's historical tool.
+  let original: SessionEvent | null = null;
+  let latest: SessionEvent | null = null;
+  const [found] = await readRecentEventsFromDisk(sessionId, 1, {
+    kinds: [kind], before: Number.POSITIVE_INFINITY, strictIdentity: true,
+    acceptEvent: row => {
+      const matching = row.kind === kind &&
+        (kind === 'page_tool' ? row.kind === 'page_tool' && row.messageId === id :
+          (row.kind === 'turn_start' || row.kind === 'turn_end') && row.turnId === id);
+      if (!matching) return false;
+      if (kind !== 'page_tool') return true;
+      if (!latest) latest = row;
+      original = row;
+      return false;
+    }
+  });
+  const first = kind === 'page_tool' ? original as SessionEvent | null : found;
+  const newest = kind === 'page_tool' ? latest as SessionEvent | null : found;
+  if (!first || !newest) return null;
+  if (!Number.isSafeInteger(first.seq) || first.seq < 0 ||
+      !Number.isSafeInteger(newest.seq) || newest.seq < first.seq ||
+      (kind === 'page_tool' &&
+        (first.kind !== 'page_tool' || newest.kind !== 'page_tool' ||
+          typeof first.label !== 'string' || typeof newest.label !== 'string' ||
+          (first.origin !== undefined && first.origin !== first.seq) ||
+          (newest.origin !== undefined && newest.origin !== first.seq))))
+    throw new Error('Native history identity has invalid original provenance');
+  return { original: first, latest: newest };
 }
 
 /** The latest authored question, unaffected by later revisions of older messages. */
@@ -1986,7 +3365,8 @@ async function readRecentEventsFromDisk(
   sessionId: string,
   limit: number,
   options: Pick<ReadOptions, 'kinds' | 'agent'> & {
-    maxBytes?: number; before?: number; after?: number; acceptEvent?: (event: SessionEvent) => boolean; orderByOrigin?: boolean
+    maxBytes?: number; before?: number; after?: number; acceptEvent?: (event: SessionEvent) => boolean;
+    orderByOrigin?: boolean; strictIdentity?: boolean
   } = {}
 ): Promise<SessionEvent[]> {
   const cap = Math.max(1, Math.min(MAX_EVENT_TAIL, Math.floor(limit)));
@@ -2068,6 +3448,9 @@ async function readRecentEventsFromDisk(
       cursor -= wanted;
       const buffer = Buffer.allocUnsafe(wanted);
       const { bytesRead } = await handle.read(buffer, 0, wanted, cursor);
+      if (options.strictIdentity && bytesRead !== wanted) {
+        throw new Error('Native history identity could not be verified from a short journal read');
+      }
       const joined = Buffer.concat([buffer.subarray(0, bytesRead), carry]);
       bytes += bytesRead;
       const firstNewline = joined.indexOf(0x0a);
@@ -2092,6 +3475,9 @@ async function readRecentEventsFromDisk(
     if (cursor === 0 && scanning() && carry.length > 0) accept(carry);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    // Session creation always creates this journal, even before its first row.
+    // A missing file in an existing session cannot prove that an ID never existed.
+    if (options.strictIdentity) throw new Error('Native history identity journal is missing');
   } finally {
     await handle?.close().catch(() => undefined);
   }
@@ -2107,6 +3493,9 @@ async function readRecentEventsFromDisk(
   }
   candidates.sort((left, right) => sequence(left) - sequence(right));
   const selected = forward ? candidates.slice(0, cap) : candidates.slice(Math.max(0, candidates.length - cap));
+  if (options.strictIdentity && damaged > 0) {
+    throw new Error('Native history identity could not be verified from a damaged journal');
+  }
   if (damaged > 0) logWarn(`session ${sessionId}: skipped ${damaged} unreadable recent event line(s)`);
   return chronological(selected);
 }
@@ -3071,60 +4460,72 @@ export async function rebindSession(
 ): Promise<boolean> {
   if (!toConversationId || fromConversationId === toConversationId) return false;
   if (committedResumeHandoffId !== undefined && !/^[0-9a-z-]{8,64}$/i.test(committedResumeHandoffId)) return false;
-  // Same rule as createSession: once a mutation may attach B, no pre-existing cached miss for
-  // B is authoritative. Clearing it early is safe even if the move later refuses or fails.
-  missingCurrentConversations.delete(toConversationId);
-  const entry = await ensureOpen(id);
-  return enqueueSessionOperation(entry, 'rebind', async () => {
-    if (entry.summary.conversationId !== fromConversationId) return false;
-    if (!Number.isSafeInteger(entry.summary.bindingRevision ?? 0) ||
-        (entry.summary.bindingRevision ?? 0) >= Number.MAX_SAFE_INTEGER) return false;
-    // Browser conversation ids are UUID-like. A handful of store unit tests deliberately
-    // use short symbolic ids and reuse them across retained temp sessions; ownership safety
-    // applies to the real identity domain rather than manufacturing a test-only collision.
-    if (/^[0-9a-f-]{8,64}$/i.test(toConversationId)) {
-      // Any existing owner is a collision witness. A unique-only lookup also returns
-      // null for duplicate owners and would incorrectly admit a third local session.
-      const target = await findSessionByConversation(toConversationId);
-      if (target && target.id !== id) {
-        logWarn(`session ${id} cannot move to ${toConversationId}: that chat already belongs to ${target.id}`);
+  // Capture acquisition may read the old live A after B is physically committed.
+  // Refuse it from the request edge until this operation finishes publication,
+  // including time spent reconstructing the entry or waiting in its queue.
+  pendingAttachmentTransitions.set(id, (pendingAttachmentTransitions.get(id) ?? 0) + 1);
+  try {
+    // Same rule as createSession: once a mutation may attach B, no pre-existing cached miss for
+    // B is authoritative. Clearing it early is safe even if the move later refuses or fails.
+    missingCurrentConversations.delete(toConversationId);
+    const entry = await ensureOpen(id);
+    return await enqueueSessionOperation(entry, 'rebind', async () => {
+      if (entry.summary.conversationId !== fromConversationId) return false;
+      if (!Number.isSafeInteger(entry.summary.bindingRevision ?? 0) ||
+          (entry.summary.bindingRevision ?? 0) >= Number.MAX_SAFE_INTEGER) return false;
+      // Browser conversation ids are UUID-like. A handful of store unit tests deliberately
+      // use short symbolic ids and reuse them across retained temp sessions; ownership safety
+      // applies to the real identity domain rather than manufacturing a test-only collision.
+      if (/^[0-9a-f-]{8,64}$/i.test(toConversationId)) {
+        // Any existing owner is a collision witness. A unique-only lookup also returns
+        // null for duplicate owners and would incorrectly admit a third local session.
+        const target = await findSessionByConversation(toConversationId);
+        if (target && target.id !== id) {
+          logWarn(`session ${id} cannot move to ${toConversationId}: that chat already belongs to ${target.id}`);
+          return false;
+        }
+      }
+      const staged: SessionSummary = {
+        ...entry.summary,
+        conversationId: toConversationId,
+        bindingRevision: (entry.summary.bindingRevision ?? 0) + 1,
+        chatIds: entry.summary.chatIds.includes(toConversationId)
+          ? [...entry.summary.chatIds]
+          : [...entry.summary.chatIds, toConversationId],
+        contextTokens: 0,
+        activeTurnId: null,
+        finishTurn: null,
+        ...(committedResumeHandoffId !== undefined
+          ? { lastCommittedResumeHandoffId: committedResumeHandoffId }
+          : {}),
+        updatedAt: Date.now(),
+        // A session whose chat was closed during the handover is live again the moment its new
+        // chat is attached; leaving `endedAt` set would draw a visibly growing session as over.
+        endedAt: null
+      };
+
+      try {
+        await writeSummary(staged, entry.historySeq);
+      } catch (err) {
+        logWarn(`session ${id} could not be moved to ${toConversationId}: ${(err as Error).message}`);
         return false;
       }
-    }
-    const staged: SessionSummary = {
-      ...entry.summary,
-      conversationId: toConversationId,
-      bindingRevision: (entry.summary.bindingRevision ?? 0) + 1,
-      chatIds: entry.summary.chatIds.includes(toConversationId)
-        ? [...entry.summary.chatIds]
-        : [...entry.summary.chatIds, toConversationId],
-      contextTokens: 0,
-      activeTurnId: null,
-      finishTurn: null,
-      ...(committedResumeHandoffId !== undefined
-        ? { lastCommittedResumeHandoffId: committedResumeHandoffId }
-        : {}),
-      updatedAt: Date.now(),
-      // A session whose chat was closed during the handover is live again the moment its new
-      // chat is attached; leaving `endedAt` set would draw a visibly growing session as over.
-      endedAt: null
-    };
 
-    try {
-      await writeSummary(staged, entry.historySeq);
-    } catch (err) {
-      logWarn(`session ${id} could not be moved to ${toConversationId}: ${(err as Error).message}`);
-      return false;
-    }
-
-    // Past this point nothing can fail: the durable record already says chat B.
-    Object.assign(entry.summary, staged);
-    entry.metaDirty = false;
-    missingCurrentConversations.delete(toConversationId);
-    publishAttachmentSummary(entry.summary);
-    logInfo(`session ${id} moved from ChatGPT conversation ${fromConversationId} to ${toConversationId}`);
-    return true;
-  });
+      // Past this point nothing can fail: the durable record already says chat B.
+      Object.assign(entry.summary, staged);
+      entry.metaDirty = false;
+      missingCurrentConversations.delete(toConversationId);
+      publishAttachmentSummary(entry.summary);
+      logInfo(`session ${id} moved from ChatGPT conversation ${fromConversationId} to ${toConversationId}`);
+      return true;
+    });
+  } finally {
+    // Count overlapping attempts: an earlier completed rebind cannot clear a later
+    // queued rebind's fence. Invalid requests never enter this latch.
+    const remaining = (pendingAttachmentTransitions.get(id) ?? 1) - 1;
+    if (remaining > 0) pendingAttachmentTransitions.set(id, remaining);
+    else pendingAttachmentTransitions.delete(id);
+  }
 }
 
 /**
@@ -3162,6 +4563,42 @@ export async function ensureCommittedResumeHandoff(
 
 // ----------------------------------------------------------------- assets
 
+/** A content-derived filename alone proves nothing about its existing bytes. Read the exact
+ * regular inode under a bounded handle, then reject replacement or mutation during the read.
+ * Missing is a valid result only before opening; a vanished known target is an error. */
+async function matchingAssetFile(file: string, expected: Buffer, digest: string): Promise<boolean> {
+  let before: Awaited<ReturnType<typeof fs.lstat>>;
+  try { before = await fs.lstat(file); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+  if (!before.isFile() || before.isSymbolicLink() || before.size !== expected.length)
+    throw new Error('Existing session asset has invalid contents');
+  const handle = await fs.open(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino ||
+        opened.size !== expected.length) throw new Error('Existing session asset changed during validation');
+    const hash = createHash('sha256');
+    const chunk = Buffer.alloc(Math.min(64 * 1024, expected.length));
+    let position = 0;
+    while (position < expected.length) {
+      const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, expected.length - position), position);
+      if (!bytesRead || !chunk.subarray(0, bytesRead).equals(expected.subarray(position, position + bytesRead)))
+        throw new Error('Existing session asset has invalid contents');
+      hash.update(chunk.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    if (hash.digest('hex') !== digest) throw new Error('Existing session asset has invalid contents');
+    const after = await fs.lstat(file);
+    if (!after.isFile() || after.isSymbolicLink() || after.dev !== opened.dev ||
+        after.ino !== opened.ino || after.size !== opened.size)
+      throw new Error('Existing session asset changed during validation');
+    return true;
+  } finally { await handle.close(); }
+}
+
 /**
  * Stores a binary beside the log and returns a reference.
  *
@@ -3178,7 +4615,7 @@ export async function writeAsset(
   requireRecording(revision);
   assertSessionId(sessionId);
   if (data.length === 0 || data.length > MAX_ASSET_BYTES) throw new Error('Session asset exceeds the per-asset limit');
-  const hash = createHash('sha256').update(data).digest('hex').slice(0, 32);
+  const digest = createHash('sha256').update(data).digest('hex');
   const extension =
     mimeType === 'image/png'
       ? '.png'
@@ -3187,7 +4624,7 @@ export async function writeAsset(
         : mimeType === 'text/plain'
           ? '.txt'
           : '.bin';
-  const id = `${hash}${extension}`;
+  const id = `${digest.slice(0, 32)}${extension}`;
   // Invocation time, rather than queue execution time, decides which side of an explicit
   // cleanup this write belongs to. A write already admitted when cleanup starts may finish,
   // but its late reference cannot resurrect the retired file.
@@ -3197,26 +4634,35 @@ export async function writeAsset(
     const dir = path.join(sessionDir(sessionId), 'assets');
     await fs.mkdir(dir, { recursive: true });
     const target = path.join(dir, id);
-    try {
-      await fs.stat(target);
+    if (await matchingAssetFile(target, data, digest)) {
       assetWrittenEpoch.set(localAssetKey(sessionId, id), admittedAt);
       return { id, mimeType, bytes: data.length };
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
     const used = await sessionAssetBytesOnDisk(sessionId);
     const globalUsed = await globalAssetBytesOnDisk();
     if (used + data.length > MAX_SESSION_ASSET_BYTES) throw new Error('Session asset quota exceeded');
     if (globalUsed + data.length > MAX_GLOBAL_ASSET_BYTES) throw new Error('Global session asset quota exceeded');
+    // Write outside the hash namespace. A partial EIO leaves only this private staging file;
+    // link publishes without replacing a shared hash target, unlike rename on POSIX.
+    const staging = path.join(dir, `.${id}.${process.pid}.${randomUUID()}.tmp`);
     try {
-      await fs.writeFile(target, data, { flag: 'wx' });
-      sessionAssetUsage.set(sessionId, used + data.length);
-      globalAssetUsage = globalUsed + data.length;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      await fs.writeFile(staging, data, { flag: 'wx' });
+      if (!await matchingAssetFile(staging, data, digest))
+        throw new Error('Staged session asset is unavailable');
+      try {
+        await fs.link(staging, target);
+        sessionAssetUsage.set(sessionId, used + data.length);
+        globalAssetUsage = globalUsed + data.length;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        if (!await matchingAssetFile(target, data, digest))
+          throw new Error('Existing session asset vanished during publication');
+      }
+      assetWrittenEpoch.set(localAssetKey(sessionId, id), admittedAt);
+      return { id, mimeType, bytes: data.length };
+    } finally {
+      await fs.rm(staging, { force: true });
     }
-    assetWrittenEpoch.set(localAssetKey(sessionId, id), admittedAt);
-    return { id, mimeType, bytes: data.length };
   });
 }
 
@@ -3475,12 +4921,22 @@ function referencedAssetIds(event: SessionEvent): readonly AssetRef[] {
 /** Read-only compatibility with future rich assets, NOT permission to admit them. Every
  * existing slot must be well formed before its references can authorize physical deletion. */
 function cleanupRichMedia(event: Extract<SessionEvent, { kind: 'assistant_message' }>): RichMediaState[] | null {
+  const removed = parsedRetiredRichMediaSlots(event.retiredRichMediaSlots);
+  if (removed === null) return null;
+  // A cleanup-created marker may only name bytes also retired on this same
+  // canonical assistant. A forged four-field marker must not gain authority by
+  // borrowing a plausible UUID and hash without its assistant-wide retirement.
+  if (removed.some(slot => slot.retiredAssetId !== undefined &&
+      (!Array.isArray(event.retiredRichImageAssetIds) ||
+       !event.retiredRichImageAssetIds.includes(slot.retiredAssetId)))) return null;
   if (event.richMedia === undefined) return [];
   const rich = event.rich ? parseRichResponse(event.rich) : null;
   const origin = event.richOrigin ? parseRichOrigin(event.richOrigin) : null;
   if (!rich || rich.status !== 'available' || !event.providerMessageId ||
       rich.providerMessageId !== event.providerMessageId || rich.messageId !== event.messageId ||
       !origin || origin.conversationId !== rich.conversationId) return null;
+  const sourceFloor = richSourceVersionFloor(event);
+  if (sourceFloor === null) return null;
   try {
     if (!Array.isArray(event.richMedia) || event.richMedia.length > 64 ||
         Reflect.ownKeys(event.richMedia).length !== event.richMedia.length + 1) return null;
@@ -3489,33 +4945,16 @@ function cleanupRichMedia(event: Extract<SessionEvent, { kind: 'assistant_messag
     for (let index = 0; index < event.richMedia.length; index++) {
       const descriptor = Object.getOwnPropertyDescriptor(event.richMedia, String(index));
       if (!descriptor?.enumerable || !('value' in descriptor)) return null;
-      const fields = richMediaFields(descriptor.value, ['mediaId', 'nodeId', 'source', 'status'],
-        ['mediaId', 'nodeId', 'source', 'status', 'reason', 'previewWidth', 'previewHeight', 'asset']);
-      if (!fields || !richMediaOpaque(fields.mediaId) || !richMediaOpaque(fields.nodeId) ||
-          found.has(fields.mediaId) || !exactRichImageNode(rich, fields.mediaId, fields.nodeId)) return null;
-      const source = parseMetadataRichMedia({ mediaId: fields.mediaId, nodeId: fields.nodeId,
-        source: fields.source, status: 'pending' });
-      if (!source || (source.source.kind === 'native' && source.source.providerMessageId !== event.providerMessageId)) return null;
-      if (fields.status !== 'available') {
-        if (Object.hasOwn(fields, 'asset') || Object.hasOwn(fields, 'previewWidth') ||
-            Object.hasOwn(fields, 'previewHeight')) return null;
-        const metadata = parseMetadataRichMedia(fields);
-        if (!metadata) return null;
-        clean.push(metadata);
-      } else {
-        if (Object.hasOwn(fields, 'reason') || !Number.isSafeInteger(fields.previewWidth) ||
-            !Number.isSafeInteger(fields.previewHeight) || (fields.previewWidth as number) < 1 ||
-            (fields.previewHeight as number) < 1 || (fields.previewWidth as number) > 1600 ||
-            (fields.previewHeight as number) > 1600) return null;
-        const asset = richMediaFields(fields.asset, ['id', 'mimeType', 'bytes'], ['id', 'mimeType', 'bytes']);
-        if (!asset || typeof asset.id !== 'string' || !/^[a-f0-9]{8,64}\.(?:bin|png|jpg)$/.test(asset.id) ||
-            !['image/png', 'image/jpeg', 'image/webp'].includes(asset.mimeType as string) ||
-            !Number.isSafeInteger(asset.bytes) || (asset.bytes as number) < 1 ||
-            (asset.bytes as number) > MAX_ASSET_BYTES) return null;
-        clean.push({ ...source, status: 'available', previewWidth: fields.previewWidth as number,
-          previewHeight: fields.previewHeight as number, asset: asset as unknown as AssetRef });
-      }
-      found.add(fields.mediaId);
+      const media = parseDurableRichMedia(descriptor.value);
+      if (!media || found.has(media.mediaId) || !exactRichImageNode(rich, media.mediaId, media.nodeId) ||
+          (media.pageSource && media.pageSource.slotVersion > event.seq) ||
+          (media.pageSource && media.pageSource.slotVersion > sourceFloor) ||
+          (media.source.kind === 'native' && media.source.providerMessageId !== event.providerMessageId)) return null;
+      const removedNode = removed.find(slot => slot.mediaId === media.mediaId);
+      if (removedNode !== undefined && (removedNode.nodeId !== media.nodeId ||
+          media.status !== 'unavailable' || media.reason !== 'removed')) return null;
+      clean.push(media);
+      found.add(media.mediaId);
     }
     return clean;
   } catch { return null; }
@@ -3825,9 +5264,30 @@ function retireImageReferences(event: CanonicalEvent, selected: ReadonlySet<stri
   if (event.kind === 'assistant_message') {
     const removed = (event.richMedia ?? []).filter(media => media.asset && selected.has(media.asset.id));
     if (!removed.length) return null;
+    const priorRemoved = parsedRetiredRichMediaSlots(event.retiredRichMediaSlots);
+    if (!priorRemoved) return null;
+    const knownIncarnations = new Set(priorRemoved.flatMap(slot =>
+      slot.removalIncarnation ? [slot.removalIncarnation.toLowerCase()] : []));
+    const newlyRemoved: RetiredRichMediaSlot[] = [];
+    for (const media of removed) {
+      // A currently available asset cannot coexist with a removed-slot marker.
+      // Do not upgrade legacy two-field markers, or rotate a previous cleanup's
+      // incarnation after a partial multi-owner retirement failure.
+      if (priorRemoved.some(slot => slot.mediaId === media.mediaId)) return null;
+      const removalIncarnation = randomUUID();
+      if (!removalIncarnationUUID.test(removalIncarnation) ||
+          knownIncarnations.has(removalIncarnation.toLowerCase()) ||
+          !retiredRichImageAssetId.test(media.asset!.id)) return null;
+      knownIncarnations.add(removalIncarnation.toLowerCase());
+      newlyRemoved.push({ mediaId: media.mediaId, nodeId: media.nodeId,
+        removalIncarnation, retiredAssetId: media.asset!.id });
+    }
+    const nextRemoved = mergedRetiredRichMediaSlots(priorRemoved, newlyRemoved);
+    if (nextRemoved === null) return null;
     const retiredRichImageAssetIds = mergedRetiredAssetIds(event.retiredRichImageAssetIds,
       removed.map(media => media.asset!.id));
-    return { ...event, retiredRichImageAssetIds, richMedia: (event.richMedia ?? []).map(media => {
+    return { ...event, retiredRichImageAssetIds, retiredRichMediaSlots: nextRemoved,
+      richMedia: (event.richMedia ?? []).map(media => {
       if (!media.asset || !selected.has(media.asset.id)) return media;
       const { asset: _asset, previewWidth: _width, previewHeight: _height, ...withoutPreview } = media;
       return { ...withoutPreview, status: 'unavailable' as const, reason: 'removed' as const };
@@ -3846,8 +5306,10 @@ function retireImageReferences(event: CanonicalEvent, selected: ReadonlySet<stri
  * is available. Unsupported unkeyed references veto deletion for their exact asset.
  */
 async function retireSessionImages(sessionId: string, selected: ReadonlySet<string>): Promise<Set<string>> {
+  if (uncertainCleanupSessions.has(sessionId)) throw new Error('Canonical cleanup ownership is uncertain');
   const entry = await ensureOpen(sessionId);
   return enqueueSessionOperation(entry, 'image storage cleanup', async () => {
+    if (uncertainCleanupSessions.has(sessionId)) throw new Error('Canonical cleanup ownership is uncertain');
     const events = await cleanupOwnerInventory(sessionId, entry);
     if (!events) return new Set<string>(); // Unknown owner is never evidence for deletion.
     const safe = new Set(selected);
@@ -3865,9 +5327,34 @@ async function retireSessionImages(sessionId: string, selected: ReadonlySet<stri
     for (const [key, observed] of keyed) {
       const current = entry.messages.get(key) ?? observed;
       const retired = retireImageReferences(current, safe);
-      if (!retired) continue;
+      if (!retired) {
+        // A damaged or saturated removal fence cannot authorize deletion. Keep
+        // the referenced bytes rather than unlinking an asset with a live owner.
+        for (const asset of referencedAssetIds(current)) safe.delete(asset.id);
+        continue;
+      }
       const full = { ...retired, origin: retired.origin ?? retired.seq, seq: entry.nextSeq } as CanonicalEvent;
-      await writeCanonicalMessage(sessionId, key, full);
+      try {
+        await writeCanonicalMessage(sessionId, key, full);
+      } catch (error) {
+        // A successful physical rename can lose its ACK. While both queues still
+        // own this retirement, reconcile exactly the proposed full shard or
+        // unchanged predecessor, never guess based on which syscall threw.
+        if (await committedImageOwner(sessionId, full)) {
+          entry.messages.set(key, full);
+          entry.nextSeq += 1;
+          entry.historySeq = full.seq;
+          scheduleMeta(entry);
+        } else if (!await committedImageOwner(sessionId, current)) {
+          // Neither exact disk state can be proven. Guard the common canonical
+          // writer, not just enqueueSessionOperation: several callers enqueue
+          // directly via entry.queue.then. Next startup reloads from disk.
+          uncertainCleanupSessions.add(sessionId);
+        }
+        // Uncertain cleanup NEVER grants physical byte deletion even if its
+        // exact committed metadata was reconciled into RAM.
+        throw error;
+      }
       entry.messages.set(key, full);
       entry.nextSeq += 1;
       entry.historySeq = full.seq;
@@ -4113,7 +5600,8 @@ async function verifiedRecordedImageBytes(sessionId: string, asset: AssetRef): P
 
 /** Sole sessions:image data-URL authority. Asset queue MUST precede session queue: cleanup
  * holds the asset queue while waiting for owner retirement, and a reversed wait deadlocks.
- * This read-only compatibility seam does not accept rich assets from a publisher. */
+ * This read-only seam admits assistant-rich assets only through the exact canonical
+ * richImageReference membership proof; never through a caller-supplied media claim. */
 export async function readRecordedSessionImage(sessionId: string, assetId: string): Promise<string | null> {
   const requestedAt = assetMutationEpoch;
   const deletionAt = sessionDeletionEpoch;
@@ -4287,6 +5775,7 @@ export async function deleteSession(id: string): Promise<void> {
 export function resetSessionStoreForTests(): void {
   for (const entry of open.values()) if (entry.metaTimer) clearTimeout(entry.metaTimer);
   open.clear();
+  pendingAttachmentTransitions.clear();
   opening.clear();
   reconciling.clear();
   sessionAssetUsage.clear();
@@ -4294,6 +5783,7 @@ export function resetSessionStoreForTests(): void {
   assetMutationEpoch = 0;
   assetWrittenEpoch.clear();
   removedAssetEpoch.clear();
+  uncertainCleanupSessions.clear();
   sessionDeletionEpoch = 0;
   deletingSessions.clear();
   missingCurrentConversations.clear();
@@ -4310,6 +5800,7 @@ export function unsetSessionRootForTests(): void {
   assetMutationEpoch = 0;
   assetWrittenEpoch.clear();
   removedAssetEpoch.clear();
+  uncertainCleanupSessions.clear();
   sessionDeletionEpoch = 0;
   deletingSessions.clear();
   missingCurrentConversations.clear();

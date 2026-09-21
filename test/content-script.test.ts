@@ -12,6 +12,7 @@
  */
 
 import { promises as fs } from 'node:fs';
+import { webcrypto } from 'node:crypto';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -180,6 +181,8 @@ interface Harness {
   listenerCounts(): { runtime: number; storage: number };
   /** Moves the clock the script reads. Nothing else advances it between ticks. */
   advance(ms: number): void;
+  /** Fire a specific real-production-duration deadline deterministically. Never compress it to wall time. */
+  expireDeadline(ms: 1250 | 10000): boolean;
   close(): void;
 }
 
@@ -235,6 +238,11 @@ async function harness(
   // registration has obtained a real-shaped authenticated issuance from its app.
   reply.set('register_document', () => ({ ok: true, recordingGeneration: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }));
   reply.set('recording_generation', () => ({ ok: true, recordingGeneration: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }));
+  reply.set('rich_capture_begin', message => ({ ok: true, capture: {
+    captureId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', conversationId: message.conversationId,
+    sessionId: 'fixture-session', bindingRevision: 0, documentId: 'fixture-document', documentGeneration: 1,
+    spaEpoch: message.navigationEpoch, recordingGeneration: message.recordingGeneration
+  } }));
   reply.set('status', () => ({ connected: true, paired: true, port: 8765, pending: 0 }));
   reply.set('events', () => ({ ok: true, pending: 0, durable: true }));
   reply.set('bind', () => ({ ok: true, bound: 0 }));
@@ -310,8 +318,28 @@ async function harness(
   // was asked for makes a give-up path arrive after the right number of attempts, instantly.
   let clock = 1_700_000_000_000;
   const nativeTimeout = window.setTimeout.bind(window);
+  const deadlines: Array<{ ms: 1250 | 10000; run: () => void }> = [];
+  const expireDeadline = (ms: 1250 | 10000): boolean => {
+    const index = deadlines.findLastIndex(deadline => deadline.ms === ms);
+    if (index < 0) return false;
+    const [deadline] = deadlines.splice(index, 1);
+    // The test deliberately expires the *requested* production deadline, not
+    // an unrelated 20ms scheduler slice. Content's cancelLater still fences
+    // any already-settled promise even if this queued callback is invoked late.
+    clock += ms;
+    deadline!.run();
+    return true;
+  };
   window.setTimeout = ((fn: () => void, ms?: number) => {
     if (holdSendDeadline && ms === 30000) return 0;
+    // The content's 1.25s issuance and 10s encode/crypto deadlines must not
+    // become 20ms under CPU load or pre-empt promise microtasks. Keep their
+    // *actual requested durations* in a test-controlled scheduler. Ordinary
+    // success does not expire; explicit negatives call expireDeadline(ms).
+    if (ms === 1250 || ms === 10000) {
+      deadlines.push({ ms, run: fn });
+      return -deadlines.length;
+    }
     // Native readiness now authorizes through an async app reply. A deadline must
     // expire after those microtasks, just as a real browser timer does.
     if (ms === 30000) return nativeTimeout(fn, 0);
@@ -384,6 +412,7 @@ async function harness(
       }),
     listenerCounts: () => ({ runtime: runtimeListeners.size, storage: storageListeners.size }),
     advance,
+    expireDeadline,
     close: () => dom.window.close()
   };
 }
@@ -457,6 +486,147 @@ describe('exact native rich response observation (no action authority)', () => {
     messages: [{ role: 'assistant', messageId, rawMessageId: providerMessageId, stable: true,
       rawText: 'Which scene?', renderedHtml: '', richRoot: true }] });
 
+  it('requests a current bound capture ticket before asking Fiber for a rich root', async () => {
+    const order: string[] = [];
+    live = await harness(undefined, { rich_capture_begin: message => {
+      order.push('capture');
+      expect(message).toMatchObject({ conversationId, navigationEpoch: 0,
+        recordingGeneration: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' });
+      return { ok: true, capture: { captureId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        conversationId, sessionId: 'fixture-session', bindingRevision: 0,
+        documentId: 'fixture-document', documentGeneration: 1, spaEpoch: 0,
+        recordingGeneration: message.recordingGeneration } };
+    } });
+    rootFixture(live.document);
+    live.window.addEventListener('message', event => {
+      if ((event as MessageEvent).data?.source === 'clf-fiber-ask') order.push('fiber');
+    });
+    await replyFiber([], [descriptor()]);
+    expect(order).toEqual(['capture', 'fiber']);
+    const observed = emitted(live.sent, 'assistant_message').at(-1);
+    expect(observed?.event.rich?.status).toBe('available');
+    expect(observed?.richSeal).toEqual({
+      captureId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', scanToken: expect.any(String),
+      messageId, providerMessageId
+    });
+    expect(observed?.richSeal.scanToken).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
+    expect(observed?.event).not.toHaveProperty('richSeal');
+    expect(observed?.event).not.toHaveProperty('captureId');
+  });
+
+  it('does not run a second Fiber scan for an ordinary answer merely because a ticket arrives', async () => {
+    live = await harness();
+    rootFixture(live.document);
+    const ordinary = descriptor();
+    ordinary.messages[0]!.richRoot = false;
+    const asked: string[] = [];
+    live.window.addEventListener('message', event => {
+      if ((event as MessageEvent).data?.source === 'clf-fiber-ask') asked.push('fiber');
+    });
+    await replyFiber([], [ordinary]);
+    await settle();
+    expect(asked).toEqual(['fiber']);
+    expect(emitted(live.sent, 'assistant_message').at(-1)?.event).toMatchObject({
+      messageId, text: 'Which scene?'
+    });
+    expect(emitted(live.sent, 'assistant_message').every(row => row.event.rich === undefined)).toBe(true);
+  });
+
+  it('keeps canonical prose and its rich dedupe eligibility when capture issuance is refused', async () => {
+    live = await harness(undefined, { rich_capture_begin: () => ({ ok: false, error: 'unbound_session' }) });
+    rootFixture(live.document);
+    await replyFiber([], [descriptor()]);
+    await live.hook.flush();
+    const first = emitted(live.sent, 'assistant_message');
+    expect(first).toHaveLength(1);
+    expect(first[0]?.event).toMatchObject({ text: 'Which scene?', messageId });
+    expect(first[0]?.event).not.toHaveProperty('rich');
+    live.reply.set('rich_capture_begin', message => ({ ok: true, capture: {
+      captureId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', conversationId,
+      sessionId: 'fixture-session', bindingRevision: 0, documentId: 'fixture-document', documentGeneration: 1,
+      spaEpoch: message.navigationEpoch, recordingGeneration: message.recordingGeneration
+    } }));
+    // A previously refused canonical scan does not inherit a ticket retroactively.
+    // The successful prefetch earns only a separate, freshly stamped follow-up scan.
+    await replyFiber([], [descriptor()], null, true, null, false, 40);
+    await live.hook.flush();
+    const second = emitted(live.sent, 'assistant_message');
+    expect(second).toHaveLength(2);
+    expect(second[1]?.event).toMatchObject({ rich: { status: 'available', messageId } });
+    expect(second[1]?.event).not.toHaveProperty('text');
+    expect(second[1]?.richSeal).toEqual({ captureId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      scanToken: expect.any(String), messageId, providerMessageId });
+    expect(second[1]?.richSeal.scanToken).not.toBe(second[0]?.richSeal?.scanToken);
+  });
+
+  it('bounds an unanswered prefetch without holding canonical prose, ignores its late reply and permits a new rich scan', async () => {
+    let release!: (reply: unknown) => void;
+    const pending = new Promise(resolve => { release = resolve; });
+    live = await harness(undefined, { rich_capture_begin: () => pending });
+    rootFixture(live.document);
+    await replyFiber([], [descriptor()]);
+    await live.hook.flush();
+    const rows = emitted(live.sent, 'assistant_message');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.event).toMatchObject({ text: 'Which scene?', messageId });
+    expect(rows[0]?.event).not.toHaveProperty('rich');
+    // Expire exactly the unresolved prefetch, independent of wall-time load.
+    expect(live.expireDeadline(1250)).toBe(true);
+    release({ ok: true, capture: { captureId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      conversationId, sessionId: 'fixture-session', bindingRevision: 0,
+      documentId: 'fixture-document', documentGeneration: 1, spaEpoch: 0,
+      recordingGeneration: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' } });
+    await settle();
+    expect(emitted(live.sent, 'assistant_message')).toHaveLength(1);
+    live.reply.set('rich_capture_begin', message => ({ ok: true, capture: {
+      captureId: 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC', conversationId,
+      sessionId: 'fixture-session', bindingRevision: 0, documentId: 'fixture-document', documentGeneration: 1,
+      spaEpoch: message.navigationEpoch, recordingGeneration: message.recordingGeneration
+    } }));
+    await replyFiber([], [descriptor()], null, true, null, false, 40);
+    await live.hook.flush();
+    expect(emitted(live.sent, 'assistant_message').at(-1)?.event).toMatchObject({
+      rich: { status: 'available', messageId }
+    });
+  });
+
+  it('rejects a delayed A ticket after same-document A→B→A before Fiber and earns a fresh scan', async () => {
+    let release!: (reply: unknown) => void;
+    const pending = new Promise(resolve => { release = resolve; });
+    live = await harness(undefined, { rich_capture_begin: () => pending });
+    rootFixture(live.document);
+    const old = replyFiber([], [descriptor()]);
+    await vi.waitFor(() => expect(live!.sent.filter(row => row.type === 'rich_capture_begin')).toHaveLength(1));
+    live.dom.reconfigure({ url: 'https://chatgpt.com/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff' });
+    live.hook.observe();
+    live.dom.reconfigure({ url: `https://chatgpt.com/c/${conversationId}` });
+    live.hook.observe();
+    release({ ok: true, capture: { captureId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      conversationId, sessionId: 'fixture-session', bindingRevision: 0,
+      documentId: 'fixture-document', documentGeneration: 1, spaEpoch: 0,
+      recordingGeneration: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' } });
+    await old;
+    await live.hook.flush();
+    expect(emitted(live.sent, 'assistant_message').some(row => row.event.rich)).toBe(false);
+    live.reply.set('rich_capture_begin', message => ({ ok: true, capture: {
+      captureId: 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC', conversationId,
+      sessionId: 'fixture-session', bindingRevision: 0, documentId: 'fixture-document', documentGeneration: 1,
+      spaEpoch: message.navigationEpoch, recordingGeneration: message.recordingGeneration
+    } }));
+    await settle();
+    await replyFiber([], [descriptor()], null, true, null, false, 40);
+    await live.hook.flush();
+    expect(emitted(live.sent, 'assistant_message').at(-1)?.event.rich?.status).toBe('available');
+    const issuedEpochs = live.sent.filter(row => row.type === 'rich_capture_begin')
+      .map(row => row.navigationEpoch);
+    expect(issuedEpochs[0]).toBe(0);
+    // The returned route can need one follow-up ticket when its canonical scan
+    // raced issuance. No ticket from the intermediate B or original A epoch may
+    // authorize that scan, including any additional bounded prefetch.
+    expect(issuedEpochs.slice(1).length).toBeGreaterThanOrEqual(1);
+    expect(issuedEpochs.slice(1).every(value => value === 2)).toBe(true);
+  });
+
   it('captures the exact image-backed DIL subtree without borrowing an identical Continue or URL', async () => {
     live = await harness();
     const { root, twin, surface } = rootFixture(live.document);
@@ -481,7 +651,9 @@ describe('exact native rich response observation (no action authority)', () => {
     // not new text/work or a synthetic user action.
     surface.querySelector('button[disabled]')!.removeAttribute('disabled');
     surface.querySelector('[aria-disabled]')!.removeAttribute('aria-disabled');
-    await replyFiber([], [descriptor()]);
+    // Ticket issuance is not part of the canonical scan. A hydration observed
+    // after the previous ticket was spent earns a separate fresh Fiber frame.
+    await replyFiber([], [descriptor()], null, true, null, false, 40);
     await live.hook.flush();
     const second = emitted(live.sent, 'assistant_message').at(-1)!.event;
     expect(second).toMatchObject({ messageId, rich: { status: 'available' } });
@@ -619,7 +791,7 @@ describe('exact native rich response observation (no action authority)', () => {
     else root.closest('[data-message-id]')!.setAttribute('data-message-id', '3150f756-bf2d-45fa-ac0f-45010b2239fc');
     expect(section.isConnected).toBe(true);
     const countBefore = emitted(live.sent, 'assistant_message').length;
-    await replyFiber([], [descriptor()]);
+    await replyFiber([], [descriptor()], null, true, null, false, 40);
     await live.hook.flush();
     const observations = emitted(live.sent, 'assistant_message');
     expect(observations).toHaveLength(countBefore + 1);
@@ -630,7 +802,7 @@ describe('exact native rich response observation (no action authority)', () => {
     expect(observations.at(-1)!.event).not.toHaveProperty('goalEligible');
   });
 
-  it('keeps pending authored prose when a rich-only revision coalesces and refuses cross-provider text adoption', async () => {
+  it('keeps pending authored prose and refuses unsealed rich-only or cross-provider adoption', async () => {
     live = await harness();
     const rich = (provider: string) => ({ version: 1, status: 'unavailable', reason: 'ambiguous',
       conversationId, messageId, providerMessageId: provider, revision: 0, accessibleText: '', nodes: [] });
@@ -640,8 +812,9 @@ describe('exact native rich response observation (no action authority)', () => {
     const sameProvider = live.sent.flatMap(row => row.type === 'events' ? row.entries || [] : [])
       .filter((entry: any) => entry.event?.messageId === messageId);
     expect(sameProvider).toHaveLength(1);
-    expect(sameProvider[0].event).toMatchObject({ text: 'Authored answer',
-      rich: { status: 'unavailable', providerMessageId } });
+    expect(sameProvider[0].event).toMatchObject({ text: 'Authored answer' });
+    expect(sameProvider[0].event).not.toHaveProperty('rich');
+    expect(sameProvider[0]).not.toHaveProperty('richSeal');
 
     live.hook.emit({ kind: 'assistant_message', messageId, providerMessageId,
       text: 'Another authored revision' });
@@ -650,11 +823,96 @@ describe('exact native rich response observation (no action authority)', () => {
     await live.hook.flush();
     const entries = live.sent.flatMap(row => row.type === 'events' ? row.entries || [] : [])
       .filter((entry: any) => entry.event?.messageId === messageId);
-    expect(entries.slice(-2).map((entry: any) => entry.event)).toEqual([
-      expect.objectContaining({ providerMessageId, text: 'Another authored revision' }),
-      expect.objectContaining({ providerMessageId: foreign, rich: expect.objectContaining({ status: 'unavailable' }) })
-    ]);
-    expect(entries.at(-1).event).not.toHaveProperty('text');
+    expect(entries.at(-1)?.event).toMatchObject({ providerMessageId,
+      text: 'Another authored revision' });
+    expect(entries.every((entry: any) => entry.event.rich === undefined && entry.richSeal === undefined)).toBe(true);
+  });
+
+  it('retains an undelivered sealed rich row across later unsealed state and prose updates after a failed worker flush', async () => {
+    let workerAccepts = false;
+    live = await harness(undefined, { events: () => workerAccepts
+      ? { ok: true, durable: true, pending: 0 }
+      : { ok: false, error: 'worker_unreachable' } });
+    rootFixture(live.document);
+    await replyFiber([], [descriptor()]);
+    await live.hook.flush();
+    const first = emitted(live.sent, 'assistant_message').at(-1)!;
+    expect(first.event.rich).toMatchObject({ status: 'available', messageId });
+    expect(first.richSeal).toMatchObject({ captureId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', messageId });
+
+    // A later canonical final/prose revision is independently recordable, but it
+    // cannot inherit the earlier rich ticket or replace the unjournalled sealed row.
+    live.hook.emit({ kind: 'assistant_message', messageId, providerMessageId,
+      text: 'Which scene?', state: 'final', final: true });
+    live.hook.emit({ kind: 'assistant_message', messageId, providerMessageId,
+      text: 'Which scene? Finished.', state: 'final', final: true });
+    await live.hook.flush();
+    workerAccepts = true;
+    await live.hook.flush();
+    const accepted = live.sent.filter(row => row.type === 'events').at(-1)!.entries
+      .filter((entry: any) => entry.event?.messageId === messageId);
+    expect(accepted).toHaveLength(2);
+    expect(accepted[0].event.rich).toMatchObject({ status: 'available', messageId });
+    expect(accepted[0].richSeal).toEqual(first.richSeal);
+    expect(accepted[1].event).toMatchObject({ text: 'Which scene? Finished.', state: 'final', final: true });
+    expect(accepted[1].event).not.toHaveProperty('rich');
+    expect(accepted[1]).not.toHaveProperty('richSeal');
+  });
+
+  it('preserves distinct verified rich scan receipts and a later plain final in one failed-flush page queue', async () => {
+    let workerAccepts = false;
+    live = await harness(undefined, { events: () => workerAccepts
+      ? { ok: true, durable: true, pending: 0 } : { ok: false, error: 'worker_unreachable' } });
+    const { surface } = rootFixture(live.document);
+    await replyFiber([], [descriptor()]); await live.hook.flush();
+    // A later independently ticketed hydration has its own scan token. It must
+    // not retire the first ticket even if it belongs to the same raw provider.
+    surface.querySelector('button[disabled]')!.removeAttribute('disabled');
+    surface.querySelector('[aria-disabled]')!.removeAttribute('aria-disabled');
+    await replyFiber([], [descriptor()], null, true, null, false, 40);
+    // Failed worker sends repeat the same page-owned entries. Distinguish the
+    // two actual source receipts by original scan token, not transport attempts.
+    const sealed = [...new Map(emitted(live.sent, 'assistant_message')
+      .filter(entry => entry.richSeal)
+      .map(entry => [entry.richSeal.scanToken, entry])).values()];
+    expect(sealed).toHaveLength(2);
+    expect(sealed[0]!.richSeal.scanToken).not.toBe(sealed[1]!.richSeal.scanToken);
+    live.hook.emit({ kind: 'assistant_message', messageId, providerMessageId,
+      text: 'Which scene?', state: 'final', final: true });
+    await live.hook.flush();
+    workerAccepts = true;
+    await live.hook.flush();
+    const accepted = live.sent.filter(row => row.type === 'events').at(-1)!.entries
+      .filter((entry: any) => entry.event?.messageId === messageId);
+    expect(accepted).toHaveLength(3);
+    expect(accepted.slice(0, 2).map((entry: any) => entry.richSeal.scanToken))
+      .toEqual(sealed.map(entry => entry.richSeal.scanToken));
+    expect(accepted.slice(0, 2).every((entry: any) => entry.event.rich?.status === 'available')).toBe(true);
+    expect(accepted[2].event).toMatchObject({ text: 'Which scene?', state: 'final' });
+    expect(accepted[2]).not.toHaveProperty('richSeal');
+  });
+
+  it('retains a pending sealed rich-only row when independently authored prose appears after failed custody', async () => {
+    let workerAccepts = false;
+    live = await harness(undefined, { events: () => workerAccepts
+      ? { ok: true, durable: true, pending: 0 } : { ok: false, error: 'worker_unreachable' } });
+    rootFixture(live.document);
+    const richOnly = descriptor();
+    richOnly.messages[0]!.rawText = '';
+    await replyFiber([], [richOnly]); await live.hook.flush();
+    expect(emitted(live.sent, 'assistant_message').at(-1)?.event).not.toHaveProperty('text');
+    live.hook.emit({ kind: 'assistant_message', messageId, providerMessageId,
+      text: 'Newly authored answer', state: 'final', final: true });
+    await live.hook.flush();
+    workerAccepts = true;
+    await live.hook.flush();
+    const accepted = live.sent.filter(row => row.type === 'events').at(-1)!.entries
+      .filter((entry: any) => entry.event?.messageId === messageId);
+    expect(accepted).toHaveLength(2);
+    expect(accepted[0].event.rich).toMatchObject({ status: 'available' });
+    expect(accepted[0]).toHaveProperty('richSeal');
+    expect(accepted[1].event).toMatchObject({ text: 'Newly authored answer', state: 'final' });
+    expect(accepted[1]).not.toHaveProperty('richSeal');
   });
 
   it('freezes a pre-Off Fiber capture in the page queue rather than coalescing it with a fresh post-On generation', async () => {
@@ -684,7 +942,9 @@ describe('exact native rich response observation (no action authority)', () => {
     surface.querySelector('[aria-disabled]')!.removeAttribute('aria-disabled');
     // The unchanged old Fiber descriptor remains visible after the transition.
     // Re-scanning it under G2 cannot re-acquire its already observed G0 prose.
-    await replyFiber([], [descriptor()]);
+    // A freshly rotated G may finish the ticket handshake during this ordinary
+    // canonical scan. Keep the response listener for the separately ticketed scan.
+    await replyFiber([], [descriptor()], null, true, null, false, 40);
     workerAccepts = true;
     await live.hook.flush();
 
@@ -739,12 +999,18 @@ describe('exact native rich response observation (no action authority)', () => {
     await live.hook.flush();
     expect(root.getAttribute('data-clf-fiber-rich')).toBe(oldStamp);
     expect(emitted(live.sent, 'assistant_message').slice(before).every(row => row.event.rich === undefined)).toBe(true);
-    await replyFiber([], [descriptor()]);
+    // The returned route cannot borrow the original stamp/ticket. If issuance
+    // completes after the canonical scan it earns a distinct fresh Fiber reply.
+    await replyFiber([], [descriptor()], null, true, null, false, 40);
     await live.hook.flush();
-    expect(emitted(live.sent, 'assistant_message').at(-1)!.event.rich?.status).toBe('available');
+    expect(emitted(live.sent, 'assistant_message').at(-1)!.event.rich?.status,
+      JSON.stringify(live.sent.filter(row => row.type === 'register_document' ||
+        row.type === 'recording_generation' || row.type === 'rich_capture_begin').map(row => ({
+        type: row.type, epoch: row.navigationEpoch, conversationId: row.conversationId
+      })))).toBe('available');
   });
 
-  it('reserves one 400 KiB observation envelope for authored prose and optional rich bytes', async () => {
+  it('reserves authored prose when a raw caller supplies unsealed oversized rich', async () => {
     live = await harness();
     const prose = 'p'.repeat(300000);
     live.hook.emit({ kind: 'assistant_message', messageId, providerMessageId, text: prose,
@@ -753,11 +1019,11 @@ describe('exact native rich response observation (no action authority)', () => {
     await live.hook.flush();
     const item = emitted(live.sent, 'assistant_message').at(-1)!.event;
     expect(item.text).toBe(prose);
-    expect(item.rich).toMatchObject({ status: 'unavailable', reason: 'oversized', nodes: [] });
+    expect(item).not.toHaveProperty('rich');
     expect(new TextEncoder().encode(JSON.stringify(item)).length).toBeLessThan(400 * 1024);
   });
 
-  it('keeps a near-limit pending authored row separate when merging a later rich-only revision would exceed its byte envelope', async () => {
+  it('refuses an unsealed rich-only revision without erasing a near-limit pending authored row', async () => {
     live = await harness();
     const prose = 'p'.repeat(310000);
     live.hook.emit({ kind: 'assistant_message', messageId, providerMessageId, text: prose });
@@ -767,11 +1033,747 @@ describe('exact native rich response observation (no action authority)', () => {
     await live.hook.flush();
     const entries = live.sent.flatMap(row => row.type === 'events' ? row.entries || [] : [])
       .filter((entry: any) => entry.event?.messageId === messageId);
-    expect(entries).toHaveLength(2);
+    expect(entries).toHaveLength(1);
     expect(entries[0].event.text).toBe(prose);
-    expect(entries[1].event).not.toHaveProperty('text');
-    expect(entries[1].event.rich.status).toBe('available');
+    expect(entries[0].event).not.toHaveProperty('rich');
+    expect(entries[0]).not.toHaveProperty('richSeal');
     for (const entry of entries) expect(new TextEncoder().encode(JSON.stringify(entry)).length).toBeLessThan(400 * 1024);
+  });
+
+  const pixelReply = (message: Record<string, any>) => ({ ok: true, capture: {
+    purpose: 'page_pixel', captureId: 'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP',
+    conversationId: message.conversationId, sessionId: 'fixture-session', bindingRevision: 0,
+    documentId: 'fixture-document', documentGeneration: 1, spaEpoch: message.navigationEpoch,
+    recordingGeneration: message.recordingGeneration, richRevision: 1, slotVersion: 0,
+    messageId: message.messageId, providerMessageId: message.providerMessageId,
+    mediaId: message.mediaId, nodeId: message.nodeId,
+    sourceIncarnation: null, sourceSequence: null
+  } });
+
+  function pixelFixture() {
+    const fixture = rootFixture(live!.document);
+    const image = fixture.surface.querySelector('img') as HTMLImageElement;
+    image.src = 'https://images.example.test/forest-private.webp?sig=NEVER_TRANSMIT';
+    Object.defineProperties(image, {
+      currentSrc: { configurable: true, get: () => image.src },
+      complete: { configurable: true, value: true }
+    });
+    const window = live!.window as any;
+    Object.defineProperty(window.crypto, 'subtle', { configurable: true, value: webcrypto.subtle });
+    const payload = new Uint8Array(48);
+    payload.set(new TextEncoder().encode('RIFF'), 0);
+    payload.set(new TextEncoder().encode('WEBP'), 8);
+    const calls: Array<{ longest: number; quality: number }> = [];
+    window.HTMLCanvasElement.prototype.getContext = function () {
+      return { drawImage: () => undefined };
+    };
+    window.HTMLCanvasElement.prototype.toBlob = function (done: (blob: unknown) => void, mime: string, quality: number) {
+      calls.push({ longest: Math.max(this.width, this.height), quality });
+      done({ type: mime, size: payload.length, arrayBuffer: async () => payload.buffer.slice(0) });
+    };
+    return { ...fixture, image, payload, calls };
+  }
+
+  it('acquires pixel ticket only from an earlier sealed rich image, rescans freshly, and queues pending before bounded hashed bytes', async () => {
+    const ordered: string[] = [];
+    live = await harness(undefined, { rich_pixel_begin: message => {
+      ordered.push('pixel_begin');
+      expect(message).toMatchObject({ type: 'rich_pixel_begin', conversationId, messageId,
+        providerMessageId, navigationEpoch: 0,
+        recordingGeneration: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' });
+      expect(message.mediaId).toBe(`media-${message.nodeId}`);
+      return pixelReply(message);
+    } });
+    const { image, payload, calls } = pixelFixture();
+    live.window.addEventListener('message', event => {
+      if ((event as MessageEvent).data?.source === 'clf-fiber-ask') ordered.push('fiber');
+    });
+    expect(live.sent.some(row => row.type === 'rich_pixel_begin')).toBe(false);
+    await replyFiber([], [descriptor()], null, true, null, false, 100);
+    await live.hook.flush();
+    await vi.waitFor(() => expect(live!.sent.some(row => row.type === 'rich_pixel_begin')).toBe(true));
+    expect(ordered[0]).toBe('fiber');
+    expect(ordered.filter(item => item === 'fiber').length).toBeGreaterThanOrEqual(2);
+    expect(ordered.indexOf('pixel_begin')).toBeGreaterThan(ordered.indexOf('fiber'));
+    await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').length).toBe(2));
+    const [pending, available] = emitted(live.sent, 'rich_media');
+    if (!pending || !available) throw new Error('Expected both pending and available pixel observations');
+    expect(pending.event).toEqual(expect.objectContaining({ kind: 'rich_media', messageId,
+      providerMessageId, status: 'pending', mediaId: expect.any(String), nodeId: expect.any(String) }));
+    expect(Object.keys(pending.event).sort()).toEqual(['kind','time','messageId','providerMessageId','mediaId','nodeId','status'].sort());
+    expect(available.event).toMatchObject({ status: 'available', pixelBytes: payload.length,
+      pixelSha256: expect.stringMatching(/^[a-f0-9]{64}$/), previewWidth: 1024, previewHeight: 1280,
+      previewDataUrl: expect.stringMatching(/^data:image\/webp;base64,/) });
+    expect(available.pixelSeal).toMatchObject({ captureId: 'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP',
+      scanToken: pending.pixelSeal.scanToken, rootStamp: expect.stringContaining(encodeURIComponent(messageId)),
+      sourceIncarnation: pending.pixelSeal.sourceIncarnation, sourceSequence: pending.pixelSeal.sourceSequence,
+      status: 'available', pixelBytes: payload.length, pixelSha256: available.event.pixelSha256 });
+    expect(pending.pixelSeal).toMatchObject({ status: 'pending', pixelBytes: null, pixelSha256: null });
+    expect(Object.keys(available.pixelSeal)).toHaveLength(12);
+    expect(pending.recordingGeneration).toBe(available.recordingGeneration);
+    expect(available.event).not.toHaveProperty('pixelSeal');
+    expect(JSON.stringify(live.sent.filter(row => row.type === 'events'))).not.toContain('NEVER_TRANSMIT');
+    expect(calls).toEqual([{ longest: 1280, quality: 0.8 }]);
+    expect(image.isConnected).toBe(true);
+  });
+
+  it.each(['A→B', 'A→B→A'])('rearms a completed PAGE pixel after same-IMG source %s without another structural revision', async change => {
+    const issued: string[] = [];
+    let previousSource: { sourceIncarnation: string; sourceSequence: number } | null = null;
+    live = await harness(undefined, { rich_pixel_begin: message => {
+      const next = pixelReply(message);
+      const capture: Record<string, unknown> = next.capture;
+      const number = issued.length + 1;
+      const id = `P${String(number).padStart(31, '0')}`;
+      capture.captureId = id;
+      capture.slotVersion = number - 1;
+      capture.sourceIncarnation = previousSource?.sourceIncarnation ?? null;
+      capture.sourceSequence = previousSource?.sourceSequence ?? null;
+      issued.push(id);
+      return next;
+    } });
+    const { image, surface } = pixelFixture();
+    surface.querySelectorAll('img')[1]!.remove();
+    const initial = image.src;
+    await replyFiber([], [descriptor()], null, true, null, false, 120);
+    await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').map(row => row.event.status))
+      .toEqual(['pending', 'available']));
+    const first = emitted(live.sent, 'rich_media')[0];
+    if (!first?.pixelSeal) throw new Error('Missing first source receipt');
+    previousSource = { sourceIncarnation: first.pixelSeal.sourceIncarnation,
+      sourceSequence: first.pixelSeal.sourceSequence };
+    const structures = emitted(live.sent, 'assistant_message').filter(row => row.event.rich);
+    image.src = 'https://images.example.test/another-private.webp?sig=NEVER_TRANSMIT';
+    if (change === 'A→B→A') image.src = initial;
+    await replyFiber([], [descriptor()], null, true, null, false, 1200, true);
+    // A changed IMG may first publish its still-loading B receipt and then
+    // publish a fresh capture's pending receipt before B becomes available.
+    // Both are truthful; neither may publish a duplicate available nor spend
+    // a third pixel ticket. Their relative scheduling varies with the DOM load.
+    await vi.waitFor(() => {
+      const statuses = emitted(live!.sent, 'rich_media').map(row => row.event.status);
+      expect(statuses.slice(0, 2)).toEqual(['pending', 'available']);
+      expect(statuses.at(-1)).toBe('available');
+      expect(statuses.length).toBeGreaterThanOrEqual(4);
+      expect(statuses.length).toBeLessThanOrEqual(5);
+      expect(statuses.slice(2, -1).every(status => status === 'pending')).toBe(true);
+    }, { timeout: 3000 });
+    expect(issued).toHaveLength(2);
+    expect(emitted(live.sent, 'assistant_message').filter(row => row.event.rich)).toHaveLength(structures.length);
+    const second = emitted(live.sent, 'rich_media')[2];
+    if (!second?.pixelSeal) throw new Error('Missing renewed source receipt');
+    expect(second.pixelSeal.sourceSequence).toBeGreaterThan(previousSource.sourceSequence);
+    expect(second.pixelSeal.sourceIncarnation).not.toBe(previousSource.sourceIncarnation);
+    expect(JSON.stringify(live.sent.filter(row => row.type === 'events'))).not.toContain('NEVER_TRANSMIT');
+  });
+
+  it('retires available A to pending for incomplete B and keeps B identity through error and a later separately ticketed load', async () => {
+    let issued = 0;
+    const firstSource = { incarnation: null as string | null, sequence: null as number | null };
+    live = await harness(undefined, { rich_pixel_begin: message => {
+      const next = pixelReply(message);
+      const capture: Record<string, unknown> = next.capture;
+      capture.captureId = `P${String(++issued).padStart(31, '0')}`;
+      capture.slotVersion = issued - 1;
+      capture.sourceIncarnation = firstSource.incarnation;
+      capture.sourceSequence = firstSource.sequence;
+      return next;
+    } });
+    const { image, surface } = pixelFixture();
+    surface.querySelectorAll('img')[1]!.remove();
+    await replyFiber([], [descriptor()], null, true, null, false, 160);
+    await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').map(row => row.event.status))
+      .toEqual(['pending', 'available']));
+    const first = emitted(live.sent, 'rich_media')[0];
+    if (!first?.pixelSeal) throw new Error('Missing original source seal');
+    firstSource.incarnation = first.pixelSeal.sourceIncarnation;
+    firstSource.sequence = first.pixelSeal.sourceSequence;
+    const structures = emitted(live.sent, 'assistant_message').filter(row => row.event.rich).length;
+    image.src = 'https://images.example.test/incomplete-private.webp?sig=NEVER_TRANSMIT';
+    Object.defineProperty(image, 'complete', { configurable: true, value: false });
+    await replyFiber([], [descriptor()], null, true, null, false, 180, true);
+    await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').map(row => row.event.status))
+      .toEqual(['pending', 'available', 'pending']));
+    const pending = emitted(live.sent, 'rich_media')[2];
+    if (!pending?.pixelSeal) throw new Error('Missing fresh B source seal');
+    if (firstSource.sequence === null) throw new Error('Original source sequence unavailable');
+    expect(pending.pixelSeal.sourceSequence).toBeGreaterThan(firstSource.sequence);
+    expect(pending.pixelSeal.sourceIncarnation).not.toBe(firstSource.incarnation);
+    expect(pending.event).not.toHaveProperty('previewDataUrl');
+    expect(emitted(live.sent, 'assistant_message').filter(row => row.event.rich)).toHaveLength(structures);
+    image.dispatchEvent(new live.window.Event('error'));
+    await live.hook.flush();
+    expect(emitted(live.sent, 'rich_media').map(row => row.event.status))
+      .toEqual(['pending', 'available', 'pending']);
+    // The later ticket reads the canonical B source, and its independent scan
+    // must reuse the exact pending B incarnation instead of minting C.
+    firstSource.incarnation = pending.pixelSeal.sourceIncarnation;
+    firstSource.sequence = pending.pixelSeal.sourceSequence;
+    Object.defineProperty(image, 'complete', { configurable: true, value: true });
+    image.dispatchEvent(new live.window.Event('load'));
+    await replyFiber([], [descriptor()], null, true, null, false, 280, true);
+    await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').map(row => row.event.status))
+      .toEqual(['pending', 'available', 'pending', 'pending', 'available']));
+    const loaded = emitted(live.sent, 'rich_media')[4];
+    expect(loaded?.pixelSeal).toMatchObject({ sourceIncarnation: firstSource.incarnation,
+      sourceSequence: firstSource.sequence, status: 'available' });
+    expect(issued).toBe(3);
+    expect(JSON.stringify(live.sent.filter(row => row.type === 'events'))).not.toContain('NEVER_TRANSMIT');
+  });
+
+  it('keeps a changed incomplete source unretired when pixel begin is refused, then retries only on a genuine status wake', async () => {
+    let issued = 0;
+    let allow = true;
+    live = await harness(undefined, { rich_pixel_begin: message => {
+      issued++;
+      if (!allow) return { ok: false, error: 'worker_unreachable' };
+      const next = pixelReply(message);
+      next.capture.captureId = `P${String(issued).padStart(31, '0')}`;
+      return next;
+    } });
+    const { image, surface } = pixelFixture();
+    surface.querySelectorAll('img')[1]!.remove();
+    await replyFiber([], [descriptor()], null, true, null, false, 130);
+    await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').map(row => row.event.status))
+      .toEqual(['pending', 'available']));
+    allow = false;
+    image.src = 'https://images.example.test/refused-private.webp?sig=NEVER_TRANSMIT';
+    Object.defineProperty(image, 'complete', { configurable: true, value: false });
+    await replyFiber([], [descriptor()], null, true, null, false, 150, true);
+    expect(issued).toBe(2);
+    expect(emitted(live.sent, 'rich_media').map(row => row.event.status)).toEqual(['pending', 'available']);
+    await replyFiber([], [descriptor()], null, true, null, false, 80, true);
+    expect(issued).toBe(2);
+    allow = true;
+    // A missing worker status is not evidence that the prior refusal healed;
+    // the old success projection must not authorize a new begin.
+    live.reply.set('status', () => null);
+    await live.hook.checkStatus();
+    expect(issued).toBe(2);
+    live.reply.set('status', () => ({ connected: true, paired: true, port: 8765, pending: 0 }));
+    // Install the MAIN reply listener before the worker-status wake. An
+    // unrelated explicit scan here would compete with the observer's ticket.
+    const observed = replyFiber([], [descriptor()], null, true, null, false, 2200, true);
+    await live.hook.checkStatus();
+    await observed;
+    await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').map(row => row.event.status))
+      .toEqual(['pending', 'available', 'pending']));
+    expect(issued).toBe(3);
+    expect(JSON.stringify(live.sent.filter(row => row.type === 'events'))).not.toContain('NEVER_TRANSMIT');
+  });
+
+  it('reacquires a replaced physical IMG at the same exact slot through a new pixel ticket', async () => {
+    let lastSource: { sourceIncarnation: string; sourceSequence: number } | null = null;
+    let issued = 0;
+    live = await harness(undefined, { rich_pixel_begin: message => {
+      const next = pixelReply(message);
+      const capture: Record<string, unknown> = next.capture;
+      capture.captureId = `P${String(++issued).padStart(31, '0')}`;
+      capture.slotVersion = issued - 1;
+      capture.sourceIncarnation = lastSource?.sourceIncarnation ?? null;
+      capture.sourceSequence = lastSource?.sourceSequence ?? null;
+      return next;
+    } });
+    const { image, surface, root } = pixelFixture();
+    // The first image uses real crypto. Hold only the replacement's digest to
+    // distinguish a deadline race from failure to reacquire its physical slot.
+    const digest = webcrypto.subtle.digest.bind(webcrypto.subtle);
+    let digests = 0;
+    let enteredDigest!: () => void;
+    let releaseDigest!: () => void;
+    const atReplacementDigest = new Promise<void>(resolve => { enteredDigest = resolve; });
+    Object.defineProperty(live.window.crypto, 'subtle', { configurable: true, value: {
+      digest: (algorithm: AlgorithmIdentifier, data: BufferSource) => {
+        if (++digests !== 2) return digest(algorithm, data);
+        return new Promise<ArrayBuffer>((resolve, reject) => {
+          releaseDigest = () => { void digest(algorithm, data).then(resolve, reject); };
+          enteredDigest();
+        });
+      }
+    } });
+    surface.querySelectorAll('img')[1]!.remove();
+    await replyFiber([], [descriptor()], null, true, null, false, 120);
+    await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').map(row => row.event.status))
+      .toEqual(['pending', 'available']));
+    const original = emitted(live.sent, 'rich_media')[0];
+    if (!original?.pixelSeal) throw new Error('Expected original physical IMG source');
+    lastSource = { sourceIncarnation: original.pixelSeal.sourceIncarnation,
+      sourceSequence: original.pixelSeal.sourceSequence };
+    const replacement = image.cloneNode(true) as HTMLImageElement;
+    Object.defineProperties(replacement, {
+      naturalWidth: { configurable: true, value: image.naturalWidth },
+      naturalHeight: { configurable: true, value: image.naturalHeight },
+      complete: { configurable: true, value: true },
+      currentSrc: { configurable: true, get: () => replacement.src }
+    });
+    image.replaceWith(replacement);
+    // Join the replacement's independently issued ticket to a fresh Fiber
+    // frame; the deliberate later scan below must revoke this old frame.
+    const observed = replyFiber([], [descriptor()], null, true, null, false, 1200, false);
+    await atReplacementDigest;
+    expect(issued).toBe(2);
+    expect(emitted(live.sent, 'rich_media').map(row => row.event.status))
+      .toEqual(['pending', 'available', 'pending']);
+    const replacementPending = emitted(live.sent, 'rich_media')[2]!;
+    expect(replacement.isConnected).toBe(true);
+    expect(surface.querySelector('img')).toBe(replacement);
+    // Commit B pending before explicitly forcing an independent Fiber rescan.
+    // The old ticket/scan MUST be revoked by the new stamp, while the still-
+    // connected exact IMG must earn a THIRD, newly authenticated ticket and
+    // eventually available pixels. No old B digest can be republished.
+    await live.hook.flush();
+    lastSource = { sourceIncarnation: replacementPending.pixelSeal.sourceIncarnation,
+      sourceSequence: replacementPending.pixelSeal.sourceSequence };
+    await observed;
+    const rescanned = replyFiber([], [descriptor()], null, true, null, false, 2200);
+    await vi.waitFor(() => expect(root.getAttribute('data-clf-fiber-rich'))
+      .not.toBe(replacementPending.pixelSeal?.rootStamp));
+    releaseDigest();
+    await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').map(row => row.event.status))
+      .toEqual(['pending', 'available', 'pending', 'pending', 'available']), { timeout: 3000 });
+    await rescanned;
+    expect(issued).toBe(3);
+    const replacementSource = emitted(live.sent, 'rich_media')[2];
+    if (!replacementSource?.pixelSeal) throw new Error('Expected replacement physical IMG source');
+    expect(replacementSource.pixelSeal.sourceIncarnation).toBe(lastSource.sourceIncarnation);
+    expect(replacementSource.pixelSeal.sourceSequence).toBe(lastSource.sourceSequence);
+    const delivered = emitted(live.sent, 'rich_media');
+    expect(delivered[3]?.pixelSeal.sourceSequence).toBeGreaterThan(replacementSource.pixelSeal.sourceSequence);
+    expect(delivered[3]?.pixelSeal.sourceIncarnation).not.toBe(replacementSource.pixelSeal.sourceIncarnation);
+    expect(delivered[4]?.pixelSeal).toMatchObject({
+      sourceIncarnation: delivered[3]!.pixelSeal.sourceIncarnation,
+      sourceSequence: delivered[3]!.pixelSeal.sourceSequence,
+      status: 'available'
+    });
+    // Firing the cancelled 10 s timeout after successful publication cannot
+    // retroactively turn this already-settled capture into unavailable.
+    expect(live.expireDeadline(10000)).toBe(true);
+    await settle();
+    expect(emitted(live.sent, 'rich_media')).toHaveLength(delivered.length);
+  });
+
+  it.each(['surviving', 'tombstoned', 'removed-img', 'replaced-img'] as const)(
+    'status wakes a twice-restamped pixel only for a %s exact root', async rootState => {
+    let issued = 0;
+    let previous: { sourceIncarnation: string; sourceSequence: number } | null = null;
+    live = await harness(undefined, { rich_pixel_begin: message => {
+      const reply = pixelReply(message);
+      const capture: Record<string, unknown> = reply.capture;
+      capture.captureId = `P${String(++issued).padStart(31, '0')}`;
+      capture.slotVersion = issued - 1;
+      capture.sourceIncarnation = previous?.sourceIncarnation ?? null;
+      capture.sourceSequence = previous?.sourceSequence ?? null;
+      return reply;
+    } });
+    const { image, surface, root } = pixelFixture();
+    surface.querySelectorAll('img')[1]!.remove();
+    const nativeDigest = webcrypto.subtle.digest.bind(webcrypto.subtle);
+    const entered: Array<() => void> = [];
+    const release: Array<() => void> = [];
+    const phases = [0, 1].map(index => new Promise<void>(resolve => { entered[index] = resolve; }));
+    let calls = 0;
+    Object.defineProperty(live.window.crypto, 'subtle', { configurable: true, value: {
+      digest: (algorithm: AlgorithmIdentifier, bytes: BufferSource) => {
+        const index = calls++;
+        if (index >= 2) return nativeDigest(algorithm, bytes);
+        return new Promise<ArrayBuffer>((resolve, reject) => {
+          release[index] = () => { void nativeDigest(algorithm, bytes).then(resolve, reject); };
+          entered[index]!();
+        });
+      }
+    } });
+    const first = replyFiber([], [descriptor()], null, true, null, false, 120);
+    await phases[0]; await first; await live.hook.flush();
+    const a = emitted(live.sent, 'rich_media')[0]!.pixelSeal;
+    expect(a).toMatchObject({ status: 'pending' });
+    previous = { sourceIncarnation: a.sourceIncarnation, sourceSequence: a.sourceSequence };
+    const secondScan = replyFiber([], [descriptor()], null, true, null, false, 1200);
+    await vi.waitFor(() => expect(root.getAttribute('data-clf-fiber-rich')).not.toBe(a.rootStamp));
+    release[0]!();
+    await phases[1]; await secondScan; await live.hook.flush();
+    const b = emitted(live.sent, 'rich_media')[1]!.pixelSeal;
+    expect(b.sourceSequence).toBeGreaterThan(a.sourceSequence);
+    previous = { sourceIncarnation: b.sourceIncarnation, sourceSequence: b.sourceSequence };
+    const thirdScan = replyFiber([], [descriptor()], null, true, null, false, 1200);
+    await vi.waitFor(() => expect(root.getAttribute('data-clf-fiber-rich')).not.toBe(b.rootStamp));
+    release[1]!();
+    await thirdScan; await settle(); await live.hook.flush();
+    expect(issued).toBe(2);
+    expect(emitted(live.sent, 'rich_media').map(row => row.event.status)).toEqual(['pending', 'pending']);
+    expect(image.isConnected).toBe(true);
+    if (rootState === 'tombstoned') root.remove();
+    if (rootState === 'removed-img') image.remove();
+    if (rootState === 'replaced-img') {
+      const replacement = image.cloneNode(true) as HTMLImageElement;
+      Object.defineProperties(replacement, {
+        naturalWidth: { configurable: true, value: image.naturalWidth },
+        naturalHeight: { configurable: true, value: image.naturalHeight },
+        complete: { configurable: true, value: true },
+        currentSrc: { configurable: true, get: () => replacement.src }
+      });
+      image.replaceWith(replacement);
+      // The still-installed exact physical observer is allowed to notice a
+      // *genuine replacement* and independently request its own fresh ticket.
+      // Prove that path runs BEFORE status; status may not borrow the old IMG
+      // witness and issue an additional ticket for the replacement.
+      await vi.waitFor(() => expect(issued).toBe(3));
+      expect(emitted(live.sent, 'rich_media').map(row => row.event.status))
+        .toEqual(['pending', 'pending']);
+      await live.hook.checkStatus();
+      await settle();
+      expect(issued).toBe(3);
+      expect(emitted(live.sent, 'rich_media').some(row => row.event.status === 'available')).toBe(false);
+      return;
+    }
+    // A repeated rescan itself is not a retry authority. A genuine independent
+    // connected+paired status response may wake one new ticket after verifying
+    // the current durable structural prerequisite and same physical slot.
+    const resumed = replyFiber([], [descriptor()], null, true, null, false, 2200, true);
+    await live.hook.checkStatus();
+    if (rootState !== 'surviving') {
+      await resumed;
+      await settle();
+      expect(issued).toBe(2);
+      expect(emitted(live.sent, 'rich_media').map(row => row.event.status))
+        .toEqual(['pending', 'pending']);
+      return;
+    }
+    await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').map(row => row.event.status))
+      .toEqual(['pending', 'pending', 'pending', 'available']), { timeout: 3000 });
+    await resumed;
+    expect(issued).toBe(3);
+    const [c, available] = emitted(live.sent, 'rich_media').slice(-2);
+    expect(c!.pixelSeal.sourceSequence).toBeGreaterThan(b.sourceSequence);
+    expect(available!.pixelSeal).toMatchObject({
+      sourceIncarnation: c!.pixelSeal.sourceIncarnation,
+      sourceSequence: c!.pixelSeal.sourceSequence,
+      status: 'available'
+    });
+    }
+  );
+
+  it.each(['SPA A→B→A', 'Recording G0→G2'] as const)(
+    'refuses an old %s status reply for a newly deferred pixel until fresh current status', async transition => {
+      const connected = { connected: true, paired: true, port: 8765, pending: 0 };
+      let issued = 0;
+      let previous: { sourceIncarnation: string; sourceSequence: number } | null = null;
+      live = await harness(undefined, { rich_pixel_begin: message => {
+        const next = pixelReply(message);
+        const capture: Record<string, unknown> = next.capture;
+        capture.captureId = `P${String(++issued).padStart(31, '0')}`;
+        capture.slotVersion = issued - 1;
+        capture.sourceIncarnation = previous?.sourceIncarnation ?? null;
+        capture.sourceSequence = previous?.sourceSequence ?? null;
+        return next;
+      } });
+      // The old worker connection answer starts in E/G0. The new E+2 or G2
+      // has not even minted its structural/pixel receipts at request time.
+      let resolveOld!: (reply: unknown) => void;
+      const heldStatus = new Promise(resolve => { resolveOld = resolve; });
+      live.reply.set('status', () => heldStatus);
+      const beforeStatus = live.sent.filter(row => row.type === 'status').length;
+      const oldPoll = live.hook.checkStatus();
+      await vi.waitFor(() => expect(live!.sent.filter(row => row.type === 'status').length)
+        .toBe(beforeStatus + 1));
+      live.reply.set('status', () => connected);
+      if (transition === 'SPA A→B→A') {
+        live.dom.reconfigure({ url: 'https://chatgpt.com/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff' });
+        live.hook.observe();
+        live.dom.reconfigure({ url: `https://chatgpt.com/c/${conversationId}` });
+        live.hook.observe();
+      } else {
+        live.reply.set('recording_generation', () => ({ ok: true,
+          recordingGeneration: 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC' }));
+        expect(await live.runtimeMessage({ type: 'clf-recording-generation-refresh' }))
+          .toMatchObject({ ok: true });
+      }
+      await settle();
+      const { root, surface } = pixelFixture();
+      surface.querySelectorAll('img')[1]!.remove();
+      const digest = webcrypto.subtle.digest.bind(webcrypto.subtle);
+      const arrived: Array<() => void> = [];
+      const release: Array<() => void> = [];
+      const phases = [0, 1].map(index => new Promise<void>(resolve => { arrived[index] = resolve; }));
+      let calls = 0;
+      Object.defineProperty(live.window.crypto, 'subtle', { configurable: true, value: {
+        digest: (algorithm: AlgorithmIdentifier, bytes: BufferSource) => {
+          const index = calls++;
+          if (index >= 2) return digest(algorithm, bytes);
+          return new Promise<ArrayBuffer>((resolve, reject) => {
+            release[index] = () => { void digest(algorithm, bytes).then(resolve, reject); };
+            arrived[index]!();
+          });
+        }
+      } });
+      // Both new-epoch tickets genuinely reach toBlob/digest and seal durable
+      // pending before the old status response is permitted to settle.
+      const first = replyFiber([], [descriptor()], null, true, null, false, 180);
+      await phases[0]; await first; await live.hook.flush();
+      const a = emitted(live.sent, 'rich_media').at(-1)!.pixelSeal;
+      expect(a).toMatchObject({ status: 'pending' });
+      previous = { sourceIncarnation: a.sourceIncarnation, sourceSequence: a.sourceSequence };
+      const second = replyFiber([], [descriptor()], null, true, null, false, 1200);
+      await vi.waitFor(() => expect(root.getAttribute('data-clf-fiber-rich')).not.toBe(a.rootStamp));
+      release[0]!();
+      await phases[1]; await second; await live.hook.flush();
+      const b = emitted(live.sent, 'rich_media').at(-1)!.pixelSeal;
+      expect(b.sourceSequence).toBeGreaterThan(a.sourceSequence);
+      previous = { sourceIncarnation: b.sourceIncarnation, sourceSequence: b.sourceSequence };
+      const third = replyFiber([], [descriptor()], null, true, null, false, 1200);
+      await vi.waitFor(() => expect(root.getAttribute('data-clf-fiber-rich')).not.toBe(b.rootStamp));
+      release[1]!();
+      await third; await settle(); await live.hook.flush();
+      expect(issued).toBe(2);
+      expect(emitted(live.sent, 'rich_media').map(row => row.event.status)).toEqual(['pending', 'pending']);
+
+      resolveOld(connected);
+      await oldPoll;
+      await settle();
+      expect(issued).toBe(2); // old E/G must not wake this fresh deferred key
+      expect(emitted(live.sent, 'rich_media').map(row => row.event.status)).toEqual(['pending', 'pending']);
+
+      // A separately obtained current-epoch status is the only rate-limit wake.
+      const resumed = replyFiber([], [descriptor()], null, true, null, false, 2200, true);
+      await live.hook.checkStatus();
+      await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').map(row => row.event.status))
+        .toEqual(['pending', 'pending', 'pending', 'available']), { timeout: 3000 });
+      await resumed;
+      expect(issued).toBe(3);
+      const [pending, available] = emitted(live.sent, 'rich_media').slice(-2);
+      expect(available!.pixelSeal).toMatchObject({
+        sourceIncarnation: pending!.pixelSeal.sourceIncarnation,
+        sourceSequence: pending!.pixelSeal.sourceSequence,
+        status: 'available'
+      });
+    }
+  );
+
+  it.each(['toBlob', 'arrayBuffer', 'digest'] as const)(
+    'enforces the real 10-second %s deadline without publishing late pixels', async stage => {
+      live = await harness(undefined, { rich_pixel_begin: pixelReply });
+      const { payload, surface } = pixelFixture();
+      surface.querySelectorAll('img')[1]!.remove();
+      const window = live.window as any;
+      let enter!: () => void;
+      let finish!: () => void;
+      const reached = new Promise<void>(resolve => { enter = resolve; });
+      if (stage === 'digest') {
+        const digest = webcrypto.subtle.digest.bind(webcrypto.subtle);
+        Object.defineProperty(window.crypto, 'subtle', { configurable: true, value: {
+          digest: (algorithm: AlgorithmIdentifier, bytes: BufferSource) =>
+            new Promise<ArrayBuffer>((resolve, reject) => {
+              finish = () => { void digest(algorithm, bytes).then(resolve, reject); };
+              enter();
+            })
+        } });
+      } else {
+        window.HTMLCanvasElement.prototype.toBlob = function (done: (blob: unknown) => void) {
+          const blob = { type: 'image/webp', size: payload.length,
+            arrayBuffer: () => stage === 'arrayBuffer'
+              ? new Promise<ArrayBuffer>(resolve => {
+                finish = () => resolve(payload.buffer.slice(0));
+                enter();
+              })
+              : Promise.resolve(payload.buffer.slice(0)) };
+          if (stage === 'toBlob') {
+            finish = () => done(blob);
+            enter();
+          } else done(blob);
+        };
+      }
+      const observed = replyFiber([], [descriptor()], null, true, null, false, 150);
+      await reached;
+      await observed;
+      await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').map(row => row.event.status))
+        .toEqual(['pending']));
+      expect(live.expireDeadline(10000)).toBe(true);
+      await settle();
+      await live.hook.flush();
+      expect(emitted(live.sent, 'rich_media').map(row => row.event.status))
+        .toEqual(stage === 'digest' ? ['pending'] : ['pending', 'unavailable']);
+      if (stage !== 'digest') expect(emitted(live.sent, 'rich_media').at(-1)?.event)
+        .toMatchObject({ reason: 'invalid' });
+      finish();
+      await settle();
+      await live.hook.flush();
+      expect(emitted(live.sent, 'rich_media').some(row => row.event.status === 'available')).toBe(false);
+      expect(JSON.stringify(live.sent.filter(row => row.type === 'events'))).not.toContain('NEVER_TRANSMIT');
+    }
+  );
+
+  it.each(['detached', 'navigation', 'recording-off'] as const)(
+    'does not rearm an in-flight pixel from a %s tombstone', async invalidation => {
+      let issued = 0;
+      live = await harness(undefined, { rich_pixel_begin: message => {
+        issued++;
+        return pixelReply(message);
+      } });
+      const { root, surface } = pixelFixture();
+      surface.querySelectorAll('img')[1]!.remove();
+      const originalDigest = webcrypto.subtle.digest.bind(webcrypto.subtle);
+      let entered!: () => void;
+      let release!: () => void;
+      const atDigest = new Promise<void>(resolve => { entered = resolve; });
+      Object.defineProperty(live.window.crypto, 'subtle', { configurable: true, value: {
+        digest: (algorithm: AlgorithmIdentifier, bytes: BufferSource) =>
+          new Promise<ArrayBuffer>((resolve, reject) => {
+            release = () => { void originalDigest(algorithm, bytes).then(resolve, reject); };
+            entered();
+          })
+      } });
+      const first = replyFiber([], [descriptor()], null, true, null, false, 120);
+      await atDigest;
+      await first;
+      await live.hook.flush();
+      expect(emitted(live.sent, 'rich_media').map(row => row.event.status)).toEqual(['pending']);
+      expect(issued).toBe(1);
+      if (invalidation === 'detached') root.remove();
+      else if (invalidation === 'navigation') {
+        live.dom.reconfigure({ url: 'https://chatgpt.com/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff' });
+        live.hook.observe();
+      } else {
+        live.reply.set('recording_generation', () => ({ ok: false, error: 'recording_off' }));
+        await live.runtimeMessage({ type: 'clf-recording-generation-refresh' });
+      }
+      const after = replyFiber([], [descriptor()], null, true, null, false, 160);
+      await after;
+      release();
+      await settle();
+      await live.hook.flush();
+      expect(issued).toBe(1);
+      expect(emitted(live.sent, 'rich_media').map(row => row.event.status)).toEqual(['pending']);
+      expect(JSON.stringify(live.sent.filter(row => row.type === 'events'))).not.toContain('NEVER_TRANSMIT');
+    }
+  );
+
+  it('drains three exact image slots after the first two consume their issued pixel tickets', async () => {
+    let issued = 0;
+    live = await harness(undefined, { rich_pixel_begin: message => {
+      const next = pixelReply(message);
+      next.capture.captureId = `P${String(++issued).padStart(31, '0')}`;
+      return next;
+    } });
+    const { image, surface } = pixelFixture();
+    const second = surface.querySelectorAll('img')[1]!;
+    second.src = 'https://images.example.test/second.webp';
+    Object.defineProperties(second, {
+      complete: { configurable: true, value: true },
+      currentSrc: { configurable: true, get: () => second.src }
+    });
+    const third = live.document.createElement('img');
+    third.src = 'https://images.example.test/third.webp';
+    third.alt = 'Third';
+    Object.defineProperties(third, {
+      naturalWidth: { configurable: true, value: 200 },
+      naturalHeight: { configurable: true, value: 100 },
+      complete: { configurable: true, value: true },
+      currentSrc: { configurable: true, get: () => third.src }
+    });
+    surface.querySelectorAll('button')[1]!.append(third);
+    await replyFiber([], [descriptor()], null, true, null, false, 1200);
+    await vi.waitFor(() => {
+      const rows = emitted(live!.sent, 'rich_media');
+      expect(issued).toBe(3);
+      expect(rows.filter(row => row.event.status === 'pending')).toHaveLength(3);
+      expect(rows.filter(row => row.event.status === 'available')).toHaveLength(3);
+      for (const mediaId of new Set(rows.map(row => row.event.mediaId))) {
+        expect(rows.filter(row => row.event.mediaId === mediaId).map(row => row.event.status))
+          .toEqual(['pending', 'available']);
+      }
+    }, { timeout: 3000 });
+    expect(image.isConnected).toBe(true);
+  });
+
+  it('preserves an available PAGE source across a text-only rich revision without another pixel ticket', async () => {
+    live = await harness(undefined, { rich_pixel_begin: pixelReply });
+    const { surface } = pixelFixture();
+    surface.querySelectorAll('img')[1]!.remove();
+    await replyFiber([], [descriptor()], null, true, null, false, 100);
+    await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').map(row => row.event.status))
+      .toEqual(['pending', 'available']));
+    const original = emitted(live.sent, 'rich_media')[0];
+    if (!original?.pixelSeal) throw new Error('Missing original pixel source receipt');
+    surface.querySelector('button')!.setAttribute('aria-label', 'Forest revised');
+    await replyFiber([], [descriptor()], null, true, null, false, 90);
+    await live.hook.flush();
+    expect(emitted(live.sent, 'assistant_message').filter(row => row.event.rich).length).toBeGreaterThan(1);
+    expect(live.sent.filter(row => row.type === 'rich_pixel_begin')).toHaveLength(1);
+    expect(emitted(live.sent, 'rich_media').map(row => row.event.status)).toEqual(['pending', 'available']);
+    expect(JSON.stringify(live.sent.filter(row => row.type === 'events'))).not.toContain('NEVER_TRANSMIT');
+  });
+
+  it('does not begin pixels until the exact sealed structural row receives durable worker custody', async () => {
+    let durable = false;
+    live = await harness(undefined, {
+      events: () => durable ? { ok: true, durable: true, pending: 0 } :
+        { ok: false, error: 'worker_unreachable' },
+      rich_pixel_begin: pixelReply
+    });
+    pixelFixture();
+    await replyFiber([], [descriptor()], null, true, null, false, 60);
+    await live.hook.flush();
+    expect(emitted(live.sent, 'assistant_message').at(-1)?.richSeal).toMatchObject({ messageId, providerMessageId });
+    expect(live.sent.filter(row => row.type === 'rich_pixel_begin')).toHaveLength(0);
+    durable = true;
+    // Keep the real Fiber reply listener for the later, independently ticketed
+    // pixel scan that the exact structural ACK may schedule.
+    await replyFiber([], [descriptor()], null, true, null, false, 100);
+    await live.hook.flush();
+    await vi.waitFor(() => expect(live!.sent.some(row => row.type === 'rich_pixel_begin')).toBe(true));
+    await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').map(row => row.event.status))
+      .toEqual(['pending', 'available']));
+  });
+
+  it('retires synchronous A→B→A source mutations during toBlob; the sealed pending is the only suffix', async () => {
+    let issued = 0;
+    live = await harness(undefined, { rich_pixel_begin: message =>
+      ++issued === 1 ? pixelReply(message) : { ok: false, error: 'worker_unreachable' } });
+    const { image, payload } = pixelFixture();
+    const window = live.window as any;
+    let enteredToBlob!: () => void;
+    const atToBlob = new Promise<void>(resolve => { enteredToBlob = resolve; });
+    window.HTMLCanvasElement.prototype.toBlob = function (done: (blob: unknown) => void) {
+      enteredToBlob();
+      const original = image.src;
+      image.src = 'https://images.example.test/other-private.webp';
+      image.src = original;
+      // A valid payload is necessary: malformed zeros would themselves suppress
+      // available and make this source-mutation negative a false positive.
+      done({ type: 'image/webp', size: payload.length, arrayBuffer: async () => payload.buffer.slice(0) });
+    };
+    // Keep the independently issued pixel scan's MAIN reply listener installed.
+    // Seeing rich_pixel_begin only proves upstream ticket issuance, not toBlob.
+    const observed = replyFiber([], [descriptor()], null, true, null, false, 1200);
+    await atToBlob;
+    await observed;
+    await live.hook.flush();
+    await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').length).toBeGreaterThan(0));
+    expect(emitted(live.sent, 'rich_media').map(row => row.event.status)).toEqual(['pending']);
+    expect(emitted(live.sent, 'rich_media')[0]?.pixelSeal).toMatchObject({ status: 'pending' });
+    expect(JSON.stringify(live.sent.filter(row => row.type === 'events'))).not.toContain('NEVER_TRANSMIT');
+  });
+
+  it('queues tainted as unavailable only under the same live source and rejects unsealed raw rich_media', async () => {
+    live = await harness(undefined, { rich_pixel_begin: pixelReply });
+    pixelFixture();
+    (live.window as any).HTMLCanvasElement.prototype.getContext = () => ({
+      drawImage() { throw Object.assign(new Error('cross origin'), { name: 'SecurityError' }); }
+    });
+    // Issuing the pixel ticket is not the fresh Fiber scan that can seal its
+    // source. Keep the actual reply listener alive until that independent scan
+    // has emitted both observations, even under full-suite scheduling load.
+    const observed = replyFiber([], [descriptor()], null, true, null, false, 2200);
+    await vi.waitFor(() => expect(emitted(live!.sent, 'rich_media').map(row => row.event.status))
+      .toEqual(['pending', 'unavailable']), { timeout: 3000 });
+    await observed;
+    await live.hook.flush();
+    expect(emitted(live.sent, 'rich_media').at(-1)!.event).toMatchObject({ reason: 'tainted' });
+    live.hook.emit({ kind: 'rich_media', messageId, providerMessageId,
+      mediaId: 'media-n-0', nodeId: 'n-0', status: 'available', pixelBytes: 1,
+      pixelSha256: '0'.repeat(64), previewDataUrl: 'data:image/webp;base64,AA==', previewWidth: 1, previewHeight: 1,
+      pixelSeal: { captureId: 'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP' } });
+    await live.hook.flush();
+    expect(emitted(live.sent, 'rich_media')).toHaveLength(2);
   });
 });
 
@@ -2203,7 +3205,9 @@ async function replyFiber(
   // Describe blocks that keep their own harness variable pass it; everything else uses the
   // shared one.
   harnessed: Harness | null = null,
-  observeOnly = false
+  observeOnly = false,
+  keepListenerMs = 0,
+  listenOnly = false
 ): Promise<void> {
   const active = harnessed ?? live!;
   const window = active.window as any;
@@ -2211,7 +3215,8 @@ async function replyFiber(
   // suite down. Here that would fire the scan's give-up timer before jsdom could
   // deliver the request, so this one case runs on real timers.
   const instant = window.setTimeout;
-  window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
+  window.setTimeout = (fn: () => void, ms: number) =>
+    ms === 1250 || ms === 10000 ? instant(fn, ms) : globalThis.setTimeout(fn, ms);
   const onAsk = (event: any) => {
     if (!event.data || event.data.source !== 'clf-fiber-ask') return;
     const scanToken = event.data.nonce;
@@ -2261,10 +3266,18 @@ async function replyFiber(
   };
   window.addEventListener('message', onAsk);
   try {
-    if (observeOnly) {
+    if (listenOnly) {
+      // The source observer itself must request the new page-model frame.
+      // A concurrent explicit refresh would replace its stamp during toBlob.
+      await new Promise(resolve => globalThis.setTimeout(resolve, keepListenerMs));
+    } else if (observeOnly) {
       active.hook.observe();
       await new Promise(resolve => globalThis.setTimeout(resolve, 100));
     } else await active.hook.refreshFiber(settled);
+    // A successful prefetch may elect a *separate* scan only after the canonical
+    // scan returns. Keep this real reply listener for that bounded follow-up in
+    // the few tests that expressly verify delayed rich hydration.
+    if (!listenOnly && keepListenerMs > 0) await new Promise(resolve => globalThis.setTimeout(resolve, keepListenerMs));
   } finally {
     window.removeEventListener('message', onAsk);
     window.setTimeout = instant;
@@ -7885,6 +8898,211 @@ describe('a stop button that goes missing while the turn is still running', () =
     await replyFiber([], [{ turnId: 'turn-generated-gallery', conversationId, messages: [], activities: [], images }]);
     await settle(); await live.hook.flush();
     expect(emitted(live.sent, 'native_image')).toHaveLength(6);
+  });
+
+  const generatedFixture = (assets: string[]) => {
+    const messageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const section = assistantTurn(live!.document, 'turn-bounded-generated-images', []);
+    section.setAttribute('data-clf-fiber-turn', '0');
+    for (const assetId of assets) {
+      const node = live!.document.createElement('img');
+      node.src = `https://chatgpt.com/backend-api/estuary/content?id=${assetId}&sig=private`;
+      node.setAttribute('data-clf-fiber-image', `0:${encodeURIComponent(messageId)}:${encodeURIComponent(assetId)}`);
+      Object.defineProperties(node, { complete: { configurable: true, value: true },
+        naturalWidth: { configurable: true, value: 1254 }, naturalHeight: { configurable: true, value: 1254 } });
+      section.append(node);
+    }
+    const descriptor = { turnId: 'turn-bounded-generated-images', conversationId, messages: [], activities: [],
+      images: assets.map((assetId, partOrder) => ({ messageId, assetId, providerRole: 'tool',
+        providerChannel: 'final', providerStatus: 'finished_successfully', width: 1254, height: 1254,
+        order: 0, partOrder })) };
+    return { messageId, conversationId, descriptor };
+  };
+
+  it('re-encodes one exact loaded native image within a fixed budget instead of discarding a large first WebP', async () => {
+    live = await harness();
+    const section = assistantTurn(live.document, 'turn-large-native-webp', []);
+    section.setAttribute('data-clf-fiber-turn', '0');
+    const messageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const assetId = 'file_000000005f2c823085a542762d1de785';
+    const node = live.document.createElement('img');
+    node.src = `https://chatgpt.com/backend-api/estuary/content?id=${assetId}&sig=private`;
+    node.setAttribute('data-clf-fiber-image', `0:${encodeURIComponent(messageId)}:${encodeURIComponent(assetId)}`);
+    Object.defineProperties(node, { complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 1254 }, naturalHeight: { configurable: true, value: 1254 } });
+    section.append(node);
+    const encoded: Array<{ width: number; height: number; quality: number }> = [];
+    const draw = vi.fn();
+    (live.window.HTMLCanvasElement.prototype as any).getContext = () => ({ drawImage: draw });
+    (live.window.HTMLCanvasElement.prototype as any).toBlob = function (
+      callback: (blob: any) => void, _mime: string, quality: number
+    ) {
+      encoded.push({ width: this.width, height: this.height, quality });
+      if (encoded.length === 1) return callback({ type: 'image/webp', size: 400_000 });
+      const bytes = new TextEncoder().encode('bounded-rescaled-webp');
+      callback({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
+    };
+    await replyFiber([], [{ turnId: 'turn-large-native-webp',
+      conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', messages: [], activities: [],
+      images: [{ messageId, assetId, providerRole: 'tool', providerChannel: 'final',
+        providerStatus: 'finished_successfully', width: 1254, height: 1254,
+        order: 0, partOrder: 0 }] }]);
+    await settle(); await live.hook.flush(); await settle();
+    const available = emitted(live.sent, 'native_image').filter(row => row.event.previewStatus === 'available');
+    expect(available).toHaveLength(1);
+    expect(available[0]!.event).toMatchObject({ providerAssetId: assetId,
+      previewWidth: encoded[1]!.width, previewHeight: encoded[1]!.height });
+    expect(encoded).toEqual([
+      { width: 1254, height: 1254, quality: 0.8 },
+      { width: 1200, height: 1200, quality: 0.7 }
+    ]);
+    expect(encoded[1]!.width).toBeLessThan(encoded[0]!.width);
+    expect(encoded[1]!.quality).toBeLessThan(encoded[0]!.quality);
+    expect(draw.mock.calls.every(call => call[0] === node)).toBe(true);
+    expect(emitted(live.sent, 'native_image').filter(row => row.event.previewStatus === 'unavailable')).toHaveLength(0);
+    expect(JSON.stringify(live.sent)).not.toContain('sig=private');
+  });
+
+  it('bounds repeated oversized encodes without inventing pixels or an image action', async () => {
+    live = await harness();
+    const section = assistantTurn(live.document, 'turn-uncompressible-image', []);
+    section.setAttribute('data-clf-fiber-turn', '0');
+    const messageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const assetId = 'file_000000005f2c823085a542762d1de785';
+    const node = live.document.createElement('img');
+    node.src = `https://chatgpt.com/backend-api/estuary/content?id=${assetId}&sig=private`;
+    node.setAttribute('data-clf-fiber-image', `0:${encodeURIComponent(messageId)}:${encodeURIComponent(assetId)}`);
+    Object.defineProperties(node, { complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 1254 }, naturalHeight: { configurable: true, value: 1254 } });
+    section.append(node);
+    const attempted: Array<{ width: number; height: number; quality: number }> = [];
+    const encode = vi.fn(function (this: HTMLCanvasElement, callback: (blob: any) => void, _mime: string, quality: number) {
+      attempted.push({ width: this.width, height: this.height, quality });
+      callback({ type: 'image/webp', size: 400_000 });
+    });
+    (live.window.HTMLCanvasElement.prototype as any).getContext = () => ({ drawImage: () => undefined });
+    (live.window.HTMLCanvasElement.prototype as any).toBlob = encode;
+    await replyFiber([], [{ turnId: 'turn-uncompressible-image',
+      conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', messages: [], activities: [],
+      images: [{ messageId, assetId, providerRole: 'tool', providerChannel: 'final',
+        providerStatus: 'finished_successfully', width: 1254, height: 1254,
+        order: 0, partOrder: 0 }] }]);
+    await settle(); await live.hook.flush(); await settle();
+    expect(encode).toHaveBeenCalledTimes(3);
+    expect(attempted).toEqual([
+      { width: 1254, height: 1254, quality: 0.8 },
+      { width: 1200, height: 1200, quality: 0.7 },
+      { width: 800, height: 800, quality: 0.6 }
+    ]);
+    expect(emitted(live.sent, 'native_image').filter(row => row.event.previewStatus === 'available')).toHaveLength(0);
+    expect(emitted(live.sent, 'native_image').filter(row => row.event.previewStatus === 'unavailable')
+      .map(row => row.event.previewError)).toEqual(['oversized']);
+    expect(JSON.stringify(live.sent)).not.toContain('sig=private');
+  });
+
+  it.each([
+    { name: 'null WebP encoder output', fault: 'null', reason: 'invalid' },
+    { name: 'unsupported MIME', fault: 'mime', reason: 'invalid' },
+    { name: 'missing canvas context', fault: 'context', reason: 'invalid' },
+    { name: 'tainted canvas draw', fault: 'security', reason: 'tainted' }
+  ])('reports $name truthfully without emitting preview bytes', async ({ fault, reason }) => {
+    live = await harness();
+    const assetId = 'file_000000005f2c823085a542762d1de785';
+    const { descriptor } = generatedFixture([assetId]);
+    (live.window.HTMLCanvasElement.prototype as any).getContext = () => fault === 'context' ? null : {
+      drawImage: () => { if (fault === 'security') throw new live!.window.DOMException('blocked', 'SecurityError'); }
+    };
+    (live.window.HTMLCanvasElement.prototype as any).toBlob = (callback: (blob: any) => void) =>
+      callback(fault === 'null' ? null : { type: 'image/png', size: 12 });
+    await replyFiber([], [descriptor]); await settle(); await live.hook.flush();
+    const events = emitted(live.sent, 'native_image').map(row => row.event);
+    expect(events.filter(row => row.previewStatus === 'available')).toHaveLength(0);
+    expect(events.filter(row => row.previewStatus === 'unavailable').map(row => row.previewError)).toEqual([reason]);
+    expect(JSON.stringify(live.sent)).not.toContain('sig=private');
+  });
+
+  it('keeps at most two physical WebP encodes across A-to-B-to-A until an old callback settles', async () => {
+    live = await harness();
+    const assets = [0, 1, 2].map(index => `file_${String(index).padStart(28, '0')}`);
+    const { descriptor, conversationId } = generatedFixture(assets);
+    const held: Array<(blob: any) => void> = [];
+    (live.window.HTMLCanvasElement.prototype as any).getContext = () => ({ drawImage: () => undefined });
+    (live.window.HTMLCanvasElement.prototype as any).toBlob = (callback: (blob: any) => void) => { held.push(callback); };
+    await replyFiber([], [{ ...descriptor, images: descriptor.images.slice(0, 2) }]); await settle();
+    expect(held).toHaveLength(2);
+    live.dom.reconfigure({ url: 'https://chatgpt.com/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff' });
+    live.hook.observe();
+    live.dom.reconfigure({ url: `https://chatgpt.com/c/${conversationId}` });
+    live.hook.observe();
+    expect(await live.runtimeMessage({ type: 'clf-recording-generation-refresh' })).toMatchObject({ ok: true });
+    await replyFiber([], [{ ...descriptor, images: [descriptor.images[2]] }]); await settle();
+    expect(held).toHaveLength(2); // Both physical encoders still occupy the global budget.
+    const bytes = new TextEncoder().encode('bounded-native-webp');
+    held[0]!({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
+    await settle();
+    expect(held).toHaveLength(3);
+    expect(emitted(live.sent, 'native_image').filter(row => row.event.previewStatus === 'available')).toHaveLength(0);
+    held[2]!({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
+    held[1]!({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
+    await settle(); await live.hook.flush();
+    expect(emitted(live.sent, 'native_image').filter(row => row.event.previewStatus === 'available')
+      .map(row => row.event.providerAssetId)).toEqual([assets[2]]);
+  });
+
+  it('bounds queued previews while leaving a deferred exact image retryable on a later scan', async () => {
+    live = await harness();
+    const assets = Array.from({ length: 67 }, (_, index) => `file_${String(index).padStart(28, '0')}`);
+    const { descriptor } = generatedFixture(assets);
+    const held: Array<(blob: any) => void> = [];
+    let encodes = 0;
+    const bytes = new TextEncoder().encode('bounded-preview');
+    (live.window.HTMLCanvasElement.prototype as any).getContext = () => ({ drawImage: () => undefined });
+    (live.window.HTMLCanvasElement.prototype as any).toBlob = (callback: (blob: any) => void) => {
+      encodes++;
+      if (encodes <= 2) held.push(callback);
+      else callback({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
+    };
+    await replyFiber([], [descriptor]); await settle();
+    expect(encodes).toBe(2);
+    expect(emitted(live.sent, 'native_image').filter(row => row.event.previewStatus === 'pending')).toHaveLength(67);
+    held[0]!({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
+    held[1]!({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
+    await settle(800);
+    expect(encodes).toBe(66); // Two active + only 64 bounded queued; last was deferred.
+    expect(emitted(live.sent, 'native_image').filter(row => row.event.previewStatus === 'available')
+      .some(row => row.event.providerAssetId === assets[66])).toBe(false);
+    await replyFiber([], [{ ...descriptor, images: [descriptor.images[66]] }]); await settle(); await live.hook.flush();
+    expect(encodes).toBe(67);
+    expect(emitted(live.sent, 'native_image').filter(row => row.event.previewStatus === 'available')
+      .some(row => row.event.providerAssetId === assets[66])).toBe(true);
+    expect(JSON.stringify(live.sent)).not.toContain('sig=private');
+  });
+
+  it('retires only an overflow-evicted exact preview cache entry so the same tuple and generation can re-encode', async () => {
+    let workerAccepts = false;
+    live = await harness(undefined, { events: () => workerAccepts
+      ? { ok: true, pending: 0, durable: true } : { ok: false, error: 'worker_unreachable' } });
+    const assetId = 'file_000000005f2c823085a542762d1de785';
+    const { descriptor } = generatedFixture([assetId]);
+    const bytes = new TextEncoder().encode('retriable-webp');
+    const encode = vi.fn((callback: (blob: any) => void) =>
+      callback({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer }));
+    (live.window.HTMLCanvasElement.prototype as any).getContext = () => ({ drawImage: () => undefined });
+    (live.window.HTMLCanvasElement.prototype as any).toBlob = encode;
+    await replyFiber([], [descriptor]); await settle(); await live.hook.flush();
+    expect(encode).toHaveBeenCalledTimes(1);
+    expect(emitted(live.sent, 'native_image').filter(row => row.event.previewStatus === 'available')).toHaveLength(1);
+    for (let index = 0; index < 405; index++) live.hook.emit({ kind: 'chat_error', text: `outage-${index}` });
+    await live.hook.flush();
+    await replyFiber([], [descriptor]); await settle();
+    expect(encode).toHaveBeenCalledTimes(2);
+    workerAccepts = true;
+    await live.hook.flush();
+    const retried = emitted(live.sent, 'native_image').filter(row => row.event.previewStatus === 'available');
+    expect(retried).toHaveLength(2);
+    expect(retried.every(row => row.event.providerAssetId === assetId)).toBe(true);
+    expect(JSON.stringify(live.sent)).not.toContain('sig=private');
   });
 
   it.each([
@@ -16198,6 +17416,22 @@ describe('the goal loop', () => {
     await settle();
     expect(sends()).toBe(1);
     expect(new Set(acks(live).map((message) => message.token))).toEqual(new Set(['g-token']));
+  });
+
+  it('keeps ordinary Goal Send and ACK independent of a never-answering rich prefetch', async () => {
+    const source = liveFeed();
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, {
+      ...source.replies,
+      rich_capture_begin: () => new Promise(() => undefined)
+    });
+    const sends = watchSend(live.document);
+    source.set(readyDraft('Canonical Goal still sends'));
+    await live.hook.pullActivity();
+    await settle();
+    expect(composerText(live.document)).toBe('Canonical Goal still sends');
+    expect(sends()).toBe(1);
+    expect(acks(live)).toMatchObject([{ conversationId: CHAT, token: 'g-token' }]);
+    expect(live.sent.filter(message => message.type === 'rich_capture_begin')).toHaveLength(1);
   });
 
   /**

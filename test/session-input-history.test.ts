@@ -3,7 +3,8 @@ import { promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import sharp from 'sharp';
+// Spy on the actual main-process backend, not a separate ESM wrapper of upstream Sharp.
+import sharp from '../src/main/sharp.js';
 import { appendEvent, clearImageStorage, createSession, deleteSession, flushSessions, getSession, initSessionStore, observeSessionModel, readEvents, rebindSession, resetSessionStoreForTests, sessionsRoot, upsertMessageEvent, upsertNativeImageEvent, upsertRichMedia, upsertRichMessage, writeAsset } from '../src/main/session/store.js';
 import { recordDeliveredInput, recordedInputImage } from '../src/main/session/input-history.js';
 import type { InputEntry } from '../src/main/session/input.js';
@@ -11,9 +12,15 @@ import { chronological } from '../src/shared/chronology.js';
 import * as store from '../src/main/session/store.js';
 import { initDurableStore, readDurable, writeDurableNow, flushDurable } from '../src/main/durable.js';
 import { configureInputDelivery, listInputs, resetInputForTests, claimBrowserInput } from '../src/main/session/input.js';
+import { initConfigPath, loadConfig } from '../src/main/config.js';
 
 let directory: string;
-beforeEach(async () => { directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cos-input-history-')); initSessionStore(directory); });
+beforeEach(async () => {
+  directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cos-input-history-'));
+  initConfigPath(directory);
+  await loadConfig();
+  initSessionStore(directory);
+});
 afterEach(async () => { vi.restoreAllMocks(); resetInputForTests(); await flushDurable(); resetSessionStoreForTests(); await fs.rm(directory, { recursive: true, force: true }); });
 
 /** Synthetic *disk-only* future owner: this does not authorize production rich availability. */

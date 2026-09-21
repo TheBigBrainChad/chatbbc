@@ -176,6 +176,52 @@ describe('durable state commit boundary', () => {
     await expect(readDurable('probe')).resolves.toEqual({ generation: 1 });
   });
 
+  it('never retries a failed no-retry checkpoint after reporting rejection', async () => {
+    await tempStore();
+    await writeDurableNow('rich-actions', { generation: 1 });
+    const rejected = vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('checkpoint refused'));
+    await expect(writeDurableNow('rich-actions', { generation: 2 }, { retryOnFailure: false }))
+      .rejects.toThrow('checkpoint refused');
+    rejected.mockRestore();
+    await flushDurable();
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'valid', value: { generation: 1 } });
+  });
+
+  it('does not cancel a newer generation when a no-retry checkpoint fails', async () => {
+    await tempStore();
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const rejected = vi.spyOn(fs, 'rename').mockImplementationOnce(async () => {
+      entered();
+      await gate;
+      throw new Error('older checkpoint refused');
+    });
+    const first = writeDurableNow('rich-actions', { generation: 1 }, { retryOnFailure: false });
+    await waiting;
+    writeDurableSoon('rich-actions', { generation: 2 });
+    release();
+    await expect(first).rejects.toThrow('older checkpoint refused');
+    rejected.mockRestore();
+    await flushDurable();
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'valid', value: { generation: 2 } });
+  });
+
+  it('does not erase an ambiguous successful rename or retry it after a lost checkpoint ACK', async () => {
+    await tempStore();
+    const original = fs.rename.bind(fs);
+    const renamed = vi.spyOn(fs, 'rename').mockImplementationOnce(async (source, target) => {
+      await original(source, target);
+      throw new Error('checkpoint ACK lost');
+    });
+    await expect(writeDurableNow('rich-actions', { generation: 1 }, { retryOnFailure: false }))
+      .rejects.toThrow('checkpoint ACK lost');
+    renamed.mockRestore();
+    await flushDurable();
+    expect(await readDurableStrict('rich-actions')).toEqual({ kind: 'valid', value: { generation: 1 } });
+  });
+
   it('never lets an older in-flight generation erase a newer pending value', async () => {
     await tempStore();
     let releaseRename!: () => void;

@@ -17,7 +17,7 @@ import { goalErrorMessage } from '../shared/goal-errors.js';
 import type { GoalModel } from '../shared/goal-reasoning.js';
 import { renderGoalReasoning } from './goal-reasoning.js';
 import { renderRichResponse } from './rich-response.js';
-import { retireRichImageViewer, retireRichImageViewerWithin, retireStaleRichImageViewer } from './rich-image.js';
+import { localDataUrl, retireRichImageViewer, retireRichImageViewerWithin, retireStaleRichImageViewer } from './rich-image.js';
 import { RICH_LIMITS } from '../shared/rich-response.js';
 import { preserveTimelineViewport } from './timeline-scroll.js';
 import { createSidebarOrder } from './sidebar-order.js';
@@ -1330,10 +1330,23 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       box.append(el('b', '', () => event.final ? 'ChatGPT' : t("ChatGPT (partial)")));
       const id = context?.id ?? selectedId;
       const generation = selectionGeneration;
+      const currentRichRow = () => context ? context.current() : selectedId === id && selectionGeneration === generation;
       box.append(event.rich ? renderRichResponse(event.rich, event.message.text, id ? {
         sessionId: id,
         media: event.richMedia ?? [],
-        current: () => context ? context.current() : selectedId === id && selectionGeneration === generation
+        current: currentRichRow,
+        // Displaying persisted richOrigin is not a URL grant. The explicit button
+        // performs no action or browser input: main rereads the exact canonical
+        // historical assistant under the current window/selection witness.
+        ...(event.richOrigin && event.messageId ? { openOriginal: async () => {
+          const selected = acknowledgedUiSelection;
+          if (!currentRichRow() || selected?.sessionId !== id) return false;
+          try {
+            const reply = await api.openRichOriginal(id, event.messageId!);
+            return currentRichRow() && acknowledgedUiSelection?.generation === selected.generation &&
+              reply.ok && reply.data === true;
+          } catch { return false; }
+        } } : {})
       } : undefined)
         : renderedMarkdown(event.message.text, event.renderedHtml));
       if (event.richMediaUnavailable) {
@@ -1368,7 +1381,10 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
         void (async () => {
           const data = await run(api.getSessionImage(id, event.asset!.id));
           if (context ? !context.current() : id !== selectedId || generation !== selectionGeneration) return;
-          if (!data) {
+          // Only the fixed local image reader's bounded bytes may become an IMG source.
+          // A malformed IPC reply must never trigger a remote image request or paint a
+          // different MIME under this exact canonical generated-image asset.
+          if (!localDataUrl(data, event.asset!.mimeType)) {
             const pane = context ? box.closest<HTMLElement>('.agent-panel-body') : $('chatBody');
             const timeline = context ? pane : $('timeline');
             const restore = pane && timeline && box.isConnected ? preserveTimelineViewport(pane, timeline) : () => {};

@@ -5,6 +5,7 @@ import type { TaskProgress } from '../shared/task-progress.js';
 import type { BrowserPreferences } from '../shared/browser-preferences.js';
 import type { SessionControlsView } from '../main/bridge.js';
 import type { RichActionResult } from '../main/rich-actions.js';
+import type { CanonicalRichMediaRetryEligibility } from '../main/session/store.js';
 import type { InputAttachment } from '../shared/input.js';
 import type { UsageOverview } from '../shared/usage.js';
 import type { InputArgs, InputEntry } from '../main/session/input.js';
@@ -35,6 +36,8 @@ import type {
 } from '../shared/session.js';
 
 type Reply<T> = { ok: true; data: T } | { ok: false; error: string };
+type RichRetryEligibilityView = Pick<CanonicalRichMediaRetryEligibility,
+  'status' | 'reason' | 'requiresRemovalConfirmation' | 'eligibilityOnly'>;
 
 const call = <T>(channel: string, payload?: unknown): Promise<Reply<T>> =>
   ipcRenderer.invoke(channel, payload) as Promise<Reply<T>>;
@@ -170,6 +173,13 @@ const api = {
     call<{ sessionId: string | null; generation: number }>('sessions:uiSelection', payload),
   richActionStatus: (sessionId: string, actionId: string) =>
     call<RichActionResult>('sessions:richActionStatus', { sessionId, actionId }),
+  /** Read-only PAGE metadata; an eligibility response is never a capture grant. */
+  richRetryEligibility: (sessionId: string, messageId: string, mediaId: string, nodeId: string, richRevision: number) =>
+    call<RichRetryEligibilityView | null>('sessions:richRetryEligibility',
+      { sessionId, messageId, mediaId, nodeId, richRevision }),
+  /** Historical navigation only. Main resolves the exact stored origin; never pass a URL. */
+  openRichOriginal: (sessionId: string, messageId: string) =>
+    call<boolean>('sessions:richOpenOriginal', { sessionId, messageId }),
   listSessions: (options?: { cursor?: SessionListCursor; limit?: number }) =>
     call<SessionList>('sessions:list', options ?? {}),
   listProjects: () => call<LocalProject[]>('projects:list'),

@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
+import sharp from 'sharp';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DEFAULT_GOAL_SYSTEM_PROMPT } from '../src/shared/goal.js';
 import { prependUserPrompt } from '../src/shared/user-prompt.js';
@@ -324,6 +325,32 @@ function retiringRichAnswer(): SessionEvent {
   return { kind: 'assistant_message', seq: 1, time: T0, source: 'extension',
     messageId: rich.messageId, message: text('Old selected answer'), final: true, rich };
 }
+
+it('keeps a historical assistant’s original as an explicit manual button without opening on hydration, updates or synthetic clicks', async () => {
+  const answer = retiringRichAnswer();
+  if (answer.kind !== 'assistant_message' || !answer.rich) throw new Error('Missing exact rich assistant fixture');
+  const originalRich = answer.rich;
+  const event: SessionEvent = { ...answer, richOrigin: {
+    conversationId: originalRich.conversationId, bindingRevision: 0,
+    documentId: 'recorded-document', navigationEpoch: 1
+  } };
+  const app = await boot([event]);
+  const opener = vi.fn(async () => ({ ok: true, data: true }));
+  (app.w as any).api.openRichOriginal = opener;
+  const button = app.w.document.querySelector<HTMLButtonElement>('.said .rich-open-original');
+  expect(button?.textContent).toBe('Open original in ChatGPT');
+  expect(app.w.document.querySelector('[data-rich-control="old-choice"]')?.getAttribute('aria-disabled')).toBe('true');
+  await app.append([{ ...event, seq: 2, rich: { ...originalRich, revision: 2 } }]);
+  await settle();
+  expect(opener).not.toHaveBeenCalled();
+  app.w.document.querySelector<HTMLButtonElement>('.said .rich-open-original')!.click();
+  expect(opener).not.toHaveBeenCalled();
+  app.w.document.getElementById('newChat')!.click();
+  await settle();
+  button?.click();
+  expect(opener).not.toHaveBeenCalled();
+  expect(app.live.sent).toHaveLength(0);
+});
 
 it('reports startup New Chat, sidebar A→B→A, same-id Write Directly and New Chat in increasing renderer epochs', async () => {
   const first = summary([]), second = { ...first, id: '2026-09-02-test0002' };
@@ -1019,6 +1046,49 @@ it('reserves geometry and hydrates multiple native generated images independentl
   pending.get('blue.webp')?.({ ok: true, data: 'data:image/webp;base64,Ymx1ZQ==' });
   await settle();
   expect(frames[0]!.querySelector('img')?.getAttribute('src')).toContain('Ymx1ZQ==');
+});
+
+it('inserts a locally supplied valid WebP for an image-only final without fabricating an assistant text row', async () => {
+  const app = await boot([]);
+  const bytes = await sharp({ create: { width: 4, height: 3, channels: 3,
+    background: '#335577' } }).webp().toBuffer();
+  expect(await sharp(bytes).metadata()).toMatchObject({ format: 'webp', width: 4, height: 3 });
+  const preview = `data:image/webp;base64,${bytes.toString('base64')}`;
+  const getImage = vi.fn(async () => ({ ok: true, data: preview }));
+  (app.w as any).api.getSessionImage = getImage;
+  await app.append([{ seq: 1, time: T0, source: 'extension', kind: 'native_image',
+    messageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb', providerAssetId: 'file_image_only',
+    providerRole: 'tool', providerChannel: 'final', providerStatus: 'finished_successfully',
+    width: 1024, height: 768, previewStatus: 'available', previewWidth: 4, previewHeight: 3,
+    asset: { id: 'abcdef12.bin', mimeType: 'image/webp', bytes: bytes.length } }]);
+  const row = app.w.document.querySelector<HTMLElement>('.said.native-image');
+  expect(row).not.toBeNull();
+  expect(row!.hidden).toBe(false);
+  expect(app.w.document.querySelectorAll('.ev-assistant_message')).toHaveLength(0);
+  expect(row!.closest('.generated-image-gallery')).not.toBeNull();
+  expect(row!.querySelector('.generated-image-frame')?.getAttribute('style')).toContain('1024 / 768');
+  expect(row!.querySelector('img')?.getAttribute('src')).toBe(preview);
+  expect(row!.querySelector('img')?.getAttribute('alt')).toBe('ChatGPT generated image');
+  expect(getImage).toHaveBeenCalledExactlyOnceWith(summary([]).id, 'abcdef12.bin');
+  // jsdom verifies a real-image URL reaches a visible DOM row, not raster decoding or pixels.
+  // Browser/Electron and installed-image acceptance remain separate evidence.
+});
+
+it.each([
+  'https://example.invalid/unverified-image.webp',
+  'data:image/png;base64,Ymx1ZQ==',
+  'data:image/webp;base64,not_valid_base64'
+])('refuses a non-local or mismatched native generated-image reader reply (%s)', async reply => {
+  const app = await boot([]);
+  (app.w as any).api.getSessionImage = vi.fn(async () => ({ ok: true, data: reply }));
+  await app.append([{ seq: 1, time: T0, source: 'extension', kind: 'native_image',
+    messageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb', providerAssetId: 'file_local_only',
+    providerRole: 'assistant', providerChannel: 'final', providerStatus: 'finished_successfully',
+    previewStatus: 'available', previewWidth: 4, previewHeight: 3,
+    asset: { id: 'abcdef1234567890abcdef1234567890.bin', mimeType: 'image/webp', bytes: 12 } }]);
+  const frame = app.w.document.querySelector<HTMLElement>('.generated-image-frame')!;
+  expect(frame.querySelector('img')).toBeNull();
+  expect(frame.textContent).toContain('Image preview unavailable');
 });
 
 it('keeps generated-image metadata visible when recording storage is full', async () => {
@@ -1944,7 +2014,10 @@ it('repaints exact rich image metadata in place, and a cleanup revision retires 
   const button = row.querySelector<HTMLButtonElement>('.rich-image-slot button')!;
   expect(button.textContent).toBe('View saved preview');
   button.click();
-  expect(getImage).toHaveBeenCalledExactlyOnceWith(summary([]).id, 'abcdef12.bin');
+  // Inline hydration and the explicitly opened viewer each use the fixed local reader.
+  expect(getImage).toHaveBeenCalledTimes(2);
+  expect(getImage).toHaveBeenNthCalledWith(1, summary([]).id, 'abcdef12.bin');
+  expect(getImage).toHaveBeenNthCalledWith(2, summary([]).id, 'abcdef12.bin');
   expect(w.document.querySelector('.rich-image-viewer')).toBeNull();
   await append([{ ...event, seq: 3, richMedia: [{ ...pending, status: 'unavailable', reason: 'removed' }],
     retiredRichImageAssetIds: ['abcdef12.bin'] }]);
@@ -1975,8 +2048,12 @@ it('preserves an open viewer across another image row revision, then closes it o
   ] };
   const other: SessionEvent = { kind: 'assistant_message', seq: 2, time: T0 + 1, source: 'extension',
     messageId: otherRich.messageId, message: text(''), final: true, rich: otherRich };
-  const { w, append } = await boot([event, other]);
+  // Install the fake reader before selecting this session: inline hydration begins on mount
+  // and would correctly retire an unreadable preview before a late reader replacement.
+  const { w, append } = await boot([event, other], false);
   (w as any).api.getSessionImage = vi.fn(async () => ({ ok: true, data: 'data:image/webp;base64,UklGRgAAAAA=' }));
+  (w.document.querySelector('#sessionList [data-id]') as HTMLElement).click();
+  await settle();
   w.document.querySelector<HTMLButtonElement>('.rich-image-slot button')!.click();
   await settle();
   expect(w.document.querySelector('.rich-image-viewer')).not.toBeNull();

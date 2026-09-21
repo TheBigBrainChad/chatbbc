@@ -4,6 +4,34 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const source = readFileSync(new URL('../extension/chatgpt-dom.js', import.meta.url), 'utf8');
 interface DomApi {
+  richRootFor(messageId: string, providerMessageId: string): Element | null;
+  captureRichRoot(root: Element): unknown[] | null;
+  resolveRichImage(
+    root: Element, rich: unknown, nodeId: string, mediaId: string,
+    expectedStamp: string, stillCurrent: () => boolean
+  ): { root: Element; image: HTMLImageElement } | null;
+  resolveRichNativeImage(
+    root: Element, rich: unknown, nodeId: string, mediaId: string,
+    expectedStamp: string, scanToken: string,
+    turns: Array<{ index: number; conversationId: string; conversationConflict: boolean;
+      images: Array<{ messageId: string; assetId: string }> }>,
+    originalImage: HTMLImageElement, stillCurrent: () => boolean,
+    sourceHandle: object
+  ): { root: Element; image: HTMLImageElement; messageId: string; assetId: string } | null;
+  beginRichImageSource(
+    root: Element, rich: unknown, nodeId: string, mediaId: string,
+    expectedStamp: string, stillCurrent: () => boolean
+  ): object | null;
+  richImageSourceWitness(handle: object): { sourceIncarnation: string; sourceSequence: number } | null;
+  richImageSourceStable(handle: object): { sourceIncarnation: string; sourceSequence: number } | null;
+  beginPendingRichImageSource(root: Element, rich: unknown, nodeId: string, mediaId: string,
+    expectedStamp: string, stillCurrent: () => boolean,
+    onRetire?: (reason: string, handle: object) => void,
+    onLoad?: (handle: object) => void): object | null;
+  richImagePendingWitness(handle: object): { sourceIncarnation: string; sourceSequence: number } | null;
+  rebindLoadedRichImageSource(handle: object, root: Element, rich: unknown, nodeId: string,
+    mediaId: string, expectedStamp: string, stillCurrent: () => boolean): object | null;
+  releaseRichImageSource(handle: object): void;
   insertPrompt(text: string, mode?: boolean | 'append', failure?: (reason: string) => void): boolean;
   enterProject(entry: { id: string; sourceConversationId: string }, current?: () => boolean): Promise<boolean>;
   composerActions(): { host: HTMLElement; before: HTMLElement | null } | null;
@@ -36,6 +64,534 @@ beforeEach(() => {
   button = document.querySelector('[data-testid="send-button"]')!;
 });
 afterEach(() => { dom.window.close(); vi.useRealTimers(); });
+
+describe('exact rich PAGE image element resolution', () => {
+  const conversationId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const providerMessageId = '11111111-2222-4333-8444-555555555555';
+  const messageId = 'thought:synthetic-exchange:synthetic-turn';
+  const stamp = `scan-one:0:${encodeURIComponent(messageId)}:${providerMessageId}`;
+  function fixture() {
+    dom.reconfigure({ url: `https://chatgpt.com/c/${conversationId}` });
+    const turn = document.createElement('section');
+    turn.dataset.testid = 'conversation-turn-0';
+    turn.setAttribute('data-clf-fiber-turn', 'scan-one:0');
+    const row = document.createElement('div');
+    row.setAttribute('data-message-author-role', 'assistant');
+    row.setAttribute('data-message-id', providerMessageId);
+    const root = document.createElement('div');
+    root.setAttribute('data-clf-fiber-rich', stamp);
+    const surface = document.createElement('div');
+    surface.className = 'puik-root not-prose not-markdown';
+    const cards = ['Forest', 'Coast'].map(alt => {
+      const card = document.createElement('button');
+      card.setAttribute('aria-label', alt);
+      const image = document.createElement('img');
+      image.alt = alt;
+      card.append(image); surface.append(card);
+      return image;
+    });
+    root.append(surface); row.append(root); turn.append(row); document.body.append(turn);
+    const nodes = api.captureRichRoot(root);
+    expect(nodes).not.toBeNull();
+    return { turn, row, root, cards, rich: {
+      version: 1, status: 'available', reason: null, conversationId, messageId,
+      providerMessageId, revision: 1, accessibleText: 'Forest Coast', nodes
+    } };
+  }
+  const forestId = 'n-0-0-0';
+  const forestMediaId = 'media-n-0-0-0';
+  const resolveForest = (sample: ReturnType<typeof fixture>, current = () => true) =>
+    api.resolveRichImage(sample.root, sample.rich, forestId, forestMediaId, stamp, current);
+
+  it('returns only the exact transient image and root from the already captured semantic path', () => {
+    const sample = fixture();
+    expect(api.richRootFor(messageId, providerMessageId)).toBe(sample.root);
+    const result = resolveForest(sample);
+    expect(result).toEqual({ root: sample.root, image: sample.cards[0] });
+    expect(Object.keys(result!)).toEqual(['root', 'image']);
+    expect(api.resolveRichImage(sample.root, sample.rich, 'n-0-1-0', 'media-n-0-1-0', stamp, () => true))
+      .toEqual({ root: sample.root, image: sample.cards[1] });
+  });
+
+  it('refuses a wrong path, media identity, missing node or duplicated rich slot', () => {
+    const sample = fixture();
+    expect(api.resolveRichImage(sample.root, sample.rich, 'n-0-1-0', forestMediaId, stamp, () => true)).toBeNull();
+    expect(api.resolveRichImage(sample.root, sample.rich, forestId, 'media-n-0-1-0', stamp, () => true)).toBeNull();
+    expect(api.resolveRichImage(sample.root, sample.rich, 'n-0-9-0', 'media-n-0-9-0', stamp, () => true)).toBeNull();
+    const duplicate = { ...sample.rich, nodes: [...sample.rich.nodes!, ...sample.rich.nodes!] };
+    expect(api.resolveRichImage(sample.root, duplicate, forestId, forestMediaId, stamp, () => true)).toBeNull();
+    sample.cards[0]!.remove();
+    expect(resolveForest(sample)).toBeNull();
+  });
+
+  it('rejects oversize and aggregate-frontier rich arrays before reading their entries', () => {
+    const sample = fixture();
+    let topLevelReads = 0;
+    const oversized = Array.from({ length: 2049 }, () => sample.rich.nodes![0]);
+    Object.defineProperty(oversized, '0', { get() { topLevelReads++; return sample.rich.nodes![0]; } });
+    expect(api.resolveRichImage(sample.root, { ...sample.rich, nodes: oversized }, forestId, forestMediaId, stamp, () => true)).toBeNull();
+    expect(topLevelReads).toBe(0);
+
+    let childReads = 0;
+    const children = Array.from({ length: 1000 }, () => sample.rich.nodes![0]);
+    Object.defineProperty(children, '0', { get() { childReads++; return sample.rich.nodes![0]; } });
+    const wide = Array.from({ length: 100 }, () => sample.rich.nodes![0]);
+    wide[99] = { id: 'wide-frontier', kind: 'group', layout: 'column', children };
+    expect(api.resolveRichImage(sample.root, { ...sample.rich, nodes: wide }, forestId, forestMediaId, stamp, () => true)).toBeNull();
+    expect(childReads).toBe(0);
+
+    const sparse = new Array(2);
+    sparse[0] = sample.rich.nodes![0];
+    expect(api.resolveRichImage(sample.root, { ...sample.rich, nodes: sparse }, forestId, forestMediaId, stamp, () => true)).toBeNull();
+  });
+
+  it('refuses hidden, shifted or duplicate DOM images rather than reusing an old image path', () => {
+    const sample = fixture();
+    sample.cards[0]!.setAttribute('aria-hidden', 'true');
+    expect(resolveForest(sample)).toBeNull();
+    sample.cards[0]!.removeAttribute('aria-hidden');
+    sample.cards[0]!.before(document.createElement('span'));
+    expect(resolveForest(sample)).toBeNull();
+    sample.cards[0]!.previousElementSibling!.remove();
+    sample.cards[0]!.after(sample.cards[0]!.cloneNode(true));
+    expect(resolveForest(sample)).toBeNull();
+  });
+
+  it('refuses a changed stamp, turn, assistant row, or disconnected original root', () => {
+    const sample = fixture();
+    sample.root.setAttribute('data-clf-fiber-rich', `old:${stamp}`);
+    expect(resolveForest(sample)).toBeNull();
+    sample.root.setAttribute('data-clf-fiber-rich', stamp);
+    sample.turn.setAttribute('data-clf-fiber-turn', 'scan-two:0');
+    expect(resolveForest(sample)).toBeNull();
+    sample.turn.setAttribute('data-clf-fiber-turn', 'scan-one:0');
+    const duplicateRow = sample.row.cloneNode(true) as HTMLElement;
+    sample.turn.append(duplicateRow);
+    expect(resolveForest(sample)).toBeNull();
+    duplicateRow.remove();
+    sample.root.remove();
+    expect(resolveForest(sample)).toBeNull();
+  });
+
+  it('refuses a same-ID assistant row remounted during the synchronous image walk', () => {
+    const sample = fixture();
+    const originalStyle = dom.window.getComputedStyle.bind(dom.window);
+    let remounted = false;
+    dom.window.getComputedStyle = (element: Element) => {
+      if (!remounted) {
+        remounted = true;
+        const replacement = sample.row.cloneNode(false) as HTMLElement;
+        sample.row.after(replacement);
+        replacement.append(sample.root);
+        sample.row.remove();
+      }
+      return originalStyle(element);
+    };
+    expect(resolveForest(sample)).toBeNull();
+    expect(remounted).toBe(true);
+  });
+
+  it('requires the caller-owned original document/SPA/recording witness after A→B→A', () => {
+    const sample = fixture();
+    let currentEpoch = 1;
+    const originalEpoch = currentEpoch;
+    const current = () => currentEpoch === originalEpoch;
+    expect(resolveForest(sample, current)?.image).toBe(sample.cards[0]);
+    currentEpoch++;
+    dom.reconfigure({ url: 'https://chatgpt.com/c/bbbbbbbb-cccc-4ddd-8eee-ffffffffffff' });
+    expect(resolveForest(sample, current)).toBeNull();
+    dom.reconfigure({ url: `https://chatgpt.com/c/${conversationId}` });
+    expect(resolveForest(sample, current)).toBeNull();
+    expect(resolveForest(sample, () => false)).toBeNull();
+  });
+
+  // Source identity is NOT a URL comparison: a synchronous A→B→A cycle before a
+  // MutationObserver callback must retire the original handle through takeRecords().
+  function loadedForest() {
+    const sample = fixture();
+    const image = sample.cards[0]!;
+    image.src = 'https://images.example.test/forest.webp';
+    Object.defineProperty(image, 'currentSrc', { configurable: true, get: () => image.src });
+    Object.defineProperties(image, {
+      naturalWidth: { configurable: true, value: 100 },
+      naturalHeight: { configurable: true, value: 80 },
+      complete: { configurable: true, value: true }
+    });
+    // The image geometry is part of the previously validated semantic tree.
+    sample.rich.nodes = api.captureRichRoot(sample.root);
+    return sample;
+  }
+  const beginForest = (sample: ReturnType<typeof loadedForest>, current = () => true) =>
+    api.beginRichImageSource(sample.root, sample.rich, forestId, forestMediaId, stamp, current);
+
+  it('issues a bounded opaque stable witness with no URL or DOM reference and retires it on release', () => {
+    const sample = loadedForest();
+    const handle = beginForest(sample);
+    expect(handle).not.toBeNull();
+    const first = api.richImageSourceWitness(handle!);
+    expect(first).toMatchObject({ sourceIncarnation: expect.stringMatching(/^src_[a-f0-9]{32}_[a-z0-9]{1,11}$/), sourceSequence: expect.any(Number) });
+    expect(first!.sourceIncarnation.length).toBeLessThanOrEqual(64);
+    expect(api.richImageSourceWitness(handle!)).toEqual(first);
+    expect(JSON.stringify(handle)).toBe('{}');
+    expect(JSON.stringify(first)).not.toContain('images.example.test');
+    expect(api.richImageSourceWitness({})).toBeNull();
+    api.releaseRichImageSource(handle!);
+    expect(api.richImageSourceWitness(handle!)).toBeNull();
+    const next = beginForest(sample);
+    expect(api.richImageSourceWitness(next!)!.sourceSequence).toBeGreaterThan(first!.sourceSequence);
+    expect(api.richImageSourceWitness(next!)!.sourceIncarnation).not.toBe(first!.sourceIncarnation);
+  });
+
+  it('rejects synchronous src A→B→A before observer delivery and never revalidates the old token', () => {
+    const sample = loadedForest();
+    const handle = beginForest(sample)!;
+    const old = api.richImageSourceWitness(handle)!;
+    sample.cards[0]!.src = 'https://images.example.test/coast.webp';
+    sample.cards[0]!.src = 'https://images.example.test/forest.webp';
+    expect(api.richImageSourceWitness(handle)).toBeNull();
+    expect(api.richImageSourceWitness(handle)).toBeNull();
+    const next = beginForest(sample)!;
+    expect(api.richImageSourceWitness(next)!.sourceSequence).toBeGreaterThan(old.sourceSequence);
+    expect(api.richImageSourceWitness(next)!.sourceIncarnation).not.toBe(old.sourceIncarnation);
+  });
+
+  it('witnesses an incomplete exact IMG without pixels and reuses its incarnation after a separately stamped load', () => {
+    const sample = loadedForest();
+    const first = beginForest(sample)!;
+    const old = api.richImageSourceWitness(first)!;
+    const selectedBeforeReload = sample.cards[0]!.src;
+    let currentSelection = selectedBeforeReload;
+    Object.defineProperty(sample.cards[0], 'currentSrc', { configurable: true, get: () => currentSelection });
+    sample.cards[0]!.src = 'https://images.example.test/second.webp';
+    Object.defineProperty(sample.cards[0], 'complete', { configurable: true, value: false });
+    expect(api.richImageSourceWitness(first)).toBeNull();
+    const pending = api.beginPendingRichImageSource(sample.root, sample.rich, forestId,
+      forestMediaId, stamp, () => true)!;
+    const source = api.richImagePendingWitness(pending)!;
+    expect(source.sourceSequence).toBeGreaterThan(old.sourceSequence);
+    expect(JSON.stringify(source)).not.toContain('images.example.test');
+    expect(api.richImageSourceWitness(pending)).toBeNull();
+    sample.cards[0]!.dispatchEvent(new dom.window.Event('error'));
+    expect(api.richImagePendingWitness(pending)).toEqual(source);
+    Object.defineProperty(sample.cards[0], 'complete', { configurable: true, value: true });
+    currentSelection = sample.cards[0]!.src;
+    sample.turn.setAttribute('data-clf-fiber-turn', 'scan-two:0');
+    const nextStamp = stamp.replace('scan-one', 'scan-two');
+    sample.root.setAttribute('data-clf-fiber-rich', nextStamp);
+    sample.rich.nodes = api.captureRichRoot(sample.root);
+    expect(api.rebindLoadedRichImageSource(pending, sample.root, sample.rich, forestId,
+      forestMediaId, nextStamp, () => true)).toBe(pending);
+    expect(api.richImageSourceWitness(pending)).toEqual(source);
+  });
+
+  it('rejects an incomplete B witness after synchronous B→A→B, route loss, or changed image path', () => {
+    const sample = loadedForest();
+    const image = sample.cards[0]!;
+    const first = image.src;
+    image.src = 'https://images.example.test/second.webp';
+    Object.defineProperty(image, 'complete', { configurable: true, value: false });
+    const pending = api.beginPendingRichImageSource(sample.root, sample.rich, forestId,
+      forestMediaId, stamp, () => true)!;
+    image.src = first;
+    image.src = 'https://images.example.test/second.webp';
+    expect(api.richImagePendingWitness(pending)).toBeNull();
+    const current = api.beginPendingRichImageSource(sample.root, sample.rich, forestId,
+      forestMediaId, stamp, () => true)!;
+    sample.cards[0]!.before(document.createElement('span'));
+    expect(api.richImagePendingWitness(current)).toBeNull();
+    sample.cards[0]!.previousElementSibling!.remove();
+    let live = true;
+    const routed = api.beginPendingRichImageSource(sample.root, sample.rich, forestId,
+      forestMediaId, stamp, () => live)!;
+    live = false;
+    expect(api.richImagePendingWitness(routed)).toBeNull();
+  });
+
+  it('preserves a physical source through text-only rich restamps and retires synchronous A→B→A afterward', () => {
+    const sample = loadedForest();
+    const handle = beginForest(sample)!;
+    const original = api.richImageSourceStable(handle)!;
+    sample.cards[1]!.parentElement!.setAttribute('aria-label', 'Coast revised');
+    const nextStamp = stamp.replace('scan-one', 'scan-two');
+    sample.turn.setAttribute('data-clf-fiber-turn', 'scan-two:0');
+    sample.root.setAttribute('data-clf-fiber-rich', nextStamp);
+    sample.rich.nodes = api.captureRichRoot(sample.root);
+    expect(api.richImageSourceStable(handle)).toEqual(original);
+    // The old per-scan task remains stale even though the private physical source survives.
+    expect(api.richImageSourceWitness(handle)).toBeNull();
+    const current = api.beginRichImageSource(sample.root, sample.rich, forestId,
+      forestMediaId, nextStamp, () => true)!;
+    expect(api.richImageSourceStable(current)).not.toBeNull();
+    sample.cards[0]!.src = 'https://images.example.test/second.webp';
+    sample.cards[0]!.src = 'https://images.example.test/forest.webp';
+    expect(api.richImageSourceStable(current)).toBeNull();
+    const renewed = api.beginRichImageSource(sample.root, sample.rich, forestId,
+      forestMediaId, nextStamp, () => true)!;
+    expect(api.richImageSourceWitness(renewed)!.sourceSequence).toBeGreaterThan(original.sourceSequence);
+  });
+
+  it.each(['srcset', 'sizes', 'load', 'error'])('retires a witnessed source after %s even when the URL/dimensions agree', change => {
+    const sample = loadedForest();
+    const handle = beginForest(sample)!;
+    expect(api.richImageSourceWitness(handle)).not.toBeNull();
+    if (change === 'srcset' || change === 'sizes') {
+      sample.cards[0]!.setAttribute(change, 'https://images.example.test/other.webp 2x');
+      sample.cards[0]!.removeAttribute(change);
+    } else sample.cards[0]!.dispatchEvent(new dom.window.Event(change));
+    expect(api.richImageSourceWitness(handle)).toBeNull();
+  });
+
+  it('refuses responsive/picture, unloaded, missing currentSrc and a source change seen before returning to A', () => {
+    const sample = loadedForest();
+    const image = sample.cards[0]!;
+    const originalSrc = image.src;
+    image.setAttribute('srcset', `${originalSrc} 1x`);
+    expect(beginForest(sample)).toBeNull();
+    image.removeAttribute('srcset');
+    const picture = document.createElement('picture');
+    image.before(picture); picture.append(image);
+    expect(beginForest(sample)).toBeNull();
+    picture.before(image); picture.remove();
+    Object.defineProperty(image, 'complete', { configurable: true, value: false });
+    expect(beginForest(sample)).toBeNull();
+    Object.defineProperty(image, 'complete', { configurable: true, value: true });
+    let current = originalSrc;
+    Object.defineProperty(image, 'currentSrc', { configurable: true, get: () => current });
+    const handle = beginForest(sample)!;
+    current = 'https://images.example.test/coast.webp';
+    expect(api.richImageSourceWitness(handle)).toBeNull();
+    current = originalSrc;
+    expect(api.richImageSourceWitness(handle)).toBeNull();
+    Object.defineProperty(image, 'currentSrc', { configurable: true, value: '' });
+    expect(beginForest(sample)).toBeNull();
+  });
+
+  it('rejects synchronous IMG/root replacement and stale row even when identical IDs and URL reappear', () => {
+    const sample = loadedForest();
+    const old = beginForest(sample)!;
+    const first = api.richImageSourceWitness(old)!;
+    const replacement = sample.cards[0]!.cloneNode(true) as HTMLImageElement;
+    sample.cards[0]!.replaceWith(replacement);
+    replacement.replaceWith(sample.cards[0]!);
+    expect(api.richImageSourceWitness(old)).toBeNull();
+    const next = beginForest(sample)!;
+    expect(api.richImageSourceWitness(next)!.sourceIncarnation).not.toBe(first.sourceIncarnation);
+    const root = sample.root;
+    const rootClone = root.cloneNode(true) as HTMLElement;
+    root.replaceWith(rootClone); rootClone.replaceWith(root);
+    expect(api.richImageSourceWitness(next)).toBeNull();
+    const third = beginForest(sample)!;
+    sample.row.remove(); sample.turn.append(sample.row);
+    expect(api.richImageSourceWitness(third)).toBeNull();
+  });
+
+  it('refuses excess handles without evicting an already watched available source', () => {
+    const sample = loadedForest();
+    const surface = sample.root.querySelector('.puik-root')!;
+    for (let index = 2; index < 42; index++) {
+      const card = document.createElement('button');
+      card.setAttribute('aria-label', `Picture ${index}`);
+      const image = document.createElement('img');
+      image.src = `https://images.example.test/picture-${index}.webp`;
+      Object.defineProperties(image, {
+        currentSrc: { configurable: true, get: () => image.src },
+        naturalWidth: { configurable: true, value: 100 },
+        naturalHeight: { configurable: true, value: 80 },
+        complete: { configurable: true, value: true }
+      });
+      card.append(image); surface.append(card);
+    }
+    sample.rich.nodes = api.captureRichRoot(sample.root);
+    const first = beginForest(sample)!;
+    const sequence = api.richImageSourceWitness(first)!.sourceSequence;
+    for (let index = 2; index < 42; index++) {
+      const id = `n-0-${index}-0`;
+      const handle = api.beginRichImageSource(sample.root, sample.rich, id, `media-${id}`, stamp, () => true);
+      expect(handle).not.toBeNull();
+    }
+    // All 64 exact image slots fit; distinct short-lived scan leases still
+    // obey the same document-wide cap instead of silently growing observers.
+    for (let index = 0; index < 23; index++) {
+      sample.rich = { ...sample.rich };
+      expect(beginForest(sample)).not.toBeNull();
+    }
+    sample.rich = { ...sample.rich };
+    expect(beginForest(sample)).toBeNull();
+    expect(api.richImageSourceStable(first)).not.toBeNull();
+    api.releaseRichImageSource(first);
+    expect(api.richImageSourceWitness(beginForest(sample)!)!.sourceSequence).toBeGreaterThan(sequence);
+  });
+});
+
+describe('inert generated-native tuple association to the same rich IMG', () => {
+  const conversationId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const providerMessageId = '11111111-2222-4333-8444-555555555555';
+  const messageId = 'thought:synthetic-exchange:synthetic-turn';
+  const nativeMessageId = '99999999-2222-4333-8444-555555555555';
+  const assetId = 'file_abcdefghijk123';
+  const richStamp = `scan-one:0:${encodeURIComponent(messageId)}:${providerMessageId}`;
+  const imageStamp = `scan-one:0:${nativeMessageId}:${assetId}`;
+  const imageUrl = `https://chatgpt.com/backend-api/estuary/content?id=${assetId}`;
+
+  function fixture() {
+    dom.reconfigure({ url: `https://chatgpt.com/c/${conversationId}` });
+    const turn = document.createElement('section');
+    turn.dataset.testid = 'conversation-turn-0';
+    turn.setAttribute('data-clf-fiber-turn', 'scan-one:0');
+    const row = document.createElement('div');
+    row.setAttribute('data-message-author-role', 'assistant');
+    row.setAttribute('data-message-id', providerMessageId);
+    const root = document.createElement('div');
+    root.setAttribute('data-clf-fiber-rich', richStamp);
+    const surface = document.createElement('div');
+    surface.className = 'puik-root not-prose not-markdown';
+    const first = document.createElement('img'); first.alt = 'Generated forest';
+    first.src = imageUrl; first.setAttribute('data-clf-fiber-image', imageStamp);
+    Object.defineProperties(first, {
+      currentSrc: { configurable: true, get: () => first.src },
+      naturalWidth: { configurable: true, value: 100 },
+      naturalHeight: { configurable: true, value: 80 },
+      complete: { configurable: true, value: true }
+    });
+    // Exactly the generated-image IMG selector used by fiber.js; the stamp
+    // is a fixture for its independently typed output, not URL inference here.
+    const generated = document.createElement('div');
+    generated.className = 'group/imagegen-image';
+    generated.append(first);
+    const sibling = document.createElement('img'); sibling.alt = 'Ordinary sibling'; sibling.src = imageUrl;
+    surface.append(generated, sibling); root.append(surface); row.append(root); turn.append(row);
+    document.body.append(turn);
+    const nodes = api.captureRichRoot(root);
+    expect(nodes).not.toBeNull();
+    const rich = { version: 1, status: 'available', reason: null, conversationId, messageId,
+      providerMessageId, revision: 1, accessibleText: 'Generated forest', nodes };
+    const turns = [{ index: 0, conversationId, conversationConflict: false,
+      images: [{ messageId: nativeMessageId, assetId }] }];
+    // The source lease precedes any tested mutation; creating a new lease at
+    // association time would erase an earlier same-object detach/reinsert.
+    const sourceHandle = api.beginRichImageSource(root, rich, 'n-0-0-0',
+      'media-n-0-0-0', richStamp, () => true);
+    expect(sourceHandle).not.toBeNull();
+    const resolve = (current = () => true, token = 'scan-one') => api.resolveRichNativeImage(
+      root, rich, 'n-0-0-0', 'media-n-0-0-0', richStamp, token, turns, first, current, sourceHandle!);
+    return { turn, row, root, first, sibling, rich, turns, sourceHandle: sourceHandle!, resolve };
+  }
+
+  it('associates only the physically identical rich IMG carrying a fresh, unique Fiber-typed tuple stamp', () => {
+    const sample = fixture();
+    expect(sample.root.querySelector('[class~="group/imagegen-image"] img')).toBe(sample.first);
+    expect(sample.resolve()).toEqual({ root: sample.root, image: sample.first,
+      messageId: nativeMessageId, assetId });
+    expect(sample.resolve()?.image).not.toBe(sample.sibling);
+    expect(Object.keys(sample.resolve()!)).toEqual(['root', 'image', 'messageId', 'assetId']);
+  });
+
+  it('refuses an unstamped rich IMG despite an identically sourced and correctly stamped foreign sibling', () => {
+    const sample = fixture();
+    sample.first.removeAttribute('data-clf-fiber-image');
+    sample.sibling.setAttribute('data-clf-fiber-image', imageStamp);
+    expect(sample.resolve()).toBeNull();
+  });
+
+  it('refuses a copied valid image stamp on an ordinary rich IMG lacking Fiber generated-image provenance', () => {
+    const sample = fixture();
+    // Styling alone changes nothing in the semantic tree or IMG/tuple/stamp/URL:
+    // the old helper incorrectly accepted this forged stamped ordinary image.
+    const generated = sample.first.parentElement!;
+    generated.className = 'ordinary-rich-picture';
+    expect(api.resolveRichImage(sample.root, sample.rich, 'n-0-0-0',
+      'media-n-0-0-0', richStamp, () => true)?.image).toBe(sample.first);
+    expect(sample.resolve()).toBeNull();
+  });
+
+  it('refuses synchronous same-IMG detach→reattach despite identical stamp, URL and current semantic tree', () => {
+    const sample = fixture();
+    const generated = sample.first.parentElement!;
+    sample.first.remove();
+    generated.append(sample.first);
+    expect(api.resolveRichImage(sample.root, sample.rich, 'n-0-0-0',
+      'media-n-0-0-0', richStamp, () => true)?.image).toBe(sample.first);
+    expect(sample.resolve()).toBeNull();
+    expect(api.richImageSourceStable(sample.sourceHandle)).toBeNull();
+  });
+
+  it('refuses duplicate typed asset owners, including a second turn, without guessing from matching URLs', () => {
+    const sample = fixture();
+    sample.turns[0]!.images.push({ messageId: nativeMessageId, assetId });
+    expect(sample.resolve()).toBeNull();
+    sample.turns[0]!.images.pop();
+    sample.turns.push({ index: 1, conversationId, conversationConflict: false,
+      images: [{ messageId: '88888888-2222-4333-8444-555555555555', assetId }] });
+    expect(sample.resolve()).toBeNull();
+  });
+
+  it('rejects custom typed-frame iterators and accessor entries without executing caller code', () => {
+    const iterated = fixture();
+    let imageIteratorCalls = 0;
+    Object.defineProperty(iterated.turns[0]!.images, Symbol.iterator, {
+      value: function* () {
+        imageIteratorCalls++;
+        yield { messageId: nativeMessageId, assetId };
+      }
+    });
+    expect(iterated.resolve()).toBeNull();
+    expect(imageIteratorCalls).toBe(0);
+    api.releaseRichImageSource(iterated.sourceHandle);
+    iterated.turn.remove();
+
+    const getter = fixture();
+    let entryReads = 0;
+    Object.defineProperty(getter.turns[0]!.images, '0', {
+      configurable: true, enumerable: true,
+      get() { entryReads++; return { messageId: nativeMessageId, assetId }; }
+    });
+    expect(getter.resolve()).toBeNull();
+    expect(entryReads).toBe(0);
+    api.releaseRichImageSource(getter.sourceHandle);
+    getter.turn.remove();
+
+    const turnIterator = fixture();
+    let turnIteratorCalls = 0;
+    Object.defineProperty(turnIterator.turns, Symbol.iterator, {
+      value: function* () { turnIteratorCalls++; yield turnIterator.turns[0]!; }
+    });
+    expect(turnIterator.resolve()).toBeNull();
+    expect(turnIteratorCalls).toBe(0);
+  });
+
+  it('refuses old currentSrc pixels when the same physical IMG has begun loading a new src', () => {
+    const sample = fixture();
+    const previous = sample.first.src;
+    Object.defineProperty(sample.first, 'currentSrc', { configurable: true, value: previous });
+    sample.first.src = 'https://chatgpt.com/backend-api/estuary/content?id=file_other123456';
+    expect(sample.resolve()).toBeNull();
+  });
+
+  it('refuses stale scan/turn stamp, wrong source URL, foreign route and changed ownership callback', () => {
+    const sample = fixture();
+    expect(sample.resolve(() => true, 'scan-two')).toBeNull();
+    sample.first.setAttribute('data-clf-fiber-image', imageStamp.replace('scan-one:', 'scan-two:'));
+    expect(sample.resolve()).toBeNull();
+    sample.first.setAttribute('data-clf-fiber-image', imageStamp);
+    sample.first.src = 'https://chatgpt.com/backend-api/estuary/content?id=file_different123';
+    expect(sample.resolve()).toBeNull();
+    sample.first.src = `https://foreign.example/backend-api/estuary/content?id=${assetId}`;
+    expect(sample.resolve()).toBeNull();
+    sample.first.src = imageUrl;
+    dom.reconfigure({ url: 'https://chatgpt.com/c/bbbbbbbb-cccc-4ddd-8eee-ffffffffffff' });
+    expect(sample.resolve()).toBeNull();
+    dom.reconfigure({ url: `https://chatgpt.com/c/${conversationId}` });
+    expect(sample.resolve(() => false)).toBeNull();
+  });
+
+  it('refuses a rich IMG remounted after its semantic path was recorded', () => {
+    const sample = fixture();
+    const replacement = sample.first.cloneNode(true) as HTMLImageElement;
+    sample.first.replaceWith(replacement);
+    expect(sample.resolve()).toBeNull();
+  });
+});
+
 function user(text: string) {
   const section = document.createElement('section');
   section.setAttribute('data-testid', 'conversation-turn-1');
