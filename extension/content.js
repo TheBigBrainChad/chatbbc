@@ -1792,6 +1792,60 @@
         const captureKey = `${dropped.conversationId || ''}\u0000${dropped.event.messageId || ''}\u0000${dropped.event.providerAssetId || ''}\u0000${dropped.recordingGeneration || ''}`;
         if (nativeImageCaptures.get(captureKey)?.status === 'available') nativeImageCaptures.delete(captureKey);
       }
+      if ((dropped.event?.kind === 'rich_media') &&
+          (dropped.event.status === 'pending' || dropped.event.status === 'available') &&
+          dropped.pixelSeal) {
+        const sameSlot = entry => entry.event?.kind === 'rich_media' &&
+          entry.conversationId === dropped.conversationId &&
+          entry.recordingGeneration === dropped.recordingGeneration &&
+          entry.event.messageId === dropped.event.messageId &&
+          entry.event.providerMessageId === dropped.event.providerMessageId &&
+          entry.event.mediaId === dropped.event.mediaId &&
+          entry.event.nodeId === dropped.event.nodeId;
+        // A later same-slot receipt is still the unjournalled original. Recapture
+        // only when this was the last page-owned row for that exact image slot.
+        if (!queue.some(sameSlot)) {
+          const matchesSlot = hint => hint &&
+            hint.conversationId === dropped.conversationId &&
+            hint.generation === dropped.recordingGeneration &&
+            hint.messageId === dropped.event.messageId &&
+            hint.providerMessageId === dropped.event.providerMessageId &&
+            hint.mediaId === dropped.event.mediaId &&
+            hint.nodeId === dropped.event.nodeId;
+          const requeue = (sourceKey, hint) => {
+            if (pagePixelHintCurrent(hint) &&
+                (pagePixelHints.has(sourceKey) || pagePixelHints.size < MAX_PAGE_PIXEL_SLOTS)) {
+              pagePixelHints.set(sourceKey, hint);
+              pumpPagePixelBegins();
+            }
+          };
+          for (const [sourceKey, watched] of [...pagePixelSources]) {
+            const hint = pagePixelPrerequisites.get(sourceKey) || watched.hint;
+            if (!matchesSlot(hint)) continue;
+            const deferred = pagePixelDeferredWitness.get(sourceKey);
+            pagePixelSources.delete(sourceKey);
+            CLF_DOM.releaseRichImageSource(watched.handle);
+            if (deferred) CLF_DOM.releaseRichImageSource(deferred.handle);
+            pagePixelAttempts.delete(sourceKey);
+            pagePixelScanRearmed.delete(sourceKey);
+            pagePixelDeferred.delete(sourceKey);
+            pagePixelDeferredWitness.delete(sourceKey);
+            requeue(sourceKey, hint);
+          }
+          // A twice-restamped digest can park its observer only in the deferred
+          // map. Last-slot overflow must still retire that 64-slot lease.
+          for (const [sourceKey, deferred] of [...pagePixelDeferredWitness]) {
+            const hint = pagePixelPrerequisites.get(sourceKey);
+            if (!matchesSlot(hint)) continue;
+            CLF_DOM.releaseRichImageSource(deferred.handle);
+            pagePixelDeferredWitness.delete(sourceKey);
+            pagePixelDeferred.delete(sourceKey);
+            pagePixelScanRearmed.delete(sourceKey);
+            pagePixelAttempts.delete(sourceKey);
+            requeue(sourceKey, hint);
+          }
+        }
+      }
       const key = `${dropped.conversationId || ''}\u0000${dropped.agent || ''}\u0000${dropped.agentCommandId || ''}\u0000${dropped.recordingGeneration || ''}\u0000${dropped.recordingNavigationEpoch}`;
       let held = queueGaps.get(key);
       if (!held) {
@@ -4687,6 +4741,7 @@
   }
   async function refreshFiber(settled = null, presentationOnly = false) {
     richScansActive++;
+    let unansweredFiberAsk = false;
     try {
     // A bound chat can briefly lose its /c/<id> route during React/router churn, and a real
     // navigation to a fresh composer has the exact same pathname until ChatGPT assigns the
@@ -4766,6 +4821,17 @@
           fiberTurns = new Map();
           fiberScanToken = null;
         }
+        // Tickets were taken at the start of this scan. An unanswered ask must
+        // not retire them: overflow recapture (and any in-flight begin) still
+        // owns the exact original issuance until a Fiber frame can join it.
+        for (const capture of pixelCaptures) {
+          const hint = capture?.hint;
+          if (!hint || !pagePixelCurrent(capture)) continue;
+          const key = pagePixelKey(hint);
+          if (!pagePixelReady.has(key)) pagePixelReady.set(key, capture);
+        }
+        pixelCaptures.length = 0;
+        unansweredFiberAsk = true;
         return false;
       }
     }
@@ -5420,7 +5486,7 @@
         const grant = acquisitionGrant();
         if (grant) scheduleRichRescan(grant, conversationId, epoch);
       }
-      if (!richScansActive) schedulePagePixelRescan();
+      if (!richScansActive && !unansweredFiberAsk) schedulePagePixelRescan();
     }
   }
 

@@ -1775,6 +1775,150 @@ describe('exact native rich response observation (no action authority)', () => {
     await live.hook.flush();
     expect(emitted(live.sent, 'rich_media')).toHaveLength(2);
   });
+
+  it('recaptures PAGE pixels after the page-local queue evicts their unjournalled receipts', async () => {
+    let issued = 0;
+    live = await harness(undefined, {
+      events: message => {
+        if ((message.entries || []).some((entry: { event?: { kind?: string } }) => entry.event?.kind === 'rich_media'))
+          return { ok: false, error: 'worker_unreachable' };
+        return { ok: true, pending: 0, durable: true };
+      },
+      rich_pixel_begin: message => {
+        const next = pixelReply(message);
+        next.capture.captureId = `P${String(++issued).padStart(31, '0')}`;
+        next.capture.slotVersion = issued - 1;
+        return next;
+      }
+    });
+    const { surface } = pixelFixture();
+    surface.querySelectorAll('img')[1]!.remove();
+    await replyFiber([], [descriptor()], null, true, null, false, 120);
+    const captureIds = () => [...new Set(emitted(live!.sent, 'rich_media')
+      .map(row => row.pixelSeal?.captureId).filter(Boolean))];
+    await vi.waitFor(() => expect(captureIds()).toHaveLength(1));
+    expect(issued).toBe(1);
+    for (let index = 0; index < 405; index++) live.hook.emit({ kind: 'chat_error', text: `outage-${index}` });
+    await live.hook.flush();
+    await replyFiber([], [descriptor()], null, true, null, false, 200);
+    await vi.waitFor(() => expect(issued).toBeGreaterThanOrEqual(2), { timeout: 3000 });
+    await vi.waitFor(() => expect(captureIds().length).toBeGreaterThanOrEqual(2), { timeout: 3000 });
+    expect(JSON.stringify(live.sent.filter(row => row.type === 'events'))).not.toContain('NEVER_TRANSMIT');
+  });
+
+  it('requeues overflow recapture against a later structural row and pumps after that row is acknowledged', async () => {
+    let issued = 0;
+    let allowAssistant = true;
+    live = await harness(undefined, {
+      events: message => {
+        const entries = message.entries || [];
+        if (entries.some((entry: { event?: { kind?: string } }) => entry.event?.kind === 'rich_media'))
+          return { ok: false, error: 'worker_unreachable' };
+        if (!allowAssistant &&
+            entries.some((entry: { event?: { kind?: string } }) => entry.event?.kind === 'assistant_message'))
+          return { ok: false, error: 'worker_unreachable' };
+        return { ok: true, pending: 0, durable: true };
+      },
+      rich_pixel_begin: message => {
+        const next = pixelReply(message);
+        next.capture.captureId = `P${String(++issued).padStart(31, '0')}`;
+        next.capture.slotVersion = issued - 1;
+        return next;
+      }
+    });
+    const { surface } = pixelFixture();
+    surface.querySelectorAll('img')[1]!.remove();
+    await replyFiber([], [descriptor()], null, true, null, false, 120);
+    await vi.waitFor(() => expect(issued).toBe(1));
+    allowAssistant = false;
+    surface.querySelector('button')!.setAttribute('aria-label', 'Forest revised');
+    await replyFiber([], [descriptor()], null, true, null, false, 90);
+    expect(issued).toBe(1);
+    // First overflow drop inserts a same-conversation gap marker (net zero length).
+    // 398 errors + pending + available + the unacknowledged revision = 401, so the
+    // second drop removes the last pixel receipt and keeps the later structural row.
+    for (let index = 0; index < 398; index++) live.hook.emit({ kind: 'chat_error', text: `outage-${index}` });
+    allowAssistant = true;
+    await live.hook.flush();
+    await vi.waitFor(() => expect(issued).toBeGreaterThanOrEqual(2), { timeout: 3000 });
+    expect(JSON.stringify(live.sent.filter(row => row.type === 'events'))).not.toContain('NEVER_TRANSMIT');
+  });
+
+  it('releases a deferred PAGE source handle when overflow recapture drops its unjournalled receipts', async () => {
+    let issued = 0;
+    let previous: { sourceIncarnation: string; sourceSequence: number } | null = null;
+    live = await harness(undefined, {
+      events: message => {
+        if ((message.entries || []).some((entry: { event?: { kind?: string } }) => entry.event?.kind === 'rich_media'))
+          return { ok: false, error: 'worker_unreachable' };
+        return { ok: true, pending: 0, durable: true };
+      },
+      rich_pixel_begin: message => {
+        const next = pixelReply(message);
+        const capture: Record<string, unknown> = next.capture;
+        capture.captureId = `P${String(++issued).padStart(31, '0')}`;
+        capture.slotVersion = issued - 1;
+        capture.sourceIncarnation = previous?.sourceIncarnation ?? null;
+        capture.sourceSequence = previous?.sourceSequence ?? null;
+        return next;
+      }
+    });
+    const { surface, root } = pixelFixture();
+    surface.querySelectorAll('img')[1]!.remove();
+    const api = (live.window as any).CLF_DOM;
+    const begun = new Set<object>();
+    const released = new Set<object>();
+    for (const name of ['beginRichImageSource', 'beginPendingRichImageSource'] as const) {
+      const original = api[name].bind(api);
+      api[name] = (...args: unknown[]) => {
+        const handle = original(...args);
+        if (handle) begun.add(handle);
+        return handle;
+      };
+    }
+    const originalRelease = api.releaseRichImageSource.bind(api);
+    api.releaseRichImageSource = (handle: object, reason?: string) => {
+      released.add(handle);
+      return originalRelease(handle, reason);
+    };
+    const nativeDigest = webcrypto.subtle.digest.bind(webcrypto.subtle);
+    const entered: Array<() => void> = [];
+    const release: Array<() => void> = [];
+    const phases = [0, 1].map(index => new Promise<void>(resolve => { entered[index] = resolve; }));
+    let calls = 0;
+    Object.defineProperty(live.window.crypto, 'subtle', { configurable: true, value: {
+      digest: (algorithm: AlgorithmIdentifier, bytes: BufferSource) => {
+        const index = calls++;
+        if (index >= 2) return nativeDigest(algorithm, bytes);
+        return new Promise<ArrayBuffer>((resolve, reject) => {
+          release[index] = () => { void nativeDigest(algorithm, bytes).then(resolve, reject); };
+          entered[index]!();
+        });
+      }
+    } });
+    const first = replyFiber([], [descriptor()], null, true, null, false, 120);
+    await phases[0]; await first; await live.hook.flush();
+    const a = emitted(live.sent, 'rich_media')[0]!.pixelSeal;
+    previous = { sourceIncarnation: a.sourceIncarnation, sourceSequence: a.sourceSequence };
+    const secondScan = replyFiber([], [descriptor()], null, true, null, false, 1200);
+    await vi.waitFor(() => expect(root.getAttribute('data-clf-fiber-rich')).not.toBe(a.rootStamp));
+    release[0]!();
+    await phases[1]; await secondScan; await live.hook.flush();
+    const b = emitted(live.sent, 'rich_media')[1]!.pixelSeal;
+    previous = { sourceIncarnation: b.sourceIncarnation, sourceSequence: b.sourceSequence };
+    const thirdScan = replyFiber([], [descriptor()], null, true, null, false, 1200);
+    await vi.waitFor(() => expect(root.getAttribute('data-clf-fiber-rich')).not.toBe(b.rootStamp));
+    release[1]!();
+    await thirdScan; await settle(); await live.hook.flush();
+    expect(issued).toBe(2);
+    for (let index = 0; index < 405; index++) live.hook.emit({ kind: 'chat_error', text: `outage-${index}` });
+    await live.hook.flush();
+    expect(begun.size).toBeGreaterThan(0);
+    const leaked = [...begun].filter(handle => !released.has(handle) ||
+      api.richImageSourceStable(handle) || api.richImagePendingWitness(handle));
+    expect(leaked, JSON.stringify({ begun: begun.size, released: released.size })).toEqual([]);
+    expect(JSON.stringify(live.sent.filter(row => row.type === 'events'))).not.toContain('NEVER_TRANSMIT');
+  });
 });
 
 describe('one synchronous page snapshot per observer turn', () => {

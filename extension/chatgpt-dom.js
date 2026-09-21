@@ -1081,7 +1081,12 @@ var CLF_DOM = (() => {
         activeRichImageSources.set(handle, state);
         // A freshly installed observer must cover every read after its initial
         // snapshot. Never grant a witness merely because the URL matches again.
-        if (!(pending ? richImagePendingWitness(handle) : richImageSourceWitness(handle))) return null;
+        if (!(pending ? richImagePendingWitness(handle) : richImageSourceWitness(handle))) {
+          // Pending witness does not retire the lease. A failed post-install
+          // check would otherwise occupy one of the 64 document-lifetime slots.
+          releaseRichImageSource(handle);
+          return null;
+        }
         return handle;
       } catch {
         observer.disconnect();

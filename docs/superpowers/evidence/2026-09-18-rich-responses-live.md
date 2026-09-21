@@ -311,3 +311,24 @@ The DEB dependency order was corrected to `libasound2t64 | libasound2` so Ubuntu
 Task 2's final source matrix passed **1,378/1,378** with TypeScript, and an independent re-review found no source findings. The final repairs require complete available PAGE custody in the renderer and retain structural capture-ticket authority through the last awaited canonical predecessor check immediately before rename. These are fixture/source guarantees; an already-admitted atomic rename cannot be revoked after it starts.
 
 The browser relay still could not acquire a signed-in provider tab. An independent OS-level Orca inventory reached a Linux computer-use runtime but returned no targetable app window. Therefore real provider-generated single/gallery/image-only pixels, matched app/companion handshake, original choice/Continue accepted input and postconditions, one-shot Retry Capture, native rich-asset association, responsive raster/accessibility and the action/retry Recording-Off/restart matrix remain **BLOCKED / NOT VERIFIED**. Production action entrypoints intentionally remain non-arming; no extension action protocol or writable action IPC was fabricated from fixture labels. No commit, push, merge, release, host-app replacement or live user-data mutation occurred.
+
+### 2026-09-21 — PAGE queue recapture and pending-lease release (source only)
+
+Post-PR independent review found two PAGE-pixel custody defects in the landed `rich-responses` tree. Source repairs and focused regressions are recorded in the SDD progress ledger. This does **not** change any live cell: signed-in companion/provider pixels, native choice/Continue, one-shot Retry Capture, and installed raster/accessibility remain **NOT VERIFIED**. Production action APIs remain non-arming. No fixture is treated as live.
+
+### 2026-09-21 — overflow requeue without durable gate; deferred-only lease release (source only)
+
+PagePixelRepairReview P1 follow-up. Source repairs and focused regressions are in the SDD progress ledger. Live companion/provider pixels, native choice/Continue, Retry Capture, and installed raster/accessibility remain **NOT VERIFIED**. Production action APIs remain non-arming.
+
+### 2026-09-21 — post-repair verify and source build (not live)
+
+Independent `PagePixelRepairReview2`: overall_correctness **correct**, confidence 0.88.
+
+`TMPDIR=.../tmp-verify-20260921-pagepixel env -u APPIMAGE npm run verify` EXIT0:
+- privacy 268 commits / 14 tags
+- notices 157 packages / 7 catalog / 731 pinned
+- typecheck then Electron `require('electron')` then vitest
+- **226 passed / 13 skipped** files; **5,684 passed / 136 skipped** tests
+- isolated shutdown **6/6**
+
+`env -u APPIMAGE npm run build` EXIT0: main 1.66s, preload 15ms, renderer 3.48s (Vite dynamic/static chunking warnings only). Linux AppImage/DEB were **not** rebuilt; hashes `1407a458…` / `2be9f447…` still describe `57c6b18`. Live companion/provider cells remain **NOT VERIFIED**. Production action APIs remain non-arming.

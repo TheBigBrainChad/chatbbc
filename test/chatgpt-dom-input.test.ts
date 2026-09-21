@@ -385,6 +385,19 @@ describe('exact rich PAGE image element resolution', () => {
     expect(api.richImageSourceWitness(third)).toBeNull();
   });
 
+  it('releases a pending source lease when the post-install witness fails', () => {
+    const sample = loadedForest();
+    const image = sample.cards[0]!;
+    Object.defineProperty(image, 'complete', { configurable: true, value: false });
+    for (let attempt = 0; attempt < 64; attempt++) {
+      let remaining = 2;
+      expect(api.beginPendingRichImageSource(sample.root, sample.rich, forestId,
+        forestMediaId, stamp, () => remaining-- > 0)).toBeNull();
+    }
+    expect(api.beginPendingRichImageSource(sample.root, sample.rich, forestId,
+      forestMediaId, stamp, () => true)).not.toBeNull();
+  });
+
   it('refuses excess handles without evicting an already watched available source', () => {
     const sample = loadedForest();
     const surface = sample.root.querySelector('.puik-root')!;
