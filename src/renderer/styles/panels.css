@@ -22,6 +22,11 @@
 .work-panel-body > :is(.file-panel, .agent-panel, .workspace-terminal, .output-inspector) { grid-area: 1 / 1; border-left: 0; border-top: 0; }
 /* shell.css overlays #contextWorkbench. This class only records that the studio is below the split. */
 .work-panel.is-overlay { --workbench-mode: overlay; }
+/* Focused output is mounted in the conversation column, not in this panel.
+   Overlay mode stays underneath that stage and must not take its focus. */
+.work-panel.is-overlay { z-index: 1; }
+#chatBody > .rich-focus-stage { position: relative; z-index: 4; }
+.output-inspector-detail[role='status'] { color: var(--ink); }
 .output-inspector { min-width: 0; min-height: 0; overflow: auto; background: var(--glass-high, var(--page)); color: var(--ink); }
 .output-inspector-title { margin: 0; padding: 12px 14px 0; font-size: calc(14px * var(--text-scale, 1)); }
 .output-inspector-meta, .output-inspector-detail { margin: 0; padding: 8px 14px; color: var(--ink-muted, var(--soft)); font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); }

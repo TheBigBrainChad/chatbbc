@@ -4033,4 +4033,86 @@ describe('conversation stage', () => {
     expect(timeline.textContent).toContain('OLDER PAGE');
     expect(timeline.textContent).toContain('THIRD');
   });
+
+  it('opens a focused artifact in the chat column and returns to the transcript row', async () => {
+    const stage = await stageFor(outboxStub());
+    stage.select('A', 1);
+    const { renderRichResponse } = await import('../src/renderer/rich-response.js');
+    const messageId = 'assistant:working:exchange:1789552000000';
+    const rich = {
+      version: 1 as const, status: 'available' as const, reason: null,
+      conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      messageId,
+      providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      revision: 3, accessibleText: 'Sketch',
+      nodes: [{
+        id: 'art1', kind: 'artifact' as const, mode: 'static' as const, title: 'Sketch',
+        html: '<p>Hello</p>', media: ['shot']
+      }]
+    };
+    const view = renderRichResponse(rich, 'source', {
+      sessionId: 'A', media: [], current: () => true, focusStatus: 'pending',
+      admittedArtifactMedia: new Map([['shot', 'data:image/png;base64,aaaa']])
+    });
+    const timeline = document.getElementById('timeline')!;
+    const pane = document.getElementById('chatBody')!;
+    const row = document.createElement('div');
+    row.dataset.timelineOrigin = '2';
+    row.append(view);
+    const message = document.createElement('div');
+    message.dataset.timelineKey = `assistant_message\u0000${messageId}`;
+    timeline.append(row, message);
+    view.querySelector<HTMLButtonElement>('.rich-focus-open')!.click();
+    const focused = document.querySelector<HTMLElement>('.rich-focus-stage')!;
+    expect(focused.hidden).toBe(false);
+    expect(pane.contains(focused)).toBe(true);
+    expect(timeline.contains(focused)).toBe(false);
+    expect(row.parentElement).toBe(timeline);
+    expect(row.contains(view)).toBe(true);
+    expect(focused.querySelector('[role="status"]')?.textContent).toBe('Pending');
+    expect(focused.dataset.shownRevision).toBe('3');
+    expect(document.activeElement).toBe(focused.querySelector('.rich-focus-close'));
+    focused.querySelector<HTMLButtonElement>('[data-rich-focus-tab="structure"]')!.click();
+    expect(focused.querySelector('pre')?.textContent).toContain('<p>Hello</p>');
+    focused.dispatchEvent(new document.defaultView!.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(focused.hidden).toBe(true);
+    expect(document.activeElement).toBe(row);
+
+    expect(stage.openRichFocus({
+      sessionId: 'A', logicalMessageId: messageId, nodeId: 'art1', revision: 9, origin: 2
+    })).toBe(true);
+    expect(focused.dataset.shownRevision).toBe('3');
+    row.remove();
+    stage.closeRichFocus();
+    expect(focused.hidden).toBe(true);
+    expect(document.activeElement).toBe(message);
+
+    const unavailable = renderRichResponse({
+      ...rich,
+      nodes: [{ id: 'art1', kind: 'artifact', mode: 'static', title: 'Sketch', html: '<p>Nope</p>', media: ['missing'] }]
+    }, 'source');
+    const again = document.createElement('div');
+    again.dataset.timelineOrigin = '5';
+    again.append(unavailable);
+    timeline.append(again);
+    unavailable.querySelector<HTMLButtonElement>('.rich-focus-open')!.click();
+    expect(focused.querySelector('iframe, img')).toBeNull();
+    expect(focused.textContent).toContain('Unavailable');
+    expect(again.contains(unavailable)).toBe(true);
+    const semantic = renderRichResponse({
+      ...rich,
+      nodes: [{ id: 'sem1', kind: 'artifact', mode: 'semantic', title: 'Outline', html: null, media: [] }]
+    }, 'source');
+    const semanticRow = document.createElement('div');
+    semanticRow.dataset.timelineOrigin = '6';
+    semanticRow.append(semantic);
+    timeline.append(semanticRow);
+    semantic.querySelector<HTMLButtonElement>('.rich-focus-open')!.click();
+    expect(focused.querySelector('.rich-focus-unavailable')).toBeNull();
+    expect(focused.querySelector('h3')?.textContent).toBe('Outline');
+    expect(semanticRow.contains(semantic)).toBe(true);
+    stage.select('B', 2);
+    expect(focused.hidden).toBe(true);
+    expect(timeline.contains(again)).toBe(true);
+  });
 });

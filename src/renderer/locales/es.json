@@ -1404,5 +1404,14 @@
   "planning": "planificando",
   "queue {0}": "cola {0}",
   "settling {0}": "cierre {0}",
-  "Open original in ChatGPT": "Abrir el original en ChatGPT"
+  "Open original in ChatGPT": "Abrir el original en ChatGPT",
+  "Preview": "Vista previa",
+  "Structure": "Estructura",
+  "Metadata": "Metadatos",
+  "Confirmed": "Confirmado",
+  "Changed": "Cambiado",
+  "Unavailable": "No disponible",
+  "Unconfirmed": "Sin confirmar",
+  "Focused output": "Resultado enfocado",
+  "Focus": "Enfocar"
 }

@@ -78,7 +78,11 @@ export function createOutputInspector(): OutputInspector {
       const meta = el('p', 'output-inspector-meta');
       ui(meta, 'textContent', () => `${kindLabel(payload.kind)} · ${payload.payloadId}`);
       const nodes: HTMLElement[] = [title, meta];
-      if (payload.detail) nodes.push(el('p', 'output-inspector-detail', payload.detail));
+      if (payload.detail) {
+        const detail = el('p', 'output-inspector-detail', payload.detail);
+        detail.setAttribute('role', 'status');
+        nodes.push(detail);
+      }
       if (payload.actions?.length) {
         const actions = el('div', 'output-inspector-actions');
         for (const action of payload.actions) {

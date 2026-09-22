@@ -30,11 +30,18 @@ export function focusTimelineOrigin(timeline: HTMLElement, origin: number): bool
   return row ? focusRow(row) : false;
 }
 
-/** Focus the gallery drawn from one exact native message id — a generated-image set. */
+/** Focus the gallery drawn from one exact native message id — a generated-image set.
+ * When that gallery is off the page, focus the resident message row instead. */
 export function focusTimelineMessage(timeline: HTMLElement, messageId: string): boolean {
+  if (typeof messageId !== 'string' || messageId.length === 0) return false;
   const row = [...timeline.querySelectorAll<HTMLElement>('[data-image-message]')]
     .find(candidate => candidate.dataset.imageMessage === messageId);
-  return row ? focusRow(row.closest<HTMLElement>('.generated-image-gallery') ?? row) : false;
+  if (row) return focusRow(row.closest<HTMLElement>('.generated-image-gallery') ?? row);
+  const assistant = `assistant_message\u0000${messageId}`;
+  const user = `user_message\u0000${messageId}`;
+  const message = [...timeline.querySelectorAll<HTMLElement>('[data-timeline-key]')]
+    .find(candidate => candidate.dataset.timelineKey === assistant || candidate.dataset.timelineKey === user);
+  return message ? focusRow(message) : false;
 }
 
 /** Capture the visible logical row for one synchronous reconciliation. No retained

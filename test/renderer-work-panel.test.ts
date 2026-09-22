@@ -356,6 +356,9 @@ describe('workbench selection', () => {
     expect(inspector.isEmpty()).toBe(false);
     expect(inspector.element.textContent).toContain('from B');
     expect(inspector.element.textContent).not.toContain('from A');
+    const detail = inspector.element.querySelector('.output-inspector-detail');
+    expect(detail?.textContent).toBe('meta');
+    expect(detail?.getAttribute('role')).toBe('status');
   });
 
   it('rejects a stale payload from the same origin', () => {
@@ -375,5 +378,39 @@ describe('workbench selection', () => {
     expect(inspector.element.querySelector('.output-inspector-meta')?.textContent).toBe('Image · next');
     expect(inspector.element.textContent).toContain('current');
     expect(inspector.element.textContent).not.toContain('stale');
+  });
+
+  it('keeps an overlay workbench from taking a focused rich output', async () => {
+    const { createRichFocusStage } = await import('../src/renderer/rich-focus-stage.js');
+    const chat = document.createElement('div');
+    chat.id = 'chatBody';
+    host.append(chat);
+    const stage = createRichFocusStage({
+      host: () => chat,
+      currentSession: () => 'A',
+      read: () => ({
+        revision: 1, title: 'Sketch', mode: 'artifact', source: '<p>Hello</p>',
+        meta: 'm · 1', status: null, preview: document.createElement('p')
+      }),
+      focusOrigin: () => true,
+      focusMessage: () => false
+    });
+    host.getBoundingClientRect = () => ({ width: 800, height: 700, top: 0, left: 0, right: 800, bottom: 700, x: 0, y: 0, toJSON() { return {}; } }) as DOMRect;
+    const work = createWorkPanel({ host });
+    const trigger = work.panel.querySelector<HTMLButtonElement>('[data-work-tab="inspector"]')!;
+    work.select({ tab: 'inspector', ownerKey: 'session:A' }, trigger);
+    expect(work.panel.classList.contains('is-overlay')).toBe(true);
+    expect(stage.open({
+      sessionId: 'A', logicalMessageId: 'm', nodeId: 'art1', revision: 1, origin: 2
+    })).toBe(true);
+    expect(work.panel.contains(stage.element)).toBe(false);
+    expect(chat.contains(stage.element)).toBe(true);
+    const closeButton = stage.element.querySelector<HTMLButtonElement>('.rich-focus-close')!;
+    closeButton.focus();
+    work.close();
+    expect(work.panel.hidden).toBe(true);
+    expect(document.activeElement).toBe(closeButton);
+    work.panel.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(document.activeElement).toBe(closeButton);
   });
 });

@@ -173,12 +173,18 @@ export function createWorkPanel(options: {
     refresh();
   }
 
+  function focusStaysWithRichOutput(): boolean {
+    const active = host.ownerDocument.activeElement;
+    return Boolean(active?.closest('.rich-focus-stage'));
+  }
+
   function close(): void {
     const current = visible();
     if (current) tenants.get(current)?.hide();
     chosen = null;
     refresh();
-    trigger?.focus();
+    // The conversation stage owns focused-output focus. Closing this overlay must not take it.
+    if (!focusStaysWithRichOutput()) trigger?.focus();
   }
 
   panel.append(strip, body);
@@ -188,7 +194,7 @@ export function createWorkPanel(options: {
   const FrameObserver = view?.ResizeObserver;
   if (FrameObserver) new FrameObserver(() => applyLayout()).observe(studioFrame());
   panel.addEventListener('keydown', event => {
-    if (event.key !== 'Escape' || event.defaultPrevented) return;
+    if (event.key !== 'Escape' || event.defaultPrevented || focusStaysWithRichOutput()) return;
     event.preventDefault();
     close();
   });

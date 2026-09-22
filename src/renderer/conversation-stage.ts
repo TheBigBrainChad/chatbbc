@@ -1,6 +1,15 @@
 import type { SessionEvent, SessionOrigin, StoredText } from '../shared/session.js';
 import type { DeliveryHost } from './outbox-view.js';
 import {
+  closeRichFocus,
+  createRichFocusStage,
+  openRichFocus,
+  type RichFocusStage,
+  type RichFocusStatus,
+  type RichFocusTarget,
+  type RichFocusView
+} from './rich-focus-stage.js';
+import {
   createTimelineView,
   type TimelinePage,
   type TimelinePaint,
@@ -63,6 +72,10 @@ export interface ConversationStage {
   focusOrigin(origin: number): boolean;
   /** Focus the gallery drawn from one exact native message; false when it is not on screen. */
   focusMessage(messageId: string): boolean;
+  /** Enlarge one resident artifact or decision. False when that node is not loaded for this session. */
+  openRichFocus(target: RichFocusTarget): boolean;
+  /** Close the focus stage and return to its transcript row. */
+  closeRichFocus(): void;
   /** Whether the resident window carries model activity after a timestamp. */
   hasLaterActivity(time: number): boolean;
   /** The resident window, chronological. */
@@ -76,6 +89,59 @@ export interface ConversationStage {
   current(): ConversationStageOwner;
 }
 
+const FOCUS_STATUS = new Set<RichFocusStatus>(['pending', 'confirmed', 'changed', 'unavailable', 'unconfirmed']);
+
+function requestedFocus(event: Event): Omit<RichFocusTarget, 'sessionId'> | null {
+  if (!('detail' in event)) return null;
+  const detail = (event as CustomEvent<unknown>).detail;
+  if (!detail || typeof detail !== 'object') return null;
+  const fields = detail as Record<string, unknown>;
+  const logicalMessageId = fields.logicalMessageId;
+  const nodeId = fields.nodeId;
+  const revision = fields.revision;
+  const origin = fields.origin;
+  if (typeof logicalMessageId !== 'string' || !/^[a-z0-9:_-]{1,190}$/i.test(logicalMessageId)) return null;
+  if (typeof nodeId !== 'string' || !/^[a-z0-9:_-]{1,190}$/i.test(nodeId)) return null;
+  if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) return null;
+  if (typeof origin !== 'number' || !Number.isSafeInteger(origin) || origin < 0) return null;
+  return { logicalMessageId, nodeId, revision, origin };
+}
+
+/** Reread the card that is actually loaded. A requested revision never invents a newer tree. */
+function readRichFocus(timeline: HTMLElement, target: RichFocusTarget): RichFocusView | null {
+  let box: HTMLElement | null = null;
+  let card: HTMLElement | null = null;
+  for (const candidate of timeline.querySelectorAll<HTMLElement>('.rich-response')) {
+    if (candidate.dataset.richMessageId !== target.logicalMessageId) continue;
+    const node = [...candidate.querySelectorAll<HTMLElement>('[data-rich-node-id]')]
+      .find(item => item.dataset.richNodeId === target.nodeId);
+    if (!node) continue;
+    box = candidate;
+    card = node;
+    if (Number(candidate.dataset.richRevision) === target.revision) break;
+  }
+  if (!box || !card) return null;
+  const revision = Number(box.dataset.richRevision);
+  if (!Number.isSafeInteger(revision) || revision < 0) return null;
+  const mode = card.classList.contains('rich-artifact') ? 'artifact'
+    : card.classList.contains('rich-card') ? 'decision' : null;
+  if (!mode) return null;
+  const clone = card.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll('.rich-focus-open').forEach(button => button.remove());
+  const frame = card.querySelector('iframe');
+  const unavailable = mode === 'artifact' && card.dataset.richArtifactMode === 'static' && card.dataset.richAdmitted !== 'true';
+  const status = box.dataset.richStatus;
+  return {
+    revision,
+    title: card.querySelector('h3')?.textContent ?? '',
+    mode,
+    source: frame?.getAttribute('srcdoc') ?? clone.textContent ?? '',
+    meta: `${target.logicalMessageId} · ${revision}`,
+    status: status && FOCUS_STATUS.has(status as RichFocusStatus) ? status as RichFocusStatus : null,
+    preview: unavailable ? null : clone
+  };
+}
+
 export function createConversationStage(options: ConversationStageOptions): ConversationStage {
   let owner: ConversationStageOwner = { sessionId: null, generation: 0 };
   const view: TimelineView = createTimelineView({
@@ -83,16 +149,37 @@ export function createConversationStage(options: ConversationStageOptions): Conv
     sessionId: () => owner.sessionId,
     generation: () => owner.generation
   });
+  const focus: RichFocusStage = createRichFocusStage({
+    host: () => options.pane(),
+    read: target => readRichFocus(options.timeline(), target),
+    currentSession: () => owner.sessionId,
+    focusOrigin: origin => view.focusOrigin(origin),
+    focusMessage: messageId => view.focusMessage(messageId)
+  });
+  const timeline = options.timeline();
+  const onFocusRequest = (event: Event): void => {
+    const request = requestedFocus(event);
+    if (!request || !owner.sessionId) return;
+    focus.open({ ...request, sessionId: owner.sessionId });
+  };
+  timeline.addEventListener('rich-focus-request', onFocusRequest);
 
   return {
     select(sessionId, generation) {
       // The drawn rows stay mounted until the destination arrives, so the previous chat is not
       // replaced by the New Chat welcome during the read. The window behind them is retired here,
       // which is what makes a page for the previous owner stale.
-      if (sessionId !== owner.sessionId) view.retire();
+      if (sessionId !== owner.sessionId) {
+        focus.close();
+        view.retire();
+      }
       owner = { sessionId, generation };
     },
-    update: (page, generation) => view.update(page, generation),
+    update(page, generation) {
+      const accepted = view.update(page, generation);
+      if (accepted) focus.refresh();
+      return accepted;
+    },
     paint: options_ => view.paint(options_),
     awaiting: () => owner.sessionId !== null && !view.loaded(),
     browsing: () => view.browsing(),
@@ -100,15 +187,20 @@ export function createConversationStage(options: ConversationStageOptions): Conv
     newerOrigin: () => view.newerOrigin(),
     focusOrigin: origin => view.focusOrigin(origin),
     focusMessage: messageId => view.focusMessage(messageId),
+    openRichFocus: target => openRichFocus(focus, target),
+    closeRichFocus: () => closeRichFocus(focus),
     hasLaterActivity: time => view.hasLaterActivity(time),
     events: () => view.events(),
     setFilter: agent => view.setFilter(agent),
     previewRows: (source, sessionId, current, groups) => view.previewRows(source, sessionId, current, groups),
     clear() {
+      focus.close();
       view.retire();
       view.clearRows();
     },
     dispose() {
+      timeline.removeEventListener('rich-focus-request', onFocusRequest);
+      focus.close();
       view.dispose();
       owner = { sessionId: null, generation: 0 };
     },

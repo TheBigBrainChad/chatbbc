@@ -1,5 +1,5 @@
 import { parseRichResponse, type RichNode, type RichResponse } from '../shared/rich-response.js';
-import { t } from './i18n.js';
+import { t, ui } from './i18n.js';
 import { admitArtifactMedia } from '../shared/static-artifact.js';
 import { mountStaticArtifact } from './static-artifact.js';
 import type { RichMediaState } from '../shared/session.js';
@@ -13,6 +13,8 @@ export type RichImageContext = {
   openOriginal?: () => Promise<boolean>;
   /** Data URLs already admitted for this message. Remote values are ignored. */
   admittedArtifactMedia?: ReadonlyMap<string, string>;
+  /** Ledger text for a focused artifact or decision. Absent until a result exists. */
+  focusStatus?: 'pending' | 'confirmed' | 'changed' | 'unavailable' | 'unconfirmed';
 };
 
 type ImageRender = RichImageContext & { rich: RichResponse; imageCounts: Map<string, number> };
@@ -448,6 +450,37 @@ function cleanAdmittedArtifactMedia(value: ReadonlyMap<string, string> | undefin
   return clean;
 }
 
+
+function containsControl(node: RichNode): boolean {
+  if (node.kind === 'control') return true;
+  if (node.kind === 'group') return node.children.some(containsControl);
+  return false;
+}
+
+/** Ask the conversation stage to enlarge this card. The click is local UI, not a provider action. */
+function appendFocus(host: HTMLElement, nodeId: string): void {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'rich-focus-open';
+  ui(button, 'textContent', () => t('Focus'));
+  button.addEventListener('click', () => {
+    const box = button.closest<HTMLElement>('.rich-response');
+    const row = button.closest<HTMLElement>('[data-timeline-origin]');
+    const logicalMessageId = box?.dataset.richMessageId ?? '';
+    const revision = Number(box?.dataset.richRevision);
+    const origin = Number(row?.getAttribute('data-timeline-origin'));
+    if (!/^[a-z0-9:_-]{1,190}$/i.test(logicalMessageId) || !/^[a-z0-9:_-]{1,190}$/i.test(nodeId)) return;
+    if (!Number.isSafeInteger(revision) || revision < 0 || !Number.isSafeInteger(origin) || origin < 0) return;
+    const view = button.ownerDocument.defaultView;
+    if (!view) return;
+    button.dispatchEvent(new view.CustomEvent('rich-focus-request', {
+      bubbles: true,
+      detail: { logicalMessageId, nodeId, revision, origin }
+    }));
+  });
+  host.append(button);
+}
+
 function renderNode(node: RichNode, images?: ImageRender): HTMLElement {
   if (node.kind === 'text') {
     const tag = node.style === 'heading' ? 'h3' : node.style === 'code' ? 'pre' : 'p';
@@ -590,10 +623,12 @@ function renderNode(node: RichNode, images?: ImageRender): HTMLElement {
     const card = document.createElement('article');
     card.className = 'rich-artifact';
     card.dataset.richNodeId = node.id;
+    card.dataset.richArtifactMode = node.mode;
     card.append(renderNode({ id: `${node.id}-title`, kind: 'text', style: 'heading', text: node.title }, images));
     if (node.mode === 'static' && node.html) {
       const frameHost = document.createElement('div');
       const admitted = admitArtifactMedia(node.media, cleanAdmittedArtifactMedia(images?.admittedArtifactMedia));
+      card.dataset.richAdmitted = admitted ? 'true' : 'false';
       if (admitted) mountStaticArtifact(frameHost, { html: node.html, media: admitted });
       else {
         const note = document.createElement('p');
@@ -602,6 +637,7 @@ function renderNode(node: RichNode, images?: ImageRender): HTMLElement {
       }
       card.append(frameHost);
     }
+    appendFocus(card, node.id);
     return card;
   }
 
@@ -629,6 +665,7 @@ function renderNode(node: RichNode, images?: ImageRender): HTMLElement {
       group.append(item);
     } else group.append(renderNode(child, images));
   }
+  if (node.layout === 'card' && containsControl(node)) appendFocus(group, node.id);
   return group;
 }
 
@@ -640,6 +677,9 @@ export function renderRichResponse(rich: RichResponse, fallback: string, media?:
   const box = document.createElement('div');
   box.className = 'msg rich-response';
   box.setAttribute('dir', 'auto');
+  box.dataset.richMessageId = clean.messageId;
+  box.dataset.richRevision = String(clean.revision);
+  if (media?.focusStatus) box.dataset.richStatus = media.focusStatus;
   const safeMedia = media ? validatedMedia(media.media) : null;
   const images = media && safeMedia
     ? { sessionId: media.sessionId, current: media.current, media: safeMedia, rich: clean,

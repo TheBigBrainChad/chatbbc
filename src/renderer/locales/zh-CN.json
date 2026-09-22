@@ -1404,5 +1404,14 @@
   "planning": "正在规划",
   "queue {0}": "队列 {0}",
   "settling {0}": "收尾 {0}",
-  "Open original in ChatGPT": "在 ChatGPT 中打开原件"
+  "Open original in ChatGPT": "在 ChatGPT 中打开原件",
+  "Preview": "预览",
+  "Structure": "结构",
+  "Metadata": "元数据",
+  "Confirmed": "已确认",
+  "Changed": "已变化",
+  "Unavailable": "不可用",
+  "Unconfirmed": "未确认",
+  "Focused output": "已聚焦的输出",
+  "Focus": "聚焦"
 }

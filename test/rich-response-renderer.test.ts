@@ -798,3 +798,125 @@ it('shows an external URL as artifact text and admits one image from a larger lo
   expect(view.querySelector('iframe')?.srcdoc).toContain(dataUrl);
   expect(view.querySelector('iframe')?.srcdoc).not.toMatch(/https:/i);
 });
+
+it('asks the conversation stage to focus an artifact or decision without enabling a provider action', () => {
+  const heard: unknown[] = [];
+  const dataUrl = 'data:image/png;base64,aaaa';
+  const rich = fixture([
+    artifact('static', '<p>Hello</p><img data-media-id="shot" alt="cat">', ['shot']),
+    group('options', 'grid', [
+      group('forest', 'card', [prose('forest-title', 'Forest', 'heading'), choice('forest-choice', 'Forest', true)])
+    ])
+  ]);
+  const view = renderRichResponse(rich, 'source', {
+    sessionId: '2026-09-02-test0001', media: [], current: () => true,
+    admittedArtifactMedia: new Map([['shot', dataUrl]]), focusStatus: 'pending'
+  });
+  const row = document.createElement('div');
+  row.dataset.timelineOrigin = '4';
+  row.append(view);
+  document.body.append(row);
+  row.addEventListener('rich-focus-request', event => heard.push((event as CustomEvent).detail));
+  view.querySelector<HTMLButtonElement>('.rich-artifact .rich-focus-open')!.click();
+  view.querySelector<HTMLButtonElement>('.rich-card .rich-focus-open')!.click();
+  expect(heard).toEqual([
+    { logicalMessageId: rich.messageId, nodeId: 'art1', revision: 1, origin: 4 },
+    { logicalMessageId: rich.messageId, nodeId: 'forest', revision: 1, origin: 4 }
+  ]);
+  expect(view.dataset.richMessageId).toBe(rich.messageId);
+  expect(view.dataset.richRevision).toBe('1');
+  expect(view.dataset.richStatus).toBe('pending');
+  expect(view.querySelector('.rich-grid > .rich-focus-open')).toBeNull();
+  expect(row.contains(view.querySelector('.rich-artifact'))).toBe(true);
+  expect(view.querySelector<HTMLButtonElement>('[data-rich-control="forest-choice"]')?.getAttribute('aria-disabled')).toBe('true');
+  row.remove();
+});
+
+it('focuses one artifact or decision, refreshes a changed result, and returns keyboard focus', async () => {
+  const { createRichFocusStage } = await import('../src/renderer/rich-focus-stage.js');
+  const { readFileSync } = await import('node:fs');
+  const host = document.createElement('div');
+  document.body.append(host);
+  let session: string | null = 'A';
+  let revision = 3;
+  let status: 'pending' | 'confirmed' | null = 'pending';
+  let source = '<p>Hello</p>';
+  let preview: HTMLElement | null = document.createElement('iframe');
+  let originResident = true;
+  const origins: number[] = [];
+  const messages: string[] = [];
+  const stage = createRichFocusStage({
+    host: () => host,
+    currentSession: () => session,
+    read: () => ({
+      revision, title: 'Sketch', mode: preview ? 'artifact' : 'artifact', source,
+      meta: `assistant:working:exchange:1789552000000 · ${revision}`, status, preview
+    }),
+    focusOrigin: origin => { origins.push(origin); return originResident; },
+    focusMessage: id => { messages.push(id); return true; }
+  });
+  const target = {
+    sessionId: 'A', logicalMessageId: 'assistant:working:exchange:1789552000000',
+    nodeId: 'art1', revision: 9, origin: 4
+  };
+  expect(stage.open(target)).toBe(true);
+  expect(stage.element.dataset.shownRevision).toBe('3');
+  expect(stage.target()?.revision).toBe(3);
+  expect(document.activeElement).toBe(stage.element.querySelector('.rich-focus-close'));
+  expect(stage.element.getAttribute('role')).toBe('dialog');
+  expect(stage.element.getAttribute('aria-modal')).toBe('false');
+  expect(stage.element.querySelector('[role="status"]')?.textContent).toBe('Pending');
+  expect(stage.element.querySelector('iframe')).toBe(preview);
+  const structure = stage.element.querySelector<HTMLButtonElement>('[data-rich-focus-tab="structure"]')!;
+  expect(structure.tabIndex).toBe(0);
+  structure.focus();
+  structure.click();
+  const pre = stage.element.querySelector('pre')!;
+  expect(pre.textContent).toBe(source);
+  expect(pre.getAttribute('dir')).toBe('ltr');
+  expect(pre.style.overflow).not.toBe('auto');
+  expect(document.activeElement).toBe(structure);
+  expect(stage.refresh()).toBe('current');
+  expect(document.activeElement).toBe(structure);
+  status = 'confirmed';
+  expect(stage.refresh()).toBe('refreshed');
+  expect(stage.isOpen()).toBe(true);
+  expect(stage.element.querySelector('[role="status"]')?.textContent).toBe('Confirmed');
+  expect(document.activeElement?.getAttribute('data-rich-focus-tab')).toBe('structure');
+  stage.element.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  expect(stage.isOpen()).toBe(false);
+  expect(origins).toEqual([4]);
+  expect(messages).toEqual([]);
+  preview = null;
+  status = null;
+  revision = 3;
+  expect(stage.open(target)).toBe(true);
+  expect(stage.element.querySelector('iframe, img')).toBeNull();
+  expect(stage.element.querySelector('.rich-focus-unavailable')?.textContent).toBe('Unavailable');
+  originResident = false;
+  stage.close();
+  expect(messages).toEqual(['assistant:working:exchange:1789552000000']);
+  const decision = document.createElement('div');
+  decision.textContent = 'Forest';
+  preview = decision;
+  const decisionStage = createRichFocusStage({
+    host: () => host,
+    currentSession: () => session,
+    read: () => ({ revision: 1, title: 'Forest', mode: 'decision', source: 'Forest', meta: 'm · 1', status: null, preview: decision }),
+    focusOrigin: () => true,
+    focusMessage: () => false
+  });
+  expect(decisionStage.open({ ...target, revision: 1 })).toBe(true);
+  expect(decisionStage.element.querySelector('fieldset > legend')?.textContent).toBe('Forest');
+  expect(decisionStage.element.querySelector('fieldset')?.contains(decision)).toBe(true);
+  expect(decisionStage.element.querySelector('form')).toBeNull();
+  session = 'B';
+  expect(decisionStage.refresh()).toBe('closed');
+  expect(decisionStage.isOpen()).toBe(false);
+  const transcript = readFileSync(new URL('../src/renderer/styles/transcript.css', import.meta.url), 'utf8');
+  const base = readFileSync(new URL('../src/renderer/styles/base.css', import.meta.url), 'utf8');
+  expect(transcript).toMatch(/\.rich-focus-stage\s*\{[^}]*overflow:\s*auto/);
+  expect(transcript).toMatch(/\.rich-focus-stage pre[^{]*\{[^}]*overflow:\s*visible/);
+  expect(base).toMatch(/prefers-reduced-motion:\s*reduce[\s\S]*transition:\s*none !important/);
+  host.remove();
+});

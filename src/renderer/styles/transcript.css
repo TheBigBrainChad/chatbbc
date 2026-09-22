@@ -386,6 +386,19 @@
 .rich-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 14px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--card); }
 .rich-artifact { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
 .rich-artifact iframe { width: 100%; min-height: 12rem; border: 1px solid var(--line); background: var(--page); }
+.rich-focus-open, .rich-focus-close, .rich-focus-tab { font: inherit; }
+.rich-focus-stage {
+  position: relative; z-index: 4; display: grid; gap: 8px; max-height: min(70vh, 40rem); overflow: auto;
+  margin: 12px; padding: 12px; border: 1px solid var(--line); background: var(--page);
+  transition: opacity 160ms ease;
+}
+.rich-focus-stage pre, .rich-focus-panel, .rich-focus-source, .rich-focus-preview { overflow: visible; max-height: none; }
+.rich-focus-source { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.rich-focus-tabs { display: flex; flex-wrap: wrap; gap: 8px; }
+.rich-focus-title, .rich-focus-status, .rich-focus-meta, .rich-focus-unavailable { margin: 0; }
+.rich-focus-open:focus-visible, .rich-focus-close:focus-visible, .rich-focus-tab:focus-visible {
+  outline: 2px solid var(--ink); outline-offset: 2px;
+}
 .rich-card > * { min-width: 0; margin-block-start: 0 !important; }
 .rich-list { padding-inline-start: 1.5em; }
 .rich-list > li { min-width: 0; }
