@@ -4,7 +4,7 @@ import { CONNECTOR_BRAND } from './surfaces.js';
 import { goalWorkerChat } from '../bridge.js';
 import { announceSessionFinish, sessionFinishDeadline } from '../session/finish.js';
 import { getConfig } from '../config.js';
-import { GeneratedAssetError, listGeneratedAssets, saveGeneratedAsset } from '../generated-assets.js';
+import { GeneratedAssetError, listGeneratedAssets, readOriginalForHandle, saveGeneratedAsset } from '../generated-assets.js';
 /**
  * The Core connector: reading, changing and running code on this PC.
  *
@@ -1032,7 +1032,8 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
         roots: reg.ctx.roots,
         readOnly: config.readOnly,
         canCreate: config.capabilities.create === true && !config.readOnly,
-        canEdit: config.capabilities.edit === true && !config.readOnly
+        canEdit: config.capabilities.edit === true && !config.readOnly,
+        ...(input.source === 'original' ? { readOriginal: () => readOriginalForHandle(caller.sessionId!, input.handle!) } : {})
       });
       return { content: [{ type: 'text' as const, text: JSON.stringify(saved) }] };
     } catch (error) {

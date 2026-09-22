@@ -4,6 +4,7 @@ import path from 'node:path';
 import { getSession, readAsset, sessionImageSets } from './session/store.js';
 import { SandboxError, resolvePath } from './sandbox.js';
 import sharp from './sharp.js';
+import { wakeBrowserWork } from './browser-wake.js';
 import { GENERATED_ASSET_LIMITS } from '../shared/generated-assets.js';
 import type { Root } from '../shared/types.js';
 
@@ -256,6 +257,32 @@ export function beginOriginalTransfer(record: { sessionId: string; conversationI
     fail: null
   });
   return id;
+}
+
+export async function readOriginalForHandle(sessionId: string, handle: string): Promise<Buffer> {
+  const record = handles.get(handle);
+  if (!record || record.sessionId !== sessionId) throw new GeneratedAssetError('asset_handle_refused');
+  const session = await getSession(sessionId);
+  if (!session?.conversationId) throw new GeneratedAssetError('download_session_unavailable');
+  const id = beginOriginalTransfer({
+    sessionId,
+    conversationId: session.conversationId,
+    assetId: record.assetId,
+    logicalMessageId: record.logicalMessageId
+  });
+  wakeBrowserWork();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<Buffer>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      originalTransfers.delete(id);
+      reject(new GeneratedAssetError('original_unavailable'));
+    }, GENERATED_ASSET_LIMITS.transferMs);
+  });
+  try {
+    return await Promise.race([waitOriginalTransfer(id), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function pendingOriginalTransfers(): Array<{ id: string; conversationId: string; logicalMessageId: string; assetId: string }> {
