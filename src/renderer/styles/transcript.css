@@ -408,7 +408,7 @@
 .rich-image-slot > span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .rich-image-slot > button { max-width: 100%; min-width: 0; padding: 7px 10px; border: 1px solid var(--edge); border-radius: var(--r-sm);
   background: var(--card); color: var(--ink); font: inherit; cursor: pointer; }
-.rich-image-slot > button:focus-visible, .rich-image-viewer button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.rich-image-slot > button:focus-visible, .rich-image-viewer button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 .rich-image-viewer { box-sizing: border-box; width: fit-content; max-width: min(96vw, 1700px); max-height: 96dvh; margin: auto; padding: 16px;
   overflow: auto; border: 1px solid var(--edge); border-radius: var(--r-md); background: var(--card); color: var(--ink); }
 .rich-image-viewer::backdrop { background: #0009; }
@@ -425,7 +425,7 @@
 .rich-control-state { font-size: .8em; font-family: var(--ui-font-mono); color: var(--soft); }
 .rich-control button, .rich-control input, .rich-control select { max-width: 100%; min-width: 0; font: inherit; color: var(--soft); background: var(--card); border: 1px solid var(--line); padding: 6px 10px; cursor: not-allowed; }
 .rich-control label { display: grid; gap: 6px; min-width: 0; }
-.rich-response :is([tabindex='0'], summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.rich-response :is([tabindex='0'], summary):focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 .rich-unavailable { border: 1px solid var(--line); background: var(--sunk); padding: 12px; }
 .rich-unavailable-label { margin: 0 0 8px; color: var(--soft); }
 .rich-source > summary { cursor: pointer; color: var(--accent); font-family: var(--ui-font-mono); font-size: .86em; }
@@ -697,7 +697,7 @@
 .agent-chat-open { margin: 10px 0 2px 24px; padding: 5px 0; gap: 7px; border-radius: 0; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); font-weight: 500; }
 .agent-chat-open:hover:not(:disabled) { background: transparent; color: var(--ink); }
 .agent-chat-open:hover span { text-decoration: underline; text-underline-offset: 3px; }
-.agent-chat-open:focus-visible { outline: 2px solid var(--soft); outline-offset: 4px; }
+.agent-chat-open:focus-visible { outline: 2px solid var(--ink); outline-offset: 4px; }
 .agent-chat-open .ico { width: 13px; height: 13px; }
 
 /* ------------------------------------------------------------------- spine

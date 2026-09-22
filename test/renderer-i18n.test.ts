@@ -191,4 +191,11 @@ describe('Chinese app interface', () => {
         .toEqual([...key.matchAll(/\{\d+\}/g)].map(match => match[0]).sort());
     }
   });
+
+  it('covers every runtime t() string in each translated catalog', async () => {
+    const { missingLocaleKeys } = await import('../src/renderer/i18n.js');
+    expect(missingLocaleKeys('es')).toEqual([]);
+    expect(missingLocaleKeys('zh-CN')).toEqual([]);
+    expect(missingLocaleKeys('zh-TW')).toEqual([]);
+  });
 });

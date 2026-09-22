@@ -356,7 +356,7 @@
 .power-dot { width: 4px; height: 4px; background: #fff9; border-radius: 50%; }
 #composerPowerChoices input { position: absolute; inset: -2px 0; appearance: none; width: 100%; height: 32px; border: 0; padding: 0; margin: 0; background: transparent; cursor: pointer; }
 #composerPowerChoices input::-webkit-slider-thumb { appearance: none; width: 32px; height: 32px; background: #fff; border-radius: 50%; border: 1px solid #d5dce5; box-shadow: 0 1px 4px #0004; }
-#composerPowerChoices input:focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; }
+#composerPowerChoices input:focus-visible { outline: 2px solid var(--ink); outline-offset: 5px; }
 
 
 .send-control { position: relative; }
@@ -371,7 +371,7 @@
 
 .queue-label[draggable='true'] { cursor: grab; }
 .queue-label[draggable='true']:active { cursor: grabbing; }
-.queue-label[draggable='true']:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 0; }
+.queue-label[draggable='true']:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 0; }
 
 
 .composer-dock { --edge: var(--composer-edge); position: relative; z-index: 4; width: calc(100% - 48px); max-width: 860px; margin: 0 auto -1px; border: 1px solid var(--hairline); border-bottom: 0; border-radius: 0; background: var(--glass-medium); overflow: hidden; }

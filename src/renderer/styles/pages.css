@@ -1357,7 +1357,7 @@ input.num {
 .setting > input[type='checkbox']::after { content: ''; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; border-radius: 50%; background: var(--knob-off); }
 .setting > input[type='checkbox']:checked { background: var(--accent-fill, var(--ink)); }
 .setting > input[type='checkbox']:checked::after { left: 16px; background: var(--on-accent, var(--page)); }
-.setting > input[type='checkbox']:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.setting > input[type='checkbox']:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 
 .settings-section-title { margin: 34px 0 14px; font-family: var(--ui-font-mono); font-size: calc(14px * var(--text-scale, 1)); font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--ink); }
 

@@ -18,6 +18,46 @@ catch { /* Storage may be unavailable in a restricted renderer; English remains 
 
 export function currentLanguage(): Language { return language; }
 
+type NodeFs = {
+  readFileSync: (path: string, encoding: 'utf8') => string;
+  readdirSync: (path: string) => string[];
+  statSync: (path: string) => { isDirectory: () => boolean };
+};
+type NodePath = { join: (...parts: string[]) => string };
+
+/** Keys passed to t() in renderer source that this catalog does not contain. */
+export function missingLocaleKeys(locale: Exclude<Language, 'en'>): string[] {
+  const proc = (globalThis as { process?: { cwd: () => string; getBuiltinModule: (name: string) => NodeFs | NodePath } }).process;
+  if (!proc?.getBuiltinModule) throw new Error('missingLocaleKeys reads renderer source from Node');
+  const fs = proc.getBuiltinModule('node:fs') as NodeFs;
+  const path = proc.getBuiltinModule('node:path') as NodePath;
+  const root = path.join(proc.cwd(), 'src', 'renderer');
+  const files: string[] = [];
+  const walk = (dir: string): void => {
+    for (const name of fs.readdirSync(dir)) {
+      const full = path.join(dir, name);
+      if (fs.statSync(full).isDirectory()) walk(full);
+      else if (full.endsWith('.ts')) files.push(full);
+    }
+  };
+  walk(root);
+  const keys = new Set<string>();
+  const literal = /\bt\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*?)\1/g;
+  for (const file of files) {
+    for (const match of fs.readFileSync(file, 'utf8').matchAll(literal)) {
+      const quote = match[1]!;
+      const body = match[2]!;
+      if (quote === '`' && body.includes('${')) continue;
+      const decoded = quote === "'"
+        ? JSON.parse(`"${body.replace(/\\'/g, "'").replace(/"/g, '\\"')}"`) as string
+        : JSON.parse(`"${body}"`) as string;
+      keys.add(decoded);
+    }
+  }
+  const catalog = catalogs[locale];
+  return [...keys].filter(key => !Object.hasOwn(catalog, key)).sort();
+}
+
 /** Translate only app-authored copy at explicit call sites. Arguments remain verbatim. */
 export function t(source: string, args: readonly unknown[] = []): string {
   const catalog = language === 'en' ? undefined : catalogs[language];

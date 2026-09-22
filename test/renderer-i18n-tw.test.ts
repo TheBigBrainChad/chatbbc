@@ -7,6 +7,10 @@ import zhCN from '../src/renderer/locales/zh-CN.json';
 
 let dom: JSDOM | undefined;
 afterEach(() => { dom?.window.close(); vi.resetModules(); });
+it('covers every runtime t() string in Traditional Chinese', async () => {
+  const { missingLocaleKeys } = await import('../src/renderer/i18n.js');
+  expect(missingLocaleKeys('zh-TW')).toEqual([]);
+});
 it('covers every current source key with matching placeholders and no duplicate keys', () => {
   const missing = Object.keys(zhCN).filter(key => !Object.hasOwn(zhTW, key));
   expect(missing).toEqual([]);

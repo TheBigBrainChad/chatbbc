@@ -109,14 +109,12 @@ describe('the session card header', () => {
     expect(header.contains(connection)).toBe(false);
     expect(footer).not.toBeNull();
     expect([...footer.children].map((node) => (node as HTMLElement).id || (node as HTMLElement).className)).toEqual([
-      'workspaceSettings',
       'connection-anchor'
     ]);
     expect(document.getElementById('connectionPopover')!.closest('.connection-anchor')).not.toBeNull();
     expect(rule('.connection-popover')).toContain('position: fixed');
     expect(rule('.connection-popover')).toContain('max-height: min(580px, calc(100vh - 70px))');
     expect(rule('.connection-popover::-webkit-scrollbar-track')).toContain('margin-block: 10px');
-    expect(rule('#workspaceSettings')).toContain('height: 36px');
     expect(rule('.sidebar-connection')).toContain('width: 36px; height: 36px');
     expect(document.getElementById('connectionAdvanced')).not.toBeNull();
     expect(document.getElementById('connectionAdvancedGrid')).not.toBeNull();
@@ -496,15 +494,15 @@ describe('the settings sheet', () => {
 
 describe('the session timeline', () => {
   it('renders every event kind the recorder can write', async () => {
-    const [shared, chat] = await Promise.all([
+    const [shared, timeline] = await Promise.all([
       fs.readFile(path.join(process.cwd(), 'src', 'shared', 'session.ts'), 'utf8'),
-      fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'chat.ts'), 'utf8')
+      fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'timeline-view.ts'), 'utf8')
     ]);
     const union = shared.slice(shared.indexOf('export type SessionEvent ='), shared.indexOf('export type SessionEventKind'));
     const declared = [...new Set([...union.matchAll(/\bkind: '([a-z_]+)'/g)].map((match) => match[1]!))];
     expect(declared.length).toBeGreaterThan(5);
 
-    const body = chat.slice(chat.indexOf('function eventBody'));
+    const body = timeline.slice(timeline.indexOf('function eventBody'));
     const handled = new Set([...body.slice(0, body.indexOf('\n}')).matchAll(/case '([a-z_]+)':/g)].map((m) => m[1]!));
     expect(declared.filter((kind) => !handled.has(kind))).toEqual([]);
   });
@@ -540,6 +538,7 @@ describe('the window as a whole', () => {
     // Wide authored tables/code may scroll locally; the surrounding app must not.
     const horizontal = [...css.matchAll(/([^{}]+)\{[^{}]*overflow-x:\s*(?:auto|scroll)[^{}]*\}/g)];
     expect(horizontal.map(match => match[1]!.trim())).toEqual([
+      '.settings-pages',
       '.msg.rich .markdown-table',
       '.rich-table, .rich-diagram',
       '.file-preview-markdown pre',
@@ -550,6 +549,46 @@ describe('the window as a whole', () => {
     expect(css).not.toMatch(/overflow:\s*(auto|scroll)\s+/);
     // The one scrolling surface in the app is vertical only.
     expect(rule('.scroll')).toContain('overflow: hidden auto');
+  });
+
+  it('gives keyboard focus a shape that is not only accent, blue, or glow', () => {
+    const weak: string[] = [];
+    for (const match of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const selector = match[1]!.trim();
+      if (!/:focus-visible\b/.test(selector)) continue;
+      const body = match[2]!.replace(/\s+/g, ' ');
+      if (/outline:[^;]*var\(--ink\)/.test(body)) continue;
+      const outlineNone = /outline:\s*(?:none|0)\b/.test(body);
+      const accent = /outline:[^;]*var\(--(?:accent(?:-edge)?|blue|soft)\)/.test(body);
+      if (outlineNone || accent) weak.push(selector);
+    }
+    expect(weak).toEqual([]);
+  });
+
+  it('removes nonessential motion when reduced motion is requested', () => {
+    const reduced = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
+    expect(reduced.startsWith('@media (prefers-reduced-motion: reduce)')).toBe(true);
+    expect(reduced).toContain('animation: none !important');
+    expect(reduced).toContain('transition: none !important');
+    expect(reduced).toContain('scroll-behavior: auto !important');
+  });
+
+  it('keeps authored prose bidirectional and the shell on logical edges', () => {
+    expect(rule('.msg:not(.rich), .pending-message-text')).toContain('unicode-bidi: plaintext');
+    expect(rule(".msg.rich, textarea[dir='auto'], .queue-label[dir='auto']")).toContain('text-align: start');
+    expect(rule('.msg.rich :is(pre, code, kbd)')).toContain('unicode-bidi: isolate');
+    const rail = [...css.matchAll(/#globalRail\s*\{([^}]*)\}/g)].map(match => match[1]!);
+    const workbench = [...css.matchAll(/#contextWorkbench\s*\{([^}]*)\}/g)].map(match => match[1]!);
+    expect(rail.some(body => body.includes('border-inline-end'))).toBe(true);
+    expect(workbench.some(body => body.includes('border-inline-start'))).toBe(true);
+    expect(rail.some(body => /border-(?:left|right)\s*:/.test(body))).toBe(false);
+  });
+
+  it('keeps primary rail targets usable when text is enlarged', () => {
+    expect(rule('#globalRail [data-destination]')).toContain('min-width: 44px');
+    expect(rule('#globalRail [data-destination]')).toContain('min-height: 44px');
+    expect(rule('#globalRail [data-destination]')).toContain('calc(11px * var(--text-scale, 1))');
+    expect(document.body.innerHTML).not.toContain('aria-live="assertive"');
   });
 
   it('keeps setup and settings vertically reachable when the window is short', () => {
@@ -683,6 +722,34 @@ describe('the adaptive studio shell', () => {
     escape();
     expect(app.dataset.navigatorOpen).toBe('false');
     expect(document.activeElement).toBe(chats);
+    shell.dispose();
+  });
+
+  it('moves rail focus with the arrow keys and returns it to the agents trigger', async () => {
+    const { shell } = await mountShell();
+    const view = document.defaultView!;
+    const chats = document.querySelector<HTMLButtonElement>('[data-destination="chats"]')!;
+    const files = document.querySelector<HTMLButtonElement>('[data-destination="files"]')!;
+    const agents = document.querySelector<HTMLButtonElement>('[data-destination="agents"]')!;
+    const settings = document.querySelector<HTMLButtonElement>('[data-destination="settings"]')!;
+    const key = (target: HTMLElement, name: string) => target.dispatchEvent(new view.KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }));
+    chats.focus();
+    key(chats, 'ArrowDown');
+    expect(document.activeElement).toBe(files);
+    expect(files.tabIndex).toBe(0);
+    expect(chats.tabIndex).toBe(-1);
+    key(files, 'End');
+    expect(document.activeElement).toBe(settings);
+    key(settings, 'Home');
+    expect(document.activeElement).toBe(chats);
+
+    resize(480);
+    agents.focus();
+    agents.click();
+    expect(document.querySelector('.app')!.getAttribute('data-workbench-open')).toBe('true');
+    document.dispatchEvent(new view.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    expect(document.querySelector('.app')!.getAttribute('data-workbench-open')).toBe('false');
+    expect(document.activeElement).toBe(agents);
     shell.dispose();
   });
 
