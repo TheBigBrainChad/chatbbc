@@ -37,19 +37,18 @@
 ### Task 1: Prove and capture exact native choice identity
 
 **Files:**
-- Modify: `extension/chatgpt-dom.js`
-- Modify: `extension/fiber.js`
-- Modify: `extension/content.js`
+- Verify: `extension/chatgpt-dom.js` (choice capture already stores null `groupId` and `value`; do not infer a selector)
+- Verify: `extension/fiber.js` (it does not own rich-choice shape; do not add a selector or permission)
+- Verify: `extension/content.js` (do not freeze a choice descriptor until one family is proved)
 - Modify: `src/shared/rich-response.ts`
 - Test: `test/rich-response-schema.test.ts`
-- Test: `test/rich-response-lifecycle.test.ts`
+- Verify: `test/rich-response-lifecycle.test.ts` (no live resolution until one family is proved)
 - Test: `test/content-script.test.ts`
-- Test: `test/extension.test.ts`
+- Verify: `test/extension.test.ts` (no new choice protocol until one family is proved)
 
 **Interfaces:**
-- Extends choice-like nodes with exact bounded `groupId`, `value`, `selected`, and `disabled` fields.
-- Produces a physical descriptor joining logical message, raw provider message, document/navigation epoch, native group, control kind, and candidate value.
-- Does not expose an executable selector.
+- `collectChoices` reads `control`, `groupId`, `value`, `label`, `selected`, and `disabled` already stored on a validated tree.
+- Does not produce a live physical descriptor, and does not expose an executable selector, until signed-in inspection proves one family.
 
 - [ ] **Step 1: Inspect the real signed-in page before editing**
 
@@ -59,7 +58,8 @@ message/group/value properties, selected/disabled postcondition, and replacement
 click. Do not commit authored prompts, account ids, signed URLs, cookies, screenshots, or raw payloads.
 
 If exact group/value/postcondition cannot be proved for a control family, mark that family unsupported
-and keep it inert. Do not infer selectors from existing fixtures.
+and keep it inert. Do not infer selectors from existing fixtures. This session has no signed-in tab.
+That absence is the unproved result for every family. It is not permission to guess a selector.
 
 - [ ] **Step 2: Write fail-first duplicate-label and stale-epoch tests**
 
@@ -69,14 +69,12 @@ it('keeps identical labels distinct by physical group and value', () => {
   const choices = collectChoices(tree);
   expect(choices.map(({ groupId, value }) => `${groupId}:${value}`)).toEqual(['g-a:yes', 'g-b:yes']);
 });
-
-it('rejects a descriptor whose native group disappeared after the observation', () => {
-  expect(resolveRichControl(staleObservation, currentDom)).toEqual({ kind: 'changed' });
-});
 ```
 
-Cover duplicate labels, reordered options, disabled controls, current selection, replaced message,
-route change, navigation epoch change, and unsupported families.
+The stale-observation sample that expects `{ kind: 'changed' }` waits until a signed-in family is
+proved. Do not export a resolver that pretends to compare the live page. Cover stored duplicate
+labels in the schema test. Cover reordered options, a disabled control, and null group/value at the
+existing content-script capture boundary.
 
 - [ ] **Step 3: Run and observe RED**
 
@@ -84,12 +82,11 @@ Run: `npm test -- --run test/rich-response-schema.test.ts test/rich-response-lif
 
 Expected: FAIL because physical `groupId`/`value` remain null or unproved.
 
-- [ ] **Step 4: Implement bounded capture from observed provider structure**
+- [ ] **Step 4: Keep unproved capture inert**
 
-Update `chatgpt-dom.js` as the sole DOM-shape authority. `fiber.js` may contribute bounded exact
-provider identity but never a selector or permission. `content.js` freezes document/navigation epoch
-and exact message identity before and after capture. Reject ambiguous groups and values longer than
-the existing 512-character bound.
+Do not edit `chatgpt-dom.js`, `fiber.js`, or `content.js` from fixture structure. Their existing
+choice capture stores null `groupId` and `value` and exposes no selector. `collectChoices` reads only
+a validated tree. Reject a live resolver until one family is proved.
 
 - [ ] **Step 5: Verify source tests and repeat live observation**
 
@@ -100,14 +97,13 @@ npm test -- --run test/rich-response-schema.test.ts test/rich-response-lifecycle
 npm run typecheck
 ```
 
-Reload the changed unpacked extension, reproduce each supported control family, and verify captured
-identity and observed selected state. This task does not click from ChatBBC yet.
+Do not reload an unpacked extension for a family that was not proved. This task does not click from ChatBBC.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add extension/chatgpt-dom.js extension/fiber.js extension/content.js src/shared/rich-response.ts test/rich-response-schema.test.ts test/rich-response-lifecycle.test.ts test/content-script.test.ts test/extension.test.ts
-git commit -m "feat: capture exact rich choice identity"
+git add src/shared/rich-response.ts test/rich-response-schema.test.ts test/content-script.test.ts
+git commit -m "feat: keep unproved rich choices inert"
 ```
 
 ---
