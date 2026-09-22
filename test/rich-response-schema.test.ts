@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { collectChoices, parseRichResponse, resolveRichControl, RICH_LIMITS } from '../src/shared/rich-response.js';
+import { collectChoices, parseRichResponse, RICH_LIMITS } from '../src/shared/rich-response.js';
 
 const good = {
   version: 1,
@@ -326,21 +326,20 @@ it('returns null for malformed root types and rejects cycles without throwing', 
   expect(parseRichResponse(root)).toBeNull();
 });
 
-const choice = (id: string, groupId: string, value: string) => ({
+const choice = (id: string, groupId: string, value: string, selected: boolean, disabled: boolean) => ({
   id, kind: 'control', control: 'radio', label: 'Yes', groupId, value,
-  selected: false, disabled: false, children: []
+  selected, disabled, children: []
 });
 
 it('keeps identical labels distinct by physical group and value', () => {
-  const tree = parseRichResponse(withNodes([choice('c1', 'g-a', 'yes'), choice('c2', 'g-b', 'yes')]));
-  const choices = collectChoices(tree!);
-  expect(choices.map(({ groupId, value }) => `${groupId}:${value}`)).toEqual(['g-a:yes', 'g-b:yes']);
-});
-
-it('does not resolve a native family whose live structure was not proved', () => {
-  for (const control of ['radio', 'checkbox', 'select', 'continue'] as const) {
-    expect(resolveRichControl({ control, groupId: 'g-a', value: 'yes' }, { groups: [] })).toEqual({ kind: 'unsupported' });
-  }
+  const tree = parseRichResponse(withNodes([
+    choice('c1', 'g-a', 'yes', true, false),
+    choice('c2', 'g-b', 'yes', false, true)
+  ]));
+  expect(collectChoices(tree!)).toEqual([
+    { control: 'radio', groupId: 'g-a', value: 'yes', label: 'Yes', selected: true, disabled: false },
+    { control: 'radio', groupId: 'g-b', value: 'yes', label: 'Yes', selected: false, disabled: true }
+  ]);
 });
 
 it('accepts one bounded static artifact and rejects remote markup inside it', () => {

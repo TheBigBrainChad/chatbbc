@@ -706,6 +706,36 @@ describe('exact native rich response observation (no action authority)', () => {
     expect(JSON.stringify(rich)).not.toMatch(/CSS_SECRET|HIDDEN_SECRET|INERT_SECRET|ARIA_SECRET/);
   });
 
+  it('keeps unproved choice controls unidentified by label, order, or the selected row', async () => {
+    live = await harness();
+    const { root, surface } = rootFixture(live.document);
+    const controlsOf = (nodes: Array<Record<string, any>>) => {
+      const found: Array<Record<string, any>> = [];
+      const visit = (entries: Array<Record<string, any>>) => {
+        for (const entry of entries) {
+          if (entry.kind === 'control') found.push(entry);
+          if (Array.isArray(entry.children)) visit(entry.children);
+        }
+      };
+      visit(nodes);
+      return found;
+    };
+    const first = controlsOf((live.window as any).CLF_DOM.captureRichRoot(root));
+    expect(first.map(node => node.label)).toEqual(['Forest', 'Coast', 'Continue']);
+    for (const node of first) {
+      expect(node.groupId).toBeNull();
+      expect(node.value).toBeNull();
+      expect(node).not.toHaveProperty('selector');
+    }
+    expect(first.find(node => node.label === 'Continue')).toMatchObject({ selected: false, disabled: true });
+    const grid = surface.querySelector('[data-d-component="grid"]')!;
+    grid.append(grid.querySelector('button')!);
+    const reordered = controlsOf((live.window as any).CLF_DOM.captureRichRoot(root));
+    expect(reordered.map(node => node.label)).toEqual(['Coast', 'Continue', 'Forest']);
+    expect(reordered.every(node => node.groupId === null && node.value === null)).toBe(true);
+    expect(JSON.stringify(reordered)).not.toMatch(/selector|querySelector|xpath/i);
+  });
+
   it('rejects more than 1024 hostile sibling nodes before iterating their NodeList', async () => {
     live = await harness();
     const { root, surface } = rootFixture(live.document);
