@@ -27,6 +27,8 @@ export type RichFocusStage = {
   element: HTMLElement;
   open(target: RichFocusTarget): boolean;
   close(): void;
+  /** Hide without returning focus. Session retirement uses this so the old row does not take focus. */
+  release(): void;
   refresh(): 'closed' | 'refreshed' | 'current';
   isOpen(): boolean;
   target(): RichFocusTarget | null;
@@ -76,6 +78,7 @@ export function createRichFocusStage(options: {
   ui(element, 'aria-label', () => t('Focused output'));
   let current: RichFocusTarget | null = null;
   let shown: Shown | null = null;
+  let selectedTab: 'preview' | 'structure' | 'metadata' = 'preview';
 
   const paint = (target: RichFocusTarget, view: RichFocusView): void => {
     const host = options.host();
@@ -101,7 +104,6 @@ export function createRichFocusStage(options: {
     closeButton.type = 'button';
     closeButton.addEventListener('click', () => close());
     const tabs = el('div', 'rich-focus-tabs');
-    tabs.setAttribute('role', 'tablist');
     const preview = el('div', 'rich-focus-preview');
     if (view.preview) preview.append(view.preview);
     else preview.append(el('p', 'rich-focus-unavailable', () => t('Unavailable')));
@@ -112,11 +114,11 @@ export function createRichFocusStage(options: {
     meta.dir = 'auto';
     meta.textContent = view.meta;
     const panel = el('div', 'rich-focus-panel');
-    panel.setAttribute('role', 'tabpanel');
     const show = (name: 'preview' | 'structure' | 'metadata'): void => {
-      for (const button of tabs.querySelectorAll<HTMLButtonElement>('[role="tab"]')) {
+      selectedTab = name;
+      for (const button of tabs.querySelectorAll<HTMLButtonElement>('.rich-focus-tab')) {
         const selected = button.dataset.richFocusTab === name;
-        button.setAttribute('aria-selected', String(selected));
+        button.setAttribute('aria-pressed', String(selected));
         button.tabIndex = 0;
       }
       if (name === 'structure') panel.replaceChildren(source);
@@ -133,12 +135,12 @@ export function createRichFocusStage(options: {
     for (const name of ['preview', 'structure', 'metadata'] as const) {
       const tab = el('button', 'rich-focus-tab', () => tabLabel(name)) as HTMLButtonElement;
       tab.type = 'button';
-      tab.setAttribute('role', 'tab');
       tab.dataset.richFocusTab = name;
       tab.addEventListener('click', () => show(name));
       tabs.append(tab);
     }
-    show('preview');
+    if (wasHidden) selectedTab = 'preview';
+    show(selectedTab);
     element.replaceChildren(title, status, closeButton, tabs, panel);
     current = { ...target, revision: view.revision };
     shown = { revision: view.revision, status: view.status ?? '', title: view.title, source: view.source };
@@ -149,7 +151,7 @@ export function createRichFocusStage(options: {
     }
   };
 
-  const close = (): void => {
+  const conceal = (restore: boolean): void => {
     const target = current;
     element.hidden = true;
     element.replaceChildren();
@@ -157,9 +159,12 @@ export function createRichFocusStage(options: {
     delete element.dataset.richStatus;
     current = null;
     shown = null;
-    if (!target) return;
+    selectedTab = 'preview';
+    if (!target || !restore) return;
     if (!options.focusOrigin(target.origin)) options.focusMessage(target.logicalMessageId);
   };
+  const close = (): void => conceal(true);
+  const release = (): void => conceal(false);
 
   element.addEventListener('keydown', event => {
     if (event.key !== 'Escape' || element.hidden) return;
@@ -171,10 +176,7 @@ export function createRichFocusStage(options: {
   return {
     element,
     open(target) {
-      if (options.currentSession() !== target.sessionId) {
-        if (current) close();
-        return false;
-      }
+      if (options.currentSession() !== target.sessionId) return false;
       const view = options.read(target);
       if (!view) {
         if (current) close();
@@ -184,10 +186,11 @@ export function createRichFocusStage(options: {
       return true;
     },
     close,
+    release,
     refresh() {
       if (!current) return 'current';
       if (options.currentSession() !== current.sessionId) {
-        close();
+        release();
         return 'closed';
       }
       const view = options.read(current);

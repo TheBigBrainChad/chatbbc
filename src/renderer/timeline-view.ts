@@ -119,6 +119,8 @@ export interface TimelineViewOptions {
   openOriginal: (sessionId: string, messageId: string, current: () => boolean) => Promise<boolean>;
   /** Open the one worker chat this prime spawned for an agent; null when that is ambiguous. */
   workerChat: (agent: string) => (() => void) | null;
+  /** The live action result for one logical message, when the action owner has one. */
+  richFocusStatus?: (logicalMessageId: string) => 'pending' | 'confirmed' | 'changed' | 'unavailable' | 'unconfirmed' | null;
 }
 
 export interface TimelineView {
@@ -451,10 +453,12 @@ export function createTimelineView(options: TimelineViewOptions): TimelineView {
         const currentRichRow = () => context
           ? context.current()
           : id !== null && options.sessionId() === id && options.generation() === generation;
+        const focusStatus = !context && event.messageId ? options.richFocusStatus?.(event.messageId) ?? undefined : undefined;
         box.append(event.rich ? renderRichResponse(event.rich, event.message.text, id ? {
           sessionId: id,
           media: event.richMedia ?? [],
           current: currentRichRow,
+          ...(focusStatus ? { focusStatus } : {}),
           // Displaying persisted richOrigin is not a URL grant. The explicit button performs no
           // action or browser input: main rereads the exact canonical historical assistant under
           // the current window/selection witness.
@@ -761,7 +765,9 @@ export function createTimelineView(options: TimelineViewOptions): TimelineView {
       if (!options.developerMode() && item.kind === 'event' && item.event.source === 'app' && item.event.kind === 'progress' && item.event.progressId?.startsWith('browser-repair:')) continue;
       if (!options.developerMode() && item.kind === 'event' && ['session_start', 'session_end', 'turn_start', 'turn_end', 'note'].includes(item.event.kind)) continue;
       const key = itemKey(item);
-      const sig = itemSignature(item, sessionId, options.outbox.pendingComposerInputs()) + (item.kind === 'event' && item.event.kind === 'chat_error'
+      const focusStatus = item.kind === 'event' && item.event.kind === 'assistant_message' && item.event.messageId
+        ? options.richFocusStatus?.(item.event.messageId) ?? '' : '';
+      const sig = itemSignature(item, sessionId, options.outbox.pendingComposerInputs(), focusStatus) + (item.kind === 'event' && item.event.kind === 'chat_error'
         ? JSON.stringify(chatErrorPresentation(item.event, residentEvents)) : '');
       keep.add(key);
       const cached = rowCache.get(key);
@@ -1244,7 +1250,7 @@ function compactionState(block: CompactionBlock): { text: string; tone: Compacti
 }
 
 /** What a row was drawn from; a different signature is a different row. */
-function itemSignature(item: TimelineItem, sessionId: string | null, pending: readonly InputEntry[]): string {
+function itemSignature(item: TimelineItem, sessionId: string | null, pending: readonly InputEntry[], focusStatus = ''): string {
   if (item.kind === 'compaction') {
     const { block } = item;
     return [
@@ -1280,7 +1286,7 @@ function itemSignature(item: TimelineItem, sessionId: string | null, pending: re
       parts.push(event.message.chars, event.renderedHtml?.chars ?? 0, event.state ?? '', event.final ? 'final' : '',
         event.rich?.revision ?? '', event.rich?.status ?? '', event.rich?.reason ?? '',
         event.richMediaUnavailable ?? '', JSON.stringify(event.richMedia ?? []),
-        JSON.stringify(event.retiredRichImageAssetIds ?? []));
+        JSON.stringify(event.retiredRichImageAssetIds ?? []), focusStatus);
       break;
     case 'native_image':
       parts.push(event.messageId, event.providerAssetId, event.providerStatus ?? '', event.previewStatus, event.asset?.id ?? '',

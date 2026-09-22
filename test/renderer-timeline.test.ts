@@ -3938,7 +3938,10 @@ describe('conversation stage', () => {
     message: text(body), final: true
   });
 
-  async function stageFor(outbox: DeliveryHost) {
+  async function stageFor(
+    outbox: DeliveryHost,
+    richFocusStatus?: (messageId: string) => 'pending' | 'confirmed' | 'changed' | 'unavailable' | 'unconfirmed' | null
+  ) {
     timelineFixture();
     const { createConversationStage } = await import('../src/renderer/conversation-stage.js');
     return createConversationStage({
@@ -3950,7 +3953,8 @@ describe('conversation stage', () => {
       renderMarkdown: source => el('p', 'msg', source),
       renderMessage: (_html, fallback) => el('p', 'msg', fallback),
       openOriginal: async () => false,
-      workerChat: () => null
+      workerChat: () => null,
+      ...(richFocusStatus ? { richFocusStatus } : {})
     });
   }
 
@@ -4113,6 +4117,70 @@ describe('conversation stage', () => {
     expect(semanticRow.contains(semantic)).toBe(true);
     stage.select('B', 2);
     expect(focused.hidden).toBe(true);
+    expect(document.activeElement).not.toBe(semanticRow);
+    expect(document.activeElement).not.toBe(again);
     expect(timeline.contains(again)).toBe(true);
+  });
+
+  it('shows the newest resident revision when an older copy is still on screen', async () => {
+    const stage = await stageFor(outboxStub());
+    stage.select('A', 1);
+    const { renderRichResponse } = await import('../src/renderer/rich-response.js');
+    const messageId = 'assistant:working:exchange:1789552000000';
+    const base = {
+      version: 1 as const, status: 'available' as const, reason: null,
+      conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      messageId, providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      accessibleText: 'Outline',
+      nodes: [{ id: 'art1', kind: 'artifact' as const, mode: 'semantic' as const, title: 'Rev 3', html: null, media: [] as string[] }]
+    };
+    const timeline = document.getElementById('timeline')!;
+    const older = document.createElement('div');
+    older.dataset.timelineOrigin = '2';
+    older.append(renderRichResponse({ ...base, revision: 3 }, 'source'));
+    const newer = document.createElement('div');
+    newer.dataset.timelineOrigin = '8';
+    newer.append(renderRichResponse({
+      ...base, revision: 4,
+      nodes: [{ id: 'art1', kind: 'artifact', mode: 'semantic', title: 'Rev 4', html: null, media: [] }]
+    }, 'source'));
+    timeline.append(older, newer);
+    expect(stage.openRichFocus({
+      sessionId: 'A', logicalMessageId: messageId, nodeId: 'art1', revision: 3, origin: 2
+    })).toBe(true);
+    const focused = document.querySelector<HTMLElement>('.rich-focus-stage')!;
+    expect(focused.dataset.shownRevision).toBe('4');
+    expect(focused.querySelector('h2')?.textContent).toBe('Rev 4');
+    expect(timeline.contains(older)).toBe(true);
+    expect(timeline.contains(newer)).toBe(true);
+  });
+
+  it('refreshes focused output when a timeline update brings the action result', async () => {
+    let status: 'pending' | 'confirmed' = 'pending';
+    const stage = await stageFor(outboxStub(), () => status);
+    stage.select('A', 1);
+    const messageId = 'assistant:working:exchange:1789552000000';
+    const rich = {
+      version: 1 as const, status: 'available' as const, reason: null,
+      conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      messageId, providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      revision: 1, accessibleText: 'Outline',
+      nodes: [{ id: 'sem1', kind: 'artifact' as const, mode: 'semantic' as const, title: 'Outline', html: null, media: [] as string[] }]
+    };
+    const event = { ...answer(2, messageId, 'Outline'), rich };
+    const page = { sessionId: 'A', events: [event], total: 1, mode: 'open' as const };
+    expect(stage.update(page, 1)).toBe(true);
+    const timeline = document.getElementById('timeline')!;
+    expect(timeline.querySelector('.rich-response')?.getAttribute('data-rich-status')).toBe('pending');
+    timeline.querySelector<HTMLButtonElement>('.rich-focus-open')!.click();
+    const focused = document.querySelector<HTMLElement>('.rich-focus-stage')!;
+    expect(focused.hidden).toBe(false);
+    expect(focused.querySelector('[role="status"]')?.textContent).toBe('Pending');
+    status = 'confirmed';
+    expect(stage.update(page, 1)).toBe(true);
+    expect(focused.hidden).toBe(false);
+    expect(timeline.querySelector('.rich-response')?.getAttribute('data-rich-status')).toBe('confirmed');
+    expect(focused.querySelector('[role="status"]')?.textContent).toBe('Confirmed');
+    expect(timeline.contains(timeline.querySelector('.rich-artifact'))).toBe(true);
   });
 });

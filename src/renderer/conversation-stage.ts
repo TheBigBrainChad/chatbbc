@@ -50,6 +50,8 @@ export interface ConversationStageOptions {
   renderMessage: (html: StoredText | null | undefined, fallback: string) => HTMLElement;
   /** Hand a persisted original back to its exact witness; false when it no longer applies. */
   openOriginal: (sessionId: string, messageId: string, current: () => boolean) => Promise<boolean>;
+  /** The live action result for one logical message, when the action owner has one. */
+  richFocusStatus?: (logicalMessageId: string) => RichFocusStatus | null;
   /** Open the one worker chat this prime spawned for an agent; null when that is ambiguous. */
   workerChat: (agent: string) => (() => void) | null;
 }
@@ -111,14 +113,17 @@ function requestedFocus(event: Event): Omit<RichFocusTarget, 'sessionId'> | null
 function readRichFocus(timeline: HTMLElement, target: RichFocusTarget): RichFocusView | null {
   let box: HTMLElement | null = null;
   let card: HTMLElement | null = null;
+  let bestRevision = -1;
   for (const candidate of timeline.querySelectorAll<HTMLElement>('.rich-response')) {
     if (candidate.dataset.richMessageId !== target.logicalMessageId) continue;
     const node = [...candidate.querySelectorAll<HTMLElement>('[data-rich-node-id]')]
       .find(item => item.dataset.richNodeId === target.nodeId);
-    if (!node) continue;
+    const revision = Number(candidate.dataset.richRevision);
+    if (!node || !Number.isSafeInteger(revision) || revision < 0) continue;
+    if (revision < bestRevision) continue;
+    bestRevision = revision;
     box = candidate;
     card = node;
-    if (Number(candidate.dataset.richRevision) === target.revision) break;
   }
   if (!box || !card) return null;
   const revision = Number(box.dataset.richRevision);
@@ -170,7 +175,7 @@ export function createConversationStage(options: ConversationStageOptions): Conv
       // replaced by the New Chat welcome during the read. The window behind them is retired here,
       // which is what makes a page for the previous owner stale.
       if (sessionId !== owner.sessionId) {
-        focus.close();
+        focus.release();
         view.retire();
       }
       owner = { sessionId, generation };

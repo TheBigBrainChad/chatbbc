@@ -883,6 +883,10 @@ it('focuses one artifact or decision, refreshes a changed result, and returns ke
   expect(stage.isOpen()).toBe(true);
   expect(stage.element.querySelector('[role="status"]')?.textContent).toBe('Confirmed');
   expect(document.activeElement?.getAttribute('data-rich-focus-tab')).toBe('structure');
+  expect(stage.element.querySelector('pre')?.textContent).toBe(source);
+  expect(stage.element.querySelector('[data-rich-focus-tab="structure"]')?.getAttribute('aria-pressed')).toBe('true');
+  expect(stage.element.querySelector('[data-rich-focus-tab="preview"]')?.getAttribute('aria-pressed')).toBe('false');
+  expect(stage.element.querySelector('[role="tab"]')).toBeNull();
   stage.element.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   expect(stage.isOpen()).toBe(false);
   expect(origins).toEqual([4]);
@@ -899,20 +903,25 @@ it('focuses one artifact or decision, refreshes a changed result, and returns ke
   const decision = document.createElement('div');
   decision.textContent = 'Forest';
   preview = decision;
+  let decisionRestores = 0;
   const decisionStage = createRichFocusStage({
     host: () => host,
     currentSession: () => session,
     read: () => ({ revision: 1, title: 'Forest', mode: 'decision', source: 'Forest', meta: 'm · 1', status: null, preview: decision }),
-    focusOrigin: () => true,
+    focusOrigin: () => { decisionRestores += 1; return true; },
     focusMessage: () => false
   });
   expect(decisionStage.open({ ...target, revision: 1 })).toBe(true);
   expect(decisionStage.element.querySelector('fieldset > legend')?.textContent).toBe('Forest');
   expect(decisionStage.element.querySelector('fieldset')?.contains(decision)).toBe(true);
   expect(decisionStage.element.querySelector('form')).toBeNull();
+  expect(decisionStage.open({ ...target, sessionId: 'Z' })).toBe(false);
+  expect(decisionStage.isOpen()).toBe(true);
+  expect(decisionRestores).toBe(0);
   session = 'B';
   expect(decisionStage.refresh()).toBe('closed');
   expect(decisionStage.isOpen()).toBe(false);
+  expect(decisionRestores).toBe(0);
   const transcript = readFileSync(new URL('../src/renderer/styles/transcript.css', import.meta.url), 'utf8');
   const base = readFileSync(new URL('../src/renderer/styles/base.css', import.meta.url), 'utf8');
   expect(transcript).toMatch(/\.rich-focus-stage\s*\{[^}]*overflow:\s*auto/);
