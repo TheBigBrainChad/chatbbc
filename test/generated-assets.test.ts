@@ -124,4 +124,18 @@ describe('generated asset retrieval', () => {
     expect(new Set(rows.map(row => row.handle)).size).toBe(2);
     expect(JSON.stringify(rows)).not.toMatch(/file_|https?:/);
   });
+
+  it('does not substitute a preview when the original reader is absent', async () => {
+    const { session, roots } = await fixture();
+    const [row] = await listGeneratedAssets(session.id);
+    await expect(saveGeneratedAsset({
+      ...saveBase,
+      source: 'original',
+      sessionId: session.id,
+      handle: row!.handle,
+      path: '/approved/original.png',
+      roots
+    })).rejects.toMatchObject({ code: 'original_unavailable' });
+    await expect(fs.stat(path.join(rootPath, 'original.png'))).rejects.toThrow();
+  });
 });
