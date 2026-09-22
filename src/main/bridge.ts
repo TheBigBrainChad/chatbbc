@@ -27,6 +27,10 @@ import {
   reconcileGeneratedAssetDownloadCustody,
   recordGeneratedAssetDownloadResult
 } from './generated-asset-downloads.js';
+import {
+  appendOriginalChunk,
+  finishOriginalTransfer
+} from './generated-assets.js';
 /**
  * The local bridge between the Chrome extension and this app.
  *
@@ -2394,6 +2398,36 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const accepted = await recordGeneratedAssetDownloadResult(
       body as Parameters<typeof recordGeneratedAssetDownloadResult>[0]);
     return json(res, accepted ? 200 : 409, { ok: accepted }, origin);
+  }
+  if (route === '/generated-assets/original/chunk' && req.method === 'POST') {
+    let body: unknown;
+    try { body = await readBody(req); }
+    catch { return json(res, 400, { error: 'invalid_original_chunk' }, origin); }
+    const fields = body as { id?: unknown; chunk?: unknown };
+    if (!fields || typeof fields.id !== 'string' || typeof fields.chunk !== 'string') {
+      return json(res, 400, { error: 'invalid_original_chunk' }, origin);
+    }
+    try {
+      appendOriginalChunk(fields.id, Buffer.from(fields.chunk, 'base64'));
+      return json(res, 200, { ok: true }, origin);
+    } catch {
+      return json(res, 409, { ok: false }, origin);
+    }
+  }
+  if (route === '/generated-assets/original/finish' && req.method === 'POST') {
+    let body: unknown;
+    try { body = await readBody(req); }
+    catch { return json(res, 400, { error: 'invalid_original_finish' }, origin); }
+    const fields = body as { id?: unknown; sha256?: unknown };
+    if (!fields || typeof fields.id !== 'string' || typeof fields.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(fields.sha256)) {
+      return json(res, 400, { error: 'invalid_original_finish' }, origin);
+    }
+    try {
+      finishOriginalTransfer(fields.id, fields.sha256);
+      return json(res, 200, { ok: true }, origin);
+    } catch {
+      return json(res, 409, { ok: false }, origin);
+    }
   }
 
   if (route === '/browser-control' && req.method === 'POST') {

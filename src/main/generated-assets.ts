@@ -273,10 +273,10 @@ export function appendOriginalChunk(id: string, chunk: Buffer): void {
 export function waitOriginalTransfer(id: string): Promise<Buffer> {
   const transfer = originalTransfers.get(id);
   if (!transfer) return Promise.reject(new GeneratedAssetError('asset_transfer_missing'));
-  const { promise, resolve, reject } = Promise.withResolvers<Buffer>();
-  transfer.done = resolve;
-  transfer.fail = reject;
-  return promise;
+  return new Promise((resolve, reject) => {
+    transfer.done = resolve;
+    transfer.fail = reject;
+  });
 }
 export function finishOriginalTransfer(id: string, sha256: string): void {
   const transfer = originalTransfers.get(id);
