@@ -2991,6 +2991,67 @@ async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
   }
 }
 
+async function processGeneratedAssetOriginals(rawOffers, observedTabs) {
+  if (!Array.isArray(rawOffers)) return;
+  for (const offer of rawOffers.slice(0, 2)) {
+    if (!offer || !/^[a-f0-9-]{36}$/i.test(String(offer.id || '')) || !cleanConversationId(offer.conversationId) ||
+        typeof offer.logicalMessageId !== 'string' || !/^file_[A-Za-z0-9_-]{8,100}$/.test(String(offer.assetId || ''))) continue;
+    const tabs = observedTabs.filter(tab => Number.isInteger(tab?.id) &&
+      conversationForTab(tab) === offer.conversationId &&
+      tabConversations[String(tab.id)] === offer.conversationId &&
+      ownsDocument({ tab: tab.id, documentId: tabDocuments[String(tab.id)], navigationEpoch: tabEpochs[String(tab.id)] }));
+    if (tabs.length !== 1) continue;
+    const tab = tabs[0];
+    const key = String(tab.id);
+    const owner = registeredDocuments[key];
+    if (!owner || owner.documentId !== tabDocuments[key]) continue;
+    let result;
+    try {
+      result = await tabReply(tab.id, {
+        type: 'clf-generated-asset-source',
+        conversationId: offer.conversationId,
+        logicalMessageId: offer.logicalMessageId,
+        assetId: offer.assetId
+      }, { documentId: tabDocuments[key] });
+    } catch { result = null; }
+    let selected = null;
+    try {
+      const url = result?.ok === true && result.assetId === offer.assetId && typeof result.url === 'string'
+        ? new URL(result.url) : null;
+      const tabUrl = new URL(tab.url);
+      if (url?.protocol === 'https:' && url.origin === tabUrl.origin &&
+          url.pathname === '/backend-api/estuary/content' && url.searchParams.get('id') === offer.assetId) selected = url.href;
+    } catch { selected = null; }
+    if (!selected) continue;
+    let bytes;
+    try {
+      const response = await fetch(selected);
+      if (!response.ok) continue;
+      bytes = new Uint8Array(await response.arrayBuffer());
+    } catch { continue; }
+    finally { selected = null; }
+    if (!bytes || bytes.length < 1 || bytes.length > 64 * 1024 * 1024) continue;
+    const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+      .map(value => value.toString(16).padStart(2, '0')).join('');
+    let offset = 0;
+    let failed = false;
+    while (offset < bytes.length) {
+      const slice = bytes.subarray(offset, offset + 512 * 1024);
+      let binary = '';
+      for (const value of slice) binary += String.fromCharCode(value);
+      const posted = await call('/generated-assets/original/chunk', { method: 'POST', body: JSON.stringify({
+        id: offer.id, chunk: btoa(binary)
+      }) }).catch(() => null);
+      if (!posted?.ok || posted.data?.ok !== true) { failed = true; break; }
+      offset += slice.length;
+    }
+    if (failed) continue;
+    await call('/generated-assets/original/finish', { method: 'POST', body: JSON.stringify({
+      id: offer.id, sha256: digest
+    }) }).catch(() => undefined);
+  }
+}
+
 async function maintainOnce() {
   // The app decides whether there is recovery work; a worker holding no tabs is not a worker
   // with nothing to do, it is the one that has to open the chat the app is owed.
@@ -3032,6 +3093,7 @@ async function maintainOnce() {
   if (!reply.ok || !reply.data) { await activeTabs?.revoke(); return; }
   await flushGeneratedAssetDownloadResults();
   await processGeneratedAssetDownloads(reply.data.generatedAssetDownloads, observedTabs);
+  await processGeneratedAssetOriginals(reply.data.generatedAssetOriginals, observedTabs);
   if (downloadCustodyNeedsReconcile && intent === connectionEpoch && token && !disconnected) {
     downloadCustodyNeedsReconcile = false;
     await call('/status', { method: 'POST', body: JSON.stringify({

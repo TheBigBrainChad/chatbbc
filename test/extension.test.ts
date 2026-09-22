@@ -239,6 +239,45 @@ describe('extension release metadata', () => {
     expect(JSON.stringify(calls)).not.toContain('sig=secret');
   });
 
+  it('posts original chunks from the exact document without persisting the signed URL', async () => {
+    const code = backgroundSource.slice(
+      backgroundSource.indexOf('async function processGeneratedAssetOriginals('),
+      backgroundSource.indexOf('\nasync function maintainOnce(')
+    );
+    const calls: Array<{ route: string; body: any }> = [];
+    const context = vm.createContext({
+      URL,
+      btoa: (value: string) => Buffer.from(value, 'binary').toString('base64'),
+      crypto: { subtle: { digest: async () => new Uint8Array(32).buffer } },
+      fetch: async (url: string) => ({ ok: true, arrayBuffer: async () => Buffer.from('png-bytes') }),
+      cleanConversationId: (value: unknown) => typeof value === 'string' ? value : null,
+      conversationForTab: () => '11111111-2222-4333-8444-555555555555',
+      tabConversations: { '42': '11111111-2222-4333-8444-555555555555' },
+      tabDocuments: { '42': 'doc-42' },
+      tabEpochs: { '42': 7 },
+      registeredDocuments: { '42': { documentId: 'doc-42', epoch: 3 } },
+      ownsDocument: () => true,
+      tabReply: async () => ({ ok: true, assetId: 'file_AuroraOriginal0001',
+        url: 'https://chatgpt.com/backend-api/estuary/content?id=file_AuroraOriginal0001&sig=secret' }),
+      call: async (route: string, init: { body?: string }) => {
+        calls.push({ route, body: JSON.parse(init.body || '{}') });
+        return { ok: true, data: { ok: true } };
+      }
+    });
+    const processOriginals = vm.runInContext(`${code}\nprocessGeneratedAssetOriginals`, context);
+    await processOriginals([{
+      id: '22222222-3333-4444-8555-666666666666',
+      conversationId: '11111111-2222-4333-8444-555555555555',
+      logicalMessageId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      assetId: 'file_AuroraOriginal0001'
+    }], [{ id: 42, url: 'https://chatgpt.com/c/11111111-2222-4333-8444-555555555555' }]);
+    expect(calls.map(entry => entry.route)).toEqual([
+      '/generated-assets/original/chunk',
+      '/generated-assets/original/finish'
+    ]);
+    expect(JSON.stringify(calls)).not.toContain('sig=secret');
+  });
+
   it('settles restored Chrome download changes once, including cancellation, and ignores unknown receipts', async () => {
     expect(backgroundSource).toContain('async function settleGeneratedAssetDownloadChange(');
     const code = backgroundSource.slice(
