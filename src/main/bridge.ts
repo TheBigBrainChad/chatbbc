@@ -2473,6 +2473,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         stalledConversations?: unknown;
         generatedAssetDownloadIds?: unknown;
         generatedAssetDocuments?: unknown;
+        generatedAssetDocumentsTruncated?: unknown;
       };
       if (!Array.isArray(body?.openConversations) || body.openConversations.length > 10_000 || body.openConversations.some(id => !conversationId(id))) {
         return json(res, 400, { error: 'invalid_open_conversations' }, origin);
@@ -2491,11 +2492,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       if (Array.isArray(body.generatedAssetDownloadIds)) {
         reconcileGeneratedAssetDownloadCustody(body.generatedAssetDownloadIds as string[]);
       }
-      if (body.generatedAssetDocuments !== undefined &&
+      if (body.generatedAssetDocumentsTruncated === true) observeGeneratedAssetDocuments([], false);
+      else if (body.generatedAssetDocuments !== undefined &&
           (!Array.isArray(body.generatedAssetDocuments) || body.generatedAssetDocuments.length > 64)) {
         return json(res, 400, { error: 'invalid_generated_asset_documents' }, origin);
-      }
-      if (Array.isArray(body.generatedAssetDocuments)) {
+      } else if (Array.isArray(body.generatedAssetDocuments)) {
         observeGeneratedAssetDocuments(body.generatedAssetDocuments as Parameters<typeof observeGeneratedAssetDocuments>[0]);
       }
     }

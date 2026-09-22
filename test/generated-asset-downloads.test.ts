@@ -131,6 +131,17 @@ describe('generated original download custody', () => {
     expect(await claimGeneratedAssetDownload({ id: second.items[0]!.id, ...source(conversationId) })).toBeNull();
   });
 
+  it('withholds every offer when the live document report is truncated', async () => {
+    const { session, conversationId } = await fixture();
+    await requestGeneratedAssetDownloads({
+      sessionId: session.id, logicalMessageId: responseId, assetIds: [firstAsset]
+    });
+    showDocument(conversationId);
+    expect(pendingGeneratedAssetDownloadOffers()).toHaveLength(1);
+    observeGeneratedAssetDocuments([], false);
+    expect(pendingGeneratedAssetDownloadOffers()).toEqual([]);
+  });
+
   it('publishes truthful per-item states and accepts only the matching claimed receipt', async () => {
     const { session, conversationId } = await fixture();
     const seen: string[] = [];

@@ -2831,10 +2831,7 @@ async function rememberGeneratedAssetDownload(row) {
       !generatedAssetDownloads[row.id]) return false;
   generatedAssetDownloads[row.id] = row;
   try { await persistLive(); }
-  catch {
-    delete generatedAssetDownloads[row.id];
-    return false;
-  }
+  catch { return false; }
   return generatedAssetDownloads[row.id] === row;
 }
 
@@ -2969,17 +2966,14 @@ async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
       state: 'started',
       detail: null
     };
-    if (!await rememberGeneratedAssetDownload(custody)) {
-      await call('/generated-assets/result', { method: 'POST', body: JSON.stringify({
-        id: offer.id, claimToken: claim.claimToken, state: 'unconfirmed',
-        detail: 'Chrome accepted the download, but receipt custody could not be saved.'
-      }) }).catch(() => undefined);
-      continue;
+    const persisted = await rememberGeneratedAssetDownload(custody);
+    if (!persisted && generatedAssetDownloads[offer.id] === custody) {
+      custody.state = 'unconfirmed';
+      custody.detail = 'Chrome accepted the download, but receipt custody could not be saved.';
     }
-    await reconcileGeneratedAssetDownload(generatedAssetDownloads[offer.id]).catch(() => false);
-    if (generatedAssetDownloads[offer.id]?.state === 'started') {
-      await publishGeneratedAssetDownloadResult(generatedAssetDownloads[offer.id]).catch(() => false);
-    }
+    if (generatedAssetDownloads[offer.id] !== custody) continue;
+    if (custody.state === 'started') await reconcileGeneratedAssetDownload(custody).catch(() => false);
+    if (generatedAssetDownloads[offer.id] === custody) await publishGeneratedAssetDownloadResult(custody).catch(() => false);
   }
 }
 
@@ -3000,7 +2994,7 @@ async function maintainOnce() {
     .filter((tab) => tab && (tab.discarded === true || tab.frozen === true))
     .map(conversationForTab)
     .filter(Boolean))];
-  const generatedAssetDocuments = observedTabs.flatMap(tab => {
+  const generatedAssetDocumentRows = observedTabs.flatMap(tab => {
     if (!Number.isInteger(tab?.id) || tab.discarded === true || tab.frozen === true) return [];
     const key = String(tab.id);
     const owner = registeredDocuments[key];
@@ -3011,12 +3005,14 @@ async function maintainOnce() {
         !ownsDocument(source)) return [];
     return [{ conversationId, tab: tab.id, documentId: source.documentId,
       documentGeneration: owner.epoch, spaEpoch: source.navigationEpoch }];
-  }).slice(0, 64);
+  });
+  const generatedAssetDocumentsTruncated = generatedAssetDocumentRows.length > 64;
   const reply = await call('/status', { method: 'POST', body: JSON.stringify({
     openConversations,
     stalledConversations,
     generatedAssetDownloadIds: Object.keys(generatedAssetDownloads),
-    generatedAssetDocuments
+    generatedAssetDocuments: generatedAssetDocumentsTruncated ? [] : generatedAssetDocumentRows,
+    generatedAssetDocumentsTruncated
   }) });
   if (intent !== connectionEpoch || !token || disconnected) return;
   if (!reply.ok || !reply.data) { await activeTabs?.revoke(); return; }

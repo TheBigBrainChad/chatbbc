@@ -167,14 +167,16 @@ function documentKey(document: GeneratedAssetDownloadDocument): string {
 function sameDocument(left: GeneratedAssetDownloadDocument, right: GeneratedAssetDownloadDocument): boolean {
   return documentKey(left) === documentKey(right);
 }
-
 const liveDocuments = new Map<string, GeneratedAssetDownloadDocument | null>();
+let documentsComplete = false;
 
 export function observeGeneratedAssetDocuments(
-  rows: readonly (GeneratedAssetDownloadDocument & { conversationId: string })[]
+  rows: readonly (GeneratedAssetDownloadDocument & { conversationId: string })[],
+  complete = true
 ): void {
   liveDocuments.clear();
-  if (!Array.isArray(rows) || rows.length > MAX_LIVE_DOCUMENTS) return;
+  documentsComplete = complete === true && Array.isArray(rows) && rows.length <= MAX_LIVE_DOCUMENTS;
+  if (!documentsComplete) return;
   const grouped = new Map<string, Map<string, GeneratedAssetDownloadDocument>>();
   for (const row of rows) {
     if (!row || typeof row.conversationId !== 'string' || !/^[a-f0-9-]{36}$/i.test(row.conversationId) ||
@@ -201,6 +203,7 @@ export function observeGeneratedAssetDocuments(
 
 export function pendingGeneratedAssetDownloadOffers(): GeneratedAssetDownloadOffer[] {
   const offers: GeneratedAssetDownloadOffer[] = [];
+  if (!documentsComplete) return offers;
   for (const item of items.values()) {
     if (item.state !== 'requested' || item.claimToken !== null || !item.document) continue;
     const live = liveDocuments.get(item.conversationId);
@@ -327,4 +330,6 @@ export function resetGeneratedAssetDownloadsForTests(): void {
   items.clear();
   subscribers.clear();
   liveDocuments.clear();
+  documentsComplete = false;
+  requestQueue = Promise.resolve();
 }
