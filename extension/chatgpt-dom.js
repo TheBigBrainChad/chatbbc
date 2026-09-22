@@ -585,7 +585,12 @@ var CLF_DOM = (() => {
   function captureOwnedArtifact(element, id, onImage = null) {
     const allowed = new Set(['div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'pre', 'code', 'strong', 'em', 'b', 'i', 'br', 'hr', 'section', 'article', 'header', 'footer', 'figure', 'figcaption', 'blockquote', 'img']);
     const styleProps = new Set(['color', 'background', 'background-color', 'font', 'font-size', 'font-weight', 'font-family', 'font-style', 'text-align', 'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'border', 'border-color', 'display', 'width', 'height', 'max-width', 'gap', 'line-height', 'white-space', 'overflow-wrap']);
-    const dangerousStyle = /url\s*\(|image-set\s*\(|-webkit-image-set\s*\(|@import|expression\s*\(|javascript:|https?:|\/\/|\\/i;
+    const cssValueAllowed = value => {
+      if (/[\\<>{}]|\/\*|\*\//.test(value)) return false;
+      if (/url\s*\(|image-set\s*\(|-webkit-image-set\s*\(|expression\s*\(|@import|javascript:|https?:|\/\//i.test(value)) return false;
+      const withoutColor = value.replace(/rgba?\(\s*(?:\d{1,3}\s*,\s*){2}\d{1,3}(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)/gi, ' ');
+      return !/[()]/.test(withoutColor);
+    };
     const startedAt = Date.now();
     const expired = () => Date.now() - startedAt > 2000;
     if (expired()) return { rejected: 'deadline' };
@@ -595,7 +600,7 @@ var CLF_DOM = (() => {
     const media = [];
     const seen = new Set();
     const styleOf = value => {
-      if (dangerousStyle.test(value)) return null;
+      if (!cssValueAllowed(value)) return null;
       const kept = [];
       for (const part of value.split(';')) {
         const trimmed = part.trim();
@@ -604,7 +609,7 @@ var CLF_DOM = (() => {
         if (split <= 0) return null;
         const prop = trimmed.slice(0, split).trim().toLowerCase();
         const raw = trimmed.slice(split + 1).trim();
-        if (!styleProps.has(prop) || /[{}<>]/.test(raw) || dangerousStyle.test(raw)) return null;
+        if (!styleProps.has(prop) || !cssValueAllowed(raw)) return null;
         kept.push(`${prop}: ${raw}`);
       }
       const style = kept.join('; ');
@@ -642,9 +647,10 @@ var CLF_DOM = (() => {
           const hasSrc = child.hasAttribute('src');
           let mediaId = supplied;
           if (hasSrc || !supplied) {
-            if (child.hasAttribute('srcset')) return 'unsupported';
-            mediaId = `media-${id}-${media.length}`;
-            if (typeof onImage === 'function') onImage(child, `${id}-img${media.length}`);
+            if (child.hasAttribute('srcset') || typeof onImage !== 'function') return 'unsupported';
+            const nodeId = `${id}-${media.length}`;
+            mediaId = `media-${nodeId}`;
+            onImage(child, nodeId);
           }
           if (!/^[\w:-]{1,80}$/.test(mediaId) || seen.has(mediaId)) return 'unsupported';
           if (media.length >= 4) return 'oversized';

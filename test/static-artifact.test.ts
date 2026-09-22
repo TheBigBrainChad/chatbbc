@@ -89,6 +89,10 @@ it('rejects malformed fragments and CSS image functions, and keeps URL prose', (
   expect(clean('<p style="background: image-set(url(http://remote/x) 1x)">x</p>').rejected).not.toBeNull();
   expect(clean('<p style="background: -webkit-image-set(url(http://remote/x) 1x)">x</p>').rejected).not.toBeNull();
   expect(clean('<p style="color: \\72 ed">x</p>').rejected).not.toBeNull();
+  expect(clean('<p><div>x</div></p>').rejected).toBe('malformed');
+  expect(clean('<div/>').rejected).toBe('malformed');
+  expect(clean('<p style="background:u/**/rl(data:,x)">x</p>').rejected).not.toBeNull();
+  expect(clean('<p style="background:u/**/rl(data:,x)">x</p>').html).not.toMatch(/url|data:/i);
   const prose = clean('<p>see https://example.test</p>');
   expect(prose.rejected).toBeNull();
   expect(prose.html).toContain('https://example.test');

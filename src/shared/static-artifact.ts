@@ -27,40 +27,81 @@ const STYLE_PROPS = new Set([
 const reject = (reason: string): SanitizedArtifact => ({ html: '', rejected: reason });
 
 const VOID_TAGS = new Set(['br', 'hr', 'img']);
-const DANGEROUS_STYLE = /url\s*\(|image-set\s*\(|-webkit-image-set\s*\(|@import|expression\s*\(|javascript:|https?:|\/\/|\\/i;
 
-/** Require an explicitly closed fragment. HTML repair must not become admission. */
-export function wellFormedFragment(html: string): boolean {
-  const stack: string[] = [];
+type FragmentShape = { tag: string; children: FragmentShape[] };
+
+/** The element tree the author wrote. Parser repair must not become a different tree. */
+export function fragmentShape(html: string): FragmentShape[] | null {
+  const stack: FragmentShape[] = [];
+  const roots: FragmentShape[] = [];
   let index = 0;
+  const place = (node: FragmentShape): void => {
+    const parent = stack[stack.length - 1];
+    if (parent) parent.children.push(node);
+    else roots.push(node);
+  };
   while (index < html.length) {
     const open = html.indexOf('<', index);
     if (open < 0) break;
     if (html.startsWith('<!--', open)) {
       const end = html.indexOf('-->', open + 4);
-      if (end < 0) return false;
+      if (end < 0) return null;
       index = end + 3;
       continue;
     }
     const close = html.indexOf('>', open + 1);
-    if (close < 0) return false;
+    if (close < 0) return null;
     const raw = html.slice(open + 1, close).trim();
     const closing = raw.startsWith('/');
     const body = (closing ? raw.slice(1) : raw).trim();
     const name = /^([a-zA-Z][\w:-]*)/.exec(body);
-    if (!name) return false;
+    if (!name) return null;
     const tag = name[1]!.toLowerCase();
+    const selfClosing = raw.endsWith('/');
     if (closing) {
-      if (stack.pop() !== tag) return false;
-    } else if (!raw.endsWith('/') && !VOID_TAGS.has(tag)) stack.push(tag);
+      if (selfClosing || stack.pop()?.tag !== tag) return null;
+    } else if (selfClosing && !VOID_TAGS.has(tag)) return null;
+    else {
+      const node = { tag, children: [] as FragmentShape[] };
+      place(node);
+      if (!selfClosing && !VOID_TAGS.has(tag)) stack.push(node);
+    }
     index = close + 1;
   }
-  return stack.length === 0;
+  return stack.length === 0 ? roots : null;
+}
+
+/** Require an explicitly closed fragment. HTML repair must not become admission. */
+export function wellFormedFragment(html: string): boolean {
+  return fragmentShape(html) !== null;
+}
+
+function elementShape(element: Element): FragmentShape[] {
+  const shapes: FragmentShape[] = [];
+  for (const child of element.childNodes) {
+    if (child.nodeType !== 1) continue;
+    const node = child as Element;
+    shapes.push({ tag: node.tagName.toLowerCase(), children: elementShape(node) });
+  }
+  return shapes;
+}
+
+function sameShape(left: FragmentShape[], right: FragmentShape[]): boolean {
+  return left.length === right.length && left.every((node, index) =>
+    node.tag === right[index]!.tag && sameShape(node.children, right[index]!.children));
+}
+
+/** Comments, escapes, and any function other than rgb()/rgba() are not a style value. */
+function cssValueAllowed(value: string): boolean {
+  if (/[\\<>{}]|\/\*|\*\//.test(value)) return false;
+  if (/url\s*\(|image-set\s*\(|-webkit-image-set\s*\(|expression\s*\(|@import|javascript:|https?:|\/\//i.test(value)) return false;
+  const withoutColor = value.replace(/rgba?\(\s*(?:\d{1,3}\s*,\s*){2}\d{1,3}(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)/gi, ' ');
+  return !/[()]/.test(withoutColor);
 }
 
 
 function safeStyle(value: string, css: { n: number }): string | null {
-  if (DANGEROUS_STYLE.test(value)) return null;
+  if (!cssValueAllowed(value)) return null;
   const parts = value.split(';').map(part => part.trim()).filter(Boolean);
   const kept: string[] = [];
   for (const part of parts) {
@@ -68,7 +109,7 @@ function safeStyle(value: string, css: { n: number }): string | null {
     if (split <= 0) return null;
     const prop = part.slice(0, split).trim().toLowerCase();
     const raw = part.slice(split + 1).trim();
-    if (!STYLE_PROPS.has(prop) || /[{}<>]/.test(raw) || DANGEROUS_STYLE.test(raw)) return null;
+    if (!STYLE_PROPS.has(prop) || !cssValueAllowed(raw)) return null;
     kept.push(`${prop}: ${raw}`);
   }
   const style = kept.join('; ');
@@ -89,7 +130,8 @@ export function sanitizeStaticArtifact(
   if (expired()) return reject('deadline');
   const html = input.html;
   if (typeof html !== 'string' || new TextEncoder().encode(html).length > STATIC_ARTIFACT_LIMITS.bytes) return reject('bytes');
-  if (!wellFormedFragment(html)) return reject('malformed');
+  const expected = fragmentShape(html);
+  if (!expected) return reject('malformed');
   const media = input.media ?? [];
   if (media.length > STATIC_ARTIFACT_LIMITS.images) return reject('images');
   const seenMedia = new Set<string>();
@@ -102,6 +144,7 @@ export function sanitizeStaticArtifact(
   }
   const parsed = new doc.defaultView!.DOMParser().parseFromString(html, 'text/html');
   if (parsed.querySelector('parsererror')) return reject('malformed');
+  if (!sameShape(expected, elementShape(parsed.body))) return reject('malformed');
   const counts = { nodes: 0, text: 0 };
   const css = { n: 0 };
   const root = doc.createElement('div');

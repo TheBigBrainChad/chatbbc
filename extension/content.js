@@ -4050,7 +4050,10 @@
     if (!root || root.getAttribute('data-clf-fiber-rich') !== expected ||
         root.closest('section[data-testid^="conversation-turn"]')?.getAttribute('data-clf-fiber-turn') !==
           `${scanToken}:${turn.index}`) return null;
-    const nodes = CLF_DOM.captureRichRoot(root);
+    const mintedArtifactMedia = new Set();
+    const nodes = CLF_DOM.captureRichRoot(root, (element, nodeId) => {
+      if (element?.closest?.('[data-clf-owned-artifact]')) mintedArtifactMedia.add(`media-${nodeId}`);
+    });
     if (epoch !== heldEpoch || conversationId !== heldConversation || CLF_DOM.conversationId() !== heldConversation ||
         !root.isConnected || root.getAttribute('data-clf-fiber-rich') !== expected ||
         CLF_DOM.richRootFor(message.messageId, message.rawMessageId) !== root) return null;
@@ -4058,6 +4061,17 @@
       conversationId: heldConversation, messageId: message.messageId,
       providerMessageId: message.rawMessageId, revision: 0, accessibleText: '', nodes: [] });
     if (!nodes) return unavailable(CLF_DOM.richCaptureReason(root));
+    const listedArtifactMedia = [];
+    const collectArtifactMedia = entries => {
+      for (const node of entries || []) {
+        if (node.kind === 'artifact' && Array.isArray(node.media)) listedArtifactMedia.push(...node.media);
+        if (node.children) collectArtifactMedia(node.children);
+      }
+    };
+    collectArtifactMedia(nodes);
+    for (const mediaId of mintedArtifactMedia) {
+      if (!listedArtifactMedia.includes(mediaId)) return unavailable('unsupported');
+    }
     // Read only text already admitted into the semantic tree. Provider model source and
     // raw root.textContent can include hidden component source or irrelevant chrome.
     const textParts = [];
