@@ -198,22 +198,23 @@ describe('the terminal tab', () => {
 
     work.toggle('terminal');
     expect(host.style.getPropertyValue('--work-panel-width')).toBe('1240px');
-    expect(dom.window.localStorage.getItem('chatbbc.work-panel-width')).toBe('700');
+    // The migrated preference is where the reader's width now lives; the legacy key is gone.
+    expect(dom.window.localStorage.getItem('chatbbc.workbench-width')).toBe('700');
+    expect(dom.window.localStorage.getItem('chatbbc.work-panel-width')).toBeNull();
   });
 
-  it('migrates a work-panel width into the workbench preference once and leaves the old key', () => {
+  it('migrates a work-panel width into the workbench preference once and deletes the old key', () => {
     host.getBoundingClientRect = () => ({ width: 1600 } as DOMRect);
     dom.window.localStorage.setItem('chatbbc.work-panel-width', '640');
     const work = createWorkPanel({ host });
     const files = tenant(work, 'files');
     expect(dom.window.localStorage.getItem('chatbbc.workbench-width')).toBe('640');
-    expect(dom.window.localStorage.getItem('chatbbc.work-panel-width')).toBe('640');
+    expect(dom.window.localStorage.getItem('chatbbc.work-panel-width')).toBeNull();
     expect(host.style.getPropertyValue('--work-panel-width')).toBe('640px');
 
     const handle = files.root.querySelector<HTMLElement>('.work-panel-resize')!;
     handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft' }));
     expect(dom.window.localStorage.getItem('chatbbc.workbench-width')).toBe('650');
-    expect(dom.window.localStorage.getItem('chatbbc.work-panel-width')).toBe('640');
 
     dom.window.localStorage.setItem('chatbbc.workbench-width', '510');
     const host2 = document.createElement('section');
@@ -222,11 +223,17 @@ describe('the terminal tab', () => {
     const pane = document.createElement('aside');
     attachWorkPanelResize(host2, pane);
     expect(host2.style.getPropertyValue('--work-panel-width')).toBe('510px');
-    expect(dom.window.localStorage.getItem('chatbbc.work-panel-width')).toBe('640');
+    // A legacy value cannot override the authoritative key on a later mount.
+    dom.window.localStorage.setItem('chatbbc.work-panel-width', '640');
+    const host3 = document.createElement('section');
+    host3.getBoundingClientRect = () => ({ width: 1600 } as DOMRect);
+    document.body.append(host3);
+    attachWorkPanelResize(host3, document.createElement('aside'));
+    expect(host3.style.getPropertyValue('--work-panel-width')).toBe('510px');
+    expect(dom.window.localStorage.getItem('chatbbc.work-panel-width')).toBeNull();
 
     pane.querySelector<HTMLElement>('.work-panel-resize')!.dispatchEvent(new dom.window.MouseEvent('dblclick'));
     expect(dom.window.localStorage.getItem('chatbbc.workbench-width')).toBeNull();
-    expect(dom.window.localStorage.getItem('chatbbc.work-panel-width')).toBe('640');
   });
 });
 

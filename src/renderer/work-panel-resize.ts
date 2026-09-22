@@ -1,6 +1,5 @@
 const LEGACY_KEY = 'chatbbc.work-panel-width';
 const STORAGE_KEY = 'chatbbc.workbench-width';
-const MIGRATED_KEY = 'chatbbc.workbench-width.migrated';
 const MIN_WIDTH = 280;
 const MIN_MAIN_WIDTH = 360;
 
@@ -15,12 +14,13 @@ function migrateWorkbenchWidth(view: Window | null | undefined): void {
   try {
     const storage = view?.localStorage;
     if (!storage) return;
-    if (storage.getItem(MIGRATED_KEY) === '1') return;
+    // One-time migration, then the legacy key is deleted in the same read so no runtime
+    // branch or duplicate preference survives this call.
     if (storage.getItem(STORAGE_KEY) == null) {
       const legacy = storage.getItem(LEGACY_KEY);
       if (legacy != null) storage.setItem(STORAGE_KEY, legacy);
     }
-    storage.setItem(MIGRATED_KEY, '1');
+    storage.removeItem(LEGACY_KEY);
   } catch { /* Layout persistence is optional. */ }
 }
 
