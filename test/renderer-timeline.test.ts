@@ -4175,7 +4175,7 @@ describe('conversation stage', () => {
     };
     const event = { ...answer(2, messageId, 'Outline'), rich };
     const page = { sessionId: 'A', events: [event], total: 1, mode: 'open' as const };
-    projectRichActionResult(messageId, 'pending');
+    projectRichActionResult('A', messageId, 'pending');
     expect(stage.update(page, 1)).toBe(true);
     const timeline = document.getElementById('timeline')!;
     expect(timeline.querySelector('.rich-response')?.getAttribute('data-rich-status')).toBe('pending');
@@ -4183,11 +4183,68 @@ describe('conversation stage', () => {
     const focused = document.querySelector<HTMLElement>('.rich-focus-stage')!;
     expect(focused.hidden).toBe(false);
     expect(focused.querySelector('[role="status"]')?.textContent).toBe('Pending');
-    projectRichActionResult(messageId, 'observed');
+    projectRichActionResult('A', messageId, 'observed');
     expect(stage.update(page, 1)).toBe(true);
     expect(focused.hidden).toBe(false);
     expect(timeline.querySelector('.rich-response')?.getAttribute('data-rich-status')).toBe('confirmed');
     expect(focused.querySelector('[role="status"]')?.textContent).toBe('Confirmed');
     expect(timeline.contains(timeline.querySelector('.rich-artifact'))).toBe(true);
+  });
+
+  it('keeps an action result inside the session that owns it', async () => {
+    const stage = await stageFor(outboxStub());
+    const { projectRichActionResult, richFocusStatus, RICH_FOCUS_STATUS_LIMIT, retainRichFocusStatus } = await import('../src/renderer/rich-focus-status.js');
+    stage.select('A', 1);
+    const messageId = 'assistant:working:exchange:1789552000000';
+    const rich = {
+      version: 1 as const, status: 'available' as const, reason: null,
+      conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      messageId, providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      revision: 1, accessibleText: 'Outline',
+      nodes: [{ id: 'sem1', kind: 'artifact' as const, mode: 'semantic' as const, title: 'Outline', html: null, media: [] as string[] }]
+    };
+    const event = { ...answer(2, messageId, 'Outline'), rich };
+    const page = { sessionId: 'A', events: [event], total: 1, mode: 'open' as const };
+    projectRichActionResult('A', messageId, 'observed');
+    projectRichActionResult('B', messageId, 'pending');
+    projectRichActionResult('A', 'assistant:other:exchange:1789552000001', 'changed');
+    expect(stage.update(page, 1)).toBe(true);
+    const timeline = document.getElementById('timeline')!;
+    expect(timeline.querySelector('.rich-response')?.getAttribute('data-rich-status')).toBe('confirmed');
+    expect(richFocusStatus('B', messageId)).toBe('pending');
+    expect(richFocusStatus('A', 'assistant:other:exchange:1789552000001')).toBeNull();
+    const nextId = 'assistant:delta:exchange:1789552000002';
+    const next = { ...answer(3, nextId, 'Next'), rich: { ...rich, messageId: nextId } };
+    projectRichActionResult('A', nextId, 'pending');
+    expect(stage.update({ sessionId: 'A', events: [next], total: 2, mode: 'delta' }, 1)).toBe(true);
+    expect(richFocusStatus('A', messageId)).toBe('confirmed');
+    expect(stage.paint()).not.toBeNull();
+    expect(timeline.querySelector(`[data-rich-message-id="${messageId}"]`)?.getAttribute('data-rich-status')).toBe('confirmed');
+    expect(timeline.querySelector(`[data-rich-message-id="${nextId}"]`)?.getAttribute('data-rich-status')).toBe('pending');
+    stage.select('B', 2);
+    stage.select('A', 3);
+    expect(stage.update(page, 3)).toBe(true);
+    expect(timeline.querySelector('.rich-response')?.getAttribute('data-rich-status')).toBeNull();
+    expect(richFocusStatus('A', messageId)).toBeNull();
+    expect(richFocusStatus('B', messageId)).toBeNull();
+    for (let index = 0; index < RICH_FOCUS_STATUS_LIMIT + 1; index += 1) {
+      projectRichActionResult('A', `assistant:bound:${index}`, 'pending');
+    }
+    expect(richFocusStatus('A', 'assistant:bound:0')).toBeNull();
+    expect(richFocusStatus('A', `assistant:bound:${RICH_FOCUS_STATUS_LIMIT}`)).toBe('pending');
+    retainRichFocusStatus('A', ['assistant:bound:1']);
+    expect(richFocusStatus('A', 'assistant:bound:1')).toBe('pending');
+    expect(richFocusStatus('A', `assistant:bound:${RICH_FOCUS_STATUS_LIMIT}`)).toBeNull();
+    const longId = 'm'.repeat(200);
+    expect(longId.length).toBe(200);
+    projectRichActionResult('A', longId, 'changed');
+    expect(richFocusStatus('A', longId)).toBe('changed');
+    const oversized = 'n'.repeat(257);
+    projectRichActionResult('A', oversized, 'pending');
+    expect(richFocusStatus('A', oversized)).toBeNull();
+    projectRichActionResult('B', messageId, 'pending');
+    stage.dispose();
+    expect(richFocusStatus('A', longId)).toBeNull();
+    expect(richFocusStatus('B', messageId)).toBeNull();
   });
 });

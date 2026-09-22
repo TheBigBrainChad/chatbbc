@@ -119,8 +119,8 @@ export interface TimelineViewOptions {
   openOriginal: (sessionId: string, messageId: string, current: () => boolean) => Promise<boolean>;
   /** Open the one worker chat this prime spawned for an agent; null when that is ambiguous. */
   workerChat: (agent: string) => (() => void) | null;
-  /** The live action result for one logical message, when the action owner has one. */
-  richFocusStatus?: (logicalMessageId: string) => 'pending' | 'confirmed' | 'changed' | 'unavailable' | 'unconfirmed' | null;
+  /** The live action result for one session and logical message, when the action owner has one. */
+  richFocusStatus?: (sessionId: string, logicalMessageId: string) => 'pending' | 'confirmed' | 'changed' | 'unavailable' | 'unconfirmed' | null;
 }
 
 export interface TimelineView {
@@ -453,7 +453,7 @@ export function createTimelineView(options: TimelineViewOptions): TimelineView {
         const currentRichRow = () => context
           ? context.current()
           : id !== null && options.sessionId() === id && options.generation() === generation;
-        const focusStatus = !context && event.messageId ? options.richFocusStatus?.(event.messageId) ?? undefined : undefined;
+        const focusStatus = !context && id && event.messageId ? options.richFocusStatus?.(id, event.messageId) ?? undefined : undefined;
         box.append(event.rich ? renderRichResponse(event.rich, event.message.text, id ? {
           sessionId: id,
           media: event.richMedia ?? [],
@@ -765,8 +765,8 @@ export function createTimelineView(options: TimelineViewOptions): TimelineView {
       if (!options.developerMode() && item.kind === 'event' && item.event.source === 'app' && item.event.kind === 'progress' && item.event.progressId?.startsWith('browser-repair:')) continue;
       if (!options.developerMode() && item.kind === 'event' && ['session_start', 'session_end', 'turn_start', 'turn_end', 'note'].includes(item.event.kind)) continue;
       const key = itemKey(item);
-      const focusStatus = item.kind === 'event' && item.event.kind === 'assistant_message' && item.event.messageId
-        ? options.richFocusStatus?.(item.event.messageId) ?? '' : '';
+      const focusStatus = sessionId && item.kind === 'event' && item.event.kind === 'assistant_message' && item.event.messageId
+        ? options.richFocusStatus?.(sessionId, item.event.messageId) ?? '' : '';
       const sig = itemSignature(item, sessionId, options.outbox.pendingComposerInputs(), focusStatus) + (item.kind === 'event' && item.event.kind === 'chat_error'
         ? JSON.stringify(chatErrorPresentation(item.event, residentEvents)) : '');
       keep.add(key);

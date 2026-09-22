@@ -15,6 +15,7 @@ import {
   type TimelinePaint,
   type TimelineView
 } from './timeline-view.js';
+import { clearRichFocusStatus, retainRichFocusStatus, retireRichFocusStatus } from './rich-focus-status.js';
 import { timelineMessageRow } from './timeline-scroll.js';
 
 /**
@@ -51,8 +52,8 @@ export interface ConversationStageOptions {
   renderMessage: (html: StoredText | null | undefined, fallback: string) => HTMLElement;
   /** Hand a persisted original back to its exact witness; false when it no longer applies. */
   openOriginal: (sessionId: string, messageId: string, current: () => boolean) => Promise<boolean>;
-  /** The live action result for one logical message, when the action owner has one. */
-  richFocusStatus?: (logicalMessageId: string) => RichFocusStatus | null;
+  /** The live action result for one session and logical message, when the action owner has one. */
+  richFocusStatus?: (sessionId: string, logicalMessageId: string) => RichFocusStatus | null;
   /** Open the one worker chat this prime spawned for an agent; null when that is ambiguous. */
   workerChat: (agent: string) => (() => void) | null;
 }
@@ -144,6 +145,10 @@ function readRichFocus(timeline: HTMLElement, target: RichFocusTarget): RichFocu
   };
 }
 
+function assistantMessageIds(events: readonly SessionEvent[]): string[] {
+  return events.flatMap(event => event.kind === 'assistant_message' && event.messageId ? [event.messageId] : []);
+}
+
 export function createConversationStage(options: ConversationStageOptions): ConversationStage {
   let owner: ConversationStageOwner = { sessionId: null, generation: 0 };
   const view: TimelineView = createTimelineView({
@@ -172,6 +177,7 @@ export function createConversationStage(options: ConversationStageOptions): Conv
       // replaced by the New Chat welcome during the read. The window behind them is retired here,
       // which is what makes a page for the previous owner stale.
       if (sessionId !== owner.sessionId) {
+        if (owner.sessionId) retireRichFocusStatus(owner.sessionId);
         focus.release();
         view.retire();
       }
@@ -179,7 +185,12 @@ export function createConversationStage(options: ConversationStageOptions): Conv
     },
     update(page, generation) {
       const accepted = view.update(page, generation);
-      if (accepted) focus.refresh();
+      if (accepted && owner.sessionId && owner.sessionId === page.sessionId) {
+        // The incoming page may be a delta. Keep results for every assistant row still
+        // resident, not only the events that arrived in this read.
+        retainRichFocusStatus(owner.sessionId, assistantMessageIds(view.events()));
+        focus.refresh();
+      }
       return accepted;
     },
     paint: options_ => view.paint(options_),
@@ -197,12 +208,14 @@ export function createConversationStage(options: ConversationStageOptions): Conv
     setFilter: agent => view.setFilter(agent),
     previewRows: (source, sessionId, current, groups) => view.previewRows(source, sessionId, current, groups),
     clear() {
+      if (owner.sessionId) retireRichFocusStatus(owner.sessionId);
       focus.close();
       view.retire();
       view.clearRows();
     },
     dispose() {
       timeline.removeEventListener('rich-focus-request', onFocusRequest);
+      clearRichFocusStatus();
       focus.close();
       view.dispose();
       owner = { sessionId: null, generation: 0 };
