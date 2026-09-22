@@ -121,3 +121,23 @@ export function sanitizeStaticArtifact(
 export function artifactSrcdoc(artifact: { html: string }): string {
   return `<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">${artifact.html}`;
 }
+
+const ADMITTED_IMAGE = /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+
+/** Map at most four owned ids onto data URLs that were already admitted. */
+export function admitArtifactMedia(
+  ids: readonly string[],
+  admitted: ReadonlyMap<string, string> | undefined
+): StaticMedia[] | null {
+  if (ids.length > STATIC_ARTIFACT_LIMITS.images) return null;
+  const media: StaticMedia[] = [];
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (seen.has(id) || !/^[\w:-]{1,80}$/.test(id)) return null;
+    const dataUrl = admitted?.get(id);
+    if (!dataUrl || !ADMITTED_IMAGE.test(dataUrl)) return null;
+    seen.add(id);
+    media.push({ id, dataUrl });
+  }
+  return media;
+}

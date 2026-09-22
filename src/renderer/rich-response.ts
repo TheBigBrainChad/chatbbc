@@ -1,4 +1,6 @@
 import { parseRichResponse, type RichNode, type RichResponse } from '../shared/rich-response.js';
+import { t } from './i18n.js';
+import { admitArtifactMedia } from '../shared/static-artifact.js';
 import { mountStaticArtifact } from './static-artifact.js';
 import type { RichMediaState } from '../shared/session.js';
 import { isViewableRichImage, localDataUrl, openRichImageViewer } from './rich-image.js';
@@ -9,6 +11,8 @@ export type RichImageContext = {
   current: () => boolean;
   /** A fixed, main-verified manual history opener, not an action/Continue/retry. */
   openOriginal?: () => Promise<boolean>;
+  /** Data URLs already admitted for this message. Remote values are ignored. */
+  admittedArtifactMedia?: ReadonlyMap<string, string>;
 };
 
 type ImageRender = RichImageContext & { rich: RichResponse; imageCounts: Map<string, number> };
@@ -432,6 +436,18 @@ function renderTableRow(node: RichNode, images?: ImageRender): HTMLElement {
   return row;
 }
 
+
+function cleanAdmittedArtifactMedia(value: ReadonlyMap<string, string> | undefined): ReadonlyMap<string, string> | undefined {
+  if (!value || typeof value.size !== 'number' || value.size > 4) return undefined;
+  const clean = new Map<string, string>();
+  for (const [id, dataUrl] of value) {
+    if (typeof id !== 'string' || typeof dataUrl !== 'string') return undefined;
+    if (!/^[\w:-]{1,80}$/.test(id) || !/^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(dataUrl)) return undefined;
+    clean.set(id, dataUrl);
+  }
+  return clean;
+}
+
 function renderNode(node: RichNode, images?: ImageRender): HTMLElement {
   if (node.kind === 'text') {
     const tag = node.style === 'heading' ? 'h3' : node.style === 'code' ? 'pre' : 'p';
@@ -574,12 +590,16 @@ function renderNode(node: RichNode, images?: ImageRender): HTMLElement {
     const card = document.createElement('article');
     card.className = 'rich-artifact';
     card.dataset.richNodeId = node.id;
-    const title = document.createElement('h3');
-    title.textContent = node.title;
-    card.append(title);
+    card.append(renderNode({ id: `${node.id}-title`, kind: 'text', style: 'heading', text: node.title }, images));
     if (node.mode === 'static' && node.html) {
       const frameHost = document.createElement('div');
-      mountStaticArtifact(frameHost, { html: node.html });
+      const admitted = admitArtifactMedia(node.media, cleanAdmittedArtifactMedia(images?.admittedArtifactMedia));
+      if (admitted) mountStaticArtifact(frameHost, { html: node.html, media: admitted });
+      else {
+        const note = document.createElement('p');
+        note.textContent = t('Open original in ChatGPT');
+        frameHost.append(note);
+      }
       card.append(frameHost);
     }
     return card;
@@ -623,7 +643,7 @@ export function renderRichResponse(rich: RichResponse, fallback: string, media?:
   const safeMedia = media ? validatedMedia(media.media) : null;
   const images = media && safeMedia
     ? { sessionId: media.sessionId, current: media.current, media: safeMedia, rich: clean,
-      imageCounts: countImages(clean.nodes) } : undefined;
+      admittedArtifactMedia: media.admittedArtifactMedia, imageCounts: countImages(clean.nodes) } : undefined;
   for (const node of clean.nodes) box.append(renderNode(node, images));
   appendManualOriginal(box, media);
   return box;

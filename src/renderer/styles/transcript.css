@@ -384,6 +384,8 @@
 .rich-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: 12px; }
 .rich-grid > * { min-width: 0; margin-block-start: 0 !important; }
 .rich-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 14px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--card); }
+.rich-artifact { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
+.rich-artifact iframe { width: 100%; min-height: 12rem; border: 1px solid var(--line); background: var(--page); }
 .rich-card > * { min-width: 0; margin-block-start: 0 !important; }
 .rich-list { padding-inline-start: 1.5em; }
 .rich-list > li { min-width: 0; }

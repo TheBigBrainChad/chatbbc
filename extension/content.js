@@ -4065,6 +4065,7 @@
       for (const node of entries) {
         if (node.kind === 'text' && node.text) textParts.push(node.text);
         else if (node.kind === 'control' && node.label) textParts.push(node.label);
+        else if (node.kind === 'artifact' && node.title) textParts.push(node.title);
         if (node.children) collect(node.children);
       }
     };

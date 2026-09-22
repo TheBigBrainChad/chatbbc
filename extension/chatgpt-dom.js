@@ -581,6 +581,87 @@ var CLF_DOM = (() => {
   }
 
   const richFailure = new WeakMap();
+
+  function captureOwnedArtifact(element, id) {
+    const allowed = new Set(['div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'pre', 'code', 'strong', 'em', 'b', 'i', 'br', 'hr', 'section', 'article', 'header', 'footer', 'figure', 'figcaption', 'blockquote', 'img']);
+    const styleProps = new Set(['color', 'background', 'background-color', 'font', 'font-size', 'font-weight', 'font-family', 'font-style', 'text-align', 'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'border', 'border-color', 'display', 'width', 'height', 'max-width', 'gap', 'line-height', 'white-space', 'overflow-wrap']);
+    const doc = element.ownerDocument;
+    const host = doc.createElement('div');
+    let nodes = 0, textLength = 0, cssLength = 0;
+    const media = [];
+    const seen = new Set();
+    const styleOf = value => {
+      if (/url\s*\(|@import|expression\s*\(|javascript:/i.test(value)) return null;
+      const kept = [];
+      for (const part of value.split(';')) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+        const split = trimmed.indexOf(':');
+        if (split <= 0) return null;
+        const prop = trimmed.slice(0, split).trim().toLowerCase();
+        const raw = trimmed.slice(split + 1).trim();
+        if (!styleProps.has(prop) || /[{}<>]|url\s*\(/i.test(raw)) return null;
+        kept.push(`${prop}: ${raw}`);
+      }
+      const style = kept.join('; ');
+      cssLength += style.length;
+      return cssLength <= 65536 ? style : null;
+    };
+    const walk = (source, parent, depth) => {
+      if (depth > 24) return 'oversized';
+      const rawChildren = source.childNodes;
+      if (rawChildren.length > 1024 - nodes) return 'oversized';
+      for (let index = 0; index < rawChildren.length; index++) {
+        const child = rawChildren[index];
+        if (child.nodeType === 3) {
+          const value = child.nodeValue || '';
+          textLength += value.length;
+          if (textLength > 65536) return 'oversized';
+          parent.append(doc.createTextNode(value));
+          continue;
+        }
+        if (child.nodeType !== 1) return 'unsupported';
+        const tag = child.tagName.toLowerCase();
+        if (!allowed.has(tag)) return 'unsupported';
+        if (++nodes > 1024) return 'oversized';
+        for (const attr of [...child.attributes]) {
+          const name = attr.name.toLowerCase();
+          if (name.startsWith('on') || name === 'href' || name === 'src' || name === 'srcset' || name === 'action' || name === 'formaction') return 'unsupported';
+          if (name !== 'style' && !(tag === 'img' && (name === 'alt' || name === 'data-media-id'))) return 'unsupported';
+        }
+        const next = doc.createElement(tag);
+        if (tag === 'img') {
+          const mediaId = child.getAttribute('data-media-id') || '';
+          if (!/^[\w:-]{1,80}$/.test(mediaId) || seen.has(mediaId) || child.hasAttribute('src')) return 'unsupported';
+          if (media.length >= 4) return 'oversized';
+          seen.add(mediaId);
+          media.push(mediaId);
+          next.setAttribute('alt', child.getAttribute('alt') || '');
+          next.setAttribute('data-media-id', mediaId);
+        }
+        const style = child.getAttribute('style');
+        if (style !== null) {
+          const clean = styleOf(style);
+          if (clean === null) return 'unsupported';
+          if (clean) next.setAttribute('style', clean);
+        }
+        parent.append(next);
+        if (tag !== 'br' && tag !== 'hr' && tag !== 'img') {
+          const reason = walk(child, next, depth + 1);
+          if (reason) return reason;
+        }
+      }
+      return null;
+    };
+    const reason = walk(element, host, 1);
+    if (reason) return { rejected: reason };
+    const html = host.innerHTML;
+    const bytes = typeof TextEncoder === 'function' ? new TextEncoder().encode(html).byteLength : html.length * 4;
+    if (bytes > 131072) return { rejected: 'oversized' };
+    const label = (element.getAttribute('aria-label') || '').trim().slice(0, 200);
+    return { node: { id, kind: 'artifact', mode: 'static', title: label || 'Artifact', html, media } };
+  }
+
   /** Read inert rendered semantics, never model-authored component source, URLs or callbacks. */
   function captureRichRoot(root, onImage = null) {
     return safe(() => {
@@ -611,6 +692,15 @@ var CLF_DOM = (() => {
           return element.getAttribute('aria-hidden') === 'true' || !element.textContent?.trim() && !element.getAttribute('aria-label') ? [] : null;
         }
         const id = `n-${path.join('-')}`;
+        if (element.hasAttribute('data-clf-owned-artifact')) {
+          const artifact = captureOwnedArtifact(element, id);
+          if (!artifact || artifact.rejected) {
+            if (artifact && artifact.rejected === 'oversized') return overLimit();
+            richFailure.set(root, 'unsupported');
+            return null;
+          }
+          return [artifact.node];
+        }
         if (name === 'img') {
           if (++media > 64) return overLimit();
           const alt = element.getAttribute('alt') || '';

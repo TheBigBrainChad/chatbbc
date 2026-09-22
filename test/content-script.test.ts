@@ -736,6 +736,46 @@ describe('exact native rich response observation (no action authority)', () => {
     expect(JSON.stringify(reordered)).not.toMatch(/selector|querySelector|xpath/i);
   });
 
+  it('captures an owned static artifact without urls, forms, scripts, or handlers', async () => {
+    live = await harness();
+    const { root, surface } = rootFixture(live.document);
+    const artifact = live.document.createElement('section');
+    artifact.setAttribute('data-clf-owned-artifact', '');
+    artifact.setAttribute('aria-label', 'Sketch');
+    artifact.innerHTML = '<p style="color: red">Hello</p><img data-media-id="shot" alt="cat">';
+    surface.append(artifact);
+    const controlsOf = (nodes: Array<Record<string, any>>) => {
+      const found: Array<Record<string, any>> = [];
+      const visit = (entries: Array<Record<string, any>>) => {
+        for (const entry of entries ?? []) {
+          if (entry.kind === 'artifact') found.push(entry);
+          if (Array.isArray(entry.children)) visit(entry.children);
+        }
+      };
+      visit(nodes);
+      return found;
+    };
+    const safe = controlsOf((live.window as any).CLF_DOM.captureRichRoot(root));
+    expect(safe).toHaveLength(1);
+    const captured = safe[0];
+    expect(captured).toMatchObject({ mode: 'static', title: 'Sketch', media: ['shot'] });
+    expect(captured?.html ?? '').toContain('Hello');
+    expect(captured?.html ?? '').toContain('color: red');
+    expect(captured?.html ?? '').not.toMatch(/script|onclick|https:|<form|@import|href=|\ssrc=/i);
+    await replyFiber([], [descriptor()]);
+    await live.hook.flush();
+    const rich = emitted(live.sent, 'assistant_message').at(-1)?.event.rich;
+    expect(rich?.accessibleText).toContain('Sketch');
+    expect(JSON.stringify(rich?.nodes)).not.toMatch(/script|onclick|https:|<form|@import|href=|\ssrc=/i);
+    artifact.innerHTML = '<p>Hello</p><script>alert(1)</script>';
+    expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+    expect((live.window as any).CLF_DOM.richCaptureReason(root)).toBe('unsupported');
+    artifact.innerHTML = '<p>Hello</p><img src="https://remote/x" alt="remote">';
+    expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+    artifact.innerHTML = '<form action="/x"><button>go</button></form>';
+    expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+  });
+
   it('rejects more than 1024 hostile sibling nodes before iterating their NodeList', async () => {
     live = await harness();
     const { root, surface } = rootFixture(live.document);

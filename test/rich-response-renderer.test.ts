@@ -720,3 +720,61 @@ it('shows only a fully validated unavailable response accessible summary outside
   expect(invalid.textContent).not.toContain('UNVERIFIED CONTENT');
   expect(invalid.querySelector('details.rich-source pre')?.textContent).toBe(source);
 });
+
+const artifact = (mode: 'static' | 'semantic', html: string | null, media: string[] = []): RichNode => ({
+  id: 'art1', kind: 'artifact', mode, title: 'Sketch', html, media
+});
+
+it.each([
+  '<svg><rect /></svg>',
+  '<img src="http://remote/x" alt="remote">',
+  '<input value="name">',
+  '<div style="background: url(http://remote/x)">x</div>'
+])('makes a rendered static artifact inert: %s', html => {
+  const view = renderRichResponse(fixture([artifact('static', html)]), 'source');
+  expect(view.querySelector('iframe')).toBeNull();
+  expect(view.textContent).toContain('Open original in ChatGPT');
+  expect(view.innerHTML).not.toMatch(/<script|onclick|https:|<form|@import|\bhref=|<svg|<input/i);
+});
+
+it('sandboxes admitted static markup and renders a semantic artifact as a typed heading', () => {
+  const dataUrl = 'data:image/png;base64,aaaa';
+  const view = renderRichResponse(fixture([
+    artifact('static', '<p>Hello</p><img data-media-id="shot" alt="cat">', ['shot'])
+  ]), 'source', {
+    sessionId: '2026-09-02-test0001', media: [], current: () => true,
+    admittedArtifactMedia: new Map([['shot', dataUrl]])
+  });
+  const frame = view.querySelector('iframe');
+  expect(frame).not.toBeNull();
+  expect(frame!.getAttribute('sandbox')).toBe('');
+  expect(frame!.getAttribute('referrerpolicy')).toBe('no-referrer');
+  expect(frame!.srcdoc).toContain("default-src 'none'");
+  expect(frame!.srcdoc).toContain(dataUrl);
+  expect(frame!.srcdoc).toContain('Hello');
+  expect(frame!.srcdoc).not.toMatch(/allow-scripts|allow-same-origin|https:/i);
+  expect(view.querySelector('h3.rich-heading')?.textContent).toBe('Sketch');
+  expect(view.querySelector('h3.rich-heading')?.getAttribute('dir')).toBe('auto');
+  const semantic = renderRichResponse(fixture([artifact('semantic', null)]), 'source');
+  expect(semantic.querySelector('iframe')).toBeNull();
+  expect(semantic.querySelector('h3.rich-heading')?.textContent).toBe('Sketch');
+  expect(semantic.querySelector('h3.rich-heading')?.getAttribute('dir')).toBe('auto');
+});
+
+it('does not paint an unadmitted artifact image or a data URL that was not already local', () => {
+  const ids = ['a', 'b', 'c', 'd'];
+  const many = renderRichResponse(fixture([artifact('static', '<p>Hello</p>', ids)]), 'source', {
+    sessionId: '2026-09-02-test0001', media: [], current: () => true,
+    admittedArtifactMedia: new Map([['a', 'data:image/png;base64,aaaa'], ['b', 'data:image/png;base64,aaaa'], ['c', 'data:image/png;base64,aaaa']])
+  });
+  expect(many.querySelector('iframe')).toBeNull();
+  expect(many.textContent).toContain('Open original in ChatGPT');
+  const remote = renderRichResponse(fixture([
+    artifact('static', '<img data-media-id="shot" alt="cat">', ['shot'])
+  ]), 'source', {
+    sessionId: '2026-09-02-test0001', media: [], current: () => true,
+    admittedArtifactMedia: new Map([['shot', 'https://remote/x']])
+  });
+  expect(remote.querySelector('iframe')).toBeNull();
+  expect(remote.innerHTML).not.toMatch(/https:/i);
+});
