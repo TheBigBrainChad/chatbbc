@@ -1420,3 +1420,10 @@ input.num {
 
 
 @media (max-width: 760px) { .setup-heading { grid-template-columns: minmax(0, 1fr); } }
+
+/* Settings, Usage, and Appearance read as Crystal cards. The solid token remains the opaque fallback. */
+.app[data-screen='settings'] :is([data-panel='workspace'], [data-panel='usage'], [data-panel='appearance'], [data-panel='activity']) .card {
+  background: var(--glass-high, var(--card));
+  border: 1px solid var(--hairline, var(--line));
+  box-shadow: 0 18px 48px var(--shadow, transparent);
+}

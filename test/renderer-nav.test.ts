@@ -302,3 +302,147 @@ describe('chat navigator projection', () => {
     vi.unstubAllGlobals();
   });
 });
+
+describe('destination router', () => {
+  function mount() {
+    const dom = new JSDOM(`<div class="app" id="appShell" data-screen="chat">
+      <nav id="globalRail">
+        <button type="button" data-destination="chats" aria-current="page"></button>
+        <button type="button" data-destination="files"></button>
+        <button type="button" data-destination="agents"></button>
+        <button type="button" data-destination="usage"></button>
+        <button type="button" data-destination="settings"></button>
+      </nav>
+      <div id="chatNavigator"></div>
+      <main id="conversationStage">
+        <section class="panel is-active" data-panel="chat"><div id="timeline"></div></section>
+        <section class="panel" data-panel="usage"></section>
+        <section class="panel" data-panel="workspace"></section>
+      </main>
+      <aside id="contextWorkbench"></aside>
+      <nav id="settingsPages" hidden></nav>
+      <input id="appearance-accent-hex" value="#000000" />
+    </div>`, { url: 'https://cos.local/' });
+    const { document } = dom.window;
+    return { dom, document };
+  }
+
+  it('returns to the same chat without reloading it after Settings', async () => {
+    const { createDestinationRouter } = await import('../src/renderer/destination-router.js');
+    const { createAppShell } = await import('../src/renderer/app-shell.js');
+    const { dom, document } = mount();
+    const store = createPresentationStore(initialPresentationState());
+    const shell = createAppShell({
+      document,
+      store,
+      roots: {
+        rail: document.getElementById('globalRail')!,
+        navigator: document.getElementById('chatNavigator')!,
+        stage: document.getElementById('conversationStage')!,
+        workbench: document.getElementById('contextWorkbench')!
+      }
+    });
+    const router = createDestinationRouter({ shell, store, document });
+    router.show('chats');
+    const timeline = document.querySelector('#timeline');
+    router.show('settings');
+    router.show('chats');
+    expect(document.querySelector('#timeline')).toBe(timeline);
+    expect(document.getElementById('appShell')!.dataset.screen).toBe('chat');
+    shell.dispose();
+    dom.window.close();
+  });
+
+  it('does not overwrite a dirty appearance field on a state push', async () => {
+    const { createDestinationRouter } = await import('../src/renderer/destination-router.js');
+    const { createAppShell } = await import('../src/renderer/app-shell.js');
+    const { dom, document } = mount();
+    const store = createPresentationStore(initialPresentationState());
+    const shell = createAppShell({
+      document,
+      store,
+      roots: {
+        rail: document.getElementById('globalRail')!,
+        navigator: document.getElementById('chatNavigator')!,
+        stage: document.getElementById('conversationStage')!,
+        workbench: document.getElementById('contextWorkbench')!
+      }
+    });
+    const router = createDestinationRouter({ shell, store, document });
+    router.show('settings');
+    const field = document.getElementById('appearance-accent-hex') as HTMLInputElement;
+    field.focus();
+    field.value = '#123456';
+    store.dispatch({ type: 'appStateReceived', generation: 1, state: { config: { ui: { appearance: { accent: '#abcdef' } } } } as never });
+    expect(field.value).toBe('#123456');
+    shell.dispose();
+    dom.window.close();
+  });
+
+  it('keeps Chats current while Files or Agents open the workbench', async () => {
+    const { createDestinationRouter } = await import('../src/renderer/destination-router.js');
+    const { createAppShell } = await import('../src/renderer/app-shell.js');
+    const { dom, document } = mount();
+    const store = createPresentationStore(initialPresentationState());
+    const shell = createAppShell({
+      document,
+      store,
+      roots: {
+        rail: document.getElementById('globalRail')!,
+        navigator: document.getElementById('chatNavigator')!,
+        stage: document.getElementById('conversationStage')!,
+        workbench: document.getElementById('contextWorkbench')!
+      }
+    });
+    const router = createDestinationRouter({ shell, store, document });
+    const timeline = document.querySelector('#timeline');
+    router.show('files');
+    expect(document.querySelector('#timeline')).toBe(timeline);
+    expect(document.querySelector('[data-destination="chats"]')!.getAttribute('aria-current')).toBe('page');
+    expect(document.querySelector('[data-destination="files"]')!.hasAttribute('aria-current')).toBe(false);
+    expect(document.getElementById('appShell')!.dataset.workbenchOpen).toBe('true');
+    expect(document.getElementById('appShell')!.dataset.screen).toBe('chat');
+    expect(router.current()).toBe('files');
+    router.show('agents');
+    expect(document.querySelector('[data-destination="chats"]')!.getAttribute('aria-current')).toBe('page');
+    expect(document.getElementById('appShell')!.dataset.workbenchOpen).toBe('true');
+    expect(router.current()).toBe('agents');
+    store.dispatch({ type: 'workbenchChanged', open: false, tab: 'agents' });
+    expect(router.current()).toBe('chats');
+    expect(document.getElementById('appShell')!.dataset.screen).toBe('chat');
+    router.show('chats');
+    expect(document.getElementById('appShell')!.dataset.workbenchOpen).toBe('false');
+    expect(router.current()).toBe('chats');
+    shell.dispose();
+    dom.window.close();
+  });
+
+  it('opens Usage without the workbench and keeps the chat mounted', async () => {
+    const { createDestinationRouter } = await import('../src/renderer/destination-router.js');
+    const { createAppShell } = await import('../src/renderer/app-shell.js');
+    const { dom, document } = mount();
+    const store = createPresentationStore(initialPresentationState());
+    const shell = createAppShell({
+      document,
+      store,
+      roots: {
+        rail: document.getElementById('globalRail')!,
+        navigator: document.getElementById('chatNavigator')!,
+        stage: document.getElementById('conversationStage')!,
+        workbench: document.getElementById('contextWorkbench')!
+      }
+    });
+    const router = createDestinationRouter({ shell, store, document });
+    router.show('files');
+    const timeline = document.querySelector('#timeline');
+    router.show('usage');
+    expect(document.querySelector('#timeline')).toBe(timeline);
+    expect(document.querySelector('[data-panel="usage"]')!.classList.contains('is-active')).toBe(true);
+    expect(document.querySelector('[data-destination="usage"]')!.getAttribute('aria-current')).toBe('page');
+    expect(document.getElementById('appShell')!.dataset.screen).toBe('settings');
+    expect(document.getElementById('appShell')!.dataset.workbenchOpen).toBe('false');
+    expect(router.current()).toBe('usage');
+    shell.dispose();
+    dom.window.close();
+  });
+});

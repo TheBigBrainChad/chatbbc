@@ -1,5 +1,12 @@
 // Real Chromium layout for the setup guide, using the production modules and styles.
 // Serves a UI-only fixture; no app backend, credentials, browser pairing or tunnel is started.
+if (!process.versions.electron) {
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE;
+  const extra = process.platform === 'linux' ? ['--ozone-platform=x11', '--disable-gpu', '--in-process-gpu'] : [];
+  const { status } = require('node:child_process').spawnSync(require('electron'), [__filename, ...extra], { env, stdio: 'inherit', windowsHide: true });
+  process.exit(status ?? 1);
+}
 const { app, BrowserWindow } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -35,7 +42,7 @@ app.whenReady().then(async () => {
             initLanguage(); initSetupGuide(); window.setLanguage = setLanguage; window.t = t;
             document.querySelector('.app').dataset.screen = 'settings';
             for (const p of document.querySelectorAll('.panel')) p.classList.toggle('is-active', p.dataset.panel === 'setup');
-            document.getElementById('tabs').hidden = false;
+            document.getElementById('settingsPages').hidden = false;
             document.getElementById('desktopTunnelField').hidden = false;
             window.fixtureReady = true;
           </script></body>`);

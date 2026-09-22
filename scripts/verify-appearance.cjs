@@ -1,4 +1,11 @@
 // Isolated renderer/Chromium acceptance. No backend, provider, credentials or pairing.
+if (!process.versions.electron) {
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE;
+  const extra = process.platform === 'linux' ? ['--ozone-platform=x11', '--disable-gpu', '--in-process-gpu'] : [];
+  const { status } = require('node:child_process').spawnSync(require('electron'), [__filename, ...extra], { env, stdio: 'inherit', windowsHide: true });
+  process.exit(status ?? 1);
+}
 const { app, BrowserWindow } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -20,10 +27,14 @@ app.whenReady().then(async () => {
       multiAgent:{enabled:false,maxWorkers:2,allowUnattributedCalls:false,recoverAgentTabs:false},
       goal:{enabled:false,model:'fixture',reasoning:'default',prompt:'Fixture'}
     };
-    const state = {config,hasApiKey:false,hasGoalKey:false,resolvedBinary:null,bundledTunnelVersion:null,
+    const state = {config,hasApiKey:false,hasGoalKey:false,hasCustomProviderKey:false,resolvedBinary:null,bundledTunnelVersion:null,
+      platform:{family:'linux',name:'Linux',desktopAutomation:false},
+      secureStorage:{available:true,backend:'secret-service',detail:null},
       status:{state:'disconnected',detail:'',publicUrl:null,localUrl:null,handshakeAt:null,lastRequestAt:null,lastToolCallAt:null,health:null,surfaces:[]},
       bridge:{running:false,port:0,paired:false,present:false,lastSeenAt:null,extensionVersion:null},
-      update:{current:'2.0.9',latest:null,stage:'idle',error:null,checkedAt:null}};
+      update:{current:'2.0.9',latest:null,stage:'idle',error:null,checkedAt:null},
+      omarchy:{generation:0,theme:null,diagnostic:null},
+      glass:{mode:'atmospheric',transparent:false,diagnostic:null},glassGeneration:0};
     const project = {id:'demo-project',name:'VideoClipper',path:'C:/demo',createdAt:1};
     const rows = Array.from({length:22},(_,i)=>({id:'task-'+i,title:'Project chat '+(i+1),projectId:project.id,
       conversationId:'chat-'+i,chatIds:['chat-'+i],startedAt:1,updatedAt:100-i,endedAt:2,events:0,userMessages:0,
@@ -84,7 +95,7 @@ app.whenReady().then(async () => {
       await js(`(() => {const input=document.getElementById(${JSON.stringify(id)});input.value=${JSON.stringify(value)};input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));})()`);
       await js('new Promise(r=>setTimeout(r,40))');
     };
-    await js(`document.querySelector('[data-tab="appearance"]').click()`);
+    await js(`document.querySelector('[data-settings-panel="appearance"]').click()`);
     assert.equal(await js(`document.getElementById('appearancePanel').classList.contains('is-active')`),true);
     await screenshot('default-dark.png');
     await change('appearance-accent-hex','#a855f7');
@@ -152,13 +163,13 @@ app.whenReady().then(async () => {
     const savedUi = await js('window.fixtureState.config.ui');
     await win.reload();
     for(let i=0;i<100 && !(await js('!!window.fixtureReady'));i++) await new Promise(r=>setTimeout(r,25));
-    await js(`window.fixtureState.config.ui=${JSON.stringify(savedUi)};window.pushState();document.querySelector('[data-tab="appearance"]').click()`);
+    await js(`window.fixtureState.config.ui=${JSON.stringify(savedUi)};window.pushState();document.querySelector('[data-settings-panel="appearance"]').click()`);
     assert.equal(await js(`document.getElementById('appearance-sidebar-hex').value`),'#331155');
     await change('uiLanguage','zh-CN');
     assert.equal(await js(`document.getElementById('appearanceTitle').textContent`),'外观');
     await screenshot('chinese.png');
     await change('uiLanguage','en');
-    await js(`document.getElementById('backToChat').click();document.getElementById('chatInput').value='A workspace in your colors.'`);
+    await js(`document.querySelector('[data-destination="chats"]').click();document.getElementById('chatInput').value='A workspace in your colors.'`);
     await screenshot('chat.png');
     fs.writeFileSync(path.join(output,'results.json'),JSON.stringify({arbitraryColors:true,separateThemes:true,translucency:true,dirtyPush:true,queuedSave:true,saveFailureRollback:true,reload:true,reset:true,layout},null,2));
     console.log('Appearance Electron checks passed. '+output);

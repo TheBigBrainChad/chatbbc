@@ -1,4 +1,11 @@
 // Isolated production CSS/markup: focus and picker repaints must not move settings.
+if (!process.versions.electron) {
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE;
+  const extra = process.platform === 'linux' ? ['--ozone-platform=x11', '--disable-gpu', '--in-process-gpu'] : [];
+  const { status } = require('node:child_process').spawnSync(require('electron'), [__filename, ...extra], { env, stdio: 'inherit', windowsHide: true });
+  process.exit(status ?? 1);
+}
 const { app, BrowserWindow } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
