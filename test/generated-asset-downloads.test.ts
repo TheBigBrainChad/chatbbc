@@ -12,6 +12,7 @@ import {
   reconcileGeneratedAssetDownloadCustody,
   requestGeneratedAssetDownloads,
   resetGeneratedAssetDownloadsForTests,
+  stopGeneratedAssetDownloads,
   subscribeGeneratedAssetDownloads
 } from '../src/main/generated-asset-downloads.js';
 import {
@@ -264,5 +265,24 @@ describe('generated original download custody', () => {
     await expect(requestGeneratedAssetDownloads({
       sessionId: session.id, logicalMessageId: responseId, assetIds: [secondAsset]
     })).rejects.toThrow('download_capacity');
+  });
+
+  it('marks an unresolved download unconfirmed and refuses new admission after shutdown', async () => {
+    const { session, conversationId } = await fixture();
+    const batch = await requestGeneratedAssetDownloads({
+      sessionId: session.id, logicalMessageId: responseId, assetIds: [firstAsset]
+    });
+    showDocument(conversationId);
+    expect(await claimGeneratedAssetDownload({ id: batch.items[0]!.id, ...source(conversationId) })).toBeTruthy();
+    let latest = '';
+    const unsubscribe = subscribeGeneratedAssetDownloads(value => {
+      latest = value.items[0]?.state ?? '';
+    });
+    expect(stopGeneratedAssetDownloads()).toBe(1);
+    unsubscribe();
+    expect(latest).toBe('unconfirmed');
+    await expect(requestGeneratedAssetDownloads({
+      sessionId: session.id, logicalMessageId: responseId, assetIds: [secondAsset]
+    })).rejects.toThrow('download_shutdown');
   });
 });

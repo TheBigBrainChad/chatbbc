@@ -40,6 +40,7 @@ const batches = new Map<string, InternalBatch>();
 const items = new Map<string, InternalItem>();
 const subscribers = new Set<(batch: GeneratedAssetDownloadBatch) => void>();
 let requestQueue = Promise.resolve();
+let admissionClosed = false;
 
 function publicBatch(batch: InternalBatch): GeneratedAssetDownloadBatch {
   return {
@@ -118,6 +119,7 @@ export async function requestGeneratedAssetDownloads(
   stillCurrent?: () => boolean
 ): Promise<GeneratedAssetDownloadBatch> {
   const run = requestQueue.then(async () => {
+    if (admissionClosed) throw new Error('download_shutdown');
     const assetIds = validateRequest(input);
     const target = await canonicalTarget(input, assetIds);
     const fingerprint = JSON.stringify([input.sessionId, target.conversationId, target.bindingRevision,
@@ -325,11 +327,28 @@ export function subscribeGeneratedAssetDownloads(
   return () => subscribers.delete(subscriber);
 }
 
+export function stopGeneratedAssetDownloads(): number {
+  admissionClosed = true;
+  const changed = new Set<InternalBatch>();
+  let count = 0;
+  for (const item of items.values()) {
+    if (terminal(item.state)) continue;
+    item.state = 'unconfirmed';
+    item.detail = 'The app shut down before the browser download receipt was confirmed.';
+    const batch = batches.get(item.batchId);
+    if (batch) changed.add(batch);
+    count += 1;
+  }
+  for (const batch of changed) publish(batch);
+  return count;
+}
+
 export function resetGeneratedAssetDownloadsForTests(): void {
   batches.clear();
   items.clear();
   subscribers.clear();
   liveDocuments.clear();
   documentsComplete = false;
+  admissionClosed = false;
   requestQueue = Promise.resolve();
 }
