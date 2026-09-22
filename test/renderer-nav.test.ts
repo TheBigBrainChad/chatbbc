@@ -11,15 +11,20 @@ import { createSidebarOrder } from '../src/renderer/sidebar-order.js';
 const html = () => fs.readFile(path.resolve(__dirname, '../src/renderer/index.html'), 'utf8');
 
 describe('workspace destination ownership', () => {
-  it('retires the Settings-only tabs after moving the five workspace destinations to the rail', async () => {
+  it('replaces legacy tabs with Settings-owned controls for every retained panel', async () => {
     const text = await html();
     expect(text).not.toContain('id="tabs"');
     expect(text).not.toContain('data-tab=');
     expect(text).not.toContain('id="backToChat"');
     expect(text).not.toContain('id="workspaceSettings"');
-    expect(text).toContain('data-panel="setup"');
+    expect(text).toContain('id="settingsPages"');
+    for (const panel of ['workspace', 'automation', 'appearance', 'activity']) {
+      expect(text).toContain(`data-settings-panel="${panel}"`);
+    }
+    expect(text).toContain('id="setupBadge"');
   });
 });
+
 
 describe('the global rail', () => {
   it('places Chats, Files, Agents, Usage, and Settings around the current navigator and stage', async () => {

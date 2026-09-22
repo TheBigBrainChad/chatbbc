@@ -22,6 +22,8 @@ export interface NavigatorImageSet {
   sessionId: string;
   title: string;
   projectId?: string | null;
+  /** Loaded transcript anchor used only by the transcript owner to focus the canonical gallery. */
+  anchorMessageId?: string;
 }
 export type NavigatorSession = SessionSummary & {
   /** Bounded authored preview already carried by a loaded session projection. */

@@ -169,6 +169,7 @@ const DESTINATION_PANEL: Readonly<Record<string, string>> = {
   activity: 'activity',
   setup: 'setup'
 };
+const SETTINGS_PANELS = new Set(['workspace', 'automation', 'appearance', 'activity']);
 function showTab(name: string): void {
   const settings = name !== 'chat' && name !== 'plugins';
   const panel = DESTINATION_PANEL[name] ?? name;
@@ -178,6 +179,16 @@ function showTab(name: string): void {
   if (name === 'automation') openChatView('settings');
   else if (name === 'chat') openChatView('timeline');
 
+  const settingsPages = $('settingsPages');
+  const settingsOwned = SETTINGS_PANELS.has(name) || name === 'setup';
+  settingsPages.hidden = !settingsOwned;
+  settingsPages.closest('main')?.classList.toggle('has-settings-pages', settingsOwned);
+  for (const control of settingsPages.querySelectorAll<HTMLElement>('[data-settings-panel]')) {
+    const current = control.dataset.settingsPanel === name;
+    control.classList.toggle('is-sel', current);
+    if (current) control.setAttribute('aria-current', 'page');
+    else control.removeAttribute('aria-current');
+  }
   for (const item of document.querySelectorAll<HTMLElement>('[data-sidebar-page]')) item.classList.toggle('is-sel', item.dataset.sidebarPage === name);
   for (const node of document.querySelectorAll<HTMLElement>('.panel')) {
     node.classList.toggle('is-active', node.dataset.panel === panel);
@@ -224,6 +235,11 @@ $('sidebarConnection').addEventListener('click', () => {
   setConnectionPopover(Boolean($('connectionPopover').hidden));
 });
 $('chatSettingsBtn').addEventListener('click', () => showTab('automation'));
+for (const control of $('settingsPages').querySelectorAll<HTMLButtonElement>('[data-settings-panel]')) {
+  control.addEventListener('click', () => {
+    if (control.dataset.settingsPanel) showTab(control.dataset.settingsPanel);
+  });
+}
 $('chatNavigator').addEventListener('click', event => {
   if ((event.target as HTMLElement).closest('[data-id], [data-new-project], [data-project-id]')) showTab('chat');
 }, { capture: true });

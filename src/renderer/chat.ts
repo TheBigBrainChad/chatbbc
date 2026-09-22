@@ -22,7 +22,13 @@ import { localDataUrl, retireRichImageViewer, retireRichImageViewerWithin, retir
 import { RICH_LIMITS } from '../shared/rich-response.js';
 import { preserveTimelineViewport } from './timeline-scroll.js';
 import { createSidebarOrder, type SidebarOrder } from './sidebar-order.js';
-import { createChatNavigator, type ChatNavigator } from './chat-navigator.js';
+import {
+  createChatNavigator,
+  type ChatNavigator,
+  type NavigatorFile,
+  type NavigatorImageSet,
+  type NavigatorSession
+} from './chat-navigator.js';
 import { toolResultText } from './tool-result.js';
 import { chatErrorPresentation, duplicateChatErrors } from './chat-error.js';
 import { categoryFor, categoryClass } from './transcript-categories.js';
@@ -146,15 +152,93 @@ let workspaceTerminal: ReturnType<typeof createWorkspaceTerminal> | null = null;
 
 let sidebarOrder: SidebarOrder | undefined;
 let chatNavigator: ChatNavigator | null = null;
+function navigatorSessions(): NavigatorSession[] {
+  const sessionId = selectedId();
+  if (!sessionId || detailFor !== sessionId) return sessions;
+  let authored: Extract<SessionEvent, { kind: 'user_message' }> | undefined;
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index]!;
+    if (event.kind !== 'user_message') continue;
+    authored = event;
+    break;
+  }
+  if (!authored) return sessions;
+  const preview = (authored.authoredText ?? userPromptText(authored.message.text.trimStart()) ?? authored.message.text)
+    .slice(0, 500);
+  return sessions.map(session => session.id === sessionId ? { ...session, preview } : session);
+}
+
+function loadedNavigatorFiles(): NavigatorFile[] {
+  const project = selectedLocalProject(sessionHost);
+  if (!project || !filePanel) return [];
+  return [...filePanel.element.querySelectorAll<HTMLElement>('.file-tree-row[data-kind="file"][data-path]')]
+    .slice(0, 100)
+    .map(row => ({
+      projectId: project.id,
+      path: row.dataset.path!,
+      name: row.querySelector<HTMLElement>('.file-tree-name')?.textContent ?? row.dataset.path!,
+      ...(row.classList.contains('is-selected')
+        ? { preview: filePanel!.element.querySelector<HTMLElement>('.file-preview')?.textContent?.slice(0, 500) }
+        : {})
+    }));
+}
+
+function loadedNavigatorImageSets(): NavigatorImageSet[] {
+  const sessionId = selectedId();
+  if (!sessionId || detailFor !== sessionId) return [];
+  const projectId = sessions.find(session => session.id === sessionId)?.projectId ?? null;
+  const sets = new Map<string, NavigatorImageSet>();
+  for (const event of events) {
+    if (event.kind !== 'native_image') continue;
+    const family = event.turnId || event.messageId;
+    const key = `${sessionId}:${event.agent ?? ''}:${family}`;
+    if (!sets.has(key)) sets.set(key, {
+      key,
+      sessionId,
+      projectId,
+      title: t('ChatGPT generated image'),
+      anchorMessageId: event.messageId
+    });
+    if (sets.size >= 100) break;
+  }
+  return [...sets.values()];
+}
+function openNavigatorFile(file: NavigatorFile): void {
+  const instance = filePanel, sessionId = selectedId(), generation = selectionGeneration();
+  if (!instance || selectedLocalProject(sessionHost)?.id !== file.projectId) return;
+  const row = [...instance.element.querySelectorAll<HTMLButtonElement>('.file-tree-row[data-kind="file"][data-path]')]
+    .find(candidate => candidate.dataset.path === file.path);
+  if (!row) return;
+  workPanel?.show('files');
+  if (filePanel !== instance || selectedId() !== sessionId || selectionGeneration() !== generation) return;
+  row.focus({ preventScroll: true });
+  row.click();
+}
+
+function openNavigatorImageSet(set: NavigatorImageSet): void {
+  const generation = selectionGeneration();
+  if (selectedId() !== set.sessionId || detailFor !== set.sessionId || !set.anchorMessageId) return;
+  const row = [...document.querySelectorAll<HTMLElement>('#timeline [data-image-message]')]
+    .find(candidate => candidate.dataset.imageMessage === set.anchorMessageId);
+  if (!row || selectedId() !== set.sessionId || selectionGeneration() !== generation) return;
+  const target = row.closest<HTMLElement>('.generated-image-gallery') ?? row;
+  target.tabIndex = -1;
+  target.focus({ preventScroll: true });
+  target.scrollIntoView({ block: 'nearest' });
+}
+
 function paintNavigator(host: SessionListHost): void {
   if (!chatNavigator) {
     paintSessionList(host);
     return;
   }
+  filePanel?.update(selectedLocalProject(sessionHost));
   chatNavigator.update({
-    sessions,
+    sessions: navigatorSessions(),
     projects,
     selectedSessionId: selectedId(),
+    files: loadedNavigatorFiles(),
+    imageSets: loadedNavigatorImageSets(),
     order: sidebarOrder
   });
 }
@@ -2311,6 +2395,7 @@ function paintDetail(followBottom = historyBefore === null): void {
   $('chatFoot').textContent = facts.join(' · ');
   $('chatFoot').hidden = !deps.state()?.config.ui.developerMode;
   $('chatFoot').classList.toggle('is-warn', pressureOf(pressure, selectedId() ?? '')?.level === 'huge');
+  if (chatNavigator) paintNavigator(sessionHost);
 }
 
 // -------------------------------------------------------------------- handoff
@@ -3464,7 +3549,9 @@ export function initChat(next: Deps): void {
     selectSession: id => {
       pendingNewInput = null;
       selectSession(id);
-    }
+    },
+    openFile: openNavigatorFile,
+    openImageSet: openNavigatorImageSet
   });
   reportVisibleSelection(true); // Initial New Chat/null is explicit; activity never supplies selection.
   document.addEventListener('visibilitychange', () => reportVisibleSelection(!document.hidden));
@@ -3668,6 +3755,9 @@ export function initChat(next: Deps): void {
       return attachment => appendImages(owner, [attachment]);
     }
   });
+  const NavigatorMutationObserver = filePanel.element.ownerDocument.defaultView?.MutationObserver;
+  if (NavigatorMutationObserver) new NavigatorMutationObserver(() => paintNavigator(sessionHost))
+    .observe(filePanel.element, { childList: true, subtree: true, characterData: true });
   filePanel.update(selectedLocalProject(sessionHost));
   workspaceTerminal = createWorkspaceTerminal({ host: workHost });
   workspaceTerminal.update(selectedLocalProject(sessionHost));

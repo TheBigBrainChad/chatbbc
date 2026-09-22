@@ -637,7 +637,7 @@ it('keeps global connection controls in a compact sidebar popover', async () => 
   expect(popover.hidden).toBe(true);
 });
 
-it('uses the global rail for Settings and returns to the mounted chat workspace', async () => {
+it('uses the global rail for Settings, reaches every Settings-owned panel, and returns to chat', async () => {
   const mounted = await mountChat({ hasApiKey: true });
   const doc = mounted.window.document;
   const settings = doc.querySelector<HTMLButtonElement>('[data-destination="settings"]')!;
@@ -646,6 +646,15 @@ it('uses the global rail for Settings and returns to the mounted chat workspace'
   settings.click();
   expect(doc.getElementById('appShell')!.dataset.screen).toBe('settings');
   expect(settings.getAttribute('aria-current')).toBe('page');
+  for (const panel of ['workspace', 'automation', 'appearance', 'activity']) {
+    const control = doc.querySelector<HTMLButtonElement>(`[data-settings-panel="${panel}"]`)!;
+    expect(control).not.toBeNull();
+    control.click();
+    const targetPanel = panel === 'automation' ? 'chat' : panel;
+    expect(doc.querySelector(`[data-panel="${targetPanel}"]`)!.classList.contains('is-active')).toBe(true);
+    expect(control.getAttribute('aria-current')).toBe('page');
+    expect(settings.getAttribute('aria-current')).toBe('page');
+  }
   chats.click();
   expect(doc.getElementById('appShell')!.dataset.screen).toBe('chat');
   expect(chats.getAttribute('aria-current')).toBe('page');
