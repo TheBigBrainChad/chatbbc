@@ -337,3 +337,68 @@ it('shows the selected position while that preview read is still pending', async
   retireImageSetViewer();
 });
 
+it('requests one exact original or bounded set and paints state receipts without reading provider URLs', async () => {
+  const { applyImageSetMembers } = await import('../src/renderer/image-set.js');
+  const download = vi.fn(async (_session: string, _message: string, assetIds: string[]) => ({ ok: true, data: {
+    id: '11111111-2222-4333-8444-555555555555',
+    sessionId,
+    logicalMessageId: 'response-a',
+    createdAt: 1,
+    items: assetIds.map((assetId, index) => ({
+      id: index === 0 ? '22222222-3333-4444-8555-666666666666' : '33333333-4444-4555-8666-777777777777',
+      assetId,
+      filename: `ChatBBC image 0${index + 1}.png`,
+      state: 'requested',
+      detail: null
+    }))
+  } }));
+  let changed: ((batch: any) => void) | null = null;
+  (window as any).api = {
+    getSessionImage: image,
+    downloadGeneratedAssets: download,
+    onGeneratedAssetDownloadChanged: (listener: (batch: any) => void) => {
+      changed = listener;
+      return () => undefined;
+    }
+  };
+  const gallery = document.createElement('div');
+  gallery.className = 'generated-image-gallery';
+  document.body.append(gallery);
+  applyImageSetMembers(gallery, {
+    responseId: 'response-a',
+    origin: 1,
+    completeness: 'complete',
+    images: [
+      { providerAssetId: 'file_AuroraOriginal0001', origin: 1, previewStatus: 'pending', hasPreview: false },
+      { providerAssetId: 'file_AuroraOriginal0002', origin: 2, previewStatus: 'pending', hasPreview: false }
+    ]
+  }, { sessionId, current: () => current });
+  const one = gallery.querySelector<HTMLButtonElement>('.image-set-download')!;
+  one.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(download).toHaveBeenCalledWith(sessionId, 'response-a', ['file_AuroraOriginal0001']);
+  expect(one.textContent).toBe('Download requested');
+  const all = gallery.querySelector<HTMLButtonElement>('.image-set-download-all')!;
+  all.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(download).toHaveBeenLastCalledWith(sessionId, 'response-a',
+    ['file_AuroraOriginal0001', 'file_AuroraOriginal0002']);
+  changed!({
+    id: '11111111-2222-4333-8444-555555555555',
+    sessionId,
+    logicalMessageId: 'response-a',
+    createdAt: 1,
+    items: [
+      { id: '22222222-3333-4444-8555-666666666666', assetId: 'file_AuroraOriginal0001',
+        filename: 'ChatBBC image 01.png', state: 'complete', detail: null },
+      { id: '33333333-4444-4555-8666-777777777777', assetId: 'file_AuroraOriginal0002',
+        filename: 'ChatBBC image 02.png', state: 'unconfirmed', detail: null }
+    ]
+  });
+  expect(one.textContent).toBe('Saved to browser Downloads');
+  expect(all.textContent).toBe('Download outcome unconfirmed');
+  expect(JSON.stringify(download.mock.calls)).not.toMatch(/https?:|signedUrl/i);
+});
+

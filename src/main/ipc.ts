@@ -36,6 +36,11 @@ import { requestBrowserPreferences } from './browser-preferences.js';
 import { sendDesktopInput, cancelDesktopInput, retryQueuedInputBrowser } from './session/start-input.js';
 import { wakeBrowserUrl } from './browser-startup.js';
 import { registerPluginIpc } from './plugins-ipc.js';
+import {
+  requestGeneratedAssetDownloads,
+  subscribeGeneratedAssetDownloads
+} from './generated-asset-downloads.js';
+import { MAX_GENERATED_ASSET_DOWNLOADS } from '../shared/generated-assets.js';
 /**
  * IPC surface.
  *
@@ -446,6 +451,41 @@ export function registerIpc(
   const uiSelection = registerUiSelection(getWindow);
   // This channel must keep Electron's actual event: the ordinary handle() discards sender proof.
   ipcMain.handle('sessions:uiSelection', (event, payload: unknown) => uiSelection.report(event, payload));
+  const stopGeneratedAssetPush = subscribeGeneratedAssetDownloads(batch => {
+    const window = getWindow();
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed() ||
+        currentUiSelectionFor(window.webContents)?.sessionId !== batch.sessionId) return;
+    window.webContents.send('sessions:generatedAssetDownloadChanged', batch);
+  });
+  const generatedAssetDownloadRequest = z.object({
+    sessionId: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i),
+    logicalMessageId: z.string().min(1).max(512).refine(id => !/[\u0000-\u001f\u007f]/.test(id)),
+    assetIds: z.array(z.string().regex(/^file_[A-Za-z0-9_-]{8,100}$/))
+      .min(1).max(MAX_GENERATED_ASSET_DOWNLOADS)
+  }).strict().refine(value => new Set(value.assetIds).size === value.assetIds.length);
+  ipcMain.handle('sessions:downloadGeneratedAssets', async (event, payload: unknown) => {
+    const parsed = generatedAssetDownloadRequest.safeParse(payload);
+    if (!parsed.success) return { ok: false as const, error: 'Invalid input' };
+    const selected = (): number | null => {
+      const window = getWindow();
+      if (!window || window.isDestroyed() || window.webContents.isDestroyed() ||
+          !event?.sender || event.sender !== window.webContents || !event.senderFrame ||
+          event.senderFrame !== window.webContents.mainFrame) return null;
+      const witness = currentUiSelectionFor(event.sender);
+      return witness?.sessionId === parsed.data.sessionId ? witness.generation : null;
+    };
+    const generation = selected();
+    const stillSelected = (): boolean => generation !== null && selected() === generation;
+    if (!stillSelected()) return { ok: false as const, error: 'That chat is no longer selected' };
+    try {
+      const batch = await requestGeneratedAssetDownloads(parsed.data, stillSelected);
+      return stillSelected()
+        ? { ok: true as const, data: batch }
+        : { ok: false as const, error: 'That chat is no longer selected' };
+    } catch (error) {
+      return { ok: false as const, error: error instanceof Error ? error.message : 'Download request failed' };
+    }
+  });
   const richStatusRequest = z.object({
     sessionId: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i),
     actionId: z.string().uuid()
@@ -1473,5 +1513,8 @@ export function registerIpc(
   onLog((entry) => push('log:entry', entry));
   onSessionChange(() => push('session:changed'));
   onSwarmChange(() => push('swarm:changed', swarmState()));
-  return stopOmarchyStatePush;
+  return () => {
+    stopGeneratedAssetPush();
+    stopOmarchyStatePush();
+  };
 }

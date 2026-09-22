@@ -981,6 +981,36 @@ var CLF_DOM = (() => {
     }, null);
   }
 
+  /**
+   * Returns the exact selected signed source only for an already identified native generated IMG.
+   * Identity comes from the Fiber-stamped physical node supplied by the isolated recorder; URL
+   * similarity never finds a node. The value stays inside the extension and is consumed only by
+   * chrome.downloads.
+   */
+  function generatedAssetSource(image, assetId, stillCurrent) {
+    return safe(() => {
+      if (!image?.isConnected || image.ownerDocument !== document || image.tagName !== 'IMG' ||
+          !image.matches('[class~="group/imagegen-image"] img') ||
+          typeof assetId !== 'string' || !/^file_[A-Za-z0-9_-]{8,100}$/.test(assetId) ||
+          typeof stillCurrent !== 'function' || stillCurrent() !== true) return null;
+      const stamp = image.getAttribute('data-clf-fiber-image');
+      if (typeof stamp !== 'string' || stamp.length > 360 ||
+          !stamp.endsWith(`:${encodeURIComponent(assetId)}`)) return null;
+      const source = image.currentSrc || image.src;
+      if (typeof source !== 'string' || source.length > 8192 || image.currentSrc !== image.src) return null;
+      const url = new URL(source, location.href);
+      if (url.origin !== location.origin || url.protocol !== 'https:' ||
+          url.pathname !== '/backend-api/estuary/content' || url.hash ||
+          url.searchParams.getAll('id').length !== 1 ||
+          url.searchParams.get('id') !== assetId) return null;
+      if (stillCurrent() !== true || !image.isConnected ||
+          !image.matches('[class~="group/imagegen-image"] img') ||
+          image.getAttribute('data-clf-fiber-image') !== stamp ||
+          (image.currentSrc || image.src) !== source) return null;
+      return source;
+    }, null);
+  }
+
   // Isolated-world, document-lifetime source identity only. The opaque handle and
   // its private URL snapshot are never an event, source URL lookup or store grant.
   // Eviction/release/replacement terminally invalidates the old incarnation.
@@ -3171,6 +3201,7 @@ var CLF_DOM = (() => {
     richCaptureReason,
     resolveRichImage,
     resolveRichNativeImage,
+    generatedAssetSource,
     beginRichImageSource,
     beginPendingRichImageSource,
     richImageSourceWitness,

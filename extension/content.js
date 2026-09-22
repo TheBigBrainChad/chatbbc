@@ -4437,6 +4437,27 @@
     return found[0] || null;
   }
 
+  function generatedAssetDownloadSource(message) {
+    const logicalMessageId = typeof message.logicalMessageId === 'string' ? message.logicalMessageId : '';
+    const assetId = typeof message.assetId === 'string' ? message.assetId : '';
+    const expectedConversation = typeof message.conversationId === 'string' ? message.conversationId : '';
+    if (!alive || expectedConversation !== conversationId ||
+        logicalMessageId.length < 1 || logicalMessageId.length > 512 ||
+        /[\u0000-\u001f\u007f]/.test(logicalMessageId) ||
+        !/^file_[A-Za-z0-9_-]{8,100}$/.test(assetId)) return null;
+    const heldEpoch = epoch;
+    const heldScan = fiberScanToken;
+    const current = () => alive && epoch === heldEpoch && fiberScanToken === heldScan &&
+      conversationId === expectedConversation && CLF_DOM.conversationId() === expectedConversation;
+    if (!current()) return null;
+    const node = nativeImageNode({ messageId: logicalMessageId, assetId });
+    if (!node || !current()) return null;
+    const url = CLF_DOM.generatedAssetSource(node, assetId,
+      () => current() && nativeImageNode({ messageId: logicalMessageId, assetId }) === node);
+    if (!url || !current()) return null;
+    return { ok: true, logicalMessageId, assetId, url };
+  }
+
   function nativeImageCaptureOwnerCurrent(key, image, observation, heldEpoch, heldConversation, capture) {
     if (epoch !== heldEpoch || conversationId !== heldConversation) return false;
     const reported = nativeImagesReported.get(nativeImageKey(image));
@@ -12590,6 +12611,10 @@
         void refreshRecordingGeneration().then(grant => sendResponse({ ok: Boolean(grant) }))
           .catch(() => sendResponse({ ok: false }));
         return true;
+      }
+      if (message.type === 'clf-generated-asset-source') {
+        sendResponse(generatedAssetDownloadSource(message) ?? { ok: false, error: 'asset_source_unavailable' });
+        return false;
       }
       // background.js uses this only to distinguish a live isolated-world recorder from the
       // dead context Chrome leaves behind when an unpacked extension is reloaded while the

@@ -9,7 +9,8 @@
     "scripting",
     "alarms",
     "debugger",
-    "tabs"
+    "tabs",
+    "downloads"
   ],
   "host_permissions": [
     "http://*/*",

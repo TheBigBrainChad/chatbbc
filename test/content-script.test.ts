@@ -9507,6 +9507,67 @@ describe('a stop button that goes missing while the turn is still running', () =
     expect(emitted(live.sent, 'native_image')).toHaveLength(6);
   });
 
+  it('hands one exact signed generated-image source only to the extension download request', async () => {
+    live = await harness();
+    const section = assistantTurn(live.document, 'turn-generated-download', []);
+    section.setAttribute('data-clf-fiber-turn', '0');
+    const messageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const assetId = 'file_000000005f2c823085a542762d1de785';
+    const group = live.document.createElement('div');
+    group.className = 'group/imagegen-image';
+    const image = live.document.createElement('img');
+    image.src = `https://chatgpt.com/backend-api/estuary/content?id=${assetId}&sig=download-only`;
+    Object.defineProperty(image, 'currentSrc', { configurable: true, get: () => image.src });
+    image.setAttribute('data-clf-fiber-image',
+      `0:${encodeURIComponent(messageId)}:${encodeURIComponent(assetId)}`);
+    group.append(image);
+    section.append(group);
+    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    await replyFiber([], [{
+      turnId: 'turn-generated-download',
+      conversationId,
+      messages: [],
+      activities: [],
+      images: [{
+        messageId,
+        assetId,
+        providerRole: 'tool',
+        providerChannel: 'final',
+        providerStatus: 'finished_successfully',
+        width: 1254,
+        height: 1254,
+        order: 0,
+        partOrder: 0
+      }]
+    }]);
+    await settle();
+    expect(await live.runtimeMessage({
+      type: 'clf-generated-asset-source',
+      conversationId,
+      logicalMessageId: messageId,
+      assetId
+    })).toEqual({
+      ok: true,
+      logicalMessageId: messageId,
+      assetId,
+      url: `https://chatgpt.com/backend-api/estuary/content?id=${assetId}&sig=download-only`
+    });
+    expect(await live.runtimeMessage({
+      type: 'clf-generated-asset-source',
+      conversationId,
+      logicalMessageId: messageId,
+      assetId: 'file_00000000dc58821198efef946a9ade33'
+    })).toEqual({ ok: false, error: 'asset_source_unavailable' });
+    live.dom.reconfigure({ url: 'https://chatgpt.com/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff' });
+    live.hook.observe();
+    expect(await live.runtimeMessage({
+      type: 'clf-generated-asset-source',
+      conversationId,
+      logicalMessageId: messageId,
+      assetId
+    })).toEqual({ ok: false, error: 'asset_source_unavailable' });
+  });
+
   const generatedFixture = (assets: string[]) => {
     const messageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
     const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';

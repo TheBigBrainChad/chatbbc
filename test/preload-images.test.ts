@@ -1,11 +1,15 @@
 import { expect, it, vi } from 'vitest';
 
-const { invoke, expose, getPath } = vi.hoisted(() => ({
-  invoke: vi.fn(async (_channel: string, _payload?: unknown): Promise<unknown> => ({ ok: true, data: [] })), expose: vi.fn(), getPath: vi.fn((file: any) => file.path ?? '')
+const { invoke, expose, getPath, on, removeListener } = vi.hoisted(() => ({
+  invoke: vi.fn(async (_channel: string, _payload?: unknown): Promise<unknown> => ({ ok: true, data: [] })),
+  expose: vi.fn(),
+  getPath: vi.fn((file: any) => file.path ?? ''),
+  on: vi.fn(),
+  removeListener: vi.fn()
 }));
 vi.mock('electron', () => ({
   contextBridge: { exposeInMainWorld: expose },
-  ipcRenderer: { invoke },
+  ipcRenderer: { invoke, on, removeListener },
   webUtils: { getPathForFile: getPath }
 }));
 
@@ -91,6 +95,40 @@ it('exposes a fixed read-only PAGE eligibility request without browser, URL, or 
   expect(api.invoke).toBeUndefined();
   expect(api.retryRichImage).toBeUndefined();
   expect(api.richAction).toBeUndefined();
+});
+
+it('exposes one fixed generated-original request and a state-only subscription without URL authority', async () => {
+  vi.resetModules();
+  invoke.mockReset().mockResolvedValue({ ok: true, data: {
+    id: '11111111-2222-4333-8444-555555555555',
+    sessionId: '2026-09-19-aaaaaaaa',
+    logicalMessageId: 'assistant:image-set:aurora',
+    createdAt: 1,
+    items: [{ id: '22222222-3333-4444-8555-666666666666', assetId: 'file_AuroraOriginal0001',
+      filename: 'ChatBBC image 01.png', state: 'requested', detail: null }]
+  } });
+  expose.mockClear(); on.mockClear(); removeListener.mockClear();
+  await import('../src/preload/index.js');
+  const api = expose.mock.calls[0]![1];
+  const result = await api.downloadGeneratedAssets('2026-09-19-aaaaaaaa',
+    'assistant:image-set:aurora', ['file_AuroraOriginal0001']);
+  expect(result.ok).toBe(true);
+  expect(invoke).toHaveBeenCalledExactlyOnceWith('sessions:downloadGeneratedAssets', {
+    sessionId: '2026-09-19-aaaaaaaa',
+    logicalMessageId: 'assistant:image-set:aurora',
+    assetIds: ['file_AuroraOriginal0001']
+  });
+  const listener = vi.fn();
+  const stop = api.onGeneratedAssetDownloadChanged(listener);
+  expect(on).toHaveBeenCalledOnce();
+  expect(on.mock.calls[0]?.[0]).toBe('sessions:generatedAssetDownloadChanged');
+  const wrapped = on.mock.calls[0]?.[1];
+  wrapped({}, result.data);
+  expect(listener).toHaveBeenCalledWith(result.data);
+  stop();
+  expect(removeListener).toHaveBeenCalledWith('sessions:generatedAssetDownloadChanged', wrapped);
+  expect(api.invoke).toBeUndefined();
+  expect(JSON.stringify(invoke.mock.calls)).not.toMatch(/https?:|signedUrl/i);
 });
 
 it('carries the main-issued glass navigation generation through the fixed readiness channel', async () => {

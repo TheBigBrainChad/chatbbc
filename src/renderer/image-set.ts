@@ -2,7 +2,15 @@ import { el, reconcileChildren, run } from './dom.js';
 import { preserveTimelineViewport } from './timeline-scroll.js';
 import { t, ui } from './i18n.js';
 import { imageStorageButton } from './image-storage.js';
-import { localDataUrl, localImageDataUrl } from './rich-image.js';
+import {
+  localDataUrl,
+  localImageDataUrl,
+  paintGeneratedDownloadState
+} from './rich-image.js';
+import {
+  type GeneratedAssetDownloadBatch,
+  type GeneratedAssetDownloadState
+} from '../shared/generated-assets.js';
 import { IMAGE_SET_METADATA_LIMIT, imageSetsForTimeline, type ImageSetImage, type ImageSetView } from '../shared/chronology.js';
 
 export { imageSetsForTimeline, type ImageSetImage, type ImageSetView };
@@ -27,6 +35,55 @@ type SetViewer = {
   panY: number;
 };
 let active: SetViewer | null = null;
+let downloadSubscriptionInstalled = false;
+
+function downloadButtons(sessionId: string, messageId: string, assetId?: string): HTMLButtonElement[] {
+  return [...document.querySelectorAll<HTMLButtonElement>('.image-set-download, .image-set-download-all')]
+    .filter(node => node.dataset.downloadSession === sessionId &&
+      node.dataset.downloadMessage === messageId &&
+      (assetId === undefined || node.dataset.downloadAssets?.split('\u0001').includes(assetId)));
+}
+
+export function applyGeneratedAssetDownloadBatch(batch: GeneratedAssetDownloadBatch): void {
+  const byAsset = new Map(batch.items.map(item => [item.assetId, item.state]));
+  for (const button of downloadButtons(batch.sessionId, batch.logicalMessageId)) {
+    const assets = button.dataset.downloadAssets?.split('\u0001').filter(Boolean) ?? [];
+    const states = assets.map(asset => byAsset.get(asset)).filter(
+      (state): state is GeneratedAssetDownloadState => state !== undefined);
+    if (states.length === assets.length && states.length > 0) paintGeneratedDownloadState(button, states);
+  }
+}
+
+function ensureDownloadSubscription(): void {
+  if (downloadSubscriptionInstalled || typeof window.api?.onGeneratedAssetDownloadChanged !== 'function') return;
+  downloadSubscriptionInstalled = true;
+  window.api.onGeneratedAssetDownloadChanged(applyGeneratedAssetDownloadBatch);
+}
+
+function bindDownload(
+  node: HTMLButtonElement,
+  owner: { sessionId: string; current: () => boolean },
+  messageId: string,
+  assetIds: string[]
+): void {
+  node.type = 'button';
+  node.removeAttribute('aria-disabled');
+  node.dataset.downloadSession = owner.sessionId;
+  node.dataset.downloadMessage = messageId;
+  node.dataset.downloadAssets = assetIds.join('\u0001');
+  ensureDownloadSubscription();
+  node.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!owner.current() || typeof window.api?.downloadGeneratedAssets !== 'function') return;
+    void window.api.downloadGeneratedAssets(owner.sessionId, messageId, assetIds).then(reply => {
+      if (owner.current() && reply.ok) applyGeneratedAssetDownloadBatch(reply.data);
+      else if (owner.current()) paintGeneratedDownloadState(node, ['failed']);
+    }).catch(() => {
+      if (owner.current()) paintGeneratedDownloadState(node, ['failed']);
+    });
+  });
+}
 
 function closeViewer(viewer: SetViewer, restoreFocus: boolean): void {
   if (active !== viewer) return;
@@ -79,7 +136,11 @@ function button(className: string, label: () => string): HTMLButtonElement {
 }
 
 /** Count and set actions for a multi-image card. One image keeps the same row without this bar. */
-export function paintImageSetBar(gallery: HTMLElement, count: number): void {
+export function paintImageSetBar(
+  gallery: HTMLElement,
+  count: number,
+  owner?: { sessionId: string; current: () => boolean }
+): void {
   gallery.querySelector('.image-set-bar')?.remove();
   gallery.classList.toggle('is-single', count < 2);
   gallery.dataset.imageCount = String(count);
@@ -91,7 +152,11 @@ export function paintImageSetBar(gallery: HTMLElement, count: number): void {
   ui(countLabel, 'textContent', () => t('{0} images', [count]));
   const downloadAll = button('image-set-download-all', () => t('Download all originals'));
   const saveAll = button('image-set-save-all', () => t('Save all previews'));
-  keepImageActionInert(downloadAll);
+  const rows = [...gallery.querySelectorAll<HTMLElement>(':scope > .ev-native_image')];
+  const messageId = rows[0]?.dataset.imageMessage ?? '';
+  const assetIds = rows.map(row => row.dataset.imageAsset ?? '').filter(Boolean);
+  if (owner && messageId && assetIds.length === count) bindDownload(downloadAll, owner, messageId, assetIds);
+  else keepImageActionInert(downloadAll);
   keepImageActionInert(saveAll);
   bar.append(countLabel, downloadAll, saveAll);
   gallery.append(bar);
@@ -144,7 +209,7 @@ function placeholderImageRow(image: ImageSetImage, responseId: string, owner: { 
   });
   const download = button('image-set-download', () => t('Download original'));
   const save = button('image-set-save', () => t('Save preview'));
-  keepImageActionInert(download);
+  bindDownload(download, owner, responseId, [image.providerAssetId]);
   keepImageActionInert(save);
   said.append(title, frame, open, download, save);
   const body = document.createElement('div');
@@ -163,7 +228,16 @@ export function applyImageSetMembers(gallery: HTMLElement, set: ImageSetView, ow
   }
   const members = set.images.map(image => resident.get(image.providerAssetId) ?? placeholderImageRow(image, set.responseId, owner));
   reconcileChildren(gallery, members);
-  paintImageSetBar(gallery, members.length);
+  for (const row of members) {
+    const assetId = row.dataset.imageAsset;
+    const download = row.querySelector<HTMLButtonElement>('.image-set-download');
+    if (assetId && download && !download.dataset.downloadSession) {
+      const replacement = download.cloneNode(true) as HTMLButtonElement;
+      download.replaceWith(replacement);
+      bindDownload(replacement, owner, set.responseId, [assetId]);
+    }
+  }
+  paintImageSetBar(gallery, members.length, owner);
 }
 
 /** Load only the first image in each gallery. Thumbnails keep their reserved slot. */
@@ -325,10 +399,9 @@ export async function openImageSetViewer(owner: ImageSetViewerOwner): Promise<vo
   const zoomOut = button('image-set-zoom-out', () => t('Zoom out'));
   const details = button('image-set-metadata-toggle', () => t('Metadata'));
   const workbench = button('image-set-workbench', () => t('Open workbench'));
-  const download = button('image-set-download', () => t('Download original'));
+  let download = button('image-set-download', () => t('Download original'));
   const save = button('image-set-save', () => t('Save preview'));
   const close = button('image-set-close', () => t('Close'));
-  keepImageActionInert(download);
   keepImageActionInert(save);
   stage.append(picture);
   dialog.append(position, stage, thumbs, metadata, previous, next, zoomIn, zoomOut, details, workbench, download, save, close);
@@ -383,6 +456,11 @@ export async function openImageSetViewer(owner: ImageSetViewerOwner): Promise<vo
       if (localImageDataUrl(data)) picture.src = data;
       else picture.removeAttribute('src');
     } else picture.removeAttribute('src');
+    const selectedAsset = row.dataset.imageAsset ?? '';
+    const replacement = download.cloneNode(true) as HTMLButtonElement;
+    download.replaceWith(replacement);
+    download = replacement;
+    if (selectedAsset) bindDownload(download, owner, row.dataset.imageMessage ?? '', [selectedAsset]);
     applyTransform();
   };
   const move = (step: number): void => {

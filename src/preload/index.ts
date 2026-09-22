@@ -14,6 +14,7 @@ import type { ProjectDirectoryListing, ProjectFileMutationResult, ProjectFilePre
 import type { SkillSummary, SkillLibraryPage, SkillsDraftScope, SkillState } from '../shared/skills.js';
 import type { PluginSnapshot, PluginInstallRequest, PluginConfigPatch } from '../shared/plugins.js';
 import type { OmarchyThemeState } from '../main/omarchy-theme.js';
+import type { GeneratedAssetDownloadBatch } from '../shared/generated-assets.js';
 /**
  * The entire renderer-facing API.
  *
@@ -206,6 +207,16 @@ const api = {
   attachProjectFile: (projectId: string, path: string) => call<InputAttachment>('projectFiles:attach', { projectId, path }),
   getSessionImage: (id: string, assetId: string) => call<string | null>('sessions:image', { id, assetId }),
   getSessionImageSets: (id: string, responseIds?: string[]) => call<{ sets: import('../shared/chronology.js').ImageSetView[]; truncated: boolean }>('sessions:imageSets', responseIds ? { id, responseIds } : { id }),
+  downloadGeneratedAssets: (sessionId: string, logicalMessageId: string, assetIds: string[]) =>
+    call<GeneratedAssetDownloadBatch>('sessions:downloadGeneratedAssets',
+      { sessionId, logicalMessageId, assetIds }),
+  onGeneratedAssetDownloadChanged: (
+    listener: (batch: GeneratedAssetDownloadBatch) => void
+  ): (() => void) => {
+    const wrapped = (_event: unknown, batch: GeneratedAssetDownloadBatch): void => listener(batch);
+    ipcRenderer.on('sessions:generatedAssetDownloadChanged', wrapped);
+    return () => ipcRenderer.removeListener('sessions:generatedAssetDownloadChanged', wrapped);
+  },
   getImageStorage: () => call<ImageStorageInfo>('sessions:imageStorage'),
   clearImageStorage: (mode: ImageStorageClearMode) => call<ImageStorageClearResult>('sessions:clearImageStorage', { mode }),
     getSession: (id: string, options?: { from?: number; before?: number; after?: number; limit?: number }) =>

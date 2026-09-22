@@ -228,6 +228,9 @@ let workerRichIssuances = {};
 let retiredDocuments = {};
 /** Durable terminal lease; cleared only when a different browser document speaks. */
 let terminalDocuments = {};
+/** Browser download receipts only. Signed provider URLs are never persisted or sent to main. */
+let generatedAssetDownloads = {};
+const MAX_GENERATED_ASSET_DOWNLOADS = 100;
 
 /**
  * Command ids this browser has already delivered.
@@ -305,6 +308,7 @@ async function loadOnce() {
     'commandAckOutbox',
     'recoveryMonitoring',
     'discardProtectedTabs',
+    'generatedAssetDownloads',
     'delivery'
   ]);
   settled = Array.isArray(live.settled) ? live.settled : [];
@@ -350,6 +354,18 @@ async function loadOnce() {
   if (live.delivery && typeof live.delivery === 'object' && !Array.isArray(live.delivery)) {
     delivery = { ...delivery, ...live.delivery };
   }
+  generatedAssetDownloads = {};
+  if (live.generatedAssetDownloads && typeof live.generatedAssetDownloads === 'object' &&
+      !Array.isArray(live.generatedAssetDownloads)) {
+    for (const [id, row] of Object.entries(live.generatedAssetDownloads).slice(-MAX_GENERATED_ASSET_DOWNLOADS)) {
+      if (/^[a-f0-9-]{36}$/i.test(id) && row && typeof row === 'object' &&
+          /^[A-Za-z0-9_-]{32}$/.test(String(row.claimToken || '')) &&
+          Number.isInteger(row.browserDownloadId) && row.browserDownloadId >= 0 &&
+          ['started', 'complete', 'failed', 'unconfirmed'].includes(row.state)) {
+        generatedAssetDownloads[id] = { ...row };
+      }
+    }
+  }
   loaded = true;
 }
 
@@ -375,7 +391,8 @@ function persistLive() {
         commandAckOutbox: commandAckOutbox.slice(-200),
         recoveryMonitoring,
         discardProtectedTabs,
-        delivery
+        delivery,
+        generatedAssetDownloads
       }),
       // Only small command-control metadata crosses browser restarts. No transcript and no
       // revival text is duplicated into extension storage.
@@ -2765,6 +2782,168 @@ function maintain(woken = false) {
   return maintenanceFlight;
 }
 
+function validGeneratedAssetOffer(row) {
+  return Boolean(row && typeof row === 'object' && /^[a-f0-9-]{36}$/i.test(String(row.id || '')) &&
+    cleanConversationId(row.conversationId) &&
+    typeof row.logicalMessageId === 'string' && row.logicalMessageId.length > 0 &&
+    row.logicalMessageId.length <= 512 && !/[\u0000-\u001f\u007f]/.test(row.logicalMessageId) &&
+    /^file_[A-Za-z0-9_-]{8,100}$/.test(String(row.assetId || '')) &&
+    typeof row.filename === 'string' && row.filename.length > 0 && row.filename.length <= 180 &&
+    !/[\\/:*?\"<>|\u0000-\u001f\u007f]/.test(row.filename));
+}
+
+async function publishGeneratedAssetDownloadResult(row) {
+  const reply = await call('/generated-assets/result', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: row.id,
+      claimToken: row.claimToken,
+      state: row.state,
+      ...(row.detail ? { detail: row.detail } : {})
+    })
+  });
+  if (reply.ok && reply.data?.ok === true &&
+      ['complete', 'failed', 'unconfirmed'].includes(row.state) &&
+      generatedAssetDownloads[row.id] === row) {
+    delete generatedAssetDownloads[row.id];
+    await persistLive().catch(() => undefined);
+  }
+  return reply.ok && reply.data?.ok === true;
+}
+
+async function flushGeneratedAssetDownloadResults() {
+  for (const row of Object.values(generatedAssetDownloads)) {
+    if (!row || !['started', 'complete', 'failed', 'unconfirmed'].includes(row.state)) continue;
+    await publishGeneratedAssetDownloadResult(row).catch(() => false);
+  }
+}
+
+async function settleGeneratedAssetDownloadChange(change) {
+  if (!change || !Number.isInteger(change.id)) return false;
+  const row = Object.values(generatedAssetDownloads)
+    .find(candidate => candidate?.browserDownloadId === change.id);
+  if (!row || row.state !== 'started') return false;
+  if (change.state?.current === 'complete') {
+    row.state = 'complete';
+    row.detail = null;
+  } else if (change.state?.current === 'interrupted' || change.error?.current) {
+    row.state = 'failed';
+    row.detail = String(change.error?.current || 'Chrome interrupted the download.').slice(0, 200);
+  } else return false;
+  await persistLive();
+  await publishGeneratedAssetDownloadResult(row);
+  return true;
+}
+
+async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
+  if (!chrome.downloads?.download || !Array.isArray(rawOffers)) return;
+  const offers = rawOffers.filter(validGeneratedAssetOffer).slice(0, 20);
+  for (const offer of offers) {
+    if (generatedAssetDownloads[offer.id]) continue;
+    const candidates = observedTabs.filter(tab => Number.isInteger(tab?.id) &&
+      conversationForTab(tab) === offer.conversationId &&
+      tabConversations[String(tab.id)] === offer.conversationId &&
+      ownsDocument({ tab: tab.id, documentId: tabDocuments[String(tab.id)],
+        navigationEpoch: tabEpochs[String(tab.id)] }))
+      .sort((left, right) => Number(right.active === true) - Number(left.active === true) ||
+        Number(left.id) - Number(right.id));
+    const tab = candidates[0];
+    if (!tab) continue; // Downloads never open or reload ChatGPT.
+    const key = String(tab.id);
+    const owner = registeredDocuments[key];
+    const source = {
+      tab: tab.id,
+      documentId: tabDocuments[key],
+      navigationEpoch: tabEpochs[key]
+    };
+    if (!owner || owner.documentId !== source.documentId || !Number.isSafeInteger(owner.epoch) ||
+        !ownsDocument(source)) continue;
+    const claimed = await call('/generated-assets/claim', {
+      method: 'POST',
+      body: JSON.stringify({
+        id: offer.id,
+        conversationId: offer.conversationId,
+        tab: source.tab,
+        documentId: source.documentId,
+        documentGeneration: owner.epoch,
+        spaEpoch: source.navigationEpoch
+      })
+    });
+    const claim = claimed.ok ? claimed.data?.claim : null;
+    if (!claim || claim.id !== offer.id || claim.conversationId !== offer.conversationId ||
+        claim.logicalMessageId !== offer.logicalMessageId || claim.assetId !== offer.assetId ||
+        claim.filename !== offer.filename || !/^[A-Za-z0-9_-]{32}$/.test(String(claim.claimToken || '')) ||
+        !ownsDocument(source)) continue;
+    let result;
+    try {
+      result = await tabReply(tab.id, {
+        type: 'clf-generated-asset-source',
+        conversationId: offer.conversationId,
+        logicalMessageId: offer.logicalMessageId,
+        assetId: offer.assetId
+      }, { documentId: source.documentId });
+    } catch { result = null; }
+    let selected = null;
+    try {
+      const url = result?.ok === true && result.logicalMessageId === offer.logicalMessageId &&
+        result.assetId === offer.assetId && typeof result.url === 'string' && result.url.length <= 8192
+        ? new URL(result.url) : null;
+      const tabUrl = new URL(tab.url);
+      if (url?.protocol === 'https:' && url.origin === tabUrl.origin &&
+          url.pathname === '/backend-api/estuary/content' && !url.hash &&
+          url.searchParams.getAll('id').length === 1 &&
+          url.searchParams.get('id') === offer.assetId && ownsDocument(source)) selected = url.href;
+    } catch { selected = null; }
+    if (!selected) {
+      await call('/generated-assets/result', { method: 'POST', body: JSON.stringify({
+        id: offer.id, claimToken: claim.claimToken, state: 'failed',
+        detail: 'The exact generated image is unavailable in its current ChatGPT page.'
+      }) }).catch(() => undefined);
+      continue;
+    }
+    let browserDownloadId = null;
+    try {
+      browserDownloadId = await chrome.downloads.download({
+        url: selected,
+        filename: offer.filename,
+        conflictAction: 'uniquify',
+        saveAs: false
+      });
+    } catch { browserDownloadId = null; }
+    // The signed URL dies with this block. Only the browser receipt crosses suspension.
+    selected = null;
+    if (!Number.isInteger(browserDownloadId) || browserDownloadId < 0) {
+      await call('/generated-assets/result', { method: 'POST', body: JSON.stringify({
+        id: offer.id, claimToken: claim.claimToken, state: 'failed',
+        detail: 'Chrome refused the original image download.'
+      }) }).catch(() => undefined);
+      continue;
+    }
+    const custody = {
+      id: offer.id,
+      claimToken: claim.claimToken,
+      browserDownloadId,
+      conversationId: offer.conversationId,
+      logicalMessageId: offer.logicalMessageId,
+      assetId: offer.assetId,
+      filename: offer.filename,
+      state: 'started',
+      detail: null
+    };
+    generatedAssetDownloads[offer.id] = custody;
+    try { await persistLive(); }
+    catch {
+      delete generatedAssetDownloads[offer.id];
+      await call('/generated-assets/result', { method: 'POST', body: JSON.stringify({
+        id: offer.id, claimToken: claim.claimToken, state: 'unconfirmed',
+        detail: 'Chrome accepted the download, but receipt custody could not be saved.'
+      }) }).catch(() => undefined);
+      continue;
+    }
+    await publishGeneratedAssetDownloadResult(custody).catch(() => false);
+  }
+}
+
 async function maintainOnce() {
   // The app decides whether there is recovery work; a worker holding no tabs is not a worker
   // with nothing to do, it is the one that has to open the chat the app is owed.
@@ -2782,9 +2961,15 @@ async function maintainOnce() {
     .filter((tab) => tab && (tab.discarded === true || tab.frozen === true))
     .map(conversationForTab)
     .filter(Boolean))];
-  const reply = await call('/status', { method: 'POST', body: JSON.stringify({ openConversations, stalledConversations }) });
+  const reply = await call('/status', { method: 'POST', body: JSON.stringify({
+    openConversations,
+    stalledConversations,
+    generatedAssetDownloadIds: Object.keys(generatedAssetDownloads).slice(-MAX_GENERATED_ASSET_DOWNLOADS)
+  }) });
   if (intent !== connectionEpoch || !token || disconnected) return;
   if (!reply.ok || !reply.data) { await activeTabs?.revoke(); return; }
+  await flushGeneratedAssetDownloadResults();
+  await processGeneratedAssetDownloads(reply.data.generatedAssetDownloads, observedTabs);
   const liveChats = new Set(Array.isArray(reply.data.nonDiscardableConversations) ? reply.data.nonDiscardableConversations : []);
   const liveOpenings = new Set(Array.isArray(reply.data.inputOpeningIds) ? reply.data.inputOpeningIds : []);
   const renderingWanted = tab => {
@@ -4322,6 +4507,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   );
   return true;
 });
+
+if (chrome.downloads?.onChanged?.addListener) {
+  chrome.downloads.onChanged.addListener(change => {
+    void load().then(() => settleGeneratedAssetDownloadChange(change)).catch(() => undefined);
+  });
+}
 
 /**
  * Best current conversation identity for one ChatGPT tab.

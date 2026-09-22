@@ -106,6 +106,10 @@ const { completeProcessCall, createSession, deleteSession, findSessionByConversa
   '../src/main/session/store.js'
 );
 const sessionStoreModule = await import('../src/main/session/store.js');
+const {
+  requestGeneratedAssetDownloads,
+  resetGeneratedAssetDownloadsForTests
+} = await import('../src/main/generated-asset-downloads.js');
 const { closeConversation, liveConversations, noteChatOrigin, recordChatObservations, recordProgress, recordToolCall, REQUEST_ID_GRACE_MS, resetRecorderForTests } = await import('../src/main/session/recorder.js');
 const { resetBlockedChatsForTests, setChatBlocked } = await import('../src/main/session/blocked-chats.js');
 const {
@@ -400,6 +404,7 @@ beforeEach(async () => {
     opened.push(url);
   });
   resetRecorderForTests();
+  resetGeneratedAssetDownloadsForTests();
   writeDurableSoon('bridge-commands', null);
   await flushDurable();
   await setSecret('bridgeToken', '');
@@ -1941,6 +1946,81 @@ describe('rich observations require capture-time Chrome document authority', () 
         navigationEpoch: 777, rich: projection }] } });
     expect(replay.status).toBe(200);
     expect((await readEvents(sessionId)).find(row => row.kind === 'assistant_message')).toEqual(original);
+  });
+});
+
+describe('generated original download bridge custody', () => {
+  it('offers, claims and settles one canonical asset without exposing its signed URL to main', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const session = await createSession({ conversationId });
+    const logicalMessageId = randomUUID();
+    const assetId = 'file_000000005f2c823085a542762d1de785';
+    expect((await request('POST', '/events', { body: { conversationId, events: [{
+      kind: 'native_image',
+      time: Date.now(),
+      messageId: logicalMessageId,
+      providerAssetId: assetId,
+      providerRole: 'tool',
+      providerChannel: 'final',
+      providerStatus: 'finished_successfully',
+      width: 1024,
+      height: 1024,
+      previewStatus: 'unavailable'
+    }] } })).status).toBe(200);
+    const batch = await requestGeneratedAssetDownloads({
+      sessionId: session.id,
+      logicalMessageId,
+      assetIds: [assetId]
+    });
+    const source = {
+      conversationId,
+      tab: 42,
+      documentId: 'generated-download-document',
+      documentGeneration: 3,
+      spaEpoch: 2
+    };
+    const firstStatus = await request('POST', '/status', { body: {
+      openConversations: [conversationId],
+      stalledConversations: [],
+      generatedAssetDownloadIds: []
+    } });
+    expect(firstStatus.status).toBe(200);
+    expect(firstStatus.body.generatedAssetDownloads).toEqual([{
+      id: batch.items[0]!.id,
+      conversationId,
+      logicalMessageId,
+      assetId,
+      filename: expect.stringMatching(/\.png$/)
+    }]);
+    const claim = await request('POST', '/generated-assets/claim', {
+      body: { id: batch.items[0]!.id, ...source }
+    });
+    expect(claim).toMatchObject({
+      status: 200,
+      body: { claim: { id: batch.items[0]!.id, claimToken: expect.any(String) } }
+    });
+    expect(JSON.stringify(claim.body)).not.toMatch(/https?:/);
+    expect((await request('POST', '/generated-assets/result', { body: {
+      id: batch.items[0]!.id,
+      claimToken: claim.body.claim.claimToken,
+      state: 'started'
+    } })).body).toEqual({ ok: true });
+    expect((await request('POST', '/status', { body: {
+      openConversations: [conversationId],
+      stalledConversations: [],
+      generatedAssetDownloadIds: [batch.items[0]!.id]
+    } })).body.generatedAssetDownloads).toEqual([]);
+    expect((await request('POST', '/generated-assets/result', { body: {
+      id: batch.items[0]!.id,
+      claimToken: claim.body.claim.claimToken,
+      state: 'complete'
+    } })).body).toEqual({ ok: true });
+    expect((await request('POST', '/status', { body: {
+      openConversations: [conversationId],
+      stalledConversations: [],
+      generatedAssetDownloadIds: ['not-a-command-id']
+    } })).status).toBe(400);
   });
 });
 

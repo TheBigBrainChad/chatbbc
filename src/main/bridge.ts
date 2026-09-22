@@ -20,6 +20,12 @@ import { pendingBrowserPreferenceRequest, acknowledgeBrowserPreferences } from '
 import { sessionFinishHeld, releaseSessionFinish, getSessionFinishDraft, sessionFinishWaiting } from './session/finish.js';
 import { observeUsage } from './session/usage.js';
 import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, listInputs, fileSilenceInput, fileRecoveryInput, advanceRecoveryInput, hasQueuedAfterTurnInput, inputBeforeGoal, pendingQueuedPickups, deferSilenceInput, revokeSilenceInputs } from './session/input.js';
+import {
+  claimGeneratedAssetDownload,
+  pendingGeneratedAssetDownloadOffers,
+  reconcileGeneratedAssetDownloadCustody,
+  recordGeneratedAssetDownloadResult
+} from './generated-asset-downloads.js';
 /**
  * The local bridge between the Chrome extension and this app.
  *
@@ -2370,6 +2376,25 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return json(res, 200, { capture }, origin);
   }
 
+  if (route === '/generated-assets/claim' && req.method === 'POST') {
+    let body: unknown;
+    try { body = await readBody(req); }
+    catch { return json(res, 400, { error: 'invalid_generated_asset_claim' }, origin); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return json(res, 400, { error: 'invalid_generated_asset_claim' }, origin);
+    }
+    const claimed = await claimGeneratedAssetDownload(body as Parameters<typeof claimGeneratedAssetDownload>[0]);
+    return json(res, claimed ? 200 : 409, { claim: claimed }, origin);
+  }
+  if (route === '/generated-assets/result' && req.method === 'POST') {
+    let body: unknown;
+    try { body = await readBody(req); }
+    catch { return json(res, 400, { error: 'invalid_generated_asset_result' }, origin); }
+    const accepted = await recordGeneratedAssetDownloadResult(
+      body as Parameters<typeof recordGeneratedAssetDownloadResult>[0]);
+    return json(res, accepted ? 200 : 409, { ok: accepted }, origin);
+  }
+
   if (route === '/browser-control' && req.method === 'POST') {
     const body = await readBody(req) as Record<string, unknown>;
     if (!body || typeof body.browserId !== 'string' || !/^[a-f\d-]{36}$/i.test(body.browserId))
@@ -2442,7 +2467,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     let openConversations: string[] = [];
     let stalledConversations: string[] = [];
     if (req.method === 'POST') {
-      const body = await readBody(req) as { openConversations?: unknown; stalledConversations?: unknown };
+      const body = await readBody(req) as {
+        openConversations?: unknown;
+        stalledConversations?: unknown;
+        generatedAssetDownloadIds?: unknown;
+      };
       if (!Array.isArray(body?.openConversations) || body.openConversations.length > 10_000 || body.openConversations.some(id => !conversationId(id))) {
         return json(res, 400, { error: 'invalid_open_conversations' }, origin);
       }
@@ -2452,6 +2481,14 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         return json(res, 400, { error: 'invalid_stalled_conversations' }, origin);
       }
       stalledConversations = (body.stalledConversations ?? []) as string[];
+      if (body.generatedAssetDownloadIds !== undefined &&
+          (!Array.isArray(body.generatedAssetDownloadIds) || body.generatedAssetDownloadIds.length > 100 ||
+            body.generatedAssetDownloadIds.some(id => typeof id !== 'string' || !/^[a-f0-9-]{36}$/i.test(id)))) {
+        return json(res, 400, { error: 'invalid_generated_asset_download_ids' }, origin);
+      }
+      if (Array.isArray(body.generatedAssetDownloadIds)) {
+        reconcileGeneratedAssetDownloadCustody(body.generatedAssetDownloadIds as string[]);
+      }
     }
     const openSet = new Set(openConversations);
     const tabPolicy = await browserTabPolicy(openSet);
@@ -2487,6 +2524,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         stopTurns: await pendingStopCommands(),
         modelCatalogRequest: pendingChatModelRequest(),
         pluginRefreshRequests: getConfig().ui.autoRefreshPlugins === true ? pluginRefreshPublications().map(({ surface, schemaId, connectorName }) => ({ surface, schemaId, connectorName })) : [],
+        generatedAssetDownloads: pendingGeneratedAssetDownloadOffers(),
         browserPreferenceRequest: pendingBrowserPreferenceRequest(),
         inputOpeningIds: inputRows.filter(row => !['sent', 'failed', 'cancelled'].includes(row.state)).map(row => row.id),
         inputs: [...(await pendingBrowserInputs()).filter(input => !input.conversationId || runningToolCalls(input.conversationId) === 0),
