@@ -92,16 +92,20 @@ describe('the global rail', () => {
     dom.window.close();
   });
 
-  it('migrates the sidebar width into one navigator preference and leaves the old key', async () => {
+  it('migrates the sidebar width into one navigator preference and deletes the old key', async () => {
     const dom = new JSDOM(await html(), { url: 'https://cos.local/' });
     vi.stubGlobal('window', dom.window);
     vi.stubGlobal('document', dom.window.document);
     vi.stubGlobal('localStorage', dom.window.localStorage);
     dom.window.localStorage.setItem('chatbbc.sidebar-width', '360');
+    dom.window.localStorage.setItem('chatbbc.sidebar-width.collapsed', 'true');
     const { initSidebarResize } = await import('../src/renderer/sidebar-resize.js');
     initSidebarResize();
     expect(dom.window.localStorage.getItem('chatbbc.navigator-width')).toBe('360');
-    expect(dom.window.localStorage.getItem('chatbbc.sidebar-width')).toBe('360');
+    expect(dom.window.localStorage.getItem('chatbbc.navigator-collapsed')).toBe('true');
+    // The migration is complete: no runtime branch or duplicate preference survives it.
+    expect(dom.window.localStorage.getItem('chatbbc.sidebar-width')).toBeNull();
+    expect(dom.window.localStorage.getItem('chatbbc.sidebar-width.collapsed')).toBeNull();
     dom.window.close();
     vi.unstubAllGlobals();
   });

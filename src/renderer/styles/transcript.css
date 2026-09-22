@@ -390,7 +390,7 @@
 .rich-focus-stage {
   position: relative; z-index: 4; display: grid; gap: 8px; max-height: min(70vh, 40rem); overflow: auto;
   margin: 12px; padding: 12px; border: 1px solid var(--line); background: var(--page);
-  transition: opacity 160ms ease;
+  transition: opacity var(--motion-state, 140ms) ease;
 }
 .rich-focus-stage pre, .rich-focus-panel, .rich-focus-source, .rich-focus-preview { overflow: visible; max-height: none; }
 .rich-focus-source { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }

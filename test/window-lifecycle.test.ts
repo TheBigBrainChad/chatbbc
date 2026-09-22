@@ -25,6 +25,9 @@ describe('native window activation', () => {
       // The native chrome is resolved from the live desktop theme before this call
       // (spec §5), so the slice receives that resolved value rather than the raw config.
       titleBarOverlayForTheme: () => ({}), windowBackgroundForTheme: () => '#181818',
+      windowGlassOptions: () => ({}),
+      glassSupport: { mode: 'atmospheric', transparent: false },
+      createGlassBackingHandshake: () => ({ loading: () => undefined, didFinishLoad: () => undefined }),
       chrome: { theme: 'dark', appearance: {} },
       UI_BASE_ZOOM: 1, path: { join: () => 'preload.js' }, __dirname: '/app', APP_TITLE
     });
@@ -54,7 +57,10 @@ describe('native window activation', () => {
     expect(operations).toEqual([]);
 
     let ready!: () => void;
-    const startup = source.slice(source.indexOf("  window.once('ready-to-show'"), source.indexOf('  // A renderer that fails', source.indexOf("  window.once('ready-to-show'")));
+    const startup = source.slice(
+      source.indexOf("  window.once('ready-to-show'"),
+      source.indexOf('  window.webContents.on(', source.indexOf("  window.once('ready-to-show'"))
+    );
     const startupOperations: string[] = [];
     const startupState = { fullscreen: false };
     const showWindow = vi.fn(() => startupOperations.push('showWindow'));

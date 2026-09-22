@@ -1005,42 +1005,50 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
     });
   }
 
-  reg.register('generated_assets', toolDeclaration('generated_assets', () => ({
-    description: 'List or save generated images that belong to this exact local session. list returns one opaque handle per image, including every image in a multi-image response. save writes one preview or original to an approved path. A handle from another session is refused. An unavailable original is never replaced with a preview.',
-    inputSchema: z.object({
-      action: z.enum(['list', 'save']),
-      handle: z.string().regex(/^[A-Za-z0-9_-]{32}$/).optional(),
-      path: z.string().min(1).max(4096).optional(),
-      source: z.enum(['original', 'preview']).optional()
-    }).strict(),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
-  })), async (input) => {
-    const caller = currentCaller();
-    if (!caller.sessionId) return failIdentity('Exact session identity is required');
-    const config = getConfig();
-    try {
-      if (input.action === 'list') {
-        const assets = await listGeneratedAssets(caller.sessionId);
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ assets }) }] };
+  // ------------------------------------------------- generated assets (read + write)
+
+  // One tool covers reading and writing, so it is exposed only when both halves are allowed:
+  // read-only mode (or a missing create/edit permission) hides it rather than offering a
+  // `save` that would always refuse. `list` inside a hidden tool is not worth an exposed name
+  // that cannot do its other half.
+  if ((exposedCaps.read || exposedCaps.browse || exposedCaps.metadata) && (exposedCaps.create || exposedCaps.edit)) {
+    reg.register('generated_assets', toolDeclaration('generated_assets', () => ({
+      description: 'List or save images ChatGPT generated in this exact session. list returns one opaque handle per image, including every image of a multi-image response. save writes one preview or original to an approved path. A handle from another session is refused. An unavailable original is never replaced with a preview.',
+      inputSchema: z.object({
+        action: z.enum(['list', 'save']),
+        handle: z.string().regex(/^[A-Za-z0-9_-]{32}$/).optional(),
+        path: z.string().min(1).max(4096).optional(),
+        source: z.enum(['original', 'preview']).optional()
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+    })), async (input) => {
+      const caller = currentCaller();
+      if (!caller.sessionId) return failIdentity('Exact session identity is required');
+      const config = getConfig();
+      try {
+        if (input.action === 'list') {
+          const assets = await listGeneratedAssets(caller.sessionId);
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ assets }) }] };
+        }
+        if (!input.handle || !input.path || !input.source) return fail('save requires handle, path, and source');
+        const saved = await saveGeneratedAsset({
+          sessionId: caller.sessionId,
+          handle: input.handle,
+          path: input.path,
+          source: input.source,
+          roots: reg.ctx.roots,
+          readOnly: config.readOnly,
+          canCreate: config.capabilities.create === true && !config.readOnly,
+          canEdit: config.capabilities.edit === true && !config.readOnly,
+          ...(input.source === 'original' ? { readOriginal: () => readOriginalForHandle(caller.sessionId!, input.handle!) } : {})
+        });
+        return { content: [{ type: 'text' as const, text: JSON.stringify(saved) }] };
+      } catch (error) {
+        if (error instanceof GeneratedAssetError) return fail(`${error.code}: ${error.message}`);
+        throw error;
       }
-      if (!input.handle || !input.path || !input.source) return fail('save requires handle, path, and source');
-      const saved = await saveGeneratedAsset({
-        sessionId: caller.sessionId,
-        handle: input.handle,
-        path: input.path,
-        source: input.source,
-        roots: reg.ctx.roots,
-        readOnly: config.readOnly,
-        canCreate: config.capabilities.create === true && !config.readOnly,
-        canEdit: config.capabilities.edit === true && !config.readOnly,
-        ...(input.source === 'original' ? { readOriginal: () => readOriginalForHandle(caller.sessionId!, input.handle!) } : {})
-      });
-      return { content: [{ type: 'text' as const, text: JSON.stringify(saved) }] };
-    } catch (error) {
-      if (error instanceof GeneratedAssetError) return fail(`${error.code}: ${error.message}`);
-      throw error;
-    }
-  });
+    });
+  }
 
   // ----------------------------------------------------------------- agents
 
