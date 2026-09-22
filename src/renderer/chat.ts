@@ -21,7 +21,8 @@ import { renderRichResponse } from './rich-response.js';
 import { localDataUrl, retireRichImageViewer, retireRichImageViewerWithin, retireStaleRichImageViewer } from './rich-image.js';
 import { RICH_LIMITS } from '../shared/rich-response.js';
 import { preserveTimelineViewport } from './timeline-scroll.js';
-import { createSidebarOrder } from './sidebar-order.js';
+import { createSidebarOrder, type SidebarOrder } from './sidebar-order.js';
+import { createChatNavigator, type ChatNavigator } from './chat-navigator.js';
 import { toolResultText } from './tool-result.js';
 import { chatErrorPresentation, duplicateChatErrors } from './chat-error.js';
 import { categoryFor, categoryClass } from './transcript-categories.js';
@@ -72,7 +73,7 @@ import {
 import { browserExtensionRequired, type AppState, type Config } from '../shared/types.js';
 import { $, ago, applySettingsFilter, clockTime, compactNumber, el, icon, reconcileChildren, run, toast } from './dom.js';
 import {
-  KIND_ICON, mergeSessionRows, maybePageSessions, paintSessions, pressureOf, projectGroup,
+  KIND_ICON, mergeSessionRows, maybePageSessions, paintSessions as paintSessionList, pressureOf, projectGroup,
   repaintBadges, selectedLocalProject, sessionWorking, unattributedBlocked,
   type SessionListHost, type SessionRowActions
 } from './session-list.js';
@@ -143,7 +144,20 @@ const expandedProjects = new Set<string>();
 const projectVisibleCounts = new Map<string, number>();
 let workspaceTerminal: ReturnType<typeof createWorkspaceTerminal> | null = null;
 
-let sidebarOrder: ReturnType<typeof createSidebarOrder> | undefined;
+let sidebarOrder: SidebarOrder | undefined;
+let chatNavigator: ChatNavigator | null = null;
+function paintNavigator(host: SessionListHost): void {
+  if (!chatNavigator) {
+    paintSessionList(host);
+    return;
+  }
+  chatNavigator.update({
+    sessions,
+    projects,
+    selectedSessionId: selectedId(),
+    order: sidebarOrder
+  });
+}
 function projectedDraftKey(): string {
   const sessionId = presentationStore.getState().selectedSessionId;
   return sessionId ?? (selectedProjectId ? `project:${selectedProjectId}` : 'new');
@@ -288,14 +302,14 @@ let handoffLoadGeneration = 0;
 async function toggleUnattributedBlock(blocked: boolean): Promise<void> {
   $<HTMLInputElement>('allowUnattributedCalls').checked = !blocked;
   await deps.save();
-  paintSessions(sessionHost);
+  paintNavigator(sessionHost);
 }
 
 async function toggleSessionBlock(id: string, blocked: boolean): Promise<void> {
   const next = await run(api.setSessionBlocked(id, blocked));
   if (next === null) return;
   blockedChats = new Set(next);
-  paintSessions(sessionHost);
+  paintNavigator(sessionHost);
 }
 
 /** One selection retirement path for deletion and independently confirmed disappearance. */
@@ -326,7 +340,7 @@ function clearSelectedSession(): void {
   forgetTimelineRows();
   restoreDraft();
   void refreshSessionControls();
-  paintSessions(sessionHost);
+  paintNavigator(sessionHost);
   paintDetail(false);
   paintHandoff();
   reportVisibleSelection(true);
@@ -398,7 +412,7 @@ async function loadSessions(): Promise<void> {
       if (retained) sessions = mergeSessionRows(sessions, [retained]);
     }
   }
-  paintSessions(sessionHost);
+  paintNavigator(sessionHost);
   await loadDetail();
   void refreshInputQueue(deliveryHost);
 }
@@ -416,7 +430,7 @@ async function loadMoreSessions(): Promise<void> {
     sessionPageCursor = page.nextCursor;
     blockedChats = new Set(page.blocked);
     for (const entry of page.pressure) pressure.set(entry.id, entry);
-    paintSessions(sessionHost);
+    paintNavigator(sessionHost);
   } finally {
     sessionPageLoading = false;
   }
@@ -440,7 +454,7 @@ function scheduleToolActivityExpiry(): void {
     if (expiry > now) nearest = Math.min(nearest, expiry);
   }
   if (!Number.isFinite(nearest)) return;
-  toolActivityTimer = window.setTimeout(() => paintSessions(sessionHost), Math.max(1, nearest - now + 1));
+  toolActivityTimer = window.setTimeout(() => paintNavigator(sessionHost), Math.max(1, nearest - now + 1));
 }
 
 function canonicalMessageKey(event: SessionEvent): string | null {
@@ -2455,7 +2469,7 @@ function paintSwarm(state: SwarmState): void {
   paintStateLine();
   // Session rows borrow their live badge from the swarm, so a worker that just went to sleep
   // must not keep saying "active" until some unrelated session update repaints the list.
-  paintSessions(sessionHost);
+  paintNavigator(sessionHost);
   const list = $('swarmList');
   if (state.agents.length === 0) {
     list.replaceChildren(
@@ -2996,7 +3010,7 @@ export function chatApply(state: AppState, previous?: Config): void {
   $('bridgeState').classList.toggle('is-warn', browserRequired && (!bridge.present || !secureStorageAvailable));
   void showExtensionPath();
 
-  if (sessions.length > 0) paintSessions(sessionHost);
+  if (sessions.length > 0) paintNavigator(sessionHost);
 }
 
 /** Called when the Chat tab becomes visible or is left, so it only polls when shown. */
@@ -3218,7 +3232,7 @@ function selectSession(id: string): void {
     handoffFor = null;
     handoffLoadGeneration++;
   }
-  paintSessions(sessionHost);
+  paintNavigator(sessionHost);
   if (ownerChanged) {
     paintDetail(false);
     paintHandoff();
@@ -3239,7 +3253,7 @@ function selectNewChat(projectId: string | null = null): void {
   // New Chat selects its existing draft, just like a session. Navigation is not
   // permission to discard authored text, attachments or a prepared workflow.
   $('inputQueue').replaceChildren();
-  restoreDraft(); showView('timeline'); paintSessions(sessionHost); void loadDetail();
+  restoreDraft(); showView('timeline'); paintNavigator(sessionHost); void loadDetail();
   if (!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
     $('composer').animate?.([{ opacity: 0.45 }, { opacity: 1 }], { duration: 150, easing: 'ease-out' });
   }
@@ -3407,7 +3421,7 @@ async function removeProject(id: string): Promise<void> {
       $<HTMLTextAreaElement>('chatInput').placeholder = 'Ask anything…';
     } else selectedProjectId = null;
   }
-  paintSessions(sessionHost); void refreshInputQueue(deliveryHost);
+  paintNavigator(sessionHost); void refreshInputQueue(deliveryHost);
   toast('Project removed; conversations kept');
 }
 
@@ -3441,8 +3455,17 @@ function followShellWorkbench(work: NonNullable<typeof workPanel>): void {
 export function initChat(next: Deps): void {
   sidebarOrder = createSidebarOrder($('sessionList'), () => sessions
     .filter(entry => (entry.conversationId || entry.origin?.kind === 'desktop') && entry.origin?.kind !== 'worker')
-    .map(entry => ({ id: entry.id, scope: projectGroup(projects, entry.projectId) ?? '' })), () => paintSessions(sessionHost));
+    .map(entry => ({ id: entry.id, scope: projectGroup(projects, entry.projectId) ?? '' })), () => paintNavigator(sessionHost));
   deps = next;
+  chatNavigator = createChatNavigator({
+    root: $('chatNavigator'),
+    host: sessionHost,
+    store: presentationStore,
+    selectSession: id => {
+      pendingNewInput = null;
+      selectSession(id);
+    }
+  });
   reportVisibleSelection(true); // Initial New Chat/null is explicit; activity never supplies selection.
   document.addEventListener('visibilitychange', () => reportVisibleSelection(!document.hidden));
   window.addEventListener('focus', () => reportVisibleSelection(true));
@@ -3742,7 +3765,7 @@ export function initChat(next: Deps): void {
       ++sessionsLoadGeneration;
       projects = [...projects.filter(row => row.id !== project.id), project];
       expandedProjects.add(project.id);
-      if (generation === selectionGeneration()) selectNewChat(project.id); else paintSessions(sessionHost);
+      if (generation === selectionGeneration()) selectNewChat(project.id); else paintNavigator(sessionHost);
     } finally { button.disabled = false; }
   });
   $('settingsSearch').addEventListener('input', () => applySettingsFilter());
@@ -3770,12 +3793,6 @@ export function initChat(next: Deps): void {
   $('createPlan').addEventListener('click', () => { if (taskPlans.has(draftKey())) cancelTaskPlan(); else void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); });
   $('composer').addEventListener('submit', (event) => { event.preventDefault(); if (currentPreparedPlan()) void sendPreparedPlan(); else if (taskPlans.has(draftKey())) { if (!$('createPlan').dataset.busy) void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); } else void sendComposer(); });
 
-  $('sessionList').addEventListener('click', (event) => {
-    const row = (event.target as HTMLElement).closest<HTMLElement>('[data-id]');
-    if (!row?.dataset.id || row.dataset.id === selectedId()) return;
-    pendingNewInput = null;
-    selectSession(row.dataset.id);
-  });
   $('sessionList').closest<HTMLElement>('.scroll')?.addEventListener('scroll', () => maybePageSessions({
     visible, cursor: sessionPageCursor, loaded: sessions.length, total: sessionTotal,
     loadMore: () => void loadMoreSessions()

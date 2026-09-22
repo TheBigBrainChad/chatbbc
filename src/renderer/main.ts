@@ -154,14 +154,13 @@ let showAllSteps: boolean | null = null;
 let setupProfileBusy = false;
 let setupKeySave: Promise<boolean> = Promise.resolve(true);
 
-// ------------------------------------------------------------------- tabs
+// ---------------------------------------------------------- destinations
 
 /**
- * Which panel draws each destination.
+ * Which full-page panel draws each existing destination callback.
  *
- * Every destination is its own panel except `automation`, which is the chat panel's settings
- * view: the automation controls belong beside the chat they govern, so that destination shows
- * the chat card with its settings view open rather than a separate page.
+ * Automation remains the chat panel's settings view. The global rail owns workspace
+ * destinations; these names are internal page paths, not a second navigation model.
  */
 const DESTINATION_PANEL: Readonly<Record<string, string>> = {
   automation: 'chat',
@@ -170,26 +169,15 @@ const DESTINATION_PANEL: Readonly<Record<string, string>> = {
   activity: 'activity',
   setup: 'setup'
 };
-
-/**
- * Settings is not a second screen: the one sidebar rail shows this nav in place of the session
- * list, and `← Back to chat` is the way out. `is-settings` is the whole of that state, so the
- * list and the nav are never both on screen and no second nav exists.
- */
 function showTab(name: string): void {
   const settings = name !== 'chat' && name !== 'plugins';
   const panel = DESTINATION_PANEL[name] ?? name;
   document.querySelector<HTMLElement>('.app')!.dataset.screen = name === 'plugins' ? 'library' : settings ? 'settings' : 'chat';
-  document.querySelector<HTMLElement>('.sidebar')!.classList.toggle('is-settings', settings);
-  $('workspaceSettings').hidden = false;
-  $('workspaceSettings').classList.toggle('is-sel', settings);
+
   if (name === 'usage') void refreshUsage();
   if (name === 'automation') openChatView('settings');
   else if (name === 'chat') openChatView('timeline');
 
-  for (const tab of document.querySelectorAll<HTMLElement>('nav button')) {
-    tab.classList.toggle('is-sel', tab.dataset.tab === name);
-  }
   for (const item of document.querySelectorAll<HTMLElement>('[data-sidebar-page]')) item.classList.toggle('is-sel', item.dataset.sidebarPage === name);
   for (const node of document.querySelectorAll<HTMLElement>('.panel')) {
     node.classList.toggle('is-active', node.dataset.panel === panel);
@@ -232,14 +220,12 @@ function positionConnectionPopover(): void {
 
 window.addEventListener('resize', () => positionConnectionPopover());
 
-$('backToChat').addEventListener('click', () => showTab('chat'));
-$('workspaceSettings').addEventListener('click', () => showTab('workspace'));
 $('sidebarConnection').addEventListener('click', () => {
   setConnectionPopover(Boolean($('connectionPopover').hidden));
 });
 $('chatSettingsBtn').addEventListener('click', () => showTab('automation'));
-$('sessionList').addEventListener('click', event => {
-  if ((event.target as HTMLElement).closest('[data-id], [data-new-project]')) showTab('chat');
+$('chatNavigator').addEventListener('click', event => {
+  if ((event.target as HTMLElement).closest('[data-id], [data-new-project], [data-project-id]')) showTab('chat');
 }, { capture: true });
 $('newChat').addEventListener('click', () => showTab('chat'));
 $('sidebarPlugins').addEventListener('click', () => showTab('plugins'));
@@ -263,10 +249,6 @@ $('zoomActualSize').addEventListener('click', () => void zoom(1));
 document.addEventListener('keydown', (event) => {
   if (!(event.ctrlKey || event.metaKey) || !['+', '=', '-', '0'].includes(event.key)) return;
   event.preventDefault(); void zoom(event.key === '0' ? 1 : zoomFactor + (event.key === '-' ? -.1 : .1));
-});
-$('tabs').addEventListener('click', (event) => {
-  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-tab]');
-  if (button?.dataset.tab) showTab(button.dataset.tab);
 });
 
 // ------------------------------------------------------------ permissions
@@ -1916,7 +1898,7 @@ initPlugins(apply);
 initBrowserPreferences();
 initChat({ save: () => save(), state: () => presentationStore.getState().app });
 
-createAppShell({
+const appShell = createAppShell({
   store: presentationStore,
   roots: {
     rail: $('globalRail'),
@@ -1927,12 +1909,15 @@ createAppShell({
 });
 $('globalRail').addEventListener('click', (event) => {
   const destination = (event.target as HTMLElement).closest<HTMLElement>('[data-destination]')?.dataset.destination;
-  if (destination === 'usage') showTab('usage');
-  else if (destination === 'settings') showTab('workspace');
-  else if (
-    (destination === 'chats' || destination === 'files' || destination === 'agents')
-    && document.querySelector<HTMLElement>('.app')?.dataset.screen !== 'chat'
-  ) showTab('chat');
+  if (destination === 'usage' || destination === 'settings') {
+    appShell.setWorkbenchOpen(false);
+    showTab(destination === 'usage' ? 'usage' : 'workspace');
+    return;
+  }
+  if (destination !== 'chats' && destination !== 'files' && destination !== 'agents') return;
+  if (document.querySelector<HTMLElement>('.app')?.dataset.screen !== 'chat') showTab('chat');
+  if (destination === 'chats') appShell.setWorkbenchOpen(false);
+  else appShell.setDestination('chats');
 });
 
 void (async () => {

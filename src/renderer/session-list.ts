@@ -1,6 +1,6 @@
 import { $, ago, el, icon, run } from './dom.js';
 import { t, ui } from './i18n.js';
-import type { createSidebarOrder } from './sidebar-order.js';
+import type { SidebarOrder } from './sidebar-order.js';
 import { sessionWorkingAt, workerReportedFinish } from '../shared/session-activity.js';
 import type { AppState } from '../shared/types.js';
 import type { ActivitySummary, AgentState, SessionSummary, SwarmState, TokenPressure } from '../shared/session.js';
@@ -21,7 +21,7 @@ export interface SessionListHost {
   sessions(): SessionSummary[];
   projects(): LocalProject[];
   selectedId(): string | null;
-  sidebarOrder(): ReturnType<typeof createSidebarOrder> | undefined;
+  sidebarOrder(): SidebarOrder | undefined;
   /** Window-local disclosure intent: the same sets chat.ts mutates when a selection opens a group. */
   expandedWorkers: Set<string>;
   expandedProjects: Set<string>;
@@ -426,6 +426,7 @@ export function paintSessions(host: SessionListHost): void {
   const otherWorkers = children.get('other-workers') ?? [];
   if (otherWorkers.length) {
     const history = document.createElement('details'); history.className = 'session-diagnostics';
+    if (otherWorkers.some(worker => worker.id === selectedId)) expandedWorkers.add('other-workers');
     history.open = expandedWorkers.has('other-workers');
     history.append(el('summary', '', () => t("Sub-agent history · {0}", [otherWorkers.length])));
     history.append(...otherWorkers.map(entry => sessionRow(entry, paint)));

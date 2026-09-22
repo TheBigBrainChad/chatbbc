@@ -637,18 +637,18 @@ it('keeps global connection controls in a compact sidebar popover', async () => 
   expect(popover.hidden).toBe(true);
 });
 
-it('keeps the Settings footer action visible while settings are open', async () => {
+it('uses the global rail for Settings and returns to the mounted chat workspace', async () => {
   const mounted = await mountChat({ hasApiKey: true });
   const doc = mounted.window.document;
-  const settings = doc.getElementById('workspaceSettings') as HTMLButtonElement;
+  const settings = doc.querySelector<HTMLButtonElement>('[data-destination="settings"]')!;
+  const chats = doc.querySelector<HTMLButtonElement>('[data-destination="chats"]')!;
 
-  expect(settings.hidden).toBe(false);
   settings.click();
-  expect(settings.hidden).toBe(false);
-  expect(settings.classList.contains('is-sel')).toBe(true);
-  (doc.getElementById('backToChat') as HTMLButtonElement).click();
-  expect(settings.hidden).toBe(false);
-  expect(settings.classList.contains('is-sel')).toBe(false);
+  expect(doc.getElementById('appShell')!.dataset.screen).toBe('settings');
+  expect(settings.getAttribute('aria-current')).toBe('page');
+  chats.click();
+  expect(doc.getElementById('appShell')!.dataset.screen).toBe('chat');
+  expect(chats.getAttribute('aria-current')).toBe('page');
 });
 
 it('renders companion diagnostics in the native Advanced connection drawer', async () => {

@@ -36,23 +36,24 @@
 .sidebar-brand strong span { display: block; color: var(--faint); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); font-weight: 400; letter-spacing: .01em; }
 .sidebar-brand .mark { width: 18px; height: 18px; }
 
-/* ----------------------------------------------------------- destinations */
+/* ------------------------------------------------------------- navigator */
 
-/* The one settings nav — the same rail in chat and in settings. Selecting a destination
-   swaps the body's panel; the sidebar keeps this nav and hands the list's slot below to
-   the back row, so there is never a second nav. */
-#tabs { display: flex; flex-direction: column; gap: 1px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
-#tabs button { display: flex; align-items: center; gap: 9px; min-height: 28px; padding: 5px 8px; border: 0; border-radius: 0; background: none; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); text-align: left; cursor: pointer; }
-#tabs button:hover, #tabs button.is-sel { background: var(--hover); color: var(--ink); }
-#tabs .badge { margin-left: auto; }
-
-/* `← Back to chat` is the way out, and only exists while a destination is open. */
-#backToChat { display: none; align-items: center; width: 100%; min-height: 28px; padding: 5px 8px; border: 0; border-radius: 0; color: var(--soft); justify-content: flex-start; text-align: left; font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
-#backToChat:hover { background: var(--hover); color: var(--ink); }
-.sidebar.is-settings #backToChat { display: flex; }
-/* In settings the list yields its slot to that row; the nav above it does not move. */
-.sidebar.is-settings #sidebarPrimary,
-.sidebar.is-settings .sidebar-sessions > .scroll { display: none; }
+.navigator-search {
+  width: calc(100% - 2px); min-height: 30px; margin: 4px 1px 6px; padding: 5px 8px;
+  border: 1px solid var(--line); border-radius: 0; background: transparent; color: var(--ink);
+  font: inherit;
+}
+.navigator-search:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
+.navigator-results { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 0 8px; }
+.navigator-result {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px; padding: 5px 10px;
+  border: 0; border-radius: 0; background: transparent; color: var(--soft); text-align: left;
+  font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); cursor: pointer;
+}
+.navigator-result:hover, .navigator-result:focus-visible { background: var(--hover); color: var(--ink); }
+.navigator-result .ico { flex: none; width: 14px; height: 14px; }
+.navigator-result span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.navigator-empty { padding: 10px; }
 
 /* -------------------------------------------------------- session header */
 
@@ -637,7 +638,6 @@ main {
 
 /* --------------------------------------------------------------------- nav */
 
-/* The destinations are `#tabs` above; this only carries the badge they show. */
 .badge {
   width: 6px;
   height: 6px;
@@ -664,7 +664,6 @@ main {
 .sidebar-sessions h2 .btn .ico { width: 14px; height: 14px; }
 
 /* Contextual controls: normal chat contains prose and work, diagnostics stay optional. */
-#workspaceSettings { flex: 1; min-height: 36px; height: 36px; justify-content: flex-start; text-align: left; font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); padding: 5px 8px; border: 0; border-radius: 0; }
 #chatSettingsBtn { display: none; }
 .picker-chevron { flex: none; width: 14px; height: 14px; }
 
