@@ -109,7 +109,8 @@ describe('extension release metadata', () => {
       conversationId: '11111111-2222-4333-8444-555555555555',
       logicalMessageId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
       assetId: 'file_AuroraOriginal0001',
-      filename: 'ChatBBC image 01.png'
+      filename: 'ChatBBC image 01.png',
+      document: { tab: 42, documentId: 'doc-42', documentGeneration: 3, spaEpoch: 7 }
     }], [{
       id: 42,
       active: true,
@@ -142,7 +143,8 @@ describe('extension release metadata', () => {
       conversationId: '11111111-2222-4333-8444-555555555555',
       logicalMessageId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
       assetId: 'file_AuroraOriginal0001',
-      filename: 'ChatBBC image 01.png'
+      filename: 'ChatBBC image 01.png',
+      document: { tab: 42, documentId: 'doc-42', documentGeneration: 3, spaEpoch: 7 }
     };
     const calls: Array<{ route: string; body: any }> = [];
     const downloads = vi.fn(async () => { throw new Error('start refused'); });

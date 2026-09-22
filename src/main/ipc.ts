@@ -37,6 +37,7 @@ import { sendDesktopInput, cancelDesktopInput, retryQueuedInputBrowser } from '.
 import { wakeBrowserUrl } from './browser-startup.js';
 import { registerPluginIpc } from './plugins-ipc.js';
 import {
+  generatedAssetDownloadsForSession,
   requestGeneratedAssetDownloads,
   subscribeGeneratedAssetDownloads
 } from './generated-asset-downloads.js';
@@ -485,6 +486,20 @@ export function registerIpc(
     } catch (error) {
       return { ok: false as const, error: error instanceof Error ? error.message : 'Download request failed' };
     }
+  });
+  ipcMain.handle('sessions:generatedAssetDownloads', async (event, payload: unknown) => {
+    const parsed = z.object({
+      sessionId: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i)
+    }).strict().safeParse(payload);
+    if (!parsed.success) return { ok: false as const, error: 'Invalid input' };
+    const window = getWindow();
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed() ||
+        !event?.sender || event.sender !== window.webContents || !event.senderFrame ||
+        event.senderFrame !== window.webContents.mainFrame ||
+        currentUiSelectionFor(event.sender)?.sessionId !== parsed.data.sessionId) {
+      return { ok: false as const, error: 'That chat is no longer selected' };
+    }
+    return { ok: true as const, data: generatedAssetDownloadsForSession(parsed.data.sessionId) };
   });
   const richStatusRequest = z.object({
     sessionId: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i),

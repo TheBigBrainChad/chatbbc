@@ -118,6 +118,11 @@ it('exposes one fixed generated-original request and a state-only subscription w
     logicalMessageId: 'assistant:image-set:aurora',
     assetIds: ['file_AuroraOriginal0001']
   });
+  invoke.mockClear();
+  await api.generatedAssetDownloads('2026-09-19-aaaaaaaa');
+  expect(invoke).toHaveBeenCalledExactlyOnceWith('sessions:generatedAssetDownloads', {
+    sessionId: '2026-09-19-aaaaaaaa'
+  });
   const listener = vi.fn();
   const stop = api.onGeneratedAssetDownloadChanged(listener);
   expect(on).toHaveBeenCalledOnce();

@@ -36,6 +36,11 @@ type SetViewer = {
 };
 let active: SetViewer | null = null;
 let downloadSubscriptionInstalled = false;
+const downloadStates = new Map<string, GeneratedAssetDownloadState>();
+
+function downloadKey(sessionId: string, messageId: string, assetId: string): string {
+  return `${sessionId}\u0000${messageId}\u0000${assetId}`;
+}
 
 function downloadButtons(sessionId: string, messageId: string, assetId?: string): HTMLButtonElement[] {
   return [...document.querySelectorAll<HTMLButtonElement>('.image-set-download, .image-set-download-all')]
@@ -44,14 +49,30 @@ function downloadButtons(sessionId: string, messageId: string, assetId?: string)
       (assetId === undefined || node.dataset.downloadAssets?.split('\u0001').includes(assetId)));
 }
 
-export function applyGeneratedAssetDownloadBatch(batch: GeneratedAssetDownloadBatch): void {
-  const byAsset = new Map(batch.items.map(item => [item.assetId, item.state]));
-  for (const button of downloadButtons(batch.sessionId, batch.logicalMessageId)) {
-    const assets = button.dataset.downloadAssets?.split('\u0001').filter(Boolean) ?? [];
-    const states = assets.map(asset => byAsset.get(asset)).filter(
-      (state): state is GeneratedAssetDownloadState => state !== undefined);
-    if (states.length === assets.length && states.length > 0) paintGeneratedDownloadState(button, states);
+function statesFor(button: HTMLButtonElement): GeneratedAssetDownloadState[] {
+  const sessionId = button.dataset.downloadSession ?? '';
+  const messageId = button.dataset.downloadMessage ?? '';
+  return (button.dataset.downloadAssets?.split('\u0001').filter(Boolean) ?? [])
+    .map(assetId => downloadStates.get(downloadKey(sessionId, messageId, assetId)))
+    .filter((state): state is GeneratedAssetDownloadState => state !== undefined);
+}
+
+function paintDownloadButton(button: HTMLButtonElement): void {
+  const assets = button.dataset.downloadAssets?.split('\u0001').filter(Boolean) ?? [];
+  const states = statesFor(button);
+  if (states.length === assets.length && states.length > 0) paintGeneratedDownloadState(button, states);
+  else {
+    button.textContent = button.classList.contains('image-set-download-all')
+      ? t('Download all originals') : t('Download original');
+    button.disabled = false;
+    button.setAttribute('aria-busy', 'false');
   }
+}
+
+export function applyGeneratedAssetDownloadBatch(batch: GeneratedAssetDownloadBatch): void {
+  if (!batch || batch.sessionId.length < 1) return;
+  for (const item of batch.items) downloadStates.set(downloadKey(batch.sessionId, batch.logicalMessageId, item.assetId), item.state);
+  for (const button of downloadButtons(batch.sessionId, batch.logicalMessageId)) paintDownloadButton(button);
 }
 
 function ensureDownloadSubscription(): void {
@@ -67,15 +88,24 @@ function bindDownload(
   assetIds: string[]
 ): void {
   node.type = 'button';
+  node.disabled = false;
   node.removeAttribute('aria-disabled');
+  node.setAttribute('aria-busy', 'false');
   node.dataset.downloadSession = owner.sessionId;
   node.dataset.downloadMessage = messageId;
   node.dataset.downloadAssets = assetIds.join('\u0001');
   ensureDownloadSubscription();
+  paintDownloadButton(node);
+  if (typeof window.api?.generatedAssetDownloads === 'function') {
+    void window.api.generatedAssetDownloads(owner.sessionId).then(reply => {
+      if (!owner.current() || !reply.ok || !Array.isArray(reply.data)) return;
+      for (const batch of reply.data) applyGeneratedAssetDownloadBatch(batch);
+    }).catch(() => undefined);
+  }
   node.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    if (!owner.current() || typeof window.api?.downloadGeneratedAssets !== 'function') return;
+    if (!owner.current() || node.disabled || typeof window.api?.downloadGeneratedAssets !== 'function') return;
     void window.api.downloadGeneratedAssets(owner.sessionId, messageId, assetIds).then(reply => {
       if (owner.current() && reply.ok) applyGeneratedAssetDownloadBatch(reply.data);
       else if (owner.current()) paintGeneratedDownloadState(node, ['failed']);

@@ -8,6 +8,7 @@ import {
   claimGeneratedAssetDownload,
   pendingGeneratedAssetDownloadOffers,
   recordGeneratedAssetDownloadResult,
+  observeGeneratedAssetDocuments,
   reconcileGeneratedAssetDownloadCustody,
   requestGeneratedAssetDownloads,
   resetGeneratedAssetDownloadsForTests,
@@ -58,17 +59,21 @@ async function fixture() {
   return { session, conversationId };
 }
 
-const source = (conversationId: string) => ({
+const source = (conversationId: string, documentId = 'doc-aurora') => ({
   conversationId,
   tab: 42,
-  documentId: 'doc-aurora',
+  documentId,
   documentGeneration: 3,
   spaEpoch: 7
 });
 
+function showDocument(conversationId: string, documentId = 'doc-aurora'): void {
+  observeGeneratedAssetDocuments([source(conversationId, documentId)]);
+}
+
 describe('generated original download custody', () => {
   it('rereads one canonical response, bounds batches, deduplicates active requests, and never returns a URL', async () => {
-    const { session } = await fixture();
+    const { session, conversationId } = await fixture();
     const batch = await requestGeneratedAssetDownloads({
       sessionId: session.id,
       logicalMessageId: responseId,
@@ -83,6 +88,7 @@ describe('generated original download custody', () => {
       assetIds: [firstAsset, secondAsset]
     });
     expect(duplicate.id).toBe(batch.id);
+    showDocument(conversationId);
     expect(pendingGeneratedAssetDownloadOffers()).toHaveLength(2);
 
     await expect(requestGeneratedAssetDownloads({
@@ -104,9 +110,10 @@ describe('generated original download custody', () => {
       logicalMessageId: responseId,
       assetIds: [firstAsset]
     });
+    showDocument(conversationId);
     const offer = pendingGeneratedAssetDownloadOffers()[0]!;
-    expect(offer).toMatchObject({ id: batch.items[0]!.id, conversationId, logicalMessageId: responseId, assetId: firstAsset });
-    expect(JSON.stringify(offer)).not.toMatch(/https?:|claimToken/i);
+    expect(offer).toMatchObject({ id: batch.items[0]!.id, conversationId, logicalMessageId: responseId, assetId: firstAsset,
+      document: { tab: 42, documentId: 'doc-aurora', documentGeneration: 3, spaEpoch: 7 } });
 
     const claimed = await claimGeneratedAssetDownload({ id: offer.id, ...source(conversationId) });
     expect(claimed).toMatchObject({ id: offer.id, conversationId, logicalMessageId: responseId, assetId: firstAsset });
@@ -119,6 +126,7 @@ describe('generated original download custody', () => {
       logicalMessageId: responseId,
       assetIds: [secondAsset]
     });
+    showDocument(conversationId);
     await rebindSession(session.id, conversationId, randomUUID());
     expect(await claimGeneratedAssetDownload({ id: second.items[0]!.id, ...source(conversationId) })).toBeNull();
   });
@@ -134,6 +142,7 @@ describe('generated original download custody', () => {
       logicalMessageId: responseId,
       assetIds: [firstAsset, secondAsset]
     });
+    showDocument(conversationId);
     expect(batch.items).toHaveLength(2);
     const [first, second] = pendingGeneratedAssetDownloadOffers();
     const firstClaim = await claimGeneratedAssetDownload({ id: first!.id, ...source(conversationId) });
@@ -178,6 +187,7 @@ describe('generated original download custody', () => {
       logicalMessageId: responseId,
       assetIds: [firstAsset]
     });
+    showDocument(conversationId);
     const claim = await claimGeneratedAssetDownload({ id: batch.items[0]!.id, ...source(conversationId) });
     expect(claim).toBeTruthy();
     let latest = '';
@@ -193,5 +203,55 @@ describe('generated original download custody', () => {
       claimToken: claim!.claimToken,
       state: 'complete'
     })).toBe(false);
+  });
+
+  it('offers only one exact live document and lets only one concurrent claim win', async () => {
+    const { session, conversationId } = await fixture();
+    const batch = await requestGeneratedAssetDownloads({
+      sessionId: session.id,
+      logicalMessageId: responseId,
+      assetIds: [firstAsset]
+    });
+    observeGeneratedAssetDocuments([
+      source(conversationId, 'doc-a'),
+      { ...source(conversationId, 'doc-b'), tab: 43 }
+    ]);
+    expect(pendingGeneratedAssetDownloadOffers()).toEqual([]);
+    expect(await claimGeneratedAssetDownload({ id: batch.items[0]!.id, ...source(conversationId, 'doc-a') })).toBeNull();
+    showDocument(conversationId, 'doc-a');
+    const [first, second] = await Promise.all([
+      claimGeneratedAssetDownload({ id: batch.items[0]!.id, ...source(conversationId, 'doc-a') }),
+      claimGeneratedAssetDownload({ id: batch.items[0]!.id, ...source(conversationId, 'doc-a') })
+    ]);
+    expect([first, second].filter(Boolean)).toHaveLength(1);
+  });
+
+  it('accepts an exact terminal receipt again after its acknowledgement was lost', async () => {
+    const { session, conversationId } = await fixture();
+    const batch = await requestGeneratedAssetDownloads({
+      sessionId: session.id, logicalMessageId: responseId, assetIds: [firstAsset]
+    });
+    showDocument(conversationId);
+    const claim = await claimGeneratedAssetDownload({ id: batch.items[0]!.id, ...source(conversationId) });
+    const receipt = { id: batch.items[0]!.id, claimToken: claim!.claimToken, state: 'complete' as const };
+    expect(await recordGeneratedAssetDownloadResult({ ...receipt, state: 'started' })).toBe(true);
+    expect(await recordGeneratedAssetDownloadResult(receipt)).toBe(true);
+    expect(await recordGeneratedAssetDownloadResult(receipt)).toBe(true);
+    expect(await recordGeneratedAssetDownloadResult({ ...receipt, state: 'failed' })).toBe(false);
+  });
+
+  it('refuses another batch when 64 downloads are still unresolved', async () => {
+    const { session } = await fixture();
+    for (let index = 0; index < 64; index += 1) {
+      const messageId = `assistant:image-set:${index}`;
+      await upsertNativeImageEvent(session.id, {
+        time: index + 10, source: 'extension', kind: 'native_image', messageId,
+        providerAssetId: firstAsset, providerRole: 'tool', previewStatus: 'pending'
+      });
+      await requestGeneratedAssetDownloads({ sessionId: session.id, logicalMessageId: messageId, assetIds: [firstAsset] });
+    }
+    await expect(requestGeneratedAssetDownloads({
+      sessionId: session.id, logicalMessageId: responseId, assetIds: [secondAsset]
+    })).rejects.toThrow('download_capacity');
   });
 });

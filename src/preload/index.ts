@@ -210,6 +210,8 @@ const api = {
   downloadGeneratedAssets: (sessionId: string, logicalMessageId: string, assetIds: string[]) =>
     call<GeneratedAssetDownloadBatch>('sessions:downloadGeneratedAssets',
       { sessionId, logicalMessageId, assetIds }),
+  generatedAssetDownloads: (sessionId: string) =>
+    call<GeneratedAssetDownloadBatch[]>('sessions:generatedAssetDownloads', { sessionId }),
   onGeneratedAssetDownloadChanged: (
     listener: (batch: GeneratedAssetDownloadBatch) => void
   ): (() => void) => {

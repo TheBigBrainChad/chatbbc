@@ -356,6 +356,7 @@ it('requests one exact original or bounded set and paints state receipts without
   (window as any).api = {
     getSessionImage: image,
     downloadGeneratedAssets: download,
+    generatedAssetDownloads: async () => ({ ok: true, data: [] }),
     onGeneratedAssetDownloadChanged: (listener: (batch: any) => void) => {
       changed = listener;
       return () => undefined;

@@ -1983,7 +1983,8 @@ describe('generated original download bridge custody', () => {
     const firstStatus = await request('POST', '/status', { body: {
       openConversations: [conversationId],
       stalledConversations: [],
-      generatedAssetDownloadIds: []
+      generatedAssetDownloadIds: [],
+      generatedAssetDocuments: [source]
     } });
     expect(firstStatus.status).toBe(200);
     expect(firstStatus.body.generatedAssetDownloads).toEqual([{
@@ -1991,7 +1992,8 @@ describe('generated original download bridge custody', () => {
       conversationId,
       logicalMessageId,
       assetId,
-      filename: expect.stringMatching(/\.png$/)
+      filename: expect.stringMatching(/\.png$/),
+      document: { tab: 42, documentId: 'generated-download-document', documentGeneration: 3, spaEpoch: 2 }
     }]);
     const claim = await request('POST', '/generated-assets/claim', {
       body: { id: batch.items[0]!.id, ...source }

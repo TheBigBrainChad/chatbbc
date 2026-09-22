@@ -22,6 +22,7 @@ import { observeUsage } from './session/usage.js';
 import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, listInputs, fileSilenceInput, fileRecoveryInput, advanceRecoveryInput, hasQueuedAfterTurnInput, inputBeforeGoal, pendingQueuedPickups, deferSilenceInput, revokeSilenceInputs } from './session/input.js';
 import {
   claimGeneratedAssetDownload,
+  observeGeneratedAssetDocuments,
   pendingGeneratedAssetDownloadOffers,
   reconcileGeneratedAssetDownloadCustody,
   recordGeneratedAssetDownloadResult
@@ -2471,6 +2472,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         openConversations?: unknown;
         stalledConversations?: unknown;
         generatedAssetDownloadIds?: unknown;
+        generatedAssetDocuments?: unknown;
       };
       if (!Array.isArray(body?.openConversations) || body.openConversations.length > 10_000 || body.openConversations.some(id => !conversationId(id))) {
         return json(res, 400, { error: 'invalid_open_conversations' }, origin);
@@ -2488,6 +2490,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       }
       if (Array.isArray(body.generatedAssetDownloadIds)) {
         reconcileGeneratedAssetDownloadCustody(body.generatedAssetDownloadIds as string[]);
+      }
+      if (body.generatedAssetDocuments !== undefined &&
+          (!Array.isArray(body.generatedAssetDocuments) || body.generatedAssetDocuments.length > 64)) {
+        return json(res, 400, { error: 'invalid_generated_asset_documents' }, origin);
+      }
+      if (Array.isArray(body.generatedAssetDocuments)) {
+        observeGeneratedAssetDocuments(body.generatedAssetDocuments as Parameters<typeof observeGeneratedAssetDocuments>[0]);
       }
     }
     const openSet = new Set(openConversations);

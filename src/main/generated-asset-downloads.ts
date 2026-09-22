@@ -5,6 +5,7 @@ import {
   MAX_GENERATED_ASSET_DOWNLOADS,
   type GeneratedAssetDownloadBatch,
   type GeneratedAssetDownloadClaim,
+  type GeneratedAssetDownloadDocument,
   type GeneratedAssetDownloadOffer,
   type GeneratedAssetDownloadRequest,
   type GeneratedAssetDownloadResult,
@@ -13,6 +14,7 @@ import {
 } from '../shared/generated-assets.js';
 
 const MAX_BATCHES = 64;
+const MAX_LIVE_DOCUMENTS = 64;
 const MAX_DETAIL = 240;
 const SESSION_ID = /^[a-z0-9_-]{1,128}$/i;
 const COMMAND_ID = /^[a-f0-9-]{36}$/i;
@@ -26,7 +28,7 @@ type InternalItem = GeneratedAssetDownloadBatch['items'][number] & {
   bindingRevision: number;
   logicalMessageId: string;
   claimToken: string | null;
-  source: GeneratedAssetDownloadSource | null;
+  document: GeneratedAssetDownloadDocument | null;
 };
 
 type InternalBatch = Omit<GeneratedAssetDownloadBatch, 'items'> & {
@@ -79,6 +81,14 @@ function terminal(state: GeneratedAssetDownloadState): boolean {
   return state === 'complete' || state === 'failed' || state === 'unconfirmed';
 }
 
+function nonterminalBatches(): number {
+  let count = 0;
+  for (const batch of batches.values()) {
+    if (batch.items.some(item => !terminal(item.state))) count++;
+  }
+  return count;
+}
+
 function trimBatches(): void {
   if (batches.size <= MAX_BATCHES) return;
   for (const [id, batch] of batches) {
@@ -115,6 +125,7 @@ export async function requestGeneratedAssetDownloads(
     for (const batch of batches.values()) {
       if (batch.fingerprint === fingerprint && batch.items.some(item => !terminal(item.state))) return publicBatch(batch);
     }
+    if (nonterminalBatches() >= MAX_BATCHES) throw new Error('download_capacity');
     if (stillCurrent && !stillCurrent()) throw new Error('download_selection_changed');
     const batchId = randomUUID();
     const batch: InternalBatch = {
@@ -135,7 +146,7 @@ export async function requestGeneratedAssetDownloads(
         state: 'requested' as const,
         detail: null,
         claimToken: null,
-        source: null
+        document: liveDocuments.get(target.conversationId) ?? null
       }))
     };
     batches.set(batch.id, batch);
@@ -149,19 +160,66 @@ export async function requestGeneratedAssetDownloads(
   return run;
 }
 
+function documentKey(document: GeneratedAssetDownloadDocument): string {
+  return `${document.tab}\u0000${document.documentId}\u0000${document.documentGeneration}\u0000${document.spaEpoch}`;
+}
+
+function sameDocument(left: GeneratedAssetDownloadDocument, right: GeneratedAssetDownloadDocument): boolean {
+  return documentKey(left) === documentKey(right);
+}
+
+const liveDocuments = new Map<string, GeneratedAssetDownloadDocument | null>();
+
+export function observeGeneratedAssetDocuments(
+  rows: readonly (GeneratedAssetDownloadDocument & { conversationId: string })[]
+): void {
+  liveDocuments.clear();
+  if (!Array.isArray(rows) || rows.length > MAX_LIVE_DOCUMENTS) return;
+  const grouped = new Map<string, Map<string, GeneratedAssetDownloadDocument>>();
+  for (const row of rows) {
+    if (!row || typeof row.conversationId !== 'string' || !/^[a-f0-9-]{36}$/i.test(row.conversationId) ||
+        !validSource({ ...row })) continue;
+    const document = Object.freeze({
+      tab: row.tab,
+      documentId: row.documentId,
+      documentGeneration: row.documentGeneration,
+      spaEpoch: row.spaEpoch
+    });
+    const documents = grouped.get(row.conversationId) ?? new Map<string, GeneratedAssetDownloadDocument>();
+    documents.set(documentKey(document), document);
+    grouped.set(row.conversationId, documents);
+  }
+  for (const [conversationId, documents] of grouped) {
+    liveDocuments.set(conversationId, documents.size === 1 ? [...documents.values()][0]! : null);
+  }
+  for (const item of items.values()) {
+    if (item.state !== 'requested' || item.claimToken !== null || item.document) continue;
+    const live = liveDocuments.get(item.conversationId);
+    if (live) item.document = live;
+  }
+}
+
 export function pendingGeneratedAssetDownloadOffers(): GeneratedAssetDownloadOffer[] {
   const offers: GeneratedAssetDownloadOffer[] = [];
   for (const item of items.values()) {
-    if (item.state !== 'requested' || item.claimToken !== null) continue;
+    if (item.state !== 'requested' || item.claimToken !== null || !item.document) continue;
+    const live = liveDocuments.get(item.conversationId);
+    if (!live || !sameDocument(live, item.document)) continue;
     offers.push({
       id: item.id,
       conversationId: item.conversationId,
       logicalMessageId: item.logicalMessageId,
       assetId: item.assetId,
-      filename: item.filename
+      filename: item.filename,
+      document: item.document
     });
   }
   return offers;
+}
+
+export function generatedAssetDownloadsForSession(sessionId: string): GeneratedAssetDownloadBatch[] {
+  if (!SESSION_ID.test(sessionId)) return [];
+  return [...batches.values()].filter(batch => batch.sessionId === sessionId).map(publicBatch);
 }
 
 export function reconcileGeneratedAssetDownloadCustody(liveIds: readonly string[]): number {
@@ -194,37 +252,42 @@ function validSource(source: GeneratedAssetDownloadSource): boolean {
 export async function claimGeneratedAssetDownload(
   input: { id: string } & GeneratedAssetDownloadSource
 ): Promise<GeneratedAssetDownloadClaim | null> {
-  if (!COMMAND_ID.test(input?.id ?? '') || !validSource(input)) return null;
-  const item = items.get(input.id);
-  if (!item || item.state !== 'requested' || item.claimToken !== null ||
-      item.conversationId !== input.conversationId) return null;
-  try {
-    await canonicalTarget({ sessionId: item.sessionId, logicalMessageId: item.logicalMessageId,
-      assetIds: [item.assetId] }, [item.assetId]);
-  } catch { return null; }
-  const current = items.get(input.id);
-  if (current !== item || item.state !== 'requested' || item.claimToken !== null) return null;
-  const session = await getSession(item.sessionId);
-  if (!session || session.conversationId !== item.conversationId ||
-      session.bindingRevision !== item.bindingRevision) return null;
-  item.claimToken = randomBytes(24).toString('base64url');
-  item.source = Object.freeze({
-    conversationId: input.conversationId,
-    tab: input.tab,
-    documentId: input.documentId,
-    documentGeneration: input.documentGeneration,
-    spaEpoch: input.spaEpoch
+  const run = requestQueue.then(async () => {
+    if (!COMMAND_ID.test(input?.id ?? '') || !validSource(input)) return null;
+    const item = items.get(input.id);
+    const presented = {
+      tab: input.tab,
+      documentId: input.documentId,
+      documentGeneration: input.documentGeneration,
+      spaEpoch: input.spaEpoch
+    };
+    if (!item || item.state !== 'requested' || item.claimToken !== null || !item.document ||
+        item.conversationId !== input.conversationId || !sameDocument(item.document, presented)) return null;
+    try {
+      await canonicalTarget({ sessionId: item.sessionId, logicalMessageId: item.logicalMessageId,
+        assetIds: [item.assetId] }, [item.assetId]);
+    } catch { return null; }
+    const session = await getSession(item.sessionId);
+    if (items.get(input.id) !== item || item.state !== 'requested' || item.claimToken !== null ||
+        !item.document || !sameDocument(item.document, presented) ||
+        !session || session.conversationId !== item.conversationId ||
+        session.bindingRevision !== item.bindingRevision) return null;
+    item.claimToken = randomBytes(24).toString('base64url');
+    const document = item.document;
+    const batch = batches.get(item.batchId);
+    if (batch) publish(batch);
+    return {
+      id: item.id,
+      conversationId: item.conversationId,
+      logicalMessageId: item.logicalMessageId,
+      assetId: item.assetId,
+      filename: item.filename,
+      document,
+      claimToken: item.claimToken
+    };
   });
-  const batch = batches.get(item.batchId);
-  if (batch) publish(batch);
-  return {
-    id: item.id,
-    conversationId: item.conversationId,
-    logicalMessageId: item.logicalMessageId,
-    assetId: item.assetId,
-    filename: item.filename,
-    claimToken: item.claimToken
-  };
+  requestQueue = run.then(() => undefined, () => undefined);
+  return run;
 }
 
 const transitions: Record<GeneratedAssetDownloadState, ReadonlySet<GeneratedAssetDownloadState>> = {
@@ -240,7 +303,9 @@ export async function recordGeneratedAssetDownloadResult(input: GeneratedAssetDo
       typeof input.claimToken !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(input.claimToken) ||
       !['started', 'complete', 'failed', 'unconfirmed'].includes(input.state)) return false;
   const item = items.get(input.id);
-  if (!item || item.claimToken !== input.claimToken || !item.source || !transitions[item.state].has(input.state)) return false;
+  if (!item || item.claimToken !== input.claimToken || !item.document) return false;
+  if (item.state === input.state) return true;
+  if (!transitions[item.state].has(input.state)) return false;
   item.state = input.state;
   item.detail = typeof input.detail === 'string' && input.detail.trim()
     ? input.detail.trim().replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, MAX_DETAIL)
@@ -261,5 +326,5 @@ export function resetGeneratedAssetDownloadsForTests(): void {
   batches.clear();
   items.clear();
   subscribers.clear();
-  requestQueue = Promise.resolve();
+  liveDocuments.clear();
 }

@@ -357,10 +357,12 @@ async function loadOnce() {
   generatedAssetDownloads = {};
   if (live.generatedAssetDownloads && typeof live.generatedAssetDownloads === 'object' &&
       !Array.isArray(live.generatedAssetDownloads)) {
-    for (const [id, row] of Object.entries(live.generatedAssetDownloads).slice(-MAX_GENERATED_ASSET_DOWNLOADS)) {
+    for (const [id, row] of Object.entries(live.generatedAssetDownloads)) {
+      const hasReceipt = Number.isInteger(row?.browserDownloadId) && row.browserDownloadId >= 0;
+      const knownFailure = row?.browserDownloadId == null && ['failed', 'unconfirmed'].includes(row?.state);
       if (/^[a-f0-9-]{36}$/i.test(id) && row && typeof row === 'object' &&
           /^[A-Za-z0-9_-]{32}$/.test(String(row.claimToken || '')) &&
-          Number.isInteger(row.browserDownloadId) && row.browserDownloadId >= 0 &&
+          (hasReceipt || knownFailure) &&
           ['started', 'complete', 'failed', 'unconfirmed'].includes(row.state)) {
         generatedAssetDownloads[id] = { ...row };
       }
@@ -2783,13 +2785,18 @@ function maintain(woken = false) {
 }
 
 function validGeneratedAssetOffer(row) {
+  const document = row?.document;
   return Boolean(row && typeof row === 'object' && /^[a-f0-9-]{36}$/i.test(String(row.id || '')) &&
     cleanConversationId(row.conversationId) &&
     typeof row.logicalMessageId === 'string' && row.logicalMessageId.length > 0 &&
     row.logicalMessageId.length <= 512 && !/[\u0000-\u001f\u007f]/.test(row.logicalMessageId) &&
     /^file_[A-Za-z0-9_-]{8,100}$/.test(String(row.assetId || '')) &&
     typeof row.filename === 'string' && row.filename.length > 0 && row.filename.length <= 180 &&
-    !/[\\/:*?\"<>|\u0000-\u001f\u007f]/.test(row.filename));
+    !/[\\/:*?\"<>|\u0000-\u001f\u007f]/.test(row.filename) &&
+    document && Number.isSafeInteger(document.tab) && document.tab >= 0 &&
+    typeof document.documentId === 'string' && /^[a-z0-9_-]{1,128}$/i.test(document.documentId) &&
+    Number.isSafeInteger(document.documentGeneration) && document.documentGeneration >= 1 &&
+    Number.isSafeInteger(document.spaEpoch) && document.spaEpoch >= 0);
 }
 
 async function publishGeneratedAssetDownloadResult(row) {
@@ -2814,8 +2821,36 @@ async function publishGeneratedAssetDownloadResult(row) {
 async function flushGeneratedAssetDownloadResults() {
   for (const row of Object.values(generatedAssetDownloads)) {
     if (!row || !['started', 'complete', 'failed', 'unconfirmed'].includes(row.state)) continue;
-    await publishGeneratedAssetDownloadResult(row).catch(() => false);
+    if (row.state === 'started') await reconcileGeneratedAssetDownload(row).catch(() => false);
+    if (generatedAssetDownloads[row.id] === row) await publishGeneratedAssetDownloadResult(row).catch(() => false);
   }
+}
+
+async function rememberGeneratedAssetDownload(row) {
+  if (Object.keys(generatedAssetDownloads).length >= MAX_GENERATED_ASSET_DOWNLOADS &&
+      !generatedAssetDownloads[row.id]) return false;
+  generatedAssetDownloads[row.id] = row;
+  try { await persistLive(); }
+  catch {
+    delete generatedAssetDownloads[row.id];
+    return false;
+  }
+  return generatedAssetDownloads[row.id] === row;
+}
+
+async function reconcileGeneratedAssetDownload(row) {
+  if (!row || row.state !== 'started' || !Number.isInteger(row.browserDownloadId) ||
+      typeof chrome.downloads?.search !== 'function') return false;
+  let found = [];
+  try { found = await chrome.downloads.search({ id: row.browserDownloadId }); }
+  catch { return false; }
+  const item = Array.isArray(found) ? found.find(entry => entry?.id === row.browserDownloadId) : null;
+  if (!item || generatedAssetDownloads[row.id] !== row || row.state !== 'started') return false;
+  if (item.state === 'complete') return settleGeneratedAssetDownloadChange({ id: item.id, state: { current: 'complete' } });
+  if (item.state === 'interrupted') {
+    return settleGeneratedAssetDownloadChange({ id: item.id, error: { current: item.error || 'interrupted' } });
+  }
+  return false;
 }
 
 async function settleGeneratedAssetDownloadChange(change) {
@@ -2840,33 +2875,30 @@ async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
   const offers = rawOffers.filter(validGeneratedAssetOffer).slice(0, 20);
   for (const offer of offers) {
     if (generatedAssetDownloads[offer.id]) continue;
-    const candidates = observedTabs.filter(tab => Number.isInteger(tab?.id) &&
-      conversationForTab(tab) === offer.conversationId &&
-      tabConversations[String(tab.id)] === offer.conversationId &&
-      ownsDocument({ tab: tab.id, documentId: tabDocuments[String(tab.id)],
-        navigationEpoch: tabEpochs[String(tab.id)] }))
-      .sort((left, right) => Number(right.active === true) - Number(left.active === true) ||
-        Number(left.id) - Number(right.id));
-    const tab = candidates[0];
-    if (!tab) continue; // Downloads never open or reload ChatGPT.
-    const key = String(tab.id);
-    const owner = registeredDocuments[key];
+    if (Object.keys(generatedAssetDownloads).length >= MAX_GENERATED_ASSET_DOWNLOADS) return;
+    const required = offer.document;
+    const key = String(required.tab);
+    const tab = observedTabs.find(candidate => candidate?.id === required.tab);
     const source = {
-      tab: tab.id,
-      documentId: tabDocuments[key],
-      navigationEpoch: tabEpochs[key]
+      tab: required.tab,
+      documentId: required.documentId,
+      navigationEpoch: required.spaEpoch
     };
-    if (!owner || owner.documentId !== source.documentId || !Number.isSafeInteger(owner.epoch) ||
+    const owner = registeredDocuments[key];
+    if (!tab || conversationForTab(tab) !== offer.conversationId ||
+        tabConversations[key] !== offer.conversationId ||
+        tabDocuments[key] !== required.documentId || tabEpochs[key] !== required.spaEpoch ||
+        !owner || owner.documentId !== required.documentId || owner.epoch !== required.documentGeneration ||
         !ownsDocument(source)) continue;
     const claimed = await call('/generated-assets/claim', {
       method: 'POST',
       body: JSON.stringify({
         id: offer.id,
         conversationId: offer.conversationId,
-        tab: source.tab,
-        documentId: source.documentId,
-        documentGeneration: owner.epoch,
-        spaEpoch: source.navigationEpoch
+        tab: required.tab,
+        documentId: required.documentId,
+        documentGeneration: required.documentGeneration,
+        spaEpoch: required.spaEpoch
       })
     });
     const claim = claimed.ok ? claimed.data?.claim : null;
@@ -2874,6 +2906,20 @@ async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
         claim.logicalMessageId !== offer.logicalMessageId || claim.assetId !== offer.assetId ||
         claim.filename !== offer.filename || !/^[A-Za-z0-9_-]{32}$/.test(String(claim.claimToken || '')) ||
         !ownsDocument(source)) continue;
+    const fail = async (detail) => {
+      const remembered = await rememberGeneratedAssetDownload({
+        id: offer.id,
+        claimToken: claim.claimToken,
+        browserDownloadId: null,
+        conversationId: offer.conversationId,
+        logicalMessageId: offer.logicalMessageId,
+        assetId: offer.assetId,
+        filename: offer.filename,
+        state: 'failed',
+        detail
+      });
+      if (remembered) await publishGeneratedAssetDownloadResult(generatedAssetDownloads[offer.id]).catch(() => false);
+    };
     let result;
     try {
       result = await tabReply(tab.id, {
@@ -2881,7 +2927,7 @@ async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
         conversationId: offer.conversationId,
         logicalMessageId: offer.logicalMessageId,
         assetId: offer.assetId
-      }, { documentId: source.documentId });
+      }, { documentId: required.documentId });
     } catch { result = null; }
     let selected = null;
     try {
@@ -2895,10 +2941,7 @@ async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
           url.searchParams.get('id') === offer.assetId && ownsDocument(source)) selected = url.href;
     } catch { selected = null; }
     if (!selected) {
-      await call('/generated-assets/result', { method: 'POST', body: JSON.stringify({
-        id: offer.id, claimToken: claim.claimToken, state: 'failed',
-        detail: 'The exact generated image is unavailable in its current ChatGPT page.'
-      }) }).catch(() => undefined);
+      await fail('The exact generated image is unavailable in its current ChatGPT page.');
       continue;
     }
     let browserDownloadId = null;
@@ -2910,13 +2953,9 @@ async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
         saveAs: false
       });
     } catch { browserDownloadId = null; }
-    // The signed URL dies with this block. Only the browser receipt crosses suspension.
     selected = null;
     if (!Number.isInteger(browserDownloadId) || browserDownloadId < 0) {
-      await call('/generated-assets/result', { method: 'POST', body: JSON.stringify({
-        id: offer.id, claimToken: claim.claimToken, state: 'failed',
-        detail: 'Chrome refused the original image download.'
-      }) }).catch(() => undefined);
+      await fail('Chrome refused the original image download.');
       continue;
     }
     const custody = {
@@ -2930,17 +2969,17 @@ async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
       state: 'started',
       detail: null
     };
-    generatedAssetDownloads[offer.id] = custody;
-    try { await persistLive(); }
-    catch {
-      delete generatedAssetDownloads[offer.id];
+    if (!await rememberGeneratedAssetDownload(custody)) {
       await call('/generated-assets/result', { method: 'POST', body: JSON.stringify({
         id: offer.id, claimToken: claim.claimToken, state: 'unconfirmed',
         detail: 'Chrome accepted the download, but receipt custody could not be saved.'
       }) }).catch(() => undefined);
       continue;
     }
-    await publishGeneratedAssetDownloadResult(custody).catch(() => false);
+    await reconcileGeneratedAssetDownload(generatedAssetDownloads[offer.id]).catch(() => false);
+    if (generatedAssetDownloads[offer.id]?.state === 'started') {
+      await publishGeneratedAssetDownloadResult(generatedAssetDownloads[offer.id]).catch(() => false);
+    }
   }
 }
 
@@ -2961,10 +3000,23 @@ async function maintainOnce() {
     .filter((tab) => tab && (tab.discarded === true || tab.frozen === true))
     .map(conversationForTab)
     .filter(Boolean))];
+  const generatedAssetDocuments = observedTabs.flatMap(tab => {
+    if (!Number.isInteger(tab?.id) || tab.discarded === true || tab.frozen === true) return [];
+    const key = String(tab.id);
+    const owner = registeredDocuments[key];
+    const conversationId = conversationForTab(tab);
+    const source = { tab: tab.id, documentId: tabDocuments[key], navigationEpoch: tabEpochs[key] };
+    if (!cleanConversationId(conversationId) || tabConversations[key] !== conversationId ||
+        !owner || owner.documentId !== source.documentId || !Number.isSafeInteger(owner.epoch) ||
+        !ownsDocument(source)) return [];
+    return [{ conversationId, tab: tab.id, documentId: source.documentId,
+      documentGeneration: owner.epoch, spaEpoch: source.navigationEpoch }];
+  }).slice(0, 64);
   const reply = await call('/status', { method: 'POST', body: JSON.stringify({
     openConversations,
     stalledConversations,
-    generatedAssetDownloadIds: Object.keys(generatedAssetDownloads).slice(-MAX_GENERATED_ASSET_DOWNLOADS)
+    generatedAssetDownloadIds: Object.keys(generatedAssetDownloads),
+    generatedAssetDocuments
   }) });
   if (intent !== connectionEpoch || !token || disconnected) return;
   if (!reply.ok || !reply.data) { await activeTabs?.revoke(); return; }

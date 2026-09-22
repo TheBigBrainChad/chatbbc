@@ -23,12 +23,20 @@ export interface GeneratedAssetDownloadBatch {
   items: GeneratedAssetDownloadItem[];
 }
 
+export interface GeneratedAssetDownloadDocument {
+  tab: number;
+  documentId: string;
+  documentGeneration: number;
+  spaEpoch: number;
+}
+
 export interface GeneratedAssetDownloadOffer {
   id: string;
   conversationId: string;
   logicalMessageId: string;
   assetId: string;
   filename: string;
+  document: GeneratedAssetDownloadDocument;
 }
 
 export interface GeneratedAssetDownloadClaim extends GeneratedAssetDownloadOffer {
