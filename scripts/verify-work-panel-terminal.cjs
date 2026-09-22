@@ -96,7 +96,7 @@ app.whenReady().then(async () => {
 
     // 1. The strip carries the three tabs, and the terminal is a tenant of the work panel's body.
     assert.deepEqual(await js(`[...document.querySelectorAll('[data-work-tab]')].map(n=>n.dataset.workTab)`),
-      ['files', 'agents', 'terminal']);
+      ['files', 'agents', 'terminal', 'inspector', 'plan', 'session']);
     await js(`document.querySelector('[data-work-tab="terminal"]').click()`);
     await until('ids.length===1');
     assert.equal(await js('document.getElementById("workspaceTerminal").parentElement.id'), 'workPanelBody');

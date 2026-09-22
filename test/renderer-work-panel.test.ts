@@ -44,7 +44,7 @@ describe('the work panel', () => {
     expect(host.querySelectorAll('#workPanel')).toHaveLength(1);
     expect(work.panel.parentElement).toBe(host);
     expect([...work.panel.querySelectorAll<HTMLElement>('[data-work-tab]')].map(node => node.dataset.workTab))
-      .toEqual(['files', 'agents', 'terminal']);
+      .toEqual(['files', 'agents', 'terminal', 'inspector', 'plan', 'session']);
   });
 
   it('gives every tenant the shared resize owner, and only that one', () => {
@@ -227,5 +227,111 @@ describe('the terminal tab', () => {
     pane.querySelector<HTMLElement>('.work-panel-resize')!.dispatchEvent(new dom.window.MouseEvent('dblclick'));
     expect(dom.window.localStorage.getItem('chatbbc.workbench-width')).toBeNull();
     expect(dom.window.localStorage.getItem('chatbbc.work-panel-width')).toBe('640');
+  });
+});
+
+describe('workbench selection', () => {
+  function mount(work: WorkPanel, name: 'files' | 'agents' | 'terminal' | 'inspector' | 'plan' | 'session', beforeReplace?: (selection: { tab: string; ownerKey: string }) => boolean) {
+    const root = document.createElement('aside');
+    root.hidden = true;
+    const show = vi.fn(() => { root.hidden = false; });
+    const hide = vi.fn(() => { root.hidden = true; });
+    work.register(name, { element: root, show, hide, ...(beforeReplace ? { beforeReplace } : {}) });
+    return { root, show, hide };
+  }
+
+  it('carries inspector, plan, and session after the original tenants', () => {
+    const work = createWorkPanel({ host });
+    expect([...work.panel.querySelectorAll<HTMLElement>('[data-work-tab]')].map(node => node.dataset.workTab))
+      .toEqual(['files', 'agents', 'terminal', 'inspector', 'plan', 'session']);
+  });
+
+  it('preserves editor draft and PTY while switching tenants', () => {
+    const work = createWorkPanel({ host });
+    const files = mount(work, 'files');
+    const terminal = mount(work, 'terminal');
+    const agents = mount(work, 'agents');
+    const editor = document.createElement('textarea');
+    files.root.append(editor);
+    const screen = document.createElement('pre');
+    terminal.root.append(screen);
+
+    work.select({ tab: 'files', ownerKey: 'project:a' });
+    editor.value = 'changed';
+    work.select({ tab: 'terminal', ownerKey: 'project:a' });
+    screen.textContent = 'echo alive';
+    work.select({ tab: 'agents', ownerKey: 'project:a' });
+    work.select({ tab: 'files', ownerKey: 'project:a' });
+    expect(editor.value).toBe('changed');
+    expect(files.root.isConnected).toBe(true);
+    work.select({ tab: 'terminal', ownerKey: 'project:a' });
+    expect(screen.textContent).toContain('alive');
+    expect(terminal.root.isConnected).toBe(true);
+    expect(agents.root.isConnected).toBe(true);
+  });
+
+  it('closes on Escape and returns focus to the exact trigger', () => {
+    const work = createWorkPanel({ host });
+    mount(work, 'files');
+    const trigger = document.createElement('button');
+    host.append(trigger);
+    trigger.focus();
+    work.select({ tab: 'files', ownerKey: 'project:a' }, trigger);
+    expect(work.panel.hidden).toBe(false);
+    work.panel.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(work.panel.hidden).toBe(true);
+    expect(dom.window.document.activeElement).toBe(trigger);
+  });
+
+  it('uses an overlay below the wide breakpoint and a split at wide width', () => {
+    host.getBoundingClientRect = () => ({ width: 800, height: 700, top: 0, left: 0, right: 800, bottom: 700, x: 0, y: 0, toJSON() { return {}; } }) as DOMRect;
+    const work = createWorkPanel({ host });
+    mount(work, 'files');
+    work.select({ tab: 'files', ownerKey: 'project:a' });
+    expect(work.panel.classList.contains('is-overlay')).toBe(true);
+    host.getBoundingClientRect = () => ({ width: 1400, height: 700, top: 0, left: 0, right: 1400, bottom: 700, x: 0, y: 0, toJSON() { return {}; } }) as DOMRect;
+    work.refresh();
+    expect(work.panel.classList.contains('is-overlay')).toBe(false);
+  });
+
+  it('still switches tabs when a tenant would refuse a different owner', () => {
+    const work = createWorkPanel({ host });
+    const files = mount(work, 'files', () => false);
+    const terminal = mount(work, 'terminal', () => false);
+    work.select({ tab: 'files', ownerKey: 'project:a' });
+    work.select({ tab: 'terminal', ownerKey: 'project:a' });
+    expect(terminal.root.hidden).toBe(false);
+    expect(files.root.hidden).toBe(true);
+  });
+
+  it('keeps the current owner when the tenant refuses replacement', () => {
+    const work = createWorkPanel({ host });
+    let allow = false;
+    mount(work, 'files', () => allow);
+    work.select({ tab: 'files', ownerKey: 'project:a' });
+    work.select({ tab: 'files', ownerKey: 'project:b' });
+    expect(work.selection()?.ownerKey).toBe('project:a');
+    allow = true;
+    work.select({ tab: 'files', ownerKey: 'project:b' });
+    expect(work.selection()?.ownerKey).toBe('project:b');
+  });
+
+  it('rejects an inspector payload from a replaced transcript origin', async () => {
+    const { createOutputInspector } = await import('../src/renderer/output-inspector.js');
+    const inspector = createOutputInspector();
+    inspector.select({ sessionId: 'A', generation: 1, origin: 8 });
+    inspector.select({ sessionId: 'B', generation: 2, origin: 1 });
+    inspector.resolve(
+      { sessionId: 'A', generation: 1, origin: 8 },
+      { payloadId: 'late', title: 'from A', kind: 'message' }
+    );
+    expect(inspector.isEmpty()).toBe(true);
+    inspector.resolve(
+      { sessionId: 'B', generation: 2, origin: 1 },
+      { payloadId: 'live', title: 'from B', kind: 'artifact', detail: 'meta' }
+    );
+    expect(inspector.isEmpty()).toBe(false);
+    expect(inspector.element.textContent).toContain('from B');
+    expect(inspector.element.textContent).not.toContain('from A');
   });
 });

@@ -19,7 +19,12 @@
 .work-panel-body { flex: 1; min-width: 0; min-height: 0; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
 /* One cell, three tenants: whichever is showing fills it. The column owns the left edge now, so a
    hosted pane drops the border it carried as a top-level column. */
-.work-panel-body > :is(.file-panel, .agent-panel, .workspace-terminal) { grid-area: 1 / 1; border-left: 0; border-top: 0; }
+.work-panel-body > :is(.file-panel, .agent-panel, .workspace-terminal, .output-inspector) { grid-area: 1 / 1; border-left: 0; border-top: 0; }
+.work-panel.is-overlay { position: fixed; z-index: 40; inset-block: 0; inset-inline-end: 0; width: min(var(--work-panel-width, 360px), 92vw); box-shadow: 0 18px 48px var(--shadow); }
+.output-inspector { min-width: 0; min-height: 0; overflow: auto; background: var(--glass-high, var(--page)); color: var(--ink); }
+.output-inspector-title { margin: 0; padding: 12px 14px 0; font-size: calc(14px * var(--text-scale, 1)); }
+.output-inspector-meta, .output-inspector-detail { margin: 0; padding: 8px 14px; color: var(--ink-muted, var(--soft)); font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); }
+.output-inspector-actions { display: flex; gap: 8px; padding: 8px 14px 14px; }
 .agent-panel { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--page); }
 .agent-panel-header { display: flex; align-items: center; gap: 10px; padding: 16px 20px; border-bottom: 1px solid var(--line); }
 .agent-panel-header strong { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 550; }

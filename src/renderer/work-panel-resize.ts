@@ -4,10 +4,17 @@ const MIGRATED_KEY = 'chatbbc.workbench-width.migrated';
 const MIN_WIDTH = 280;
 const MIN_MAIN_WIDTH = 360;
 
+export const WORKBENCH_SPLIT_MIN = 1100;
+
+/** Wide hosts keep the resizable split. Medium and narrow hosts use the overlay. */
+export function workbenchMode(width: number): 'split' | 'overlay' {
+  return width >= WORKBENCH_SPLIT_MIN ? 'split' : 'overlay';
+}
+
 function migrateWorkbenchWidth(view: Window | null | undefined): void {
-  const storage = view?.localStorage;
-  if (!storage) return;
   try {
+    const storage = view?.localStorage;
+    if (!storage) return;
     if (storage.getItem(MIGRATED_KEY) === '1') return;
     if (storage.getItem(STORAGE_KEY) == null) {
       const legacy = storage.getItem(LEGACY_KEY);

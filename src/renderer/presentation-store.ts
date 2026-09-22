@@ -1,6 +1,6 @@
 import type { AppState } from '../shared/types.js';
 
-export type WorkbenchTab = 'files' | 'agents' | 'terminal';
+export type WorkbenchTab = 'files' | 'agents' | 'terminal' | 'inspector' | 'plan' | 'session';
 
 /** Process-memory projection. Durable facts stay with their main-process owners. */
 export interface PresentationState {

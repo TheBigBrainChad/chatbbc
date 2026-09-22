@@ -92,6 +92,7 @@ app.whenReady().then(async () => {
     await js("document.querySelector('.terminal-tab .btn-icon').click()");
     assert.equal((await js(`window.api.terminalWrite(${JSON.stringify(first)}, 'echo nope\\r')`)).ok, false);
     assert.deepEqual(await js('errors'), []);
+    // hiddenPanelContinuity is this drawer's proof that hiding the tenant keeps the same PTY.
     const result = { actualPty: true, projectCwd: true, persistentEnvironmentAndCd: true, keyboardInput: true, hiddenPanelContinuity: true, multipleTabs: true, ctrlC: true, exitCode: 7, closeRetiresShell: true, geometry };
     fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(result, null, 2)); console.log(JSON.stringify(result));
   } finally { win.destroy(); win = null; await server.close(); await backend.flushDurable(); }

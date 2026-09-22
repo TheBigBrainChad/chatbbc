@@ -111,11 +111,18 @@ export async function createProjectCodeEditor(options: {
     ]
   });
 
+  let destroyed = false;
+  let retained = options.text;
   return {
     view,
     language: description?.name ?? 'Plain text',
-    getValue: () => view.state.sliceDoc(),
-    focus: () => view.focus(),
-    destroy: () => view.destroy()
+    getValue: () => destroyed ? retained : view.state.sliceDoc(),
+    focus: () => { if (!destroyed) view.focus(); },
+    destroy: () => {
+      if (destroyed) return;
+      retained = view.state.sliceDoc();
+      destroyed = true;
+      view.destroy();
+    }
   };
 }
