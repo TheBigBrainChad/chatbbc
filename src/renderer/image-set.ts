@@ -1,8 +1,9 @@
 import { el, reconcileChildren, run } from './dom.js';
+import { preserveTimelineViewport } from './timeline-scroll.js';
 import { t, ui } from './i18n.js';
 import { imageStorageButton } from './image-storage.js';
 import { localDataUrl, localImageDataUrl } from './rich-image.js';
-import { imageSetsForTimeline, type ImageSetImage, type ImageSetView } from '../shared/chronology.js';
+import { IMAGE_SET_METADATA_LIMIT, imageSetsForTimeline, type ImageSetImage, type ImageSetView } from '../shared/chronology.js';
 
 export { imageSetsForTimeline, type ImageSetImage, type ImageSetView };
 
@@ -198,29 +199,43 @@ export function hydrateImageSetHeroes(galleries: readonly HTMLElement[], session
   }
 }
 
-/** Ask for the exact responses on screen, then hydrate the hero of each resulting set. */
-export async function adoptImageSets(scope: ParentNode, sessionId: string, current: () => boolean, previewCurrent: () => boolean = current): Promise<void> {
+/** Ask for the exact responses on screen, then hydrate the hero of each resulting set.
+ * The metadata read is capped at 64 ids per call, so a longer visible page is requested in successive batches.
+ * `preserveReadingPosition` runs around the membership write: those rows arrive after the timeline has already restored scroll. */
+export async function adoptImageSets(
+  scope: ParentNode,
+  sessionId: string,
+  current: () => boolean,
+  previewCurrent: () => boolean = current,
+  preserveReadingPosition?: () => () => void
+): Promise<void> {
   const galleries = [...scope.querySelectorAll<HTMLElement>('.generated-image-gallery')];
   if (!previewCurrent() || !window.api) return;
   const load = window.api.getSessionImageSets;
-  let sets: ImageSetView[] = [];
+  const sets: ImageSetView[] = [];
   if (typeof load === 'function') {
-    const responseIds = [...new Set(galleries.map(gallery => gallery.querySelector<HTMLElement>(':scope > .ev-native_image')?.dataset.imageMessage).filter((id): id is string => !!id))].slice(0, 64);
-    if (responseIds.length) {
+    const responseIds = [...new Set(galleries.map(gallery => gallery.querySelector<HTMLElement>(':scope > .ev-native_image')?.dataset.imageMessage).filter((id): id is string => !!id))];
+    for (let offset = 0; offset < responseIds.length; offset += IMAGE_SET_METADATA_LIMIT) {
+      if (!previewCurrent()) return;
       try {
-        const reply = await load(sessionId, responseIds);
-        if (reply?.ok && reply.data && Array.isArray(reply.data.sets)) sets = reply.data.sets;
-      } catch { sets = []; }
+        const reply = await load(sessionId, responseIds.slice(offset, offset + IMAGE_SET_METADATA_LIMIT));
+        if (reply?.ok && reply.data && Array.isArray(reply.data.sets)) sets.push(...reply.data.sets);
+      } catch { /* This batch keeps the rows already painted. */ }
     }
   }
   if (!previewCurrent()) return;
   if (current()) {
-    const byId = new Map(sets.map(set => [set.responseId, set]));
-    for (const gallery of galleries) {
-      if (!gallery.isConnected && !gallery.parentElement) continue;
-      const responseId = gallery.querySelector<HTMLElement>(':scope > .ev-native_image')?.dataset.imageMessage;
-      const set = responseId ? byId.get(responseId) : undefined;
-      if (set) applyImageSetMembers(gallery, set, { sessionId, current: previewCurrent });
+    const restore = preserveReadingPosition?.() ?? (() => undefined);
+    try {
+      const byId = new Map(sets.map(set => [set.responseId, set]));
+      for (const gallery of galleries) {
+        if (!gallery.isConnected && !gallery.parentElement) continue;
+        const responseId = gallery.querySelector<HTMLElement>(':scope > .ev-native_image')?.dataset.imageMessage;
+        const set = responseId ? byId.get(responseId) : undefined;
+        if (set) applyImageSetMembers(gallery, set, { sessionId, current: previewCurrent });
+      }
+    } finally {
+      restore();
     }
   }
   hydrateImageSetHeroes(galleries.filter(gallery => gallery.isConnected || gallery.parentElement !== null), sessionId, previewCurrent);
@@ -235,7 +250,13 @@ async function canonicalMembers(owner: ImageSetViewerOwner): Promise<HTMLElement
       const reply = await load(owner.sessionId, [responseId]);
       const sets = reply?.ok && reply.data && Array.isArray(reply.data.sets) ? reply.data.sets : [];
       const set = sets.find(item => item.responseId === responseId);
-      if (set && owner.current() && owner.row.isConnected) applyImageSetMembers(gallery, set, owner);
+      if (set && owner.current() && owner.row.isConnected) {
+        const timeline = gallery.closest<HTMLElement>('#timeline');
+        const pane = timeline?.closest<HTMLElement>('#chatBody');
+        const restore = timeline && pane ? preserveTimelineViewport(pane, timeline) : () => undefined;
+        try { applyImageSetMembers(gallery, set, owner); }
+        finally { restore(); }
+      }
     } catch { /* Resident rows remain the visible set. */ }
   }
   return membersOf(owner.row.isConnected ? owner.row : gallery?.querySelector<HTMLElement>('.ev-native_image') ?? owner.row);

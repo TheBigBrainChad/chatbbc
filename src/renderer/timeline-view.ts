@@ -882,7 +882,9 @@ export function createTimelineView(options: TimelineViewOptions): TimelineView {
     const token = kind === 'timeline' ? ++timelineImageSetEpoch : ++previewImageSetEpoch;
     const previewCurrent = () => alive ? alive() : options.sessionId() === ownerId && options.generation() === generation;
     const current = () => (kind === 'timeline' ? token === timelineImageSetEpoch : token === previewImageSetEpoch) && previewCurrent();
-    void adoptImageSets(scope, ownerId, current, previewCurrent);
+    void adoptImageSets(scope, ownerId, current, previewCurrent, kind === 'timeline'
+      ? () => preserveTimelineViewport(options.pane(), options.timeline())
+      : undefined);
   }
 
   return {

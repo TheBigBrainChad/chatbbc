@@ -1312,38 +1312,6 @@ it('groups one response across metadata and keeps a different response separate'
   expect(galleries[1]?.querySelector('.image-set-bar')).toBeNull();
 });
 
-it('keeps one response whole when a member is outside the resident page, then restores it after another session', async () => {
-  const app = await boot([]);
-  const messageId = 'response-a';
-  const resident = { providerAssetId: 'file-resident', origin: 1, previewStatus: 'available' as const, hasPreview: true,
-    previewAssetId: 'abcdef12.bin', previewMime: 'image/webp' as const, width: 20, height: 10 };
-  const evicted = { providerAssetId: 'file-evicted', origin: 2, previewStatus: 'pending' as const, hasPreview: false, width: 8, height: 8 };
-  let phase: 'A' | 'B' = 'A';
-  const getImage = vi.fn(async (_sessionId: string, _assetId: string) => ({ ok: true, data: 'data:image/webp;base64,UklGRgAAAAA=' }));
-  (app.w as any).api.getSessionImage = getImage;
-  (app.w as any).api.getSessionImageSets = vi.fn(async () => ({ ok: true, data: {
-    truncated: false,
-    sets: [{ responseId: messageId, origin: 1, completeness: 'partial' as const, images: phase === 'A' ? [resident, evicted] : [resident] }]
-  } }));
-  const image = (seq: number): SessionEvent => ({ seq, time: T0 + seq, source: 'extension', kind: 'native_image',
-    messageId, providerAssetId: 'file-resident', providerRole: 'tool', previewStatus: 'available', width: 20, height: 10,
-    asset: { id: 'abcdef12.bin', mimeType: 'image/webp', bytes: 12 } });
-  await app.append([image(1)]);
-  const gallery = app.w.document.querySelector('.generated-image-gallery')!;
-  expect(gallery.querySelectorAll('.ev-native_image')).toHaveLength(2);
-  expect(gallery.textContent).toContain('2 images');
-  expect(getImage.mock.calls.map(call => call[1])).toEqual(['abcdef12.bin']);
-  phase = 'B';
-  await app.append([image(2)]);
-  expect(app.w.document.querySelector('.generated-image-gallery')?.querySelectorAll('.ev-native_image')).toHaveLength(1);
-  expect(app.w.document.querySelector('.image-set-bar')).toBeNull();
-  phase = 'A';
-  await app.append([image(3)]);
-  expect(app.w.document.querySelector('.generated-image-gallery')?.querySelectorAll('.ev-native_image')).toHaveLength(2);
-  expect(app.w.document.querySelector('.generated-image-gallery')?.textContent).toContain('2 images');
-  expect(getImage.mock.calls.every(call => call[1] === 'abcdef12.bin')).toBe(true);
-});
-
 it('retains one exact-message gallery when only one image gains a proven turn', async () => {
   const app = await boot([]);
   const first: SessionEvent = { seq: 1, time: T0, source: 'extension', kind: 'native_image',
@@ -4286,5 +4254,167 @@ describe('conversation stage', () => {
     stage.dispose();
     expect(richFocusStatus('A', longId)).toBeNull();
     expect(richFocusStatus('B', messageId)).toBeNull();
+  });
+
+  it('pages a split response into the resident window and restores it after A → B → A', async () => {
+    const stage = await stageFor(outboxStub());
+    const setA = {
+      responseId: 'response-a', origin: 1, completeness: 'partial' as const,
+      images: [
+        { providerAssetId: 'file-older', origin: 1, previewStatus: 'available' as const, hasPreview: true,
+          previewAssetId: 'abcdef12.bin', previewMime: 'image/webp' as const, width: 20, height: 10 },
+        { providerAssetId: 'file-newer', origin: 3, previewStatus: 'available' as const, hasPreview: true,
+          previewAssetId: 'fedcba98.bin', previewMime: 'image/webp' as const, width: 12, height: 8 }
+      ]
+    };
+    const setB = {
+      responseId: 'response-b', origin: 1, completeness: 'complete' as const,
+      images: [
+        { providerAssetId: 'file-b', origin: 1, previewStatus: 'pending' as const, hasPreview: false },
+        { providerAssetId: 'file-b-extra', origin: 2, previewStatus: 'pending' as const, hasPreview: false }
+      ]
+    };
+    let releaseB!: (value: unknown) => void;
+    const gateB = new Promise(resolve => { releaseB = resolve; });
+    const calls: Array<{ sessionId: string; responseIds: string[] }> = [];
+    const getImage = vi.fn(async (_sessionId: string, _assetId: string) => ({ ok: true, data: 'data:image/webp;base64,UklGRgAAAAA=' }));
+    (window as any).api = {
+      getSessionImage: getImage,
+      getSessionImageSets: (sessionId: string, responseIds: string[]) => {
+        calls.push({ sessionId, responseIds: [...responseIds] });
+        if (sessionId === 'B') return gateB;
+        return Promise.resolve({ ok: true, data: { truncated: false, sets: [setA] } });
+      }
+    };
+    const older: SessionEvent = { seq: 1, time: T0, source: 'extension', kind: 'native_image',
+      messageId: 'response-a', providerAssetId: 'file-older', providerRole: 'tool',
+      previewStatus: 'available', width: 20, height: 10,
+      asset: { id: 'abcdef12.bin', mimeType: 'image/webp', bytes: 12 } };
+    const newer: SessionEvent = { seq: 3, time: T0 + 3, source: 'extension', kind: 'native_image',
+      messageId: 'response-a', providerAssetId: 'file-newer', providerRole: 'tool',
+      previewStatus: 'available', width: 12, height: 8,
+      asset: { id: 'fedcba98.bin', mimeType: 'image/webp', bytes: 12 } };
+    const foreign: SessionEvent = { seq: 1, time: T0, source: 'extension', kind: 'native_image',
+      messageId: 'response-b', providerAssetId: 'file-b', providerRole: 'tool', previewStatus: 'pending' };
+
+    stage.select('A', 1);
+    expect(stage.update({ sessionId: 'A', events: [newer], total: 2, mode: 'open' }, 1)).toBe(true);
+    await settle();
+    const timeline = document.getElementById('timeline')!;
+    let gallery = timeline.querySelector('.generated-image-gallery')!;
+    expect([...gallery.querySelectorAll<HTMLElement>('.ev-native_image')].map(row => row.dataset.imageAsset)).toEqual(['file-older', 'file-newer']);
+    expect(gallery.querySelector<HTMLElement>('[data-image-asset="file-older"]')!.dataset.timelineKey).toBeUndefined();
+    expect(gallery.querySelector<HTMLElement>('[data-image-asset="file-newer"]')!.dataset.timelineKey).toBeTruthy();
+    expect(gallery.textContent).toContain('2 images');
+    expect(getImage.mock.calls.map(call => call[1])).toEqual(['abcdef12.bin']);
+
+    expect(stage.olderOrigin()).toBe(3);
+    expect(stage.update({ sessionId: 'A', events: [older], total: 2, mode: 'prepend', boundary: 3 }, 1)).toBe(true);
+    await settle();
+    expect(stage.browsing()).toBe(true);
+    gallery = timeline.querySelector('.generated-image-gallery')!;
+    const paged = [...gallery.querySelectorAll<HTMLElement>('.ev-native_image')];
+    expect(paged.map(row => row.dataset.imageAsset)).toEqual(['file-older', 'file-newer']);
+    expect(paged.every(row => Boolean(row.dataset.timelineKey))).toBe(true);
+    expect(getImage.mock.calls.every(call => call[1] === 'abcdef12.bin')).toBe(true);
+
+    stage.select('B', 2);
+    expect(stage.update({ sessionId: 'B', events: [foreign], total: 1, mode: 'open' }, 2)).toBe(true);
+    expect(timeline.querySelector('[data-image-asset="file-newer"]')).toBeNull();
+    expect(timeline.querySelector('[data-image-asset="file-b"]')).not.toBeNull();
+
+    stage.select('A', 3);
+    expect(stage.update({ sessionId: 'A', events: [older, newer], total: 2, mode: 'open' }, 3)).toBe(true);
+    await settle();
+    expect([...timeline.querySelectorAll<HTMLElement>('.ev-native_image')].map(row => row.dataset.imageAsset)).toEqual(['file-older', 'file-newer']);
+    releaseB({ ok: true, data: { truncated: false, sets: [setB] } });
+    await settle();
+    expect(timeline.querySelector('[data-image-asset="file-b"]')).toBeNull();
+    expect(timeline.querySelector('[data-image-asset="file-b-extra"]')).toBeNull();
+    expect([...timeline.querySelectorAll<HTMLElement>('.ev-native_image')].map(row => row.dataset.imageAsset)).toEqual(['file-older', 'file-newer']);
+    expect(calls.some(call => call.sessionId === 'B' && call.responseIds.includes('response-b'))).toBe(true);
+    expect(calls.filter(call => call.sessionId === 'A').every(call => call.responseIds.includes('response-a'))).toBe(true);
+  });
+
+  it('requests every visible response when the page needs more than one metadata batch', async () => {
+    const stage = await stageFor(outboxStub());
+    const calls: string[][] = [];
+    (window as any).api = {
+      getSessionImageSets: async (_sessionId: string, responseIds: string[]) => {
+        calls.push([...responseIds]);
+        return { ok: true, data: { truncated: false, sets: responseIds.map(id => ({
+          responseId: id, origin: 1, completeness: 'complete' as const,
+          images: id === 'response-64'
+            ? [
+              { providerAssetId: 'file-64', origin: 1, previewStatus: 'pending' as const, hasPreview: false },
+              { providerAssetId: 'file-64-extra', origin: 2, previewStatus: 'pending' as const, hasPreview: false }
+            ]
+            : [{ providerAssetId: `file-${id}`, origin: 1, previewStatus: 'pending' as const, hasPreview: false }]
+        })) } };
+      },
+      getSessionImage: async () => ({ ok: true, data: null })
+    };
+    const events: SessionEvent[] = Array.from({ length: 65 }, (_, index) => ({
+      seq: index + 1, time: T0 + index, source: 'extension', kind: 'native_image',
+      messageId: `response-${index}`, providerAssetId: `file-${index}`, providerRole: 'tool', previewStatus: 'pending'
+    }));
+    stage.select('A', 1);
+    expect(stage.update({ sessionId: 'A', events, total: 65, mode: 'open' }, 1)).toBe(true);
+    await settle();
+    expect(calls.map(batch => batch.length)).toEqual([64, 1]);
+    expect(calls[1]).toEqual(['response-64']);
+    const galleries = [...document.querySelectorAll<HTMLElement>('.generated-image-gallery')];
+    expect(galleries).toHaveLength(65);
+    expect(galleries[64]!.querySelectorAll('.ev-native_image')).toHaveLength(2);
+    expect(galleries[0]!.querySelectorAll('.ev-native_image')).toHaveLength(1);
+  });
+
+  it('keeps the reader on the same row when a missing image arrives above it', async () => {
+    const stage = await stageFor(outboxStub());
+    const pane = document.getElementById('chatBody')!;
+    const timeline = document.getElementById('timeline')!;
+    Object.defineProperty(pane, 'clientHeight', { configurable: true, value: 400 });
+    Object.defineProperty(pane, 'scrollHeight', { configurable: true, value: 2000 });
+    let release!: (value: unknown) => void;
+    const pending = new Promise(resolve => { release = resolve; });
+    (window as any).api = {
+      getSessionImageSets: () => pending,
+      getSessionImage: async () => ({ ok: true, data: null })
+    };
+    const proto = dom?.window.HTMLElement.prototype;
+    if (!proto) throw new Error('timeline fixture missing');
+    const original = proto.getBoundingClientRect;
+    proto.getBoundingClientRect = function () {
+      if (this === pane) return { top: 0, bottom: 400, height: 400, left: 0, right: 100, width: 100, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+      const blocks = [...timeline.querySelectorAll<HTMLElement>('.ev-native_image, [data-timeline-key]')]
+        .filter(node => node.matches('.ev-native_image') || !node.querySelector('.ev-native_image'));
+      const index = blocks.indexOf(this);
+      if (index < 0) return { top: 0, bottom: 0, height: 0, left: 0, right: 0, width: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+      const top = index * 100 - pane.scrollTop;
+      return { top, bottom: top + 100, height: 100, left: 0, right: 100, width: 100, x: 0, y: top, toJSON: () => ({}) } as DOMRect;
+    };
+    try {
+      const image: SessionEvent = { seq: 2, time: T0 + 2, source: 'extension', kind: 'native_image',
+        messageId: 'response-a', providerAssetId: 'file-newer', providerRole: 'tool', previewStatus: 'pending' };
+      stage.select('A', 1);
+      expect(stage.update({ sessionId: 'A', events: [image, answer(3, 'reading', 'Reading here')], total: 2, mode: 'open' }, 1)).toBe(true);
+      pane.scrollTop = 100;
+      const reading = [...timeline.querySelectorAll<HTMLElement>('[data-timeline-key]')].find(row => row.textContent?.includes('Reading here'))!;
+      expect(reading.getBoundingClientRect().top).toBe(0);
+      release({ ok: true, data: { truncated: false, sets: [{
+        responseId: 'response-a', origin: 1, completeness: 'partial',
+        images: [
+          { providerAssetId: 'file-older', origin: 1, previewStatus: 'pending', hasPreview: false },
+          { providerAssetId: 'file-newer', origin: 2, previewStatus: 'pending', hasPreview: false }
+        ]
+      }] } });
+      await settle();
+      expect(timeline.querySelectorAll('.generated-image-gallery .ev-native_image')).toHaveLength(2);
+      expect(pane.scrollTop).toBe(200);
+      expect(reading.isConnected).toBe(true);
+      expect(reading.getBoundingClientRect().top).toBe(0);
+    } finally {
+      proto.getBoundingClientRect = original;
+    }
   });
 });
