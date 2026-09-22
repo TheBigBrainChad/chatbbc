@@ -228,6 +228,7 @@ export async function saveGeneratedAsset(input: SaveGeneratedAssetRequest): Prom
 interface OriginalTransfer {
   id: string;
   sessionId: string;
+  conversationId: string;
   assetId: string;
   logicalMessageId: string;
   chunks: Buffer[];
@@ -238,7 +239,7 @@ interface OriginalTransfer {
 
 const originalTransfers = new Map<string, OriginalTransfer>();
 
-export function beginOriginalTransfer(record: { sessionId: string; assetId: string; logicalMessageId: string }): string {
+export function beginOriginalTransfer(record: { sessionId: string; conversationId: string; assetId: string; logicalMessageId: string }): string {
   if (originalTransfers.size >= GENERATED_ASSET_LIMITS.maxConcurrentTransfers) {
     throw new GeneratedAssetError('transfer_capacity');
   }
@@ -246,6 +247,7 @@ export function beginOriginalTransfer(record: { sessionId: string; assetId: stri
   originalTransfers.set(id, {
     id,
     sessionId: record.sessionId,
+    conversationId: record.conversationId,
     assetId: record.assetId,
     logicalMessageId: record.logicalMessageId,
     chunks: [],
@@ -254,6 +256,15 @@ export function beginOriginalTransfer(record: { sessionId: string; assetId: stri
     fail: null
   });
   return id;
+}
+
+export function pendingOriginalTransfers(): Array<{ id: string; conversationId: string; logicalMessageId: string; assetId: string }> {
+  return [...originalTransfers.values()].map(transfer => ({
+    id: transfer.id,
+    conversationId: transfer.conversationId,
+    logicalMessageId: transfer.logicalMessageId,
+    assetId: transfer.assetId
+  }));
 }
 
 export function appendOriginalChunk(id: string, chunk: Buffer): void {

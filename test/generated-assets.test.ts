@@ -146,7 +146,7 @@ describe('generated asset retrieval', () => {
   it('saves original bytes only after the chunk digest matches', async () => {
     const { session, roots, png } = await fixture();
     const [row] = await listGeneratedAssets(session.id);
-    const id = beginOriginalTransfer({ sessionId: session.id, assetId: 'file_AuroraOriginal0001', logicalMessageId: responseId });
+    const id = beginOriginalTransfer({ sessionId: session.id, conversationId: '11111111-2222-4333-8444-555555555555', assetId: 'file_AuroraOriginal0001', logicalMessageId: responseId });
     const pending = waitOriginalTransfer(id);
     appendOriginalChunk(id, png.subarray(0, 40));
     appendOriginalChunk(id, png.subarray(40));
