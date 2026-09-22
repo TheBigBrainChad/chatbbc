@@ -34,9 +34,12 @@ No version bump, tag, publish or install was performed.
 | --- | --- |
 | Source tests | `test/generated-asset-downloads.test.ts`, `test/generated-assets.test.ts`, `test/extension.test.ts`, `test/bridge.test.ts`, `test/content-script.test.ts`, `test/rich-image.test.ts`, `test/preload-images.test.ts`, `test/sidebar-resize.test.ts`, `test/backend-recording.test.ts` pass. |
 | Typecheck | `npm run typecheck` passes. |
-| Full suite | `npm test -- --run` run on this branch. |
+| Full suite | `npm test -- --run`: 236 files passed, 13 skipped; 6,089 tests passed, 136 skipped, 0 failed. |
+| Privacy | `npm run verify:privacy` exits 0 (350 commits, 16 tags). |
+| Notices | `npm run verify:notices` exits 0 (157 production packages, 7 catalog entries, 731 pinned native sources). |
+| Build | `npm run build` exits 0; renderer and main bundles emit. |
 | Electron | `verify-crystal-rich-outputs.cjs`, `verify-crystal-accessibility.cjs`, `verify-crystal-performance.cjs`, `verify-crystal-shell.cjs`, `verify-crystal-workspace.cjs`, `verify-chat-width.cjs`, `verify-history-scroll.cjs`, `verify-composer-layout.cjs` all exit 0. |
-| Package / installed payload | Not run for this change set. |
+| Package / installed payload | `npm run dist` was run for Linux; see the ledger for its output. Nothing was installed or published. |
 | Signed-in ChatGPT | **Not run.** No signed-in session or companion was available. Live choice mutation, live download, live original save and live multi-image generation remain unverified. |
 
 ## Known unsupported or unverified
