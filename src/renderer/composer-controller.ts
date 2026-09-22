@@ -132,8 +132,8 @@ export function createComposerController<T extends { name: string } = ComposerAt
       options.notify?.(t('Attach up to 20 files and 512 MB per message'));
       return false;
     }
-    if (options.imageDrafts.has(captured.key)) options.imageDrafts.get(captured.key)!.push(...rows);
-    else options.imageDrafts.set(captured.key, [...rows]);
+    // A new array: sendComposer snapshots the previous one and compares identity.
+    options.imageDrafts.set(captured.key, combined);
     options.onAttachments?.();
     return true;
   };

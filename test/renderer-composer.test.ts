@@ -341,6 +341,23 @@ describe('composer draft ownership', () => {
     composer.dispose();
   });
 
+  it('replaces the attachment array so an in-flight send can see the draft change', async () => {
+    const imageDrafts = new Map<string, Attachment[]>();
+    const prior = [{ name: 'kept.png' }];
+    imageDrafts.set('A', prior);
+    const composer = createComposerController({
+      imageDrafts,
+      stageFiles: async () => attachmentsA
+    });
+    composer.update(owner('A', 1), stateA);
+    const snapshot = imageDrafts.get('A')!;
+    await composer.importFiles(files);
+    expect(imageDrafts.get('A')).toEqual([{ name: 'kept.png' }, ...attachmentsA]);
+    expect(imageDrafts.get('A')).not.toBe(snapshot);
+    expect(snapshot).toEqual(prior);
+    composer.dispose();
+  });
+
   it('keeps focused dirty text when a state push arrives', () => {
     const dom = new JSDOM('<!doctype html><textarea id="chatInput"></textarea>', { url: 'https://local.test/' });
     vi.stubGlobal('document', dom.window.document);
