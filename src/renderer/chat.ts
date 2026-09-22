@@ -18,6 +18,7 @@ import type { GoalModel } from '../shared/goal-reasoning.js';
 import { renderGoalReasoning } from './goal-reasoning.js';
 import { retireRichImageViewer } from './rich-image.js';
 import { createConversationStage, type ConversationStage } from './conversation-stage.js';
+import { createComposerController, type ComposerController } from './composer-controller.js';
 import { TIMELINE_PAGE_ROWS, timelinePageRows, type TimelinePage } from './timeline-view.js';
 import { createSidebarOrder, type SidebarOrder } from './sidebar-order.js';
 import {
@@ -96,6 +97,8 @@ let deps: Deps;
 let visible = false;
 /** The mounted transcript: which session its rows belong to, and the rows themselves. */
 let stage: ConversationStage;
+/** Composer events and the draft-import fence. Sibling of the stage; #composer stays mounted. */
+let composerController: ComposerController | undefined;
 
 let sessions: SessionSummary[] = [];
 let pressure = new Map<string, TokenPressure>();
@@ -232,6 +235,7 @@ function syncDraftKey(): void {
     key,
     generation: presentationStore.getState().draft.generation
   });
+  composerController?.update(composerDraftOwner(), {});
 }
 let selectionReportSequence = 0;
 let reportedSessionId: string | null = null;
@@ -271,6 +275,7 @@ function replaceComposerDraft(): void {
     generation: presentationStore.getState().draft.generation + 1
   });
   skillPicker?.close();
+  composerController?.update(composerDraftOwner(), {});
 }
 let pendingNewInput: { id: string; generation: number } | null = null;
 let agentPanel: ReturnType<typeof createAgentPanel> | null = null;
@@ -2163,7 +2168,7 @@ function selectNewChat(projectId: string | null = null): void {
     $('composer').animate?.([{ opacity: 0.45 }, { opacity: 1 }], { duration: 150, easing: 'ease-out' });
   }
   ui($<HTMLTextAreaElement>('chatInput'), 'placeholder', () => projectId ? t("Message in {0}…", [projects.find(project => project.id === projectId)?.name ?? 'project']) : t("Ask anything…"));
-  $<HTMLTextAreaElement>('chatInput').focus();
+  composerController?.focus();
 }
 
 
@@ -2295,7 +2300,7 @@ function restoreDraftToComposer(entry: InputEntry): void {
   input.value = entry.text;
   if (entry.images?.length) imageDrafts.set(draftKey(), [...entry.images]);
   if (entry.attachments?.length) imageDrafts.set(draftKey(), [...(entry.images ?? []), ...entry.attachments]);
-  rememberDraft(); skillPicker?.restore(); paintComposerImages(deliveryHost); paintDeliveryControls(deliveryHost); input.focus();
+  rememberDraft(); skillPicker?.restore(); paintComposerImages(deliveryHost); paintDeliveryControls(deliveryHost); composerController?.focus();
 }
 
 /**
@@ -2366,6 +2371,7 @@ export function initChat(next: Deps): void {
   // One mounted transcript for the page's life. A stage from a previous init is retired rather
   // than left holding rows nothing draws into.
   stage?.dispose();
+  composerController?.dispose();
   stage = createConversationStage({
     pane: () => $('chatBody'),
     timeline: () => $('timeline'),
@@ -2433,27 +2439,23 @@ export function initChat(next: Deps): void {
     const config = deps.state()?.config;
     if (config) paintContextMeter(sessions.find(session => session.id === selectedId()) ?? null, config, confirmedComposerModel());
   });
-  $('queueAtFinish').addEventListener('click', () => {
+  const onQueueAtFinish = () => {
     if ($('queueAtFinish').hidden) return;
     $<HTMLSelectElement>('sendMode').value = 'after-turn';
     const input = $<HTMLTextAreaElement>('chatInput');
     if (input.value.trim() || imageDrafts.get(draftKey())?.length) void sendComposer('finish');
     else { input.focus(); paintDeliveryControls(deliveryHost); }
-  });
-  $('sendOptions').addEventListener('click', event => {
-    const button = (event.target as HTMLElement).closest<HTMLElement>('[data-delivery]');
-    if (!button || $('sendOptions').hidden) return;
-    $<HTMLSelectElement>('sendMode').value = button.dataset.delivery!;
+  };
+  const onChooseDelivery = (mode: string) => {
+    $<HTMLSelectElement>('sendMode').value = mode;
     paintDeliveryControls(deliveryHost);
-  });
-  $('automationSwitch').addEventListener('click', (event) => {
-    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-mode]');
-    if (!button || button.disabled) return;
+  };
+  const onChooseAutomation = (mode: string) => {
     const select = $<HTMLSelectElement>('chatAutomation');
-    select.value = button.dataset.mode!;
+    select.value = mode;
     select.dispatchEvent(new Event('change'));
-  });
-  $('chatAutomation').addEventListener('change', async () => {
+  };
+  const onAutomationChanged = async () => {
     goalIntentGeneration++;
     const select = $<HTMLSelectElement>('chatAutomation');
     cancelGoalRequest();
@@ -2480,8 +2482,8 @@ export function initChat(next: Deps): void {
       if (id === selectedId() && generation === selectionGeneration()) { delete select.dataset.edited; void refreshSessionControls(); }
       paintAutomationSwitch();
     }
-  });
-  $('loopDelivery').addEventListener('change', async () => {
+  };
+  const onLoopDeliveryChanged = async () => {
     const id = selectedId(), generation = selectionGeneration();
     const select = $<HTMLSelectElement>('loopDelivery');
     const opening = id && pendingComposerInputs.find(row => row.sessionId === id && row.opening && !row.deliveredAt && ['queued', 'browser'].includes(row.state));
@@ -2504,11 +2506,10 @@ export function initChat(next: Deps): void {
       select.disabled = false;
       if (id === selectedId() && generation === selectionGeneration()) void refreshSessionControls();
     }
-  });
-  $('sessionObjective').addEventListener('input', () => { cancelGoalRequest(); goalIntentGeneration++; $('sessionObjective').dataset.edited = 'true'; delete $('sessionObjective').dataset.saved; paintTaskActions(); });
-  $('sessionObjectiveMode').addEventListener('change', () => { cancelGoalRequest(); goalIntentGeneration++; $('sessionObjective').dataset.edited = 'true'; delete $('sessionObjective').dataset.saved; paintTaskActions(); });
-  for (const buttonId of ['saveSessionObjective'] as const) {
-    $(buttonId).addEventListener('click', async () => {
+  };
+  const onObjectiveEdited = () => { cancelGoalRequest(); goalIntentGeneration++; $('sessionObjective').dataset.edited = 'true'; delete $('sessionObjective').dataset.saved; paintTaskActions(); };
+  const onSaveObjective = async () => {
+    const buttonId = 'saveSessionObjective' as const;
       const id = selectedId();
       const objective = $<HTMLTextAreaElement>('sessionObjective');
       if (!id) {
@@ -2568,23 +2569,86 @@ export function initChat(next: Deps): void {
         delete button.dataset.busy; paintTaskActions();
         if (selectedId() === id) void refreshSessionControls();
       }
-    });
-  }
-  for (const [buttonId, cancel] of [['compactSession', false], ['cancelCompaction', true]] as const) {
-    $(buttonId).addEventListener('click', async () => {
-      const id = selectedId(); if (!id) return;
-      const button = $<HTMLButtonElement>(buttonId); button.disabled = true;
-      try { await run(cancel ? api.cancelSessionCompaction(id) : api.compactSession(id)); }
-      finally { button.disabled = false; if (selectedId() === id) void refreshSessionControls(); }
-    });
-  }
+    
+  };
+  const onCompact = async (cancel: boolean) => {
+    const id = selectedId(); if (!id) return;
+    const button = $<HTMLButtonElement>(cancel ? 'cancelCompaction' : 'compactSession'); button.disabled = true;
+    try { await run(cancel ? api.cancelSessionCompaction(id) : api.compactSession(id)); }
+    finally { button.disabled = false; if (selectedId() === id) void refreshSessionControls(); }
+  };
+  const onGenerateFinishGoal = async () => {
+    const button = $<HTMLButtonElement>('generateFinishGoal'), id = selectedId(), turnId = controlledTurnId;
+    if (!id || !turnId || button.hidden || button.disabled || controlledSessionId !== id || controlledSelection !== selectionGeneration()) return;
+    const owner = `${id}:${turnId}`;
+    button.dataset.busy = owner; paintDeliveryControls(deliveryHost);
+    try { await run(api.generateFinishGoal(id, turnId)); }
+    finally {
+      if (button.dataset.busy === owner) delete button.dataset.busy;
+      if (selectedId() === id) void refreshSessionControls();
+      else paintDeliveryControls(deliveryHost);
+    }
+  };
+  const onComposerInput = () => {
+    const hasText = !!authoredComposerText().trim();
+    const plan = taskPlans.get(draftKey());
+    if (plan && !plan.stages && (plan.requestId || !hasText)) {
+      cancelTaskPlan();
+      if (hasText) taskPlans.set(draftKey(), { text: '', requestId: null, stages: null, sending: false, progress: null, error: null });
+    }
+    paintDeliveryControls(deliveryHost); paintTaskActions();
+  };
+  const onComposerKeydown = (event: KeyboardEvent) => {
+    if (skillPicker?.keydown(event)) return;
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (currentPreparedPlan() || authoredComposerText().trim() || imageDrafts.get(draftKey())?.length) $<HTMLFormElement>('composer').requestSubmit(); }
+  };
+  const onCreatePlan = () => { if (taskPlans.has(draftKey())) cancelTaskPlan(); else void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); };
+  const onComposerSubmit = (event: Event) => { event.preventDefault(); if (currentPreparedPlan()) void sendPreparedPlan(); else if (taskPlans.has(draftKey())) { if (!$('createPlan').dataset.busy) void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); } else void sendComposer(); };
+  skillPicker = initSkills({ input: $<HTMLTextAreaElement>('chatInput'), host: $('skillPicker'),
+    openButton: $('composerSkills'), addButton: $('composerAddSkill'),
+    selectedHost: $('composerSelectedSkills'), owner: () => `${draftKey()}:${presentationStore.getState().draft.generation}`,
+    scope: () => ({ sessionId: selectedId(), projectId: selectedLocalProject(sessionHost)?.id ?? selectedProjectId }),
+    draft: () => inputDrafts.get(draftKey()), saveDraft: text => inputDrafts.set(draftKey(), text),
+    list: scope => api.skillLibrary(scope), command: name => {
+      if (name === 'plan') { $('createPlan').click(); return; }
+      if (name === 'compact') { $('compactSession').click(); return; }
+      const automation = $<HTMLSelectElement>('chatAutomation'); automation.value = name;
+      automation.dispatchEvent(new Event('change', { bubbles: true }));
+    } });
+  skillPicker.restore();
+  composerController = createComposerController({
+    imageDrafts,
+    inputDrafts,
+    taskPlans,
+    pendingInputs: () => pendingComposerInputs,
+    stageFiles: async files => (await run(api.dropFiles([...files]))) ?? null,
+    chooseFiles: () => run(api.chooseFiles()),
+    attachText: async text => (await run(api.attachText(text))) ?? null,
+    notify: message => { toast(message); },
+    text: () => $<HTMLTextAreaElement>('chatInput').value,
+    onAttachments: () => { paintComposerImages(deliveryHost); },
+    surface: {
+      queueAtFinish: onQueueAtFinish,
+      chooseDelivery: onChooseDelivery,
+      chooseAutomation: onChooseAutomation,
+      automationChanged: onAutomationChanged,
+      loopDeliveryChanged: onLoopDeliveryChanged,
+      objectiveEdited: onObjectiveEdited,
+      saveObjective: onSaveObjective,
+      compact: onCompact,
+      generateFinishGoal: onGenerateFinishGoal,
+      composerInput: onComposerInput,
+      composerKeydown: onComposerKeydown,
+      settingsToggled: paintTaskActions,
+      createPlan: onCreatePlan,
+      submit: onComposerSubmit
+    }
+  });
+  composerController.update(composerDraftOwner(), {});
   const appendImages = (owner: ComposerDraftOwner, chosen: InputAttachment[] | null | undefined): boolean => {
     if (!chosen?.length) return false;
     if (!ownsComposerDraft(owner)) { toast(t("Files were not added because the draft changed.")); return false; }
-    const combined = [...(imageDrafts.get(owner.key) ?? []), ...chosen];
-    if (combined.length > 20 || combined.reduce((sum, file) => sum + ('size' in file ? file.size : 0), 0) > 512 * 1024 * 1024) { toast(t("Attach up to 20 files and 512 MB per message")); return false; }
-    imageDrafts.set(owner.key, combined); paintComposerImages(deliveryHost);
-    return true;
+    return composerController!.acceptAttachments(owner, chosen);
   };
   filePanel = createFilePanel({
     host: workHost, toggle: fileToggle,
@@ -2609,22 +2673,6 @@ export function initChat(next: Deps): void {
   // pane, so its tab stays reachable exactly as its header button always was.
   work.register('terminal', workspaceTerminal);
   work.refresh();
-  $('attachImages').addEventListener('click', async () => {
-    const owner = composerDraftOwner();
-    appendImages(owner, await run(api.chooseFiles()));
-  });
-  skillPicker = initSkills({ input: $<HTMLTextAreaElement>('chatInput'), host: $('skillPicker'),
-    openButton: $('composerSkills'), addButton: $('composerAddSkill'),
-    selectedHost: $('composerSelectedSkills'), owner: () => `${draftKey()}:${presentationStore.getState().draft.generation}`,
-    scope: () => ({ sessionId: selectedId(), projectId: selectedLocalProject(sessionHost)?.id ?? selectedProjectId }),
-    draft: () => inputDrafts.get(draftKey()), saveDraft: text => inputDrafts.set(draftKey(), text),
-    list: scope => api.skillLibrary(scope), command: name => {
-      if (name === 'plan') { $('createPlan').click(); return; }
-      if (name === 'compact') { $('compactSession').click(); return; }
-      const automation = $<HTMLSelectElement>('chatAutomation'); automation.value = name;
-      automation.dispatchEvent(new Event('change', { bubbles: true }));
-    } });
-  skillPicker.restore();
   // Same scope as the picker above, so the page and the composer can never disagree about which
   // skills exist: a repo skill in the open project belongs on both, or on neither.
   skillsLibrary = initSkillsLibrary({
@@ -2636,49 +2684,7 @@ export function initChat(next: Deps): void {
   // Loaded when the settings sheet is opened (`showView`), not here: a launch that never opens
   // Settings should not pay for the scan.
   skillsLibraryScopeKey = JSON.stringify(skillsLibraryScope());
-  $('generateFinishGoal').addEventListener('click', async () => {
-    const button = $<HTMLButtonElement>('generateFinishGoal'), id = selectedId(), turnId = controlledTurnId;
-    if (!id || !turnId || button.hidden || button.disabled || controlledSessionId !== id || controlledSelection !== selectionGeneration()) return;
-    const owner = `${id}:${turnId}`;
-    button.dataset.busy = owner; paintDeliveryControls(deliveryHost);
-    try { await run(api.generateFinishGoal(id, turnId)); }
-    finally {
-      if (button.dataset.busy === owner) delete button.dataset.busy;
-      if (selectedId() === id) void refreshSessionControls();
-      else paintDeliveryControls(deliveryHost);
-    }
-  });
-  $('composer').addEventListener('dragover', event => {
-    if (!event.dataTransfer?.types.some(type => type === 'text/plain') || event.dataTransfer.types.includes('Files')) return;
-    event.preventDefault(); event.dataTransfer.dropEffect = 'copy';
-  });
-  $('composer').addEventListener('drop', async event => {
-    if (!event.dataTransfer?.types.some(type => type === 'text/plain') || event.dataTransfer.types.includes('Files')) return;
-    event.preventDefault();
-    const text = event.dataTransfer.getData('text/plain'), owner = composerDraftOwner();
-    if (text) { const file = await run(api.attachText(text)); if (file) appendImages(owner, [file]); }
-  });
-  window.addEventListener('paste', async event => {
-    const files = Array.from(event.clipboardData?.files ?? []).filter(file => file.type.startsWith('image/'));
-    if (!files.length) return;
-    event.preventDefault();
-    const owner = composerDraftOwner();
-    if (files.length + (imageDrafts.get(owner.key)?.length ?? 0) > 20) { toast('Attach up to 20 files per message'); return; }
-    appendImages(owner, await run(api.dropFiles(files)));
-  });
-  window.addEventListener('dragover', event => {
-    if ((event.target as Element | null)?.closest?.('#foldersCard') || !event.dataTransfer?.types?.includes?.('Files')) return;
-    event.preventDefault(); event.dataTransfer.dropEffect = 'copy';
-  });
-  window.addEventListener('drop', async event => {
-    if ((event.target as Element | null)?.closest?.('#foldersCard') || !event.dataTransfer?.types?.includes?.('Files')) return;
-    event.preventDefault();
-    const files = Array.from(event.dataTransfer.files), owner = composerDraftOwner();
-    if (!files.length) return;
-    if (files.length + (imageDrafts.get(owner.key)?.length ?? 0) > 20) { toast('Attach up to 20 files per message'); return; }
-    appendImages(owner, await run(api.dropFiles(files)));
-  });
-  api.onWriteSession?.(id => { selectSession(id); $<HTMLTextAreaElement>('chatInput').focus(); });
+  api.onWriteSession?.(id => { selectSession(id); composerController?.focus(); });
   $('newChat').addEventListener('click', () => {
     selectNewChat();
   });
@@ -2698,29 +2704,8 @@ export function initChat(next: Deps): void {
     } finally { button.disabled = false; }
   });
   $('settingsSearch').addEventListener('input', () => applySettingsFilter());
-  const composerMenus = [...document.querySelectorAll<HTMLDetailsElement>('.composer-menu, .session-controls')];
-  document.addEventListener('click', (event) => {
-    for (const menu of composerMenus) if (!menu.contains(event.target as Node) || ((event.target as HTMLElement).closest('button') && !(event.target as HTMLElement).closest('[data-keep-menu]'))) menu.open = false;
-  });
-  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') for (const menu of composerMenus) menu.open = false; });
-  $('chatInput').addEventListener('input', () => {
-    const hasText = !!authoredComposerText().trim();
-    const plan = taskPlans.get(draftKey());
-    if (plan && !plan.stages && (plan.requestId || !hasText)) {
-      cancelTaskPlan();
-      if (hasText) taskPlans.set(draftKey(), { text: '', requestId: null, stages: null, sending: false, progress: null, error: null });
-    }
-    paintDeliveryControls(deliveryHost); paintTaskActions();
-  });
-  $('chatInput').addEventListener('keydown', (event) => {
-    if (skillPicker?.keydown(event)) return;
-    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (currentPreparedPlan() || authoredComposerText().trim() || imageDrafts.get(draftKey())?.length) $<HTMLFormElement>('composer').requestSubmit(); }
-  });
-  $('composerSettings').addEventListener('toggle', paintTaskActions);
   initContextMeter();
   initComposerStatusLine();
-  $('createPlan').addEventListener('click', () => { if (taskPlans.has(draftKey())) cancelTaskPlan(); else void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); });
-  $('composer').addEventListener('submit', (event) => { event.preventDefault(); if (currentPreparedPlan()) void sendPreparedPlan(); else if (taskPlans.has(draftKey())) { if (!$('createPlan').dataset.busy) void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); } else void sendComposer(); });
 
   $('sessionList').closest<HTMLElement>('.scroll')?.addEventListener('scroll', () => maybePageSessions({
     visible, cursor: sessionPageCursor, loaded: sessions.length, total: sessionTotal,

@@ -1,13 +1,26 @@
 // Real Chromium and production renderer; isolated API fixture, no provider or live outbox.
-const { app, BrowserWindow } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
+if (!process.versions.electron) {
+  const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
+  const switches = process.platform === 'linux' ? ['--ozone-platform=x11', '--disable-gpu', '--in-process-gpu'] : [];
+  const result = require('node:child_process').spawnSync(require('electron'), [...switches, __filename, ...process.argv.slice(2)], { env, encoding: 'utf8', windowsHide: true });
+  process.stdout.write(result.stdout || ''); process.stderr.write(result.stderr || '');
+  process.exit(result.status ?? 1);
+}
+const { app, BrowserWindow } = require('electron');
 const root = path.resolve(__dirname, '..');
-const output = process.argv[2] ? path.resolve(root, process.argv[2]) : path.join(root, '.tmp/message-send-20260918/ui');
+const outputArg = process.argv.slice(2).find(arg => !arg.startsWith('-') && path.resolve(arg) !== __filename);
+const output = outputArg ? path.resolve(root, outputArg) : path.join(root, '.tmp/message-send-20260918/ui');
 app.setPath('userData', path.join(output, 'runtime'));
 
 app.whenReady().then(async () => {
+  const page = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8');
+  const statusStart = page.indexOf('id="composerStatusBody"');
+  const statusBody = page.slice(statusStart, page.indexOf('id="activeGoalRow"', statusStart) + 'id="activeGoalRow"'.length);
+  const dockIds = [...statusBody.matchAll(/id="([^"]+)"/g)].map(match => match[1]);
+  assert.deepEqual(dockIds, ['composerStatusBody', 'agentPlan', 'recoveryStatus', 'taskPlanPreview', 'finishQueue', 'activeGoalRow']);
   const { createServer } = await import('vite');
   const fixture = `
     addEventListener('error', event => window.fixtureError = event.message);
@@ -21,9 +34,13 @@ app.whenReady().then(async () => {
       compaction:{auto:false,autoTokens:300000},multiAgent:{enabled:false,maxWorkers:2},
       goal:{enabled:false,model:'fixture',reasoning:'default',prompt:'Fixture'}
     };
-    const state={config,hasApiKey:false,hasGoalKey:false,resolvedBinary:null,bundledTunnelVersion:null,
+    const state={config,hasApiKey:false,hasGoalKey:false,hasCustomProviderKey:false,resolvedBinary:null,bundledTunnelVersion:null,
+      platform:{family:'linux',name:'Linux',desktopAutomation:false},
+      secureStorage:{available:true,backend:'secret-service',detail:null},
       status:{state:'disconnected',detail:'',publicUrl:null,localUrl:null,health:null,surfaces:[]},
-      bridge:{running:false,paired:false,present:false,port:0},update:{current:'fixture',stage:'idle'}};
+      bridge:{running:false,paired:false,present:false,port:0},update:{current:'fixture',stage:'idle'},
+      omarchy:{generation:0,theme:null,diagnostic:null},
+      glass:{mode:'atmospheric',transparent:false,diagnostic:null},glassGeneration:0};
     const session={id:'queue-fixture-session',title:'Message delivery',conversationId:'fixture-chat',chatIds:['fixture-chat'],
       selectedModel:{conversationId:'fixture-chat',model:'gpt-5.6-sol',reasoningEffort:'high',observedAt:1},
       startedAt:1,updatedAt:1,endedAt:null,events:0,userMessages:0,toolCalls:0,lastToolCallAt:null,
@@ -185,6 +202,21 @@ app.whenReady().then(async () => {
       fs.writeFileSync(path.join(output,'cancelled-history-'+width+'.png'),(await win.webContents.capturePage(undefined,{stayHidden:true,stayAwake:true})).toPNG());
       checks.push({historyWidth:width,...history});
     }
+    const crystal = await js(`(() => {
+      const dockBody = document.getElementById('composerStatusBody');
+      const ids = ['agentPlan', 'recoveryStatus', 'taskPlanPreview', 'finishQueue', 'activeGoalRow'];
+      const nodes = ids.map(id => document.getElementById(id));
+      const chronological = nodes.every((node, index) => !!node && node.parentElement === dockBody &&
+        (index === 0 || (nodes[index - 1].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) === Node.DOCUMENT_POSITION_FOLLOWING));
+      const composer = getComputedStyle(document.getElementById('composer'));
+      const field = getComputedStyle(document.getElementById('chatInput'));
+      return { chronological, position: composer.position, shadow: composer.boxShadow, fieldSizing: field.fieldSizing };
+    })()`);
+    assert.equal(crystal.chronological, true);
+    assert.equal(crystal.position, 'relative');
+    assert.notEqual(crystal.shadow, 'none');
+    assert.equal(crystal.fieldSizing, 'content');
+    checks.push('chronological floating composer');
     for (const count of [7, 10]) {
       await js(`queueFixture.files=Array.from({length:${count}},(_,i)=>({id:'image-'+i,name:'reference-'+i+'.png',mimeType:'image/png',size:42}))`);
       await click('#attachImages');

@@ -1,11 +1,30 @@
 // Isolated Chromium layout probe using the production extension status styles.
-const { app, BrowserWindow } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
+if (!process.versions.electron) {
+  const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
+  const result = require('node:child_process').spawnSync(require('electron'), [__filename], { env, encoding: 'utf8', windowsHide: true });
+  process.stdout.write(result.stdout || ''); process.stderr.write(result.stderr || '');
+  process.exit(result.status ?? 1);
+}
+const { app, BrowserWindow } = require('electron');
 app.setPath('userData', fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'cos-goal-layout-')));
 
 app.whenReady().then(async () => {
+  const composerCss = fs.readFileSync(path.join(__dirname, '../src/renderer/styles/composer.css'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '../src/renderer/index.html'), 'utf8');
+  assert.match(composerCss, /field-sizing:\s*content/);
+  const body = html.slice(html.indexOf('id="composerStatusBody"'), html.indexOf('id="composer"'));
+  let at = -1;
+  for (const id of ['agentPlan', 'recoveryStatus', 'taskPlanPreview', 'finishQueue', 'activeGoalRow']) {
+    const next = body.indexOf('id="' + id + '"');
+    assert.ok(next > at, id + ' left the chronological composer dock');
+    at = next;
+  }
+  assert.match(composerCss, /\.composer \{[^}]*var\(--glass-high\)/);
+  assert.doesNotMatch(composerCss, /#activeGoalRow\s*\{[^}]*display:\s*none/);
+  assert.doesNotMatch(composerCss, /#recoveryStatus\s*\{[^}]*display:\s*none/);
   const win = new BrowserWindow({ show: false, width: 1100, height: 800,
     webPreferences: { sandbox: true, backgroundThrottling: false } });
   const css = fs.readFileSync(path.join(__dirname, '../extension/overlay.css'), 'utf8');
