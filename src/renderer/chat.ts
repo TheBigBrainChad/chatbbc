@@ -18,6 +18,7 @@ import type { GoalModel } from '../shared/goal-reasoning.js';
 import { renderGoalReasoning } from './goal-reasoning.js';
 import { retireRichImageViewer } from './rich-image.js';
 import { createConversationStage, type ConversationStage } from './conversation-stage.js';
+import { richFocusStatus } from './rich-focus-status.js';
 import { createComposerController, type ComposerController } from './composer-controller.js';
 import { TIMELINE_PAGE_ROWS, timelinePageRows, type TimelinePage } from './timeline-view.js';
 import { createSidebarOrder, type SidebarOrder } from './sidebar-order.js';
@@ -2391,6 +2392,7 @@ export function initChat(next: Deps): void {
         return current() && acknowledgedUiSelection?.generation === acknowledged.generation && reply.ok && reply.data === true;
       } catch { return false; }
     },
+    richFocusStatus,
     workerChat: agent => {
       const matches = sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId() && entry.origin.agentId === agent);
       return matches.length === 1 ? () => void agentPanel?.open(matches[0]!.id) : null;

@@ -3938,12 +3938,11 @@ describe('conversation stage', () => {
     message: text(body), final: true
   });
 
-  async function stageFor(
-    outbox: DeliveryHost,
-    richFocusStatus?: (messageId: string) => 'pending' | 'confirmed' | 'changed' | 'unavailable' | 'unconfirmed' | null
-  ) {
+  async function stageFor(outbox: DeliveryHost) {
     timelineFixture();
     const { createConversationStage } = await import('../src/renderer/conversation-stage.js');
+    const { clearRichFocusStatus, richFocusStatus } = await import('../src/renderer/rich-focus-status.js');
+    clearRichFocusStatus();
     return createConversationStage({
       pane: () => document.getElementById('chatBody')!,
       timeline: () => document.getElementById('timeline')!,
@@ -3954,7 +3953,7 @@ describe('conversation stage', () => {
       renderMessage: (_html, fallback) => el('p', 'msg', fallback),
       openOriginal: async () => false,
       workerChat: () => null,
-      ...(richFocusStatus ? { richFocusStatus } : {})
+      richFocusStatus
     });
   }
 
@@ -4064,7 +4063,7 @@ describe('conversation stage', () => {
     row.dataset.timelineOrigin = '2';
     row.append(view);
     const message = document.createElement('div');
-    message.dataset.timelineKey = `assistant_message\u0000${messageId}`;
+    message.dataset.timelineKey = `message:assistant_message\u0000${messageId}`;
     timeline.append(row, message);
     view.querySelector<HTMLButtonElement>('.rich-focus-open')!.click();
     const focused = document.querySelector<HTMLElement>('.rich-focus-stage')!;
@@ -4138,26 +4137,33 @@ describe('conversation stage', () => {
     const older = document.createElement('div');
     older.dataset.timelineOrigin = '2';
     older.append(renderRichResponse({ ...base, revision: 3 }, 'source'));
-    const newer = document.createElement('div');
-    newer.dataset.timelineOrigin = '8';
-    newer.append(renderRichResponse({
-      ...base, revision: 4,
-      nodes: [{ id: 'art1', kind: 'artifact', mode: 'semantic', title: 'Rev 4', html: null, media: [] }]
-    }, 'source'));
-    timeline.append(older, newer);
+    timeline.append(older);
     expect(stage.openRichFocus({
       sessionId: 'A', logicalMessageId: messageId, nodeId: 'art1', revision: 3, origin: 2
     })).toBe(true);
     const focused = document.querySelector<HTMLElement>('.rich-focus-stage')!;
+    expect(focused.dataset.shownRevision).toBe('3');
+    older.append(renderRichResponse({
+      ...base, revision: 4,
+      nodes: [{ id: 'art1', kind: 'artifact', mode: 'semantic', title: 'Rev 4', html: null, media: [] }]
+    }, 'source'));
+    const decoy = document.createElement('div');
+    decoy.dataset.timelineOrigin = '9';
+    decoy.append(renderRichResponse({
+      ...base, revision: 9,
+      nodes: [{ id: 'art1', kind: 'artifact', mode: 'semantic', title: 'Decoy', html: null, media: [] }]
+    }, 'source'));
+    timeline.append(decoy);
+    expect(stage.refreshRichFocus()).toBe('refreshed');
     expect(focused.dataset.shownRevision).toBe('4');
     expect(focused.querySelector('h2')?.textContent).toBe('Rev 4');
     expect(timeline.contains(older)).toBe(true);
-    expect(timeline.contains(newer)).toBe(true);
+    expect(older.querySelectorAll('.rich-response')).toHaveLength(2);
   });
 
   it('refreshes focused output when a timeline update brings the action result', async () => {
-    let status: 'pending' | 'confirmed' = 'pending';
-    const stage = await stageFor(outboxStub(), () => status);
+    const stage = await stageFor(outboxStub());
+    const { projectRichActionResult } = await import('../src/renderer/rich-focus-status.js');
     stage.select('A', 1);
     const messageId = 'assistant:working:exchange:1789552000000';
     const rich = {
@@ -4169,6 +4175,7 @@ describe('conversation stage', () => {
     };
     const event = { ...answer(2, messageId, 'Outline'), rich };
     const page = { sessionId: 'A', events: [event], total: 1, mode: 'open' as const };
+    projectRichActionResult(messageId, 'pending');
     expect(stage.update(page, 1)).toBe(true);
     const timeline = document.getElementById('timeline')!;
     expect(timeline.querySelector('.rich-response')?.getAttribute('data-rich-status')).toBe('pending');
@@ -4176,7 +4183,7 @@ describe('conversation stage', () => {
     const focused = document.querySelector<HTMLElement>('.rich-focus-stage')!;
     expect(focused.hidden).toBe(false);
     expect(focused.querySelector('[role="status"]')?.textContent).toBe('Pending');
-    status = 'confirmed';
+    projectRichActionResult(messageId, 'observed');
     expect(stage.update(page, 1)).toBe(true);
     expect(focused.hidden).toBe(false);
     expect(timeline.querySelector('.rich-response')?.getAttribute('data-rich-status')).toBe('confirmed');

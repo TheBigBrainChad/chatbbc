@@ -37,11 +37,17 @@ export function focusTimelineMessage(timeline: HTMLElement, messageId: string): 
   const row = [...timeline.querySelectorAll<HTMLElement>('[data-image-message]')]
     .find(candidate => candidate.dataset.imageMessage === messageId);
   if (row) return focusRow(row.closest<HTMLElement>('.generated-image-gallery') ?? row);
+  const message = timelineMessageRow(timeline, messageId);
+  return message ? focusRow(message) : false;
+}
+
+/** The transcript stamps `message:` plus the canonical kind. Tests may use the bare kind. */
+export function timelineMessageRow(timeline: HTMLElement, messageId: string): HTMLElement | null {
   const assistant = `assistant_message\u0000${messageId}`;
   const user = `user_message\u0000${messageId}`;
-  const message = [...timeline.querySelectorAll<HTMLElement>('[data-timeline-key]')]
-    .find(candidate => candidate.dataset.timelineKey === assistant || candidate.dataset.timelineKey === user);
-  return message ? focusRow(message) : false;
+  const keys = new Set([assistant, user, `message:${assistant}`, `message:${user}`]);
+  return [...timeline.querySelectorAll<HTMLElement>('[data-timeline-key]')]
+    .find(candidate => keys.has(candidate.dataset.timelineKey ?? '')) ?? null;
 }
 
 /** Capture the visible logical row for one synchronous reconciliation. No retained

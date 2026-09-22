@@ -15,6 +15,7 @@ import {
   type TimelinePaint,
   type TimelineView
 } from './timeline-view.js';
+import { timelineMessageRow } from './timeline-scroll.js';
 
 /**
  * The conversation stage: which session the transcript belongs to, and the mounted region all of
@@ -78,6 +79,8 @@ export interface ConversationStage {
   openRichFocus(target: RichFocusTarget): boolean;
   /** Close the focus stage and return to its transcript row. */
   closeRichFocus(): void;
+  /** Reread the loaded card. A newer copy in the same origin refreshes the open stage. */
+  refreshRichFocus(): 'closed' | 'refreshed' | 'current';
   /** Whether the resident window carries model activity after a timestamp. */
   hasLaterActivity(time: number): boolean;
   /** The resident window, chronological. */
@@ -111,21 +114,15 @@ function requestedFocus(event: Event): Omit<RichFocusTarget, 'sessionId'> | null
 
 /** Reread the card that is actually loaded. A requested revision never invents a newer tree. */
 function readRichFocus(timeline: HTMLElement, target: RichFocusTarget): RichFocusView | null {
-  let box: HTMLElement | null = null;
-  let card: HTMLElement | null = null;
-  let bestRevision = -1;
-  for (const candidate of timeline.querySelectorAll<HTMLElement>('.rich-response')) {
-    if (candidate.dataset.richMessageId !== target.logicalMessageId) continue;
-    const node = [...candidate.querySelectorAll<HTMLElement>('[data-rich-node-id]')]
-      .find(item => item.dataset.richNodeId === target.nodeId);
-    const revision = Number(candidate.dataset.richRevision);
-    if (!node || !Number.isSafeInteger(revision) || revision < 0) continue;
-    if (revision < bestRevision) continue;
-    bestRevision = revision;
-    box = candidate;
-    card = node;
-  }
-  if (!box || !card) return null;
+  const originRow = [...timeline.querySelectorAll<HTMLElement>('[data-timeline-origin]')]
+    .find(row => row.dataset.timelineOrigin === String(target.origin));
+  const scope = originRow ?? timelineMessageRow(timeline, target.logicalMessageId);
+  const card = scope ? [...scope.querySelectorAll<HTMLElement>('[data-rich-node-id]')]
+    .filter(node => node.dataset.richNodeId === target.nodeId
+      && node.closest<HTMLElement>('.rich-response')?.dataset.richMessageId === target.logicalMessageId)
+    .at(-1) : undefined;
+  const box = card?.closest<HTMLElement>('.rich-response') ?? null;
+  if (!scope || !card || !box || !scope.contains(box)) return null;
   const revision = Number(box.dataset.richRevision);
   if (!Number.isSafeInteger(revision) || revision < 0) return null;
   const mode = card.classList.contains('rich-artifact') ? 'artifact'
@@ -194,6 +191,7 @@ export function createConversationStage(options: ConversationStageOptions): Conv
     focusMessage: messageId => view.focusMessage(messageId),
     openRichFocus: target => openRichFocus(focus, target),
     closeRichFocus: () => closeRichFocus(focus),
+    refreshRichFocus: () => focus.refresh(),
     hasLaterActivity: time => view.hasLaterActivity(time),
     events: () => view.events(),
     setFilter: agent => view.setFilter(agent),
