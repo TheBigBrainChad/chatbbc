@@ -467,7 +467,7 @@ git commit -m "feat: migrate secondary surfaces to Crystal Studio"
 - Modify: `src/renderer/locales/es.json`
 - Modify: `src/renderer/locales/zh-CN.json`
 - Modify: `src/renderer/locales/zh-TW.json`
-- Modify: `src/renderer/styles/base.css`
+- Verify: `src/renderer/styles/base.css` (reduced motion already removes animation, transition, and smooth scrolling; do not rewrite that rule)
 - Modify: `src/renderer/styles/shell.css`
 - Modify: `src/renderer/styles/transcript.css`
 - Modify: `src/renderer/styles/composer.css`
@@ -503,7 +503,8 @@ Run: `npm test -- --run test/renderer-i18n.test.ts test/renderer-i18n-es.test.ts
 - [ ] **Step 3: Complete accessibility and localization fixes**
 
 Add missing `t()` bindings/translations, roving tabindex, focus return, logical edges, visible
-non-color focus, aria-live restraint, and reduced-motion rules. Do not translate authored/provider
+non-color focus, aria-live restraint, and reduced-motion rules. Verify the existing base.css
+reduced-motion rule; do not rewrite it when those three declarations are already present. Do not translate authored/provider
 content or retain detached nodes outside the existing WeakMap.
 
 - [ ] **Step 4: Exercise the complete ordinary flow**
