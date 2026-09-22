@@ -901,7 +901,7 @@ async function loadDetail(navigate = false, olderBefore?: number, newerFrom?: nu
   // or generation than the one it adopted: A → B → A retires B's page and A's earlier one here,
   // before either can reach the rows.
   const mode: TimelinePage['mode'] = incremental ? 'delta' : newerFrom !== undefined ? 'append' : prepend ? 'prepend' : 'open';
-  stage.update({
+  const accepted = stage.update({
     sessionId: wanted,
     events: detail.events,
     total: detail.total,
@@ -912,6 +912,11 @@ async function loadDetail(navigate = false, olderBefore?: number, newerFrom?: nu
     typeof detail.nextFrom === 'number'
       ? detail.nextFrom
       : detail.events.reduce((cursor, event) => Math.max(cursor, event.seq + 1), incremental ? detailCursor! : 0));
+  // Selection armed #inputQueue and hid #chatFoot until this page arrived. The outbox
+  // read can return first and paint while that wait is still on, and a later live delta
+  // is this same path, so it does not repair them. The accepted page releases both.
+  // Follow the bottom only for an opening page or a live delta.
+  if (accepted) paintDetail(mode === 'open' || mode === 'delta');
   void loadHandoff();
   // A burst can contain more than one renderer-sized page between coalesced notifications.
   // Drain it page by page rather than silently jumping the cursor or lifting the payload cap.

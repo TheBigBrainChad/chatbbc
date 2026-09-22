@@ -713,6 +713,54 @@ it('keeps the prior transcript inert until the selected detail arrives and fence
   expect(w.document.getElementById('timelineEmpty')!.hidden).toBe(true);
 });
 
+it('releases the queue and developer footer when the outbox returns before the session page', async () => {
+  const bEvents: SessionEvent[] = [
+    { seq: 1, time: T0, source: 'extension', kind: 'user_message', messageId: 'b-question', message: text('B QUESTION') }
+  ];
+  const first = summary([]);
+  const second = { ...summary(bEvents), id: '2026-09-02-test0002', title: 'Session B' };
+  const { w, live } = await boot([], true, [], [], { sessions: [first, second], developerMode: true });
+  const waiting: InputEntry = {
+    id: 'queued-for-b', sessionId: second.id, state: 'queued', owner: null, text: 'Waiting on B',
+    mode: 'auto', model: null, reasoningEffort: null, dueAt: T0, createdAt: T0, conversationId: 'chat-b'
+  };
+  live.inputs.push(waiting);
+  const api = (w as any).api;
+  const sessionReplies: Array<(value: unknown) => void> = [];
+  const inputReplies: Array<(value: unknown) => void> = [];
+  api.getSession = vi.fn((id: string, options?: { limit?: number }) => {
+    if (options?.limit === 1) {
+      const row = id === second.id ? second : first;
+      return Promise.resolve({ ok: true, data: { summary: row, events: [], total: 0, nextFrom: 0 } });
+    }
+    return new Promise(resolve => sessionReplies.push(resolve));
+  });
+  api.listInputs = vi.fn(() => new Promise(resolve => inputReplies.push(resolve)));
+
+  (w.document.querySelector(`#sessionList [data-id="${second.id}"]`) as HTMLElement).click();
+  expect(inputReplies).toHaveLength(1);
+  expect(sessionReplies).toHaveLength(1);
+  const queue = w.document.getElementById('inputQueue')!;
+  const foot = w.document.getElementById('chatFoot')!;
+  expect(queue.hasAttribute('inert')).toBe(true);
+  expect(foot.hidden).toBe(true);
+
+  // The outbox is a separate read. Returning it while the destination page is still pending
+  // must not be the last paint of the queue or the developer footer.
+  inputReplies[0]!({ ok: true, data: structuredClone(live.inputs) });
+  await settle();
+  expect(queue.hasAttribute('inert')).toBe(true);
+  expect(foot.hidden).toBe(true);
+
+  sessionReplies[0]!({ ok: true, data: { summary: second, events: bEvents, total: bEvents.length, nextFrom: 2 } });
+  await settle();
+  expect(w.document.getElementById('timeline')!.textContent).toContain('B QUESTION');
+  expect(w.document.getElementById('timeline')!.hasAttribute('inert')).toBe(false);
+  expect(queue.textContent).toContain('Waiting on B');
+  expect(queue.hasAttribute('inert')).toBe(false);
+  expect(foot.hidden).toBe(false);
+});
+
 it.each(['failed', 'empty', 'new-chat'] as const)('retires retained rows after a %s destination without a welcome flash', async outcome => {
   const rows: SessionEvent[] = [{ seq: 1, time: T0, source: 'extension', kind: 'user_message', messageId: 'a', message: text('Previous chat') }];
   const first = summary(rows), second = { ...summary([]), id: 'other', title: 'Other session' };
