@@ -39,7 +39,7 @@ No version bump, tag, publish or install was performed.
 | Notices | `npm run verify:notices` exits 0 (157 production packages, 7 catalog entries, 731 pinned native sources). |
 | Build | `npm run build` exits 0; renderer and main bundles emit. |
 | Electron | `verify-crystal-rich-outputs.cjs`, `verify-crystal-accessibility.cjs`, `verify-crystal-performance.cjs`, `verify-crystal-shell.cjs`, `verify-crystal-workspace.cjs`, `verify-chat-width.cjs`, `verify-history-scroll.cjs`, `verify-composer-layout.cjs` all exit 0. |
-| Package / installed payload | `npm run dist` was run for Linux; see the ledger for its output. Nothing was installed or published. |
+| Package / installed payload | `npm run dist` exits 0 for Linux x64 and arm64 (four artifacts). `scripts/smoke-packaged-runtime.mjs` exits 0. The packaged `resources/extension/background.js` contains the original-chunk route, the asar main bundle contains `generated_assets`, and the asar renderer bundle contains the focus control and download strings. Nothing was installed or published. |
 | Signed-in ChatGPT | **Not run.** No signed-in session or companion was available. Live choice mutation, live download, live original save and live multi-image generation remain unverified. |
 
 ## Known unsupported or unverified
