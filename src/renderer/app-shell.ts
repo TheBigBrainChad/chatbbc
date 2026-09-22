@@ -32,6 +32,8 @@ export interface AppShell {
   workbench: HTMLElement;
   setDestination(destination: AppDestination): void;
   setWorkbenchOpen(open: boolean): void;
+  /** When set, a rail click forwards here instead of calling setDestination. Roving tabindex and the drawer toggle stay local. */
+  setDestinationHandler(handler: ((destination: AppDestination) => void) | null): void;
   dispose(): void;
 }
 
@@ -58,6 +60,7 @@ export function createAppShell(options: {
   let collapse: ShellCollapse = 'wide';
   let navigatorTrigger: HTMLElement | null = roots.rail.querySelector<HTMLElement>('[data-destination="chats"]');
   let workbenchTrigger: HTMLElement | null = null;
+  let destinationHandler: ((destination: AppDestination) => void) | null = null;
   let disposed = false;
 
   const railButtons = (): HTMLButtonElement[] => APP_DESTINATIONS.flatMap(destination => {
@@ -151,13 +154,14 @@ export function createAppShell(options: {
     const destination = button.dataset.destination;
     const index = railButtons().indexOf(button);
     if (index >= 0) railButtons().forEach((item, i) => { item.tabIndex = i === index ? 0 : -1; });
-    setDestination(destination);
+    if (destination === 'files' || destination === 'agents') workbenchTrigger = button;
+    if (destinationHandler) destinationHandler(destination);
+    else setDestination(destination);
     if (destination === 'chats' && isDrawer(collapse)) {
       const open = app.dataset.navigatorOpen !== 'true';
       setNavigatorOpen(open);
       if (open) navigatorTrigger = button;
     }
-    if (destination === 'files' || destination === 'agents') workbenchTrigger = button;
   }
 
   function higherLayerOpen(): boolean {
@@ -219,6 +223,7 @@ export function createAppShell(options: {
     workbench: roots.workbench,
     setDestination,
     setWorkbenchOpen,
+    setDestinationHandler(handler) { destinationHandler = handler; },
     dispose() {
       if (disposed) return;
       disposed = true;

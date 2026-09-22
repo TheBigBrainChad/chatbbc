@@ -9,7 +9,7 @@ import { initSetupGuide } from './setup-guide.js';
 import { initAppearance } from './appearance.js';
 import { presentationStore } from './presentation-store.js';
 import { createAppShell } from './app-shell.js';
-import { createDestinationRouter, type Destination } from './destination-router.js';
+import { createDestinationRouter } from './destination-router.js';
 import { initPet } from './pet.js';
 import type { AppearanceSettings } from '../shared/appearance.js';
 /**
@@ -1929,12 +1929,7 @@ const destinationRouter = createDestinationRouter({
   store: presentationStore,
   showPage: page => showTab(page)
 });
-$('globalRail').addEventListener('click', (event) => {
-  const destination = (event.target as HTMLElement).closest<HTMLElement>('[data-destination]')?.dataset.destination;
-  if (destination === 'chats' || destination === 'files' || destination === 'agents' || destination === 'usage' || destination === 'settings') {
-    destinationRouter.show(destination as Destination);
-  }
-});
+appShell.setDestinationHandler(destination => destinationRouter.show(destination));
 
 void (async () => {
   await refresh();

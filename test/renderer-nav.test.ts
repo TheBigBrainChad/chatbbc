@@ -445,4 +445,49 @@ describe('destination router', () => {
     shell.dispose();
     dom.window.close();
   });
+
+  it('sends a rail click through one destination handler', async () => {
+    const { createDestinationRouter } = await import('../src/renderer/destination-router.js');
+    const { createAppShell } = await import('../src/renderer/app-shell.js');
+    const { dom, document } = mount();
+    const store = createPresentationStore(initialPresentationState());
+    const shell = createAppShell({
+      document,
+      store,
+      roots: {
+        rail: document.getElementById('globalRail')!,
+        navigator: document.getElementById('chatNavigator')!,
+        stage: document.getElementById('conversationStage')!,
+        workbench: document.getElementById('contextWorkbench')!
+      }
+    });
+    const router = createDestinationRouter({ shell, store, document });
+    let opens = 0;
+    store.subscribe(state => state.shell.workbench, workbench => { if (workbench.open) opens += 1; });
+    shell.setDestinationHandler(destination => router.show(destination));
+    document.querySelector<HTMLButtonElement>('[data-destination="files"]')!.click();
+    expect(opens).toBe(1);
+    expect(document.getElementById('appShell')!.dataset.workbenchOpen).toBe('true');
+    expect(document.querySelector('[data-destination="chats"]')!.getAttribute('aria-current')).toBe('page');
+    expect(document.querySelector('[data-destination="files"]')!.hasAttribute('aria-current')).toBe(false);
+    expect(router.current()).toBe('files');
+    expect(document.getElementById('appShell')!.dataset.screen).toBe('chat');
+    shell.dispose();
+    dom.window.close();
+  });
+
+  it('keeps secondary surfaces opaque until compositor glass is active', async () => {
+    const pages = await fs.readFile(path.resolve(__dirname, '../src/renderer/styles/pages.css'), 'utf8');
+    const dialogs = await fs.readFile(path.resolve(__dirname, '../src/renderer/styles/dialogs.css'), 'utf8');
+    expect(pages).toContain("[data-panel='setup']");
+    expect(pages).toContain("[data-panel='plugins']");
+    expect(pages).toContain(".plugin-connection:not(.is-configured)");
+    expect(pages).toContain("data-glass-mode='hyprland-blur'");
+    expect(pages).not.toContain('var(--glass-high, var(--card))');
+    const glassAt = pages.indexOf("data-glass-mode='hyprland-blur'");
+    expect(pages.indexOf('var(--glass-high)')).toBeGreaterThan(glassAt);
+    expect(dialogs).toContain('background: var(--card)');
+    expect(dialogs).toContain("data-glass-mode='transparent'");
+    expect(dialogs.indexOf('var(--glass-high)')).toBeGreaterThan(dialogs.indexOf('background: var(--card)'));
+  });
 });
