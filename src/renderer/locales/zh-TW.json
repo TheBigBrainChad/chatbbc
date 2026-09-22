@@ -1437,5 +1437,6 @@
   "plan {0}": "計畫 {0}",
   "planning": "正在規劃",
   "queue {0}": "佇列 {0}",
-  "settling {0}": "收尾 {0}"
+  "settling {0}": "收尾 {0}",
+  "Open original in ChatGPT": "在 ChatGPT 中開啟原件"
 }

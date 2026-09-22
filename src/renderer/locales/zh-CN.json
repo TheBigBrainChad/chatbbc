@@ -1403,5 +1403,6 @@
   "plan {0}": "计划 {0}",
   "planning": "正在规划",
   "queue {0}": "队列 {0}",
-  "settling {0}": "收尾 {0}"
+  "settling {0}": "收尾 {0}",
+  "Open original in ChatGPT": "在 ChatGPT 中打开原件"
 }
