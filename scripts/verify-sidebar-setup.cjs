@@ -176,6 +176,31 @@ app.whenReady().then(async () => {
     const savedFirst=clamped.saved.find(([scope])=>scope==='demo-project')[1];
     assert.deepEqual(savedFirst.slice(-5),['task-13','task-14','task-15','task-16','task-17']);
     assert.equal(savedFirst.some(id=>['task-18','task-19','task-20'].includes(id)),false);
+    const unfiledCross=await js(`(() => {
+      const source=document.querySelector('.project-group[data-project-id="demo-project"] > .sess');
+      const target=document.querySelector('#chatList > .sess[data-id="task-21"]');
+      const a=source.getBoundingClientRect(),b=target.getBoundingClientRect();
+      return {source:{x:Math.round(a.left+35),y:Math.round(a.top+a.height/2)},target:{x:Math.round(b.left+35),y:Math.round(b.top+b.height/2)}};
+    })()`);
+    win.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...unfiledCross.source});
+    await new Promise(r=>setTimeout(r,25));
+    win.webContents.sendInputEvent({type:'mouseMove',...unfiledCross.target});
+    await new Promise(r=>setTimeout(r,40));
+    win.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...unfiledCross.target});
+    await new Promise(r=>setTimeout(r,40));
+    const unfiledClamped=await js(`(() => {
+      const ids=id=>[...document.querySelectorAll('.project-group[data-project-id="'+id+'"] > .sess')].map(row=>row.dataset.id);
+      return {first:ids('demo-project'),second:ids('second-project'),
+        unfiled:[...document.querySelectorAll('#chatList > .sess')].map(row=>row.dataset.id),
+        saved:JSON.parse(localStorage.getItem('chatbbc.sidebar-order'))};
+    })()`);
+    assert.deepEqual(unfiledClamped.first,['task-0','task-3','task-4','task-5','task-6','task-7','task-8','task-9','task-10','task-11','task-12','task-1','task-2']);
+    assert.deepEqual(unfiledClamped.second,['task-18','task-19','task-20']);
+    assert.deepEqual(unfiledClamped.unfiled,['task-21']);
+    const unfiledSavedFirst=unfiledClamped.saved.find(([scope])=>scope==='demo-project')[1];
+    assert.deepEqual(unfiledSavedFirst.slice(-5),['task-13','task-14','task-15','task-16','task-17']);
+    assert.equal(unfiledSavedFirst.includes('task-21'),false);
+    assert.deepEqual(unfiledClamped.saved.find(([scope])=>scope==='')[1],['task-21']);
     await js(`(() => {
       const search=document.getElementById('navigatorSearch');
       search.value='Project chat 14';
@@ -248,6 +273,6 @@ app.whenReady().then(async () => {
     assert.equal(await js(`document.getElementById('appShell').dataset.screen`),'chat');
     assert.equal(await js(`document.getElementById('appShell').dataset.workbenchOpen`),'false');
     assert.equal(await js(`document.querySelector('[data-destination="chats"]').getAttribute('aria-current')`),'page');
-    console.log(JSON.stringify({projectDisclosure:{initiallyCollapsed:true,pointer:true,space:true,enter:true},geometry,drag:moved,dragClamp:clamped,showMore:13,navigatorSearch:{chat:true,authoredPreview:true,file:true,imageSet:true},rail:{files:true,agents:true,usage:true,settings:true,chats:true},settingsPanels:true,collapse:true,output}));
+    console.log(JSON.stringify({projectDisclosure:{initiallyCollapsed:true,pointer:true,space:true,enter:true},geometry,drag:moved,dragClamp:{project:clamped,unfiled:unfiledClamped},showMore:13,navigatorSearch:{chat:true,authoredPreview:true,file:true,imageSet:true},rail:{files:true,agents:true,usage:true,settings:true,chats:true},settingsPanels:true,collapse:true,output}));
   } finally { win?.destroy(); await server.close(); app.quit(); }
 }).catch(error=>{console.error(error);app.exit(1)});
