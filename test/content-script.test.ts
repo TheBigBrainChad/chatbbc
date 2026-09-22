@@ -9507,6 +9507,86 @@ describe('a stop button that goes missing while the turn is still running', () =
     expect(emitted(live.sent, 'native_image')).toHaveLength(6);
   });
 
+  it('records two assets from one message in one scan and does not turn nine clones into nine records', async () => {
+    live = await harness();
+    const section = assistantTurn(live.document, 'turn-simultaneous-images', []);
+    section.setAttribute('data-clf-fiber-turn', '0');
+    const messageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const blue = 'file_000000005f2c823085a542762d1de785';
+    const orange = 'file_00000000dc58821198efef946a9ade33';
+    const drawn: string[] = [];
+    const held: Array<(blob: { type: string; size: number; arrayBuffer: () => Promise<ArrayBuffer> } | null) => void> = [];
+    Object.defineProperty(live.window.HTMLCanvasElement.prototype, 'getContext', {
+      configurable: true,
+      value: () => ({
+        drawImage: (node: HTMLImageElement) => { drawn.push(new URL(node.src).searchParams.get('id') ?? ''); }
+      })
+    });
+    Object.defineProperty(live.window.HTMLCanvasElement.prototype, 'toBlob', {
+      configurable: true,
+      value: (callback: (blob: { type: string; size: number; arrayBuffer: () => Promise<ArrayBuffer> } | null) => void) => { held.push(callback); }
+    });
+    const addClones = (assetId: string, count: number, main: boolean) => {
+      for (let index = 0; index < count; index++) {
+        const group = live!.document.createElement('div');
+        group.className = 'group/imagegen-image';
+        const image = live!.document.createElement('img');
+        image.src = `https://chatgpt.com/backend-api/estuary/content?id=${assetId}&sig=private-${index}`;
+        Object.defineProperty(image, 'currentSrc', { configurable: true, get: () => image.src });
+        image.setAttribute('data-clf-fiber-image', `0:${encodeURIComponent(messageId)}:${encodeURIComponent(assetId)}`);
+        Object.defineProperties(image, {
+          complete: { configurable: true, value: true },
+          naturalWidth: { configurable: true, value: 1254 },
+          naturalHeight: { configurable: true, value: 1254 }
+        });
+        image.getBoundingClientRect = () => ({ width: main && index === 0 ? 480 : 48, height: main && index === 0 ? 480 : 48 } as DOMRect);
+        group.append(image);
+        section.append(group);
+      }
+    };
+    addClones(blue, 6, true);
+    addClones(orange, 3, false);
+    const images = [blue, orange].map((assetId, partOrder) => ({
+      messageId, assetId, providerRole: 'tool', providerChannel: 'final', providerStatus: 'finished_successfully',
+      width: 1254, height: 1254, order: 0, partOrder
+    }));
+    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+    await replyFiber([], [{ turnId: 'turn-simultaneous-images', conversationId, messages: [], activities: [], images }]);
+    await settle();
+    await live.hook.flush();
+
+    const pending = emitted(live.sent, 'native_image').map(entry => entry.event);
+    expect(pending.map(event => event.providerAssetId)).toEqual([blue, orange]);
+    expect(pending.every(event => event.previewStatus === 'pending')).toBe(true);
+    expect(held).toHaveLength(2);
+    expect(drawn).toEqual([blue, orange]);
+    expect(section.querySelectorAll('[data-clf-fiber-image]')).toHaveLength(9);
+    expect(emitted(live.sent, 'native_image')).toHaveLength(2);
+    for (const assetId of [blue, orange]) {
+      expect(await live.runtimeMessage({
+        type: 'clf-generated-asset-source', conversationId, logicalMessageId: messageId, assetId
+      })).toMatchObject({ ok: true, logicalMessageId: messageId, assetId });
+    }
+
+    const bytes = new TextEncoder().encode('simultaneous-webp');
+    held[0]!({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
+    await settle();
+    await live.hook.flush();
+    expect(emitted(live.sent, 'native_image').filter(row => row.event.previewStatus === 'available')
+      .map(row => row.event.providerAssetId)).toEqual([blue]);
+    expect(held).toHaveLength(2);
+
+    held[1]!({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
+    await settle();
+    await live.hook.flush();
+    const recorded = emitted(live.sent, 'native_image').map(entry => entry.event);
+    expect(recorded.filter(event => event.previewStatus === 'available').map(event => event.providerAssetId)).toEqual([blue, orange]);
+    expect(recorded).toHaveLength(4);
+    expect(JSON.stringify(recorded)).not.toContain('sig=');
+  });
+
+
   it('hands one exact signed generated-image source only to the extension download request', async () => {
     live = await harness();
     const section = assistantTurn(live.document, 'turn-generated-download', []);

@@ -1,4 +1,15 @@
 export const MAX_GENERATED_ASSET_DOWNLOADS = 20;
+export const GENERATED_ASSET_LIMITS = {
+  maxList: 64,
+  maxCompressedBytes: 64 * 1024 * 1024,
+  maxDecodedPixels: 40_000_000,
+  maxChunkBytes: 512 * 1024,
+  maxConcurrentTransfers: 2,
+  transferMs: 120_000,
+  maxBatchAssets: 20,
+  maxBatchBytes: 512 * 1024 * 1024
+} as const;
+
 
 export type GeneratedAssetDownloadState =
   | 'requested'
