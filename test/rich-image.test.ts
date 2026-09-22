@@ -194,3 +194,106 @@ it('permits only one pending viewer, and retires an old A → B → A request af
   expect(document.querySelector('.rich-image-viewer')).toBeNull();
   expect(unavailable).not.toHaveBeenCalled();
 });
+
+it('groups images by canonical response across intervening metadata revisions', async () => {
+  const { imageSetsForTimeline } = await import('../src/renderer/image-set.js');
+  const image = (seq: number, messageId: string, asset: string, extra: Record<string, unknown> = {}) => ({
+    kind: 'native_image', seq, messageId, providerAssetId: asset, previewStatus: 'available' as const,
+    asset: { id: 'abcdef12.bin' }, ...extra
+  });
+  const sets = imageSetsForTimeline([
+    image(1, 'response-a', 'asset-a', { origin: 1, width: 10, height: 8 }),
+    { kind: 'progress', seq: 2, messageId: 'activity' },
+    image(4, 'response-a', 'asset-b', { origin: 4 }),
+    image(3, 'response-a', 'asset-a', { origin: 1, previewStatus: 'unavailable', previewError: 'quota' })
+  ]);
+  expect(sets).toHaveLength(1);
+  expect(sets[0]!.responseId).toBe('response-a');
+  expect(sets[0]!.origin).toBe(1);
+  expect(sets[0]!.images.map(item => item.providerAssetId)).toEqual(['asset-a', 'asset-b']);
+  expect(sets[0]!.images[0]).toMatchObject({ previewStatus: 'unavailable', previewError: 'quota', origin: 1, hasPreview: false, width: 10, height: 8 });
+  expect(sets[0]!.completeness).toBe('partial');
+});
+
+it('does not merge adjacent images from different responses', async () => {
+  const { imageSetsForTimeline } = await import('../src/renderer/image-set.js');
+  const image = (seq: number, messageId: string, asset: string) => ({
+    kind: 'native_image', seq, messageId, providerAssetId: asset, previewStatus: 'pending' as const
+  });
+  expect(imageSetsForTimeline([image(1, 'response-a', 'asset-a'), image(2, 'response-b', 'asset-b')])
+    .map(set => set.images.length)).toEqual([1, 1]);
+});
+
+it('keeps a removed preview in the set without treating it as available', async () => {
+  const { imageSetsForTimeline } = await import('../src/renderer/image-set.js');
+  const sets = imageSetsForTimeline([{
+    kind: 'native_image', seq: 9, origin: 2, messageId: 'response-a', providerAssetId: 'asset-a',
+    previewStatus: 'unavailable', previewError: 'removed'
+  }]);
+  expect(sets[0]).toMatchObject({ completeness: 'unavailable', origin: 2, images: [{ hasPreview: false, previewError: 'removed' }] });
+});
+
+it('moves inside one set without fetching every preview or starting a download', async () => {
+  const { openImageSetViewer, retireImageSetViewer } = await import('../src/renderer/image-set.js');
+  const gallery = document.createElement('div');
+  gallery.className = 'generated-image-gallery';
+  const row = (asset: string, preview: string, src?: string) => {
+    const node = document.createElement('div');
+    node.className = 'ev ev-native_image';
+    node.dataset.imageMessage = 'response-a';
+    node.dataset.imageAsset = asset;
+    node.dataset.imagePreview = preview;
+    node.dataset.imageStatus = 'available';
+    node.dataset.imageWidth = '320';
+    node.dataset.imageHeight = '180';
+    const open = document.createElement('button');
+    open.className = 'image-set-open';
+    node.append(open);
+    if (src) {
+      const img = document.createElement('img');
+      img.src = src;
+      node.append(img);
+    }
+    return node;
+  };
+  const localImage = 'data:image/webp;base64,UklGRgAAAAA=';
+  const first = row('asset-a', 'abcdef12.bin', localImage);
+  const second = row('asset-b', 'abcdef13.bin');
+  gallery.append(first, second);
+  document.body.append(gallery);
+  const workbench = document.createElement('button');
+  workbench.id = 'workPanelTab-files';
+  const opened = vi.fn();
+  workbench.addEventListener('click', opened);
+  document.body.append(workbench);
+  await openImageSetViewer({ row: first, sessionId, current: () => current });
+  const dialog = document.querySelector<HTMLDialogElement>('dialog.image-set-viewer')!;
+  expect(dialog.querySelector('.image-set-position')?.textContent).toBe('1 / 2');
+  expect(dialog.querySelectorAll('.image-set-thumb')).toHaveLength(2);
+  expect(dialog.querySelector('.image-set-thumb')?.getAttribute('aria-pressed')).toBe('true');
+  expect(dialog.querySelector('.image-set-stage img')?.getAttribute('src')).toBe(localImage);
+  expect(image).not.toHaveBeenCalled();
+  expect(dialog.style.getPropertyValue('--image-set-width')).toBe('320px');
+  dialog.querySelector<HTMLButtonElement>('.image-set-download')!.click();
+  expect(image).not.toHaveBeenCalled();
+  dialog.querySelector<HTMLButtonElement>('.image-set-next')!.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(image).toHaveBeenCalledExactlyOnceWith(sessionId, 'abcdef13.bin');
+  expect(dialog.querySelectorAll('.image-set-thumb')[1]?.getAttribute('aria-pressed')).toBe('true');
+  const stage = dialog.querySelector('.image-set-stage')!;
+  stage.dispatchEvent(new window.PointerEvent('pointerdown', { clientX: 0, clientY: 0, bubbles: true }));
+  stage.dispatchEvent(new window.PointerEvent('pointermove', { clientX: 80, clientY: 4, bubbles: true }));
+  stage.dispatchEvent(new window.PointerEvent('pointerup', { bubbles: true }));
+  expect(dialog.querySelector('.image-set-position')?.textContent).toBe('1 / 2');
+  expect(image).toHaveBeenCalledOnce();
+  dialog.querySelector<HTMLButtonElement>('.image-set-zoom-in')!.click();
+  expect(dialog.querySelector<HTMLImageElement>('img')?.style.transform).toContain('scale(1.5)');
+  dialog.querySelector<HTMLButtonElement>('.image-set-workbench')!.click();
+  expect(opened).toHaveBeenCalledOnce();
+  current = false;
+  dialog.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+  expect(document.querySelector('dialog.image-set-viewer')).toBeNull();
+  expect(image).toHaveBeenCalledOnce();
+  retireImageSetViewer();
+});

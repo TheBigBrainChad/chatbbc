@@ -1413,5 +1413,15 @@
   "Unavailable": "不可用",
   "Unconfirmed": "未确认",
   "Focused output": "已聚焦的输出",
-  "Focus": "聚焦"
+  "Focus": "聚焦",
+  "Download original": "下载原图",
+  "Save preview": "保存预览",
+  "Download all originals": "下载全部原图",
+  "Save all previews": "保存全部预览",
+  "Open workbench": "打开工作台",
+  "Previous": "上一张",
+  "Next": "下一张",
+  "{0} / {1}": "{0} / {1}",
+  "{0} images": "{0} 张图片",
+  "Image set": "图片组"
 }

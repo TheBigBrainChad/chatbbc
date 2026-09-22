@@ -1447,5 +1447,15 @@
   "Unavailable": "無法使用",
   "Unconfirmed": "未確認",
   "Focused output": "已聚焦的輸出",
-  "Focus": "聚焦"
+  "Focus": "聚焦",
+  "Download original": "下載原圖",
+  "Save preview": "儲存預覽",
+  "Download all originals": "下載全部原圖",
+  "Save all previews": "儲存全部預覽",
+  "Open workbench": "開啟工作台",
+  "Previous": "上一張",
+  "Next": "下一張",
+  "{0} / {1}": "{0} / {1}",
+  "{0} images": "{0} 張圖片",
+  "Image set": "圖片組"
 }

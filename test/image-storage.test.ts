@@ -673,3 +673,41 @@ it('does not traverse or delete an assets directory symlink', async () => {
   });
   expect(await fs.readFile(outsideFile)).toEqual(pixels);
 });
+
+it('returns one session\'s response-owned image metadata without preview bytes', async () => {
+  const { sessionImageSets } = await import('../src/main/session/store.js');
+  const first = await createSession({ title: 'A', conversationId: randomUUID() });
+  const second = await createSession({ title: 'B', conversationId: randomUUID() });
+  await upsertNativeImageEvent(first.id, { time: 1, source: 'extension', kind: 'native_image',
+    messageId: 'response-a', providerAssetId: 'asset-a', providerRole: 'tool', previewStatus: 'pending' });
+  await upsertNativeImageEvent(first.id, { time: 2, source: 'extension', kind: 'native_image',
+    messageId: 'response-a', providerAssetId: 'asset-b', providerRole: 'tool',
+    previewStatus: 'unavailable', previewError: 'quota' });
+  await upsertNativeImageEvent(second.id, { time: 3, source: 'extension', kind: 'native_image',
+    messageId: 'response-b', providerAssetId: 'asset-a', providerRole: 'tool', previewStatus: 'pending' });
+  const owned = await sessionImageSets(first.id);
+  expect(owned.truncated).toBe(false);
+  expect(owned.sets.map(set => set.responseId)).toEqual(['response-a']);
+  expect(owned.sets[0]!.images.map(image => image.providerAssetId)).toEqual(['asset-a', 'asset-b']);
+  expect(owned.sets[0]!.completeness).toBe('partial');
+  expect(JSON.stringify(owned)).not.toMatch(/base64|https?:|data:/);
+  expect((await sessionImageSets(second.id)).sets.map(set => set.responseId)).toEqual(['response-b']);
+  expect(await sessionImageSets(first.id)).toEqual(owned);
+});
+
+it('marks image-set metadata truncated when one response exceeds the metadata cap', async () => {
+  const { sessionImageSets } = await import('../src/main/session/store.js');
+  const { IMAGE_SET_METADATA_LIMIT } = await import('../src/shared/chronology.js');
+  const session = await createSession({ title: 'Cap', conversationId: randomUUID() });
+  for (let index = 0; index < IMAGE_SET_METADATA_LIMIT + 1; index++) {
+    await upsertNativeImageEvent(session.id, {
+      time: index + 1, source: 'extension', kind: 'native_image', messageId: 'response-a',
+      providerAssetId: `asset-${index}`, providerRole: 'tool', previewStatus: 'pending'
+    });
+  }
+  const owned = await sessionImageSets(session.id);
+  expect(owned.truncated).toBe(true);
+  expect(owned.sets).toHaveLength(1);
+  expect(owned.sets[0]!.images).toHaveLength(IMAGE_SET_METADATA_LIMIT);
+  expect(JSON.stringify(owned)).not.toMatch(/base64|https?:|data:/);
+});

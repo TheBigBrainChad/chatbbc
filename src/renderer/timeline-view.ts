@@ -20,6 +20,7 @@ import { communicationTitle, foldAgentCommunication } from './agent-communicatio
 import { KIND_ICON } from './session-list.js';
 import { imageStorageButton } from './image-storage.js';
 import { localDataUrl, retireRichImageViewerWithin, retireStaleRichImageViewer } from './rich-image.js';
+import { keepImageActionInert, openImageSetViewer, paintImageSetBar, retireStaleImageSetViewer } from './image-set.js';
 import { renderRichResponse } from './rich-response.js';
 import { toolResultText } from './tool-result.js';
 import { categoryClass, contentRowIdentity } from './transcript-categories.js';
@@ -492,8 +493,23 @@ export function createTimelineView(options: TimelineViewOptions): TimelineView {
         else unavailable();
         box.append(frame);
         const id = context?.id ?? options.sessionId();
+        const generation = options.generation();
+        const open = el('button', 'image-set-open', () => t('Open'));
+        open.setAttribute('type', 'button');
+        open.addEventListener('click', () => {
+          if (!id) return;
+          void openImageSetViewer({
+            row: box.closest<HTMLElement>('.ev-native_image') ?? box,
+            sessionId: id,
+            current: () => context ? context.current() : options.sessionId() === id && options.generation() === generation
+          });
+        });
+        const download = el('button', 'image-set-download', () => t('Download original')) as HTMLButtonElement;
+        const save = el('button', 'image-set-save', () => t('Save preview')) as HTMLButtonElement;
+        keepImageActionInert(download);
+        keepImageActionInert(save);
+        box.append(open, download, save);
         if (event.asset && id) {
-          const generation = options.generation();
           void (async () => {
             const data = await run(window.api.getSessionImage(id, event.asset!.id));
             if (context ? !context.current() : id !== options.sessionId() || generation !== options.generation()) return;
@@ -827,6 +843,7 @@ export function createTimelineView(options: TimelineViewOptions): TimelineView {
       ? groupImageRows(groupToolRows(timelineRows, sessionId, toolGroups, openTools))
       : withSpineSegments(groupImageRows(groupToolRows(timelineRows, sessionId, toolGroups, openTools)), spine));
     retireStaleRichImageViewer();
+    retireStaleImageSetViewer();
     paintPendingInputs(options.outbox);
     $('timelineEmpty').hidden = sessionId !== null || timelineRows.length > 0 || $('inputQueue').childElementCount > 0;
     restoreViewport();
@@ -1381,34 +1398,36 @@ export function groupToolRows(
   return grouped;
 }
 
-/** Adjacent images from one response share a compact gallery, retaining canonical rows. */
+/** A native image row carries the provider message that owns it. Adjacency is not that owner. */
 export function tagImageRow(row: HTMLElement, event: SessionEvent): void {
   if (event.kind !== 'native_image') return;
   row.dataset.imageAgent = event.agent ?? '';
   row.dataset.imageMessage = event.messageId;
   row.dataset.imageTurn = event.turnId ?? '';
+  row.dataset.imageAsset = event.providerAssetId;
+  row.dataset.imageStatus = event.previewStatus;
+  row.dataset.imageError = event.previewError ?? '';
+  row.dataset.imagePreview = event.asset?.id ?? '';
+  row.dataset.imageWidth = String(event.width ?? event.previewWidth ?? '');
+  row.dataset.imageHeight = String(event.height ?? event.previewHeight ?? '');
+  row.dataset.imageOrigin = String(event.origin ?? event.seq);
 }
 
+/** Images that share a provider message form one set, including across metadata between them. */
 export function groupImageRows(rows: HTMLElement[]): HTMLElement[] {
   const result: HTMLElement[] = [];
-  for (let i = 0; i < rows.length;) {
-    const first = rows[i]!;
-    if (!first.dataset.imageMessage) { result.push(first); i++; continue; }
-    const messages = new Set([first.dataset.imageMessage]);
-    const turns = new Set(first.dataset.imageTurn ? [first.dataset.imageTurn] : []);
-    let end = i + 1;
-    while (end < rows.length) {
-      const next = rows[end]!.dataset;
-      if (!next.imageMessage || next.imageAgent !== first.dataset.imageAgent) break;
-      if (!messages.has(next.imageMessage) && !(next.imageTurn && turns.has(next.imageTurn))) break;
-      messages.add(next.imageMessage);
-      if (next.imageTurn) turns.add(next.imageTurn);
-      end++;
-    }
-    const gallery = rows.slice(i, end).map(row => row.closest<HTMLElement>('.generated-image-gallery'))
+  const placed = new Set<HTMLElement>();
+  for (const row of rows) {
+    if (placed.has(row)) continue;
+    const responseId = row.dataset.imageMessage;
+    if (!responseId) { result.push(row); continue; }
+    const members = rows.filter(candidate => candidate.dataset.imageMessage === responseId);
+    for (const member of members) placed.add(member);
+    const gallery = members.map(member => member.closest<HTMLElement>('.generated-image-gallery'))
       .find((node): node is HTMLElement => !!node) ?? el('div', 'generated-image-gallery');
-    reconcileChildren(gallery, rows.slice(i, end));
-    result.push(gallery); i = end;
+    reconcileChildren(gallery, members);
+    paintImageSetBar(gallery, members.length);
+    result.push(gallery);
   }
   return result;
 }

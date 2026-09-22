@@ -70,6 +70,11 @@ export function localDataUrl(value: unknown, mimeType: string): value is string 
   return !!match && match[1] === mimeType && match[2]!.length % 4 === 0;
 }
 
+/** A saved preview of any admitted image type. Callers must not pass a provider URL. */
+export function localImageDataUrl(value: unknown): value is string {
+  return [...IMAGE_MIMES].some(mime => localDataUrl(value, mime));
+}
+
 /**
  * Viewer only: it never opens ChatGPT, fetches a URL, retries capture or grants browser input.
  * The fixed main-process getter independently checks canonical assistant-rich membership,

@@ -17,6 +17,7 @@ import { goalErrorMessage } from '../shared/goal-errors.js';
 import type { GoalModel } from '../shared/goal-reasoning.js';
 import { renderGoalReasoning } from './goal-reasoning.js';
 import { retireRichImageViewer } from './rich-image.js';
+import { imageSetsForTimeline, retireImageSetViewer } from './image-set.js';
 import { createConversationStage, type ConversationStage } from './conversation-stage.js';
 import { richFocusStatus } from './rich-focus-status.js';
 import { createComposerController, type ComposerController } from './composer-controller.js';
@@ -161,21 +162,13 @@ function loadedNavigatorImageSets(): NavigatorImageSet[] {
   const sessionId = selectedId();
   if (!sessionId || stage.awaiting()) return [];
   const projectId = sessions.find(session => session.id === sessionId)?.projectId ?? null;
-  const sets = new Map<string, NavigatorImageSet>();
-  for (const event of stage.events()) {
-    if (event.kind !== 'native_image') continue;
-    const family = event.turnId || event.messageId;
-    const key = `${sessionId}:${event.agent ?? ''}:${family}`;
-    if (!sets.has(key)) sets.set(key, {
-      key,
-      sessionId,
-      projectId,
-      title: t('ChatGPT generated image'),
-      anchorMessageId: event.messageId
-    });
-    if (sets.size >= 100) break;
-  }
-  return [...sets.values()];
+  return imageSetsForTimeline(stage.events()).slice(0, 100).map(set => ({
+    key: `${sessionId}:${set.responseId}`,
+    sessionId,
+    projectId,
+    title: t('ChatGPT generated image'),
+    anchorMessageId: set.responseId
+  }));
 }
 function openNavigatorFile(file: NavigatorFile): void {
   const instance = filePanel, sessionId = selectedId(), generation = selectionGeneration();
@@ -366,6 +359,7 @@ async function toggleSessionBlock(id: string, blocked: boolean): Promise<void> {
 /** One selection retirement path for deletion and independently confirmed disappearance. */
 function clearSelectedSession(): void {
   retireRichImageViewer();
+  retireImageSetViewer();
   rememberDraft();
   advanceSelectionGeneration();
   replaceComposerDraft();
@@ -2115,6 +2109,7 @@ function showView(name: string): void {
 
 function selectSession(id: string): void {
   retireRichImageViewer();
+  retireImageSetViewer();
   const ownerChanged = id !== selectedId();
   rememberDraft();
   advanceSelectionGeneration(); replaceComposerDraft();
@@ -2153,6 +2148,7 @@ function selectSession(id: string): void {
 
 function selectNewChat(projectId: string | null = null): void {
   retireRichImageViewer();
+  retireImageSetViewer();
   rememberDraft(); advanceSelectionGeneration(); replaceComposerDraft(); pendingNewInput = null;
   inputQueueGeneration++;
   $('finishQueue').replaceChildren(); $('finishQueue').hidden = true;

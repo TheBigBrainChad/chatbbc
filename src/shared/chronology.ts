@@ -342,3 +342,108 @@ export function chronological<T extends Chronological>(entries: readonly T[]): T
   }
   return out;
 }
+
+/** A native image belongs to the provider message that owns it, never to a neighboring row. */
+export function nativeImageResponseId(entry: { kind: string; messageId?: string | null }): string | null {
+  if (entry.kind !== 'native_image') return null;
+  const id = entry.messageId?.trim();
+  if (!id || id.length > 256) return null;
+  return id;
+}
+
+export const IMAGE_SET_METADATA_LIMIT = 64;
+
+export type ImageSetCompleteness = 'complete' | 'partial' | 'unavailable';
+
+export interface ImageSetImage {
+  providerAssetId: string;
+  origin: number;
+  previewStatus: 'pending' | 'available' | 'unavailable';
+  previewError?: 'not_loaded' | 'ambiguous' | 'tainted' | 'oversized' | 'invalid' | 'quota' | 'removed';
+  width?: number;
+  height?: number;
+  previewWidth?: number;
+  previewHeight?: number;
+  /** A saved local preview exists. This is not the preview bytes or a provider URL. */
+  hasPreview: boolean;
+}
+
+export interface ImageSetView {
+  responseId: string;
+  images: ImageSetImage[];
+  completeness: ImageSetCompleteness;
+  origin: number;
+}
+
+export interface ImageSetSource {
+  kind: string;
+  seq: number;
+  origin?: number;
+  messageId?: string;
+  providerAssetId?: string;
+  previewStatus?: ImageSetImage['previewStatus'];
+  previewError?: ImageSetImage['previewError'];
+  width?: number;
+  height?: number;
+  previewWidth?: number;
+  previewHeight?: number;
+  asset?: { id: string } | null;
+}
+
+function finiteSize(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * One set per provider message. A later revision of the same asset replaces its status and
+ * keeps the earliest origin. Metadata between images does not split or merge responses.
+ */
+export function imageSetsForTimeline(events: readonly ImageSetSource[]): ImageSetView[] {
+  const order: string[] = [];
+  const sets = new Map<string, { origin: number; assets: string[]; images: Map<string, ImageSetImage & { seq: number }> }>();
+  for (const event of events) {
+    const responseId = nativeImageResponseId(event);
+    const assetId = event.providerAssetId?.trim();
+    if (!responseId || !assetId || assetId.length > 200 || !event.previewStatus) continue;
+    const origin = typeof event.origin === 'number' && Number.isSafeInteger(event.origin) ? event.origin : event.seq;
+    let set = sets.get(responseId);
+    if (!set) {
+      set = { origin, assets: [], images: new Map() };
+      sets.set(responseId, set);
+      order.push(responseId);
+    }
+    const previous = set.images.get(assetId);
+    if (previous && event.seq < previous.seq) continue;
+    const imageOrigin = previous ? Math.min(previous.origin, origin) : origin;
+    set.origin = Math.min(set.origin, imageOrigin);
+    if (!previous) set.assets.push(assetId);
+    // A status revision often omits geometry the first row already recorded.
+    const width = finiteSize(event.width) ?? previous?.width;
+    const height = finiteSize(event.height) ?? previous?.height;
+    const previewWidth = finiteSize(event.previewWidth) ?? previous?.previewWidth;
+    const previewHeight = finiteSize(event.previewHeight) ?? previous?.previewHeight;
+    set.images.set(assetId, {
+      providerAssetId: assetId,
+      origin: imageOrigin,
+      previewStatus: event.previewStatus,
+      ...(event.previewError ? { previewError: event.previewError } : {}),
+      ...(width ? { width } : {}),
+      ...(height ? { height } : {}),
+      ...(previewWidth ? { previewWidth } : {}),
+      ...(previewHeight ? { previewHeight } : {}),
+      hasPreview: event.previewStatus === 'available' && !!event.asset?.id,
+      seq: event.seq
+    });
+  }
+  return order.map(responseId => {
+    const set = sets.get(responseId)!;
+    const images = set.assets.map(assetId => {
+      const { seq: _seq, ...image } = set.images.get(assetId)!;
+      return image;
+    });
+    const completeness: ImageSetCompleteness = images.every(image => image.previewStatus === 'available')
+      ? 'complete'
+      : images.every(image => image.previewStatus === 'unavailable') ? 'unavailable' : 'partial';
+    return { responseId, images, completeness, origin: set.origin };
+  });
+}

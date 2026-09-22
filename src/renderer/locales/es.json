@@ -1413,5 +1413,15 @@
   "Unavailable": "No disponible",
   "Unconfirmed": "Sin confirmar",
   "Focused output": "Resultado enfocado",
-  "Focus": "Enfocar"
+  "Focus": "Enfocar",
+  "Download original": "Descargar el original",
+  "Save preview": "Guardar la vista previa",
+  "Download all originals": "Descargar todos los originales",
+  "Save all previews": "Guardar todas las vistas previas",
+  "Open workbench": "Abrir el banco de trabajo",
+  "Previous": "Anterior",
+  "Next": "Siguiente",
+  "{0} / {1}": "{0} / {1}",
+  "{0} images": "{0} imágenes",
+  "Image set": "Conjunto de imágenes"
 }

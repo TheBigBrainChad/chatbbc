@@ -46,7 +46,7 @@ import { continuationMarkerOf, eventTokens, MAX_TOOL_RESULT_TOKENS, normalizedTo
 import { parseRichResponse, type RichNode, type RichResponse } from '../../shared/rich-response.js';
 import { parseRichOrigin } from './rich-response.js';
 import { applyTurnIdentity, authoredTimeOf, chronological, injectedUserMessage, positionOf, projectTimeline,
-  recordedRequestTurn, responseTurnId, type Chronological, type TimelineTurns } from '../../shared/chronology.js';
+  imageSetsForTimeline, recordedRequestTurn, responseTurnId, IMAGE_SET_METADATA_LIMIT, type Chronological, type ImageSetView, type TimelineTurns } from '../../shared/chronology.js';
 import { automaticTitle, firstTitleMessage, legacyContextTitle, refreshUserTitle } from './title.js';
 import { agentPlanSchema, agentPlanUpdateSchema, MAX_AGENT_PLAN_BYTES, type AgentPlan, type AgentPlanUpdate } from '../../shared/agent-plan.js';
 import { getConfig, getRecordingRevision, recordingGenerationGrant, recordingWriteAllowed, registerRecordingWriteDrain } from '../config.js';
@@ -3266,6 +3266,24 @@ export async function readRecentEvents(
   assertSessionId(sessionId);
   await flushSession(sessionId);
   return readRecentEventsFromDisk(sessionId, limit, options);
+}
+
+/** Bounded image-set metadata for one session. No preview bytes and no provider URL. */
+export async function sessionImageSets(sessionId: string): Promise<{ sets: ImageSetView[]; truncated: boolean }> {
+  assertSessionId(sessionId);
+  if (!(await getSession(sessionId))) return { sets: [], truncated: false };
+  const events = await readRecentEvents(sessionId, 320, { kinds: ['native_image'], orderByOrigin: true });
+  const sets = imageSetsForTimeline(events);
+  const limited = sets.slice(0, IMAGE_SET_METADATA_LIMIT);
+  const imagesTruncated = limited.some(set => set.images.length > IMAGE_SET_METADATA_LIMIT);
+  return {
+    sets: limited.map(set => ({
+      ...set,
+      images: set.images.slice(0, IMAGE_SET_METADATA_LIMIT)
+    })),
+    // A full recent window can hide older images, so a full read is not proof of completeness.
+    truncated: sets.length > IMAGE_SET_METADATA_LIMIT || imagesTruncated || events.length >= 320
+  };
 }
 
 /**

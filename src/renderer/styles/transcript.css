@@ -695,7 +695,19 @@
 .user-image-slot { flex: 0 0 96px; width: 96px; height: 124px; display: grid; grid-template-rows: 96px 28px; justify-items: center; align-items: center; overflow: hidden; }
 .user-image-slot > .meta { margin: 0; padding: 6px; text-align: center; font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
 .user-image-slot > .retained-image-notice { padding: 2px 0; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(10px * var(--text-scale, 1)); line-height: 12px; text-align: center; }
-.generated-image-gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; max-width: 34rem; margin: 12px 0; }
+.generated-image-gallery { display: grid; gap: 12px; max-width: 34rem; margin: 12px 0; }
+.generated-image-gallery.is-single { display: block; max-width: 17rem; }
+.generated-image-gallery:not(.is-single) { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.generated-image-gallery:not(.is-single) > .ev.ev-native_image:first-of-type { grid-column: 1 / -1; }
+.image-set-bar { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.image-set-viewer { max-width: min(42rem, calc(100vw - 32px)); border: 1px solid var(--line); background: var(--card); color: var(--ink); }
+.image-set-stage { overflow: hidden; max-height: 70vh; display: grid; place-items: center; touch-action: none; }
+.image-set-stage img { max-width: 100%; max-height: 70vh; transform-origin: center center; }
+.image-set-thumbs { display: flex; gap: 8px; overflow: auto; max-width: 100%; }
+.image-set-thumb { flex: 0 0 auto; min-width: 2rem; }
+.image-set-thumb img { display: block; width: 3rem; height: 3rem; object-fit: cover; }
+.image-set-thumb[aria-pressed="true"] { outline: 1px solid var(--ink); }
+.image-set-viewer button[aria-disabled="true"] { opacity: .55; }
 .generated-image-gallery > .ev.ev-native_image { min-width: 0; margin: 0; padding: 0; border: 0; background: transparent; }
 .generated-image-gallery .ev-body, .generated-image-gallery .said { min-width: 0; width: 100%; padding: 0; }
 .generated-image-frame { width: 100%; max-height: 17rem; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 0; background: var(--card); }

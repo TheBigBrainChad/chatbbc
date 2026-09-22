@@ -1290,18 +1290,28 @@ it('keeps generated-image metadata visible when recording storage is full', asyn
   expect(row.querySelector('button')?.textContent).toBe('Free image storage');
 });
 
-it('does not group images across an intervening authored message or another turn', async () => {
+it('groups one response across metadata and keeps a different response separate', async () => {
   const app = await boot([]);
-  const image = (seq: number, turnId: string): SessionEvent => ({ seq, time: T0 + seq,
-    source: 'extension', kind: 'native_image', messageId: `image-${seq}`, providerAssetId: `file-${seq}`,
-    providerRole: 'tool', turnId, previewStatus: 'pending' });
-  await app.append([image(1, 'a'), image(2, 'a'),
-    { seq: 3, time: T0 + 3, source: 'extension', kind: 'assistant_message', messageId: 'text-3',
+  const image = (seq: number, messageId: string, asset: string): SessionEvent => ({ seq, time: T0 + seq,
+    source: 'extension', kind: 'native_image', messageId, providerAssetId: asset,
+    providerRole: 'tool', turnId: 'a', previewStatus: 'pending' });
+  await app.append([
+    image(1, 'response-a', 'file-1'),
+    { seq: 2, time: T0 + 2, source: 'extension', kind: 'progress', progressId: 'cap',
+      message: { text: 'Inspecting images', chars: 17, truncated: false } },
+    image(3, 'response-a', 'file-2'),
+    { seq: 4, time: T0 + 4, source: 'extension', kind: 'assistant_message', messageId: 'text-4',
       turnId: 'a', final: false, message: { text: 'Between images', chars: 14, truncated: false } },
-    image(4, 'a'), image(5, 'b')]);
+    image(5, 'response-b', 'file-3')
+  ]);
   const galleries = [...app.w.document.querySelectorAll('.generated-image-gallery')];
-  expect(galleries.map(gallery => gallery.querySelectorAll('.ev-native_image').length)).toEqual([2, 1, 1]);
-  expect(galleries[0]?.nextElementSibling?.textContent).toContain('Between images');
+  expect(galleries.map(gallery => gallery.querySelectorAll('.ev-native_image').length)).toEqual([2, 1]);
+  expect(galleries[0]?.textContent).not.toContain('Inspecting images');
+  expect(galleries[0]?.textContent).toContain('2 images');
+  expect(app.w.document.querySelector('#timeline')?.textContent).toContain('Between images');
+  expect(galleries[0]?.querySelector('.image-set-download-all')?.getAttribute('aria-disabled')).toBe('true');
+  expect(galleries[0]?.querySelector('.ev-native_image .image-set-download')?.getAttribute('aria-disabled')).toBe('true');
+  expect(galleries[1]?.querySelector('.image-set-bar')).toBeNull();
 });
 
 it('retains one exact-message gallery when only one image gains a proven turn', async () => {

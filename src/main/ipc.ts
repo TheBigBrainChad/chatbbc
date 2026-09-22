@@ -103,7 +103,8 @@ import {
   findSessionByConversation,
   readEvents,
   readRecentEvents,
-  readHandoff
+  readHandoff,
+  sessionImageSets
 } from './session/store.js';
 import { activeSessionId, forgetSession, onSessionChange } from './session/recorder.js';
 import { blockedChatIds, setChatBlocked } from './session/blocked-chats.js';
@@ -1086,6 +1087,10 @@ export function registerIpc(
   handle('sessions:image', async (payload) => {
     const { id, assetId } = z.object({ id: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i), assetId: z.string().max(100).regex(/^[a-f0-9]{8,64}\.(?:bin|png|jpg)$/) }).parse(payload);
     return recordedInputImage(id, assetId);
+  });
+  handle('sessions:imageSets', async (payload) => {
+    const { id } = z.object({ id: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i) }).parse(payload);
+    return sessionImageSets(id);
   });
   handle('sessions:imageStorage', async () => getImageStorage());
   handle('sessions:clearImageStorage', async (payload) => {
