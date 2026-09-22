@@ -146,10 +146,18 @@ describe('generated asset retrieval', () => {
   it('saves original bytes only after the chunk digest matches', async () => {
     const { session, roots, png } = await fixture();
     const [row] = await listGeneratedAssets(session.id);
-    const id = beginOriginalTransfer({ sessionId: session.id, conversationId: '11111111-2222-4333-8444-555555555555', assetId: 'file_AuroraOriginal0001', logicalMessageId: responseId });
+    const id = beginOriginalTransfer({
+      sessionId: session.id,
+      conversationId: '11111111-2222-4333-8444-555555555555',
+      assetId: 'file_AuroraOriginal0001',
+      logicalMessageId: responseId,
+      document: { tab: 42, documentId: 'doc-aurora', documentGeneration: 3, spaEpoch: 7 }
+    });
     const pending = waitOriginalTransfer(id);
-    appendOriginalChunk(id, png.subarray(0, 40));
-    appendOriginalChunk(id, png.subarray(40));
+    appendOriginalChunk(id, 0, png.subarray(0, 40));
+    // An identical replay of an acknowledged offset must be accepted without duplicating bytes.
+    appendOriginalChunk(id, 0, png.subarray(0, 40));
+    appendOriginalChunk(id, 40, png.subarray(40));
     finishOriginalTransfer(id, createHash('sha256').update(png).digest('hex'));
     const bytes = await pending;
     const saved = await saveGeneratedAsset({

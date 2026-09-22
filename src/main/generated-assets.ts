@@ -6,6 +6,7 @@ import { SandboxError, resolvePath } from './sandbox.js';
 import sharp from './sharp.js';
 import { wakeBrowserWork } from './browser-wake.js';
 import { GENERATED_ASSET_LIMITS } from '../shared/generated-assets.js';
+import { liveDocumentFor } from './generated-asset-downloads.js';
 import type { Root } from '../shared/types.js';
 
 const HANDLE = /^[A-Za-z0-9_-]{32}$/;
@@ -226,12 +227,21 @@ export async function saveGeneratedAsset(input: SaveGeneratedAssetRequest): Prom
   };
 }
 
+interface OriginalTransferDocument {
+  tab: number;
+  documentId: string;
+  documentGeneration: number;
+  spaEpoch: number;
+}
+
 interface OriginalTransfer {
   id: string;
   sessionId: string;
   conversationId: string;
   assetId: string;
   logicalMessageId: string;
+  document: OriginalTransferDocument;
+  offset: number;
   chunks: Buffer[];
   bytes: number;
   done: ((bytes: Buffer) => void) | null;
@@ -240,7 +250,13 @@ interface OriginalTransfer {
 
 const originalTransfers = new Map<string, OriginalTransfer>();
 
-export function beginOriginalTransfer(record: { sessionId: string; conversationId: string; assetId: string; logicalMessageId: string }): string {
+export function beginOriginalTransfer(record: {
+  sessionId: string;
+  conversationId: string;
+  assetId: string;
+  logicalMessageId: string;
+  document: OriginalTransferDocument;
+}): string {
   if (originalTransfers.size >= GENERATED_ASSET_LIMITS.maxConcurrentTransfers) {
     throw new GeneratedAssetError('transfer_capacity');
   }
@@ -251,6 +267,8 @@ export function beginOriginalTransfer(record: { sessionId: string; conversationI
     conversationId: record.conversationId,
     assetId: record.assetId,
     logicalMessageId: record.logicalMessageId,
+    document: Object.freeze({ ...record.document }),
+    offset: 0,
     chunks: [],
     bytes: 0,
     done: null,
@@ -264,11 +282,21 @@ export async function readOriginalForHandle(sessionId: string, handle: string): 
   if (!record || record.sessionId !== sessionId) throw new GeneratedAssetError('asset_handle_refused');
   const session = await getSession(sessionId);
   if (!session?.conversationId) throw new GeneratedAssetError('download_session_unavailable');
+  // The document is frozen here, from main's own proven-unique observation. The companion must
+  // present this exact document before any byte is accepted, so a retry cannot retarget.
+  const document = liveDocumentFor(session.conversationId);
+  if (!document) throw new GeneratedAssetError('original_unavailable');
   const id = beginOriginalTransfer({
     sessionId,
     conversationId: session.conversationId,
     assetId: record.assetId,
-    logicalMessageId: record.logicalMessageId
+    logicalMessageId: record.logicalMessageId,
+    document: {
+      tab: document.tab,
+      documentId: document.documentId,
+      documentGeneration: document.documentGeneration,
+      spaEpoch: document.spaEpoch
+    }
   });
   wakeBrowserWork();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -285,20 +313,45 @@ export async function readOriginalForHandle(sessionId: string, handle: string): 
   }
 }
 
-export function pendingOriginalTransfers(): Array<{ id: string; conversationId: string; logicalMessageId: string; assetId: string }> {
+/** The frozen document of one live original transfer, or null when it is gone. */
+export function originalTransferDocument(id: string): OriginalTransferDocument | null {
+  return originalTransfers.get(id)?.document ?? null;
+}
+
+export function pendingOriginalTransfers(): Array<{
+  id: string;
+  conversationId: string;
+  logicalMessageId: string;
+  assetId: string;
+  offset: number;
+  document: OriginalTransferDocument;
+}> {
   return [...originalTransfers.values()].map(transfer => ({
     id: transfer.id,
     conversationId: transfer.conversationId,
     logicalMessageId: transfer.logicalMessageId,
-    assetId: transfer.assetId
+    assetId: transfer.assetId,
+    offset: transfer.offset,
+    document: transfer.document
   }));
 }
 
-export function appendOriginalChunk(id: string, chunk: Buffer): void {
+/** Append one chunk only at its exact next offset; a repeated offset must carry identical bytes. */
+export function appendOriginalChunk(id: string, offset: number, chunk: Buffer): void {
   const transfer = originalTransfers.get(id);
-  if (!transfer || chunk.length < 1 || chunk.length > GENERATED_ASSET_LIMITS.maxChunkBytes) {
+  if (!transfer || !Number.isSafeInteger(offset) || offset < 0 ||
+      chunk.length < 1 || chunk.length > GENERATED_ASSET_LIMITS.maxChunkBytes) {
     throw new GeneratedAssetError('asset_chunk_refused');
   }
+  if (offset < transfer.offset) {
+    const start = offset;
+    const prior = Buffer.concat(transfer.chunks).subarray(start, start + chunk.length);
+    if (prior.length !== chunk.length || !prior.equals(chunk)) {
+      throw new GeneratedAssetError('asset_chunk_conflict');
+    }
+    return;
+  }
+  if (offset !== transfer.offset) throw new GeneratedAssetError('asset_chunk_offset');
   if (transfer.bytes + chunk.length > GENERATED_ASSET_LIMITS.maxCompressedBytes) {
     transfer.fail?.(new GeneratedAssetError('asset_oversize'));
     originalTransfers.delete(id);
@@ -306,6 +359,7 @@ export function appendOriginalChunk(id: string, chunk: Buffer): void {
   }
   transfer.chunks.push(Buffer.from(chunk));
   transfer.bytes += chunk.length;
+  transfer.offset += chunk.length;
 }
 
 export function waitOriginalTransfer(id: string): Promise<Buffer> {
@@ -327,6 +381,16 @@ export function finishOriginalTransfer(id: string, sha256: string): void {
     throw new GeneratedAssetError('asset_digest_mismatch');
   }
   transfer.done?.(bytes);
+}
+
+/** Fail every in-flight original waiter and drop its bytes. Called from ordered shutdown. */
+export function stopOriginalTransfers(): number {
+  const count = originalTransfers.size;
+  for (const transfer of originalTransfers.values()) {
+    transfer.fail?.(new GeneratedAssetError('transfer_shutdown'));
+  }
+  originalTransfers.clear();
+  return count;
 }
 
 export function resetGeneratedAssetsForTests(): void {

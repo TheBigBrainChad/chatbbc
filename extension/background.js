@@ -231,6 +231,15 @@ let terminalDocuments = {};
 /** Browser download receipts only. Signed provider URLs are never persisted or sent to main. */
 let generatedAssetDownloads = {};
 const MAX_GENERATED_ASSET_DOWNLOADS = 100;
+/** Terminal results that Chrome already proved but main has not acknowledged. Survives restart. */
+let generatedAssetResults = [];
+
+function validGeneratedAssetResult(row) {
+  return Boolean(row && typeof row === 'object' && /^[a-f0-9-]{36}$/i.test(String(row.id || '')) &&
+    /^[A-Za-z0-9_-]{32}$/.test(String(row.claimToken || '')) &&
+    ['complete', 'failed', 'unconfirmed'].includes(row.state) &&
+    (row.detail === null || row.detail === undefined || (typeof row.detail === 'string' && row.detail.length <= 200)));
+}
 
 /**
  * Command ids this browser has already delivered.
@@ -279,13 +288,17 @@ function load() {
 }
 
 async function loadOnce() {
-  const stored = await chrome.storage.local.get(['port', 'token', 'disconnected', 'deferredRevivals', 'commandAckOutbox', 'inputOpenings', 'desktopInputTabs', 'stopOpenings']);
+  const stored = await chrome.storage.local.get(['port', 'token', 'disconnected', 'deferredRevivals', 'commandAckOutbox', 'inputOpenings', 'desktopInputTabs', 'stopOpenings', 'generatedAssetResults']);
   port = typeof stored.port === 'number' ? stored.port : null;
   token = typeof stored.token === 'string' ? stored.token : null;
   // Deliberately in `local` rather than `session`: a choice to disconnect that a browser
   // restart undoes is not a choice, it is a delay.
   disconnected = stored.disconnected === true;
   deferredRevivals = Array.isArray(stored.deferredRevivals) ? stored.deferredRevivals.slice(-100) : [];
+  // A terminal result is a fact about Chrome's own download, not about this worker. It has to
+  // survive a browser restart, or a lost HTTP acknowledgement leaves main claimed forever.
+  generatedAssetResults = Array.isArray(stored.generatedAssetResults)
+    ? stored.generatedAssetResults.filter(validGeneratedAssetResult).slice(-MAX_GENERATED_ASSET_DOWNLOADS) : [];
   stored.inputOpenings = { ...(stored.desktopInputTabs || {}), ...(stored.inputOpenings || {}) };
   inputOpenings = stored.inputOpenings && typeof stored.inputOpenings === 'object' && !Array.isArray(stored.inputOpenings)
     ? Object.fromEntries(Object.entries(stored.inputOpenings).filter(([id, row]) => /^[a-f0-9-]{36}$/i.test(id) && row && (row.tab === null || Number.isInteger(row.tab))).slice(-1000)) : {};
@@ -402,7 +415,8 @@ function persistLive() {
         commandAckOutbox: commandAckOutbox.slice(-200),
         inputOpenings,
         stopOpenings,
-        deferredRevivals: deferredRevivals.slice(-100)
+        deferredRevivals: deferredRevivals.slice(-100),
+        generatedAssetResults: generatedAssetResults.slice(-MAX_GENERATED_ASSET_DOWNLOADS)
       })
     ])
   );
@@ -2800,6 +2814,19 @@ function validGeneratedAssetOffer(row) {
 }
 
 async function publishGeneratedAssetDownloadResult(row) {
+  if (['complete', 'failed', 'unconfirmed'].includes(row.state)) {
+    // Persist the terminal fact before sending it, so a lost HTTP response can be retried
+    // after a worker or browser restart instead of leaving main claimed forever.
+    if (!generatedAssetResults.some(entry => entry.id === row.id && entry.state === row.state)) {
+      generatedAssetResults.push({ id: row.id, claimToken: row.claimToken, state: row.state,
+        ...(row.detail ? { detail: row.detail } : {}) });
+      generatedAssetResults = generatedAssetResults.slice(-MAX_GENERATED_ASSET_DOWNLOADS);
+      await persistLive().catch(() => undefined);
+    }
+    // The terminal fact is durable now; the in-memory row must not be re-offered for download.
+    if (['complete', 'failed', 'unconfirmed'].includes(row.state) &&
+        generatedAssetDownloads[row.id] === row) delete generatedAssetDownloads[row.id];
+  }
   const reply = await call('/generated-assets/result', {
     method: 'POST',
     body: JSON.stringify({
@@ -2809,13 +2836,27 @@ async function publishGeneratedAssetDownloadResult(row) {
       ...(row.detail ? { detail: row.detail } : {})
     })
   });
-  if (reply.ok && reply.data?.ok === true &&
-      ['complete', 'failed', 'unconfirmed'].includes(row.state) &&
-      generatedAssetDownloads[row.id] === row) {
-    delete generatedAssetDownloads[row.id];
+  const accepted = reply.ok && reply.data?.ok === true;
+  if (accepted && ['complete', 'failed', 'unconfirmed'].includes(row.state)) {
+    generatedAssetResults = generatedAssetResults.filter(entry => entry.id !== row.id);
+    if (generatedAssetDownloads[row.id] === row) delete generatedAssetDownloads[row.id];
     await persistLive().catch(() => undefined);
   }
-  return reply.ok && reply.data?.ok === true;
+  return accepted;
+}
+
+async function flushGeneratedAssetResults() {
+  let changed = false;
+  for (const entry of [...generatedAssetResults]) {
+    const reply = await call('/generated-assets/result', { method: 'POST', body: JSON.stringify(entry) })
+      .catch(() => null);
+    if (reply?.ok && reply.data?.ok === true) {
+      generatedAssetResults = generatedAssetResults.filter(row => row !== entry);
+      delete generatedAssetDownloads[entry.id];
+      changed = true;
+    }
+  }
+  if (changed) await persistLive().catch(() => undefined);
 }
 
 async function flushGeneratedAssetDownloadResults() {
@@ -2867,19 +2908,6 @@ async function settleGeneratedAssetDownloadChange(change) {
   return true;
 }
 
-let downloadCustodyNeedsReconcile = false;
-async function releaseUnpersistedDownload(offer, claim) {
-  delete generatedAssetDownloads[offer.id];
-  const detail = 'Chrome accepted the download, but receipt custody could not be saved.';
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const reply = await call('/generated-assets/result', { method: 'POST', body: JSON.stringify({
-      id: offer.id, claimToken: claim.claimToken, state: 'unconfirmed', detail
-    }) }).catch(() => null);
-    if (reply?.ok && reply.data?.ok === true) return;
-  }
-  downloadCustodyNeedsReconcile = true;
-}
-
 async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
   if (!chrome.downloads?.download || !Array.isArray(rawOffers)) return;
   const offers = rawOffers.filter(validGeneratedAssetOffer).slice(0, 20);
@@ -2917,7 +2945,7 @@ async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
         claim.filename !== offer.filename || !/^[A-Za-z0-9_-]{32}$/.test(String(claim.claimToken || '')) ||
         !ownsDocument(source)) continue;
     const fail = async (detail) => {
-      const remembered = await rememberGeneratedAssetDownload({
+      await publishGeneratedAssetDownloadResult({
         id: offer.id,
         claimToken: claim.claimToken,
         browserDownloadId: null,
@@ -2928,7 +2956,6 @@ async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
         state: 'failed',
         detail
       });
-      if (remembered) await publishGeneratedAssetDownloadResult(generatedAssetDownloads[offer.id]).catch(() => false);
     };
     let result;
     try {
@@ -2981,7 +3008,15 @@ async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
     };
     const persisted = await rememberGeneratedAssetDownload(custody);
     if (!persisted) {
-      await releaseUnpersistedDownload(offer, claim);
+      // Chrome accepted the download, but our own receipt could not be written. The terminal
+      // fact still belongs in the durable outbox; the in-memory row is dropped so no later
+      // pass can re-offer this exact download.
+      delete generatedAssetDownloads[offer.id];
+      await publishGeneratedAssetDownloadResult({
+        ...custody,
+        state: 'unconfirmed',
+        detail: 'Chrome accepted the download, but receipt custody could not be saved.'
+      }).catch(() => false);
       continue;
     }
     await reconcileGeneratedAssetDownload(generatedAssetDownloads[offer.id]).catch(() => false);
@@ -2993,18 +3028,27 @@ async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
 
 async function processGeneratedAssetOriginals(rawOffers, observedTabs) {
   if (!Array.isArray(rawOffers)) return;
+  const validDocument = (value) => Boolean(value && typeof value === 'object' &&
+    Number.isSafeInteger(value.tab) && value.tab >= 0 &&
+    typeof value.documentId === 'string' && /^[a-z0-9_-]{1,128}$/i.test(value.documentId) &&
+    Number.isSafeInteger(value.documentGeneration) && value.documentGeneration >= 1 &&
+    Number.isSafeInteger(value.spaEpoch) && value.spaEpoch >= 0);
   for (const offer of rawOffers.slice(0, 2)) {
     if (!offer || !/^[a-f0-9-]{36}$/i.test(String(offer.id || '')) || !cleanConversationId(offer.conversationId) ||
-        typeof offer.logicalMessageId !== 'string' || !/^file_[A-Za-z0-9_-]{8,100}$/.test(String(offer.assetId || ''))) continue;
-    const tabs = observedTabs.filter(tab => Number.isInteger(tab?.id) &&
-      conversationForTab(tab) === offer.conversationId &&
-      tabConversations[String(tab.id)] === offer.conversationId &&
-      ownsDocument({ tab: tab.id, documentId: tabDocuments[String(tab.id)], navigationEpoch: tabEpochs[String(tab.id)] }));
-    if (tabs.length !== 1) continue;
-    const tab = tabs[0];
-    const key = String(tab.id);
+        typeof offer.logicalMessageId !== 'string' || !/^file_[A-Za-z0-9_-]{8,100}$/.test(String(offer.assetId || '')) ||
+        !Number.isSafeInteger(offer.offset) || offer.offset < 0 || !validDocument(offer.document)) continue;
+    const required = offer.document;
+    const key = String(required.tab);
+    const tab = observedTabs.find(candidate => candidate?.id === required.tab);
+    const document = { tab: required.tab, documentId: required.documentId, navigationEpoch: required.spaEpoch };
+    const source = { tab: required.tab, documentId: required.documentId,
+      documentGeneration: required.documentGeneration, spaEpoch: required.spaEpoch };
     const owner = registeredDocuments[key];
-    if (!owner || owner.documentId !== tabDocuments[key]) continue;
+    if (!tab || conversationForTab(tab) !== offer.conversationId ||
+        tabConversations[key] !== offer.conversationId ||
+        tabDocuments[key] !== required.documentId || tabEpochs[key] !== required.spaEpoch ||
+        !owner || owner.documentId !== required.documentId || owner.epoch !== required.documentGeneration ||
+        !ownsDocument(document)) continue;
     let result;
     try {
       result = await tabReply(tab.id, {
@@ -3012,7 +3056,7 @@ async function processGeneratedAssetOriginals(rawOffers, observedTabs) {
         conversationId: offer.conversationId,
         logicalMessageId: offer.logicalMessageId,
         assetId: offer.assetId
-      }, { documentId: tabDocuments[key] });
+      }, { documentId: required.documentId });
     } catch { result = null; }
     let selected = null;
     try {
@@ -3020,34 +3064,50 @@ async function processGeneratedAssetOriginals(rawOffers, observedTabs) {
         ? new URL(result.url) : null;
       const tabUrl = new URL(tab.url);
       if (url?.protocol === 'https:' && url.origin === tabUrl.origin &&
-          url.pathname === '/backend-api/estuary/content' && url.searchParams.get('id') === offer.assetId) selected = url.href;
+          url.pathname === '/backend-api/estuary/content' && url.searchParams.get('id') === offer.assetId &&
+          ownsDocument(document)) selected = url.href;
     } catch { selected = null; }
     if (!selected) continue;
+    // Read the body with an enforced ceiling instead of allocating it whole first.
     let bytes;
     try {
       const response = await fetch(selected);
       if (!response.ok) continue;
-      bytes = new Uint8Array(await response.arrayBuffer());
+      const reader = response.body?.getReader?.();
+      if (!reader) continue;
+      const parts = [];
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.length;
+        if (total > 64 * 1024 * 1024) { await reader.cancel().catch(() => undefined); parts.length = 0; break; }
+        parts.push(value);
+      }
+      if (total < 1 || total > 64 * 1024 * 1024) continue;
+      bytes = new Uint8Array(total);
+      let at = 0;
+      for (const part of parts) { bytes.set(part, at); at += part.length; }
     } catch { continue; }
     finally { selected = null; }
-    if (!bytes || bytes.length < 1 || bytes.length > 64 * 1024 * 1024) continue;
+    if (!bytes || bytes.length < 1) continue;
     const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
       .map(value => value.toString(16).padStart(2, '0')).join('');
-    let offset = 0;
+    let offset = offer.offset;
     let failed = false;
     while (offset < bytes.length) {
       const slice = bytes.subarray(offset, offset + 512 * 1024);
       let binary = '';
       for (const value of slice) binary += String.fromCharCode(value);
       const posted = await call('/generated-assets/original/chunk', { method: 'POST', body: JSON.stringify({
-        id: offer.id, chunk: btoa(binary)
+        id: offer.id, offset, chunk: btoa(binary), source
       }) }).catch(() => null);
       if (!posted?.ok || posted.data?.ok !== true) { failed = true; break; }
       offset += slice.length;
     }
     if (failed) continue;
     await call('/generated-assets/original/finish', { method: 'POST', body: JSON.stringify({
-      id: offer.id, sha256: digest
+      id: offer.id, sha256: digest, source
     }) }).catch(() => undefined);
   }
 }
@@ -3092,18 +3152,9 @@ async function maintainOnce() {
   if (intent !== connectionEpoch || !token || disconnected) return;
   if (!reply.ok || !reply.data) { await activeTabs?.revoke(); return; }
   await flushGeneratedAssetDownloadResults();
+  await flushGeneratedAssetResults();
   await processGeneratedAssetDownloads(reply.data.generatedAssetDownloads, observedTabs);
   await processGeneratedAssetOriginals(reply.data.generatedAssetOriginals, observedTabs);
-  if (downloadCustodyNeedsReconcile && intent === connectionEpoch && token && !disconnected) {
-    downloadCustodyNeedsReconcile = false;
-    await call('/status', { method: 'POST', body: JSON.stringify({
-      openConversations,
-      stalledConversations,
-      generatedAssetDownloadIds: Object.keys(generatedAssetDownloads),
-      generatedAssetDocuments: generatedAssetDocumentsTruncated ? [] : generatedAssetDocumentRows,
-      generatedAssetDocumentsTruncated
-    }) }).catch(() => undefined);
-  }
   const liveChats = new Set(Array.isArray(reply.data.nonDiscardableConversations) ? reply.data.nonDiscardableConversations : []);
   const liveOpenings = new Set(Array.isArray(reply.data.inputOpeningIds) ? reply.data.inputOpeningIds : []);
   const renderingWanted = tab => {

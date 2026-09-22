@@ -173,6 +173,7 @@ describe('extension release metadata', () => {
         return { ok: true, data: { ok: true } };
       },
       generatedAssetDownloads,
+      generatedAssetResults: [],
       MAX_GENERATED_ASSET_DOWNLOADS: 100,
       persistLive: async () => undefined
     });
@@ -206,6 +207,7 @@ describe('extension release metadata', () => {
     };
     const calls: Array<{ route: string; body: any }> = [];
     const generatedAssetDownloads: Record<string, any> = {};
+    const generatedAssetResults: Array<Record<string, unknown>> = [];
     const context = vm.createContext({
       chrome: { downloads: { download: async () => 73 } },
       URL,
@@ -225,17 +227,19 @@ describe('extension release metadata', () => {
         return { ok: false, data: { ok: false } };
       },
       generatedAssetDownloads,
+      generatedAssetResults,
+      validGeneratedAssetResult: () => true,
       MAX_GENERATED_ASSET_DOWNLOADS: 100,
       persistLive: async () => { throw new Error('session storage full'); }
     });
-    const api = vm.runInContext(`${code}\n({ processGeneratedAssetDownloads, lost: () => downloadCustodyNeedsReconcile })`, context);
-    await api.processGeneratedAssetDownloads([offer], [{
+    const processDownloads = vm.runInContext(`${code}\nprocessGeneratedAssetDownloads`, context);
+    await processDownloads([offer], [{
       id: 42, active: true, url: `https://chatgpt.com/c/${offer.conversationId}`
     }]);
+    // The in-memory row is dropped, but the terminal fact survives for a later acknowledgement.
     expect(generatedAssetDownloads).toEqual({});
-    expect(calls.filter(entry => entry.route === '/generated-assets/result')).toHaveLength(3);
-    expect(calls.filter(entry => entry.route === '/generated-assets/result').every(entry => entry.body.state === 'unconfirmed')).toBe(true);
-    expect(api.lost()).toBe(true);
+    expect(generatedAssetResults).toHaveLength(1);
+    expect(generatedAssetResults[0]).toMatchObject({ id: offer.id, state: 'unconfirmed' });
     expect(JSON.stringify(calls)).not.toContain('sig=secret');
   });
 
@@ -249,7 +253,13 @@ describe('extension release metadata', () => {
       URL,
       btoa: (value: string) => Buffer.from(value, 'binary').toString('base64'),
       crypto: { subtle: { digest: async () => new Uint8Array(32).buffer } },
-      fetch: async (url: string) => ({ ok: true, arrayBuffer: async () => Buffer.from('png-bytes') }),
+      fetch: async () => ({
+        ok: true,
+        body: { getReader: () => {
+          let sent = false;
+          return { read: async () => sent ? { done: true } : (sent = true, { done: false, value: new Uint8Array([1, 2, 3]) }) };
+        } }
+      }),
       cleanConversationId: (value: unknown) => typeof value === 'string' ? value : null,
       conversationForTab: () => '11111111-2222-4333-8444-555555555555',
       tabConversations: { '42': '11111111-2222-4333-8444-555555555555' },
@@ -269,12 +279,16 @@ describe('extension release metadata', () => {
       id: '22222222-3333-4444-8555-666666666666',
       conversationId: '11111111-2222-4333-8444-555555555555',
       logicalMessageId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
-      assetId: 'file_AuroraOriginal0001'
+      assetId: 'file_AuroraOriginal0001',
+      offset: 0,
+      document: { tab: 42, documentId: 'doc-42', documentGeneration: 3, spaEpoch: 7 }
     }], [{ id: 42, url: 'https://chatgpt.com/c/11111111-2222-4333-8444-555555555555' }]);
     expect(calls.map(entry => entry.route)).toEqual([
       '/generated-assets/original/chunk',
       '/generated-assets/original/finish'
     ]);
+    expect(calls[0]!.body).toMatchObject({ offset: 0,
+      source: { tab: 42, documentId: 'doc-42', documentGeneration: 3, spaEpoch: 7 } });
     expect(JSON.stringify(calls)).not.toContain('sig=secret');
   });
 

@@ -129,6 +129,9 @@ export async function requestGeneratedAssetDownloads(
     }
     if (nonterminalBatches() >= MAX_BATCHES) throw new Error('download_capacity');
     if (stillCurrent && !stillCurrent()) throw new Error('download_selection_changed');
+    // Shutdown is asynchronous with respect to this queue. Recheck it here, with no await
+    // between this line and publication, so an admitted request cannot escape abandonment.
+    if (admissionClosed) throw new Error('download_shutdown');
     const batchId = randomUUID();
     const batch: InternalBatch = {
       id: batchId,
@@ -225,6 +228,12 @@ export function pendingGeneratedAssetDownloadOffers(): GeneratedAssetDownloadOff
 export function generatedAssetDownloadsForSession(sessionId: string): GeneratedAssetDownloadBatch[] {
   if (!SESSION_ID.test(sessionId)) return [];
   return [...batches.values()].filter(batch => batch.sessionId === sessionId).map(publicBatch);
+}
+
+/** The one live document main currently proves for a conversation, or null when ambiguous. */
+export function liveDocumentFor(conversationId: string): GeneratedAssetDownloadDocument | null {
+  if (!documentsComplete) return null;
+  return liveDocuments.get(conversationId) ?? null;
 }
 
 export function reconcileGeneratedAssetDownloadCustody(liveIds: readonly string[]): number {

@@ -30,6 +30,7 @@ import {
 import {
   appendOriginalChunk,
   finishOriginalTransfer,
+  originalTransferDocument,
   pendingOriginalTransfers
 } from './generated-assets.js';
 /**
@@ -2400,28 +2401,53 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       body as Parameters<typeof recordGeneratedAssetDownloadResult>[0]);
     return json(res, accepted ? 200 : 409, { ok: accepted }, origin);
   }
-  if (route === '/generated-assets/original/chunk' && req.method === 'POST') {
+/** Exact document the companion must present for one original transfer; never re-elected. */
+function validOriginalSource(value: unknown): value is { tab: number; documentId: string; documentGeneration: number; spaEpoch: number } {
+  if (!value || typeof value !== 'object') return false;
+  const source = value as Record<string, unknown>;
+  return Number.isSafeInteger(source.tab) && (source.tab as number) >= 0 &&
+    typeof source.documentId === 'string' && /^[a-z0-9_-]{1,128}$/i.test(source.documentId) &&
+    Number.isSafeInteger(source.documentGeneration) && (source.documentGeneration as number) >= 1 &&
+    Number.isSafeInteger(source.spaEpoch) && (source.spaEpoch as number) >= 0;
+}
+
+function transferMatchesDocument(id: string, source: { tab: number; documentId: string; documentGeneration: number; spaEpoch: number }): boolean {
+  const transfer = originalTransferDocument(id);
+  return Boolean(transfer) && transfer!.tab === source.tab && transfer!.documentId === source.documentId &&
+    transfer!.documentGeneration === source.documentGeneration && transfer!.spaEpoch === source.spaEpoch;
+}
+
+if (route === '/generated-assets/original/chunk' && req.method === 'POST') {
     let body: unknown;
     try { body = await readBody(req); }
     catch { return json(res, 400, { error: 'invalid_original_chunk' }, origin); }
-    const fields = body as { id?: unknown; chunk?: unknown };
-    if (!fields || typeof fields.id !== 'string' || typeof fields.chunk !== 'string') {
+    const fields = body as { id?: unknown; offset?: unknown; chunk?: unknown; source?: unknown };
+    if (!fields || typeof fields.id !== 'string' || !Number.isSafeInteger(fields.offset) ||
+        typeof fields.chunk !== 'string' || !validOriginalSource(fields.source)) {
       return json(res, 400, { error: 'invalid_original_chunk' }, origin);
     }
     try {
-      appendOriginalChunk(fields.id, Buffer.from(fields.chunk, 'base64'));
+      if (!transferMatchesDocument(fields.id, fields.source)) {
+        return json(res, 409, { error: 'original_document_refused' }, origin);
+      }
+      appendOriginalChunk(fields.id, fields.offset as number, Buffer.from(fields.chunk, 'base64'));
       return json(res, 200, { ok: true }, origin);
-    } catch {
-      return json(res, 409, { ok: false }, origin);
+    } catch (error) {
+      const code = error instanceof Error && error.name === 'GeneratedAssetError' ? error.message : 'asset_chunk_refused';
+      return json(res, 409, { ok: false, error: code }, origin);
     }
   }
   if (route === '/generated-assets/original/finish' && req.method === 'POST') {
     let body: unknown;
     try { body = await readBody(req); }
     catch { return json(res, 400, { error: 'invalid_original_finish' }, origin); }
-    const fields = body as { id?: unknown; sha256?: unknown };
-    if (!fields || typeof fields.id !== 'string' || typeof fields.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(fields.sha256)) {
+    const fields = body as { id?: unknown; sha256?: unknown; source?: unknown };
+    if (!fields || typeof fields.id !== 'string' || typeof fields.sha256 !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(fields.sha256) || !validOriginalSource(fields.source)) {
       return json(res, 400, { error: 'invalid_original_finish' }, origin);
+    }
+    if (!transferMatchesDocument(fields.id, fields.source)) {
+      return json(res, 409, { error: 'original_document_refused' }, origin);
     }
     try {
       finishOriginalTransfer(fields.id, fields.sha256);
