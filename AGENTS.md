@@ -360,7 +360,7 @@ still checks live policy. Schema visibility is never the security boundary.
 
 | Surface | Advertised operations under current eligibility |
 | --- | --- |
-| Core — `chatbbc-core` | `read`, `view_image`, `find` when command execution is off, `apply_patch`, `exec_command`/`write_stdin`, `update_plan`, `agents`, `session_finish`, code-mode `exec`. |
+| Core — `chatbbc-core` | `read`, `view_image`, `find` when command execution is off, `apply_patch`, `exec_command`/`write_stdin`, `update_plan`, `agents`, `session_finish`, `generated_assets`, code-mode `exec`. |
 | Desktop — `chatbbc-desktop` | All Chromium extension hosts: `browser_tabs`, `browser_snapshot`, `browser_screenshot`, `browser_console`, `browser_network`, `browser_navigate`, `browser_action`, `browser_evaluate`. Windows additionally exposes 13 Window2 operations, clipboard and `exec` with `sky`; macOS adds `observe`/`computer`. Surface `exec` composes browser tools too. |
 | Plugins — `chatbbc-plugins` | Enabled external tools with their upstream names and schemas, plus code-mode `exec` when that composition name is available. |
 
@@ -1233,6 +1233,29 @@ preview can hydrate inline from the existing local session-image reader, includi
 pending and ambiguous previews stay placeholders. A saved local preview is **not** the original
 ChatGPT asset; inline display and its local viewer do not fetch or regenerate the original.
 Unknown media ownership never creates a guessed `native_image` tuple or downloads a signed URL.
+
+### Human original downloads and agent retrieval are separate ledgers
+
+A human "Download original" is the browser's own download. `generated-asset-downloads.ts` owns one
+process-lifetime batch ledger with a 20-asset limit, 64 nonterminal batches and five truthful states.
+Main publishes only opaque ids, filenames, an exact frozen document and receipt state; it never
+receives a URL. A batch offer is withheld unless exactly one live document is proven for the
+conversation, so an ambiguous or truncated report yields no offer rather than a guess.
+`extension/background.js` claims once per asset, resolves the signed source in the exact document,
+and calls `chrome.downloads.download`; the signed URL never leaves the extension. Chrome's own
+receipt id is persisted before `started`, so an accepted download is never started twice.
+Terminal results enter a durable outbox and are retired only after main acknowledges them.
+An unresolved batch is reported `unconfirmed`, never silently completed; shutdown marks every
+unresolved item unconfirmed and closes download and original-transfer admission.
+
+The agent path is a different ledger and permission. Core's `generated_assets` lists one opaque
+handle per canonical asset — including every asset of a multi-image response — and saves a preview
+or original to an approved path through the existing sandbox with an atomic temp-file publish and a
+destination-revision check. A handle from another session is refused. An unavailable original is
+never substituted with a preview. `GENERATED_ASSET_LIMITS` bounds the list, compressed bytes,
+decoded pixels, chunk size, concurrent transfers and transfer time. Original bytes are requested
+from the companion in offset-checked chunks and accepted only against the frozen document and a
+final SHA-256. Saved previews are local files; they are not the provider original.
 
 Recorded choice, radio, checkbox, input and Continue elements currently paint as **inert**
 descriptions with disabled action surfaces. A historical selected state means selected *when
