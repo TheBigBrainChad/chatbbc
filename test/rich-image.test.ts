@@ -297,3 +297,43 @@ it('moves inside one set without fetching every preview or starting a download',
   expect(image).toHaveBeenCalledOnce();
   retireImageSetViewer();
 });
+
+it('shows the selected position while that preview read is still pending', async () => {
+  const { openImageSetViewer, retireImageSetViewer } = await import('../src/renderer/image-set.js');
+  let resolveImage: (value: unknown) => void = () => {};
+  image.mockImplementation(() => new Promise(resolve => { resolveImage = resolve; }));
+  const gallery = document.createElement('div');
+  gallery.className = 'generated-image-gallery';
+  const row = (asset: string, preview: string, src?: string) => {
+    const node = document.createElement('div');
+    node.className = 'ev ev-native_image';
+    node.dataset.imageMessage = 'response-a';
+    node.dataset.imageAsset = asset;
+    node.dataset.imagePreview = preview;
+    node.dataset.imageStatus = 'available';
+    node.dataset.imageWidth = '32';
+    node.dataset.imageHeight = '32';
+    if (src) {
+      const img = document.createElement('img');
+      img.src = src;
+      node.append(img);
+    }
+    gallery.append(node);
+    return node;
+  };
+  const first = row('asset-a', 'abcdef12.bin', localImage);
+  row('asset-b', 'abcdef13.bin');
+  document.body.append(gallery);
+  await openImageSetViewer({ row: first, sessionId, current: () => current });
+  const dialog = document.querySelector<HTMLDialogElement>('dialog.image-set-viewer')!;
+  dialog.querySelector<HTMLButtonElement>('.image-set-next')!.click();
+  expect(dialog.querySelector('.image-set-position')?.textContent).toBe('2 / 2');
+  expect(dialog.querySelector('.image-set-stage img')?.hasAttribute('src')).toBe(false);
+  resolveImage({ ok: true, data: localImage });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(dialog.querySelector('.image-set-stage img')?.getAttribute('src')).toBe(localImage);
+  expect(image).toHaveBeenCalledExactlyOnceWith(sessionId, 'abcdef13.bin');
+  retireImageSetViewer();
+});
+

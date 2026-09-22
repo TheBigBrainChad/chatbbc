@@ -366,6 +366,9 @@ export interface ImageSetImage {
   previewHeight?: number;
   /** A saved local preview exists. This is not the preview bytes or a provider URL. */
   hasPreview: boolean;
+  /** Local sessions:image id. Absent when no admitted preview exists. */
+  previewAssetId?: string;
+  previewMime?: 'image/png' | 'image/jpeg' | 'image/webp';
 }
 
 export interface ImageSetView {
@@ -387,7 +390,15 @@ export interface ImageSetSource {
   height?: number;
   previewWidth?: number;
   previewHeight?: number;
-  asset?: { id: string } | null;
+  asset?: { id: string; mimeType?: string } | null;
+}
+
+const LOCAL_PREVIEW_ID = /^[a-f0-9]{8,64}\.(?:bin|png|jpg)$/;
+
+function localPreview(asset: { id: string; mimeType?: string } | null | undefined, status: string): { previewAssetId?: string; previewMime?: ImageSetImage['previewMime'] } {
+  if (status !== 'available' || !asset?.id || !LOCAL_PREVIEW_ID.test(asset.id)) return {};
+  const previewMime = asset.mimeType === 'image/png' || asset.mimeType === 'image/jpeg' || asset.mimeType === 'image/webp' ? asset.mimeType : undefined;
+  return { previewAssetId: asset.id, ...(previewMime ? { previewMime } : {}) };
 }
 
 function finiteSize(value: number | undefined): number | undefined {
@@ -422,6 +433,7 @@ export function imageSetsForTimeline(events: readonly ImageSetSource[]): ImageSe
     const height = finiteSize(event.height) ?? previous?.height;
     const previewWidth = finiteSize(event.previewWidth) ?? previous?.previewWidth;
     const previewHeight = finiteSize(event.previewHeight) ?? previous?.previewHeight;
+    const preview = localPreview(event.asset, event.previewStatus);
     set.images.set(assetId, {
       providerAssetId: assetId,
       origin: imageOrigin,
@@ -431,7 +443,8 @@ export function imageSetsForTimeline(events: readonly ImageSetSource[]): ImageSe
       ...(height ? { height } : {}),
       ...(previewWidth ? { previewWidth } : {}),
       ...(previewHeight ? { previewHeight } : {}),
-      hasPreview: event.previewStatus === 'available' && !!event.asset?.id,
+      hasPreview: !!preview.previewAssetId,
+      ...preview,
       seq: event.seq
     });
   }

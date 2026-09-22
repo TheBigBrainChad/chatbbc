@@ -19,8 +19,8 @@ import { chatErrorPresentation, duplicateChatErrors } from './chat-error.js';
 import { communicationTitle, foldAgentCommunication } from './agent-communication.js';
 import { KIND_ICON } from './session-list.js';
 import { imageStorageButton } from './image-storage.js';
-import { localDataUrl, retireRichImageViewerWithin, retireStaleRichImageViewer } from './rich-image.js';
-import { keepImageActionInert, openImageSetViewer, paintImageSetBar, retireStaleImageSetViewer } from './image-set.js';
+import { retireRichImageViewerWithin, retireStaleRichImageViewer } from './rich-image.js';
+import { adoptImageSets, keepImageActionInert, openImageSetViewer, paintImageSetBar, retireStaleImageSetViewer } from './image-set.js';
 import { renderRichResponse } from './rich-response.js';
 import { toolResultText } from './tool-result.js';
 import { categoryClass, contentRowIdentity } from './transcript-categories.js';
@@ -175,6 +175,8 @@ export function createTimelineView(options: TimelineViewOptions): TimelineView {
   let loaded = false;
   /** The immutable origin the reader walked back to; null while they are at the live tail. */
   let browsingFrom: number | null = null;
+  let timelineImageSetEpoch = 0;
+  let previewImageSetEpoch = 0;
 
   /**
    * Tool calls the user has opened, by their durable call id.
@@ -509,26 +511,6 @@ export function createTimelineView(options: TimelineViewOptions): TimelineView {
         keepImageActionInert(download);
         keepImageActionInert(save);
         box.append(open, download, save);
-        if (event.asset && id) {
-          void (async () => {
-            const data = await run(window.api.getSessionImage(id, event.asset!.id));
-            if (context ? !context.current() : id !== options.sessionId() || generation !== options.generation()) return;
-            // Only the fixed local image reader's bounded bytes may become an IMG source. A
-            // malformed IPC reply must never trigger a remote image request or paint a different
-            // MIME under this exact canonical generated-image asset.
-            if (!localDataUrl(data, event.asset!.mimeType)) {
-              const pane = context ? box.closest<HTMLElement>('.agent-panel-body') : options.pane();
-              const timeline = context ? pane : options.timeline();
-              const restore = pane && timeline && box.isConnected ? preserveTimelineViewport(pane, timeline) : () => {};
-              unavailable(); restore();
-              return;
-            }
-            const image = document.createElement('img');
-            image.src = data;
-            image.alt = t("ChatGPT generated image");
-            frame.replaceChildren(image);
-          })();
-        }
         return box;
       }
       case 'progress':
@@ -842,6 +824,7 @@ export function createTimelineView(options: TimelineViewOptions): TimelineView {
     reconcileChildren(timeline, spine.length === 0
       ? groupImageRows(groupToolRows(timelineRows, sessionId, toolGroups, openTools))
       : withSpineSegments(groupImageRows(groupToolRows(timelineRows, sessionId, toolGroups, openTools)), spine));
+    settleImageSets(timeline, sessionId, 'timeline');
     retireStaleRichImageViewer();
     retireStaleImageSetViewer();
     paintPendingInputs(options.outbox);
@@ -891,6 +874,15 @@ export function createTimelineView(options: TimelineViewOptions): TimelineView {
     browsingFrom = null;
     agentFilter = null;
     filterFor = null;
+  }
+
+  function settleImageSets(scope: ParentNode, ownerId: string | null, kind: 'timeline' | 'preview', alive?: () => boolean): void {
+    if (!ownerId) return;
+    const generation = options.generation();
+    const token = kind === 'timeline' ? ++timelineImageSetEpoch : ++previewImageSetEpoch;
+    const previewCurrent = () => alive ? alive() : options.sessionId() === ownerId && options.generation() === generation;
+    const current = () => (kind === 'timeline' ? token === timelineImageSetEpoch : token === previewImageSetEpoch) && previewCurrent();
+    void adoptImageSets(scope, ownerId, current, previewCurrent);
   }
 
   return {
@@ -961,7 +953,11 @@ export function createTimelineView(options: TimelineViewOptions): TimelineView {
         row.append(body);
         return [row];
       });
-      return groupImageRows(groupToolRows(rows, `pane:${sessionId}`, groups, openTools));
+      const grouped = groupImageRows(groupToolRows(rows, `pane:${sessionId}`, groups, openTools));
+      const host = document.createElement('div');
+      host.append(...grouped);
+      settleImageSets(host, sessionId, 'preview', current);
+      return grouped;
     },
     retire,
     clearRows,
@@ -1408,6 +1404,7 @@ export function tagImageRow(row: HTMLElement, event: SessionEvent): void {
   row.dataset.imageStatus = event.previewStatus;
   row.dataset.imageError = event.previewError ?? '';
   row.dataset.imagePreview = event.asset?.id ?? '';
+  row.dataset.imageMime = event.asset?.mimeType ?? '';
   row.dataset.imageWidth = String(event.width ?? event.previewWidth ?? '');
   row.dataset.imageHeight = String(event.height ?? event.previewHeight ?? '');
   row.dataset.imageOrigin = String(event.origin ?? event.seq);

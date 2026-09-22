@@ -1089,8 +1089,11 @@ export function registerIpc(
     return recordedInputImage(id, assetId);
   });
   handle('sessions:imageSets', async (payload) => {
-    const { id } = z.object({ id: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i) }).parse(payload);
-    return sessionImageSets(id);
+    const { id, responseIds } = z.object({
+      id: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i),
+      responseIds: z.array(z.string().min(1).max(256)).max(64).optional()
+    }).parse(payload);
+    return sessionImageSets(id, responseIds);
   });
   handle('sessions:imageStorage', async () => getImageStorage());
   handle('sessions:clearImageStorage', async (payload) => {

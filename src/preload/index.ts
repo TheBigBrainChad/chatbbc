@@ -205,7 +205,7 @@ const api = {
   revealProjectFileEntry: (projectId: string, path = '') => call<boolean>('projectFiles:reveal', { projectId, path }),
   attachProjectFile: (projectId: string, path: string) => call<InputAttachment>('projectFiles:attach', { projectId, path }),
   getSessionImage: (id: string, assetId: string) => call<string | null>('sessions:image', { id, assetId }),
-  getSessionImageSets: (id: string) => call<{ sets: import('../shared/chronology.js').ImageSetView[]; truncated: boolean }>('sessions:imageSets', { id }),
+  getSessionImageSets: (id: string, responseIds?: string[]) => call<{ sets: import('../shared/chronology.js').ImageSetView[]; truncated: boolean }>('sessions:imageSets', responseIds ? { id, responseIds } : { id }),
   getImageStorage: () => call<ImageStorageInfo>('sessions:imageStorage'),
   clearImageStorage: (mode: ImageStorageClearMode) => call<ImageStorageClearResult>('sessions:clearImageStorage', { mode }),
     getSession: (id: string, options?: { from?: number; before?: number; after?: number; limit?: number }) =>

@@ -595,6 +595,10 @@ it('clears only persisted images after retiring every durable reference and neve
   });
   expect(generated).toMatchObject({ previewStatus: 'unavailable', previewError: 'removed' });
   expect(generated?.kind === 'native_image' ? generated.asset : null).toBeUndefined();
+  const { sessionImageSets } = await import('../src/main/session/store.js');
+  const tombstone = await sessionImageSets(session.id, ['native-image-message']);
+  expect(tombstone.sets[0]).toMatchObject({ completeness: 'unavailable', images: [{ hasPreview: false, previewError: 'removed' }] });
+  expect(JSON.stringify(tombstone)).not.toMatch(/base64|https?:|data:/);
 
   const { seq: _seq, origin: _origin, ...nativeReplay } = native.event;
   const replay = await upsertNativeImageEvent(session.id, {
@@ -693,6 +697,10 @@ it('returns one session\'s response-owned image metadata without preview bytes',
   expect(JSON.stringify(owned)).not.toMatch(/base64|https?:|data:/);
   expect((await sessionImageSets(second.id)).sets.map(set => set.responseId)).toEqual(['response-b']);
   expect(await sessionImageSets(first.id)).toEqual(owned);
+  const scoped = await sessionImageSets(first.id, ['response-a']);
+  expect(scoped.sets.map(set => set.responseId)).toEqual(['response-a']);
+  expect((await sessionImageSets(second.id, ['response-b'])).sets.map(set => set.responseId)).toEqual(['response-b']);
+  expect(await sessionImageSets(first.id, ['response-a'])).toEqual(scoped);
 });
 
 it('marks image-set metadata truncated when one response exceeds the metadata cap', async () => {

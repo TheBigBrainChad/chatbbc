@@ -1,7 +1,10 @@
+import { el, reconcileChildren, run } from './dom.js';
 import { t, ui } from './i18n.js';
-import { localImageDataUrl } from './rich-image.js';
+import { imageStorageButton } from './image-storage.js';
+import { localDataUrl, localImageDataUrl } from './rich-image.js';
+import { imageSetsForTimeline, type ImageSetImage, type ImageSetView } from '../shared/chronology.js';
 
-export { imageSetsForTimeline, type ImageSetImage, type ImageSetView } from '../shared/chronology.js';
+export { imageSetsForTimeline, type ImageSetImage, type ImageSetView };
 
 const MIN_SCALE = 1;
 const MAX_SCALE = 3;
@@ -93,18 +96,168 @@ export function paintImageSetBar(gallery: HTMLElement, count: number): void {
   gallery.append(bar);
 }
 
+
+function availabilityText(status: string, error: string): string {
+  if (status === 'pending') return t('Image preview is loading');
+  if (error === 'removed') return t('Image removed from local storage');
+  if (error === 'quota') return t('Image preview unavailable — recording storage is full');
+  if (error === 'oversized') return t('Image preview unavailable — image exceeds the recording limit');
+  if (status === 'unavailable') return t('Image preview unavailable');
+  return t('Image preview is loading');
+}
+
+function placeholderImageRow(image: ImageSetImage, responseId: string, owner: { sessionId: string; current: () => boolean }): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'ev ev-native_image';
+  row.dataset.imageMessage = responseId;
+  row.dataset.imageAsset = image.providerAssetId;
+  row.dataset.imageStatus = image.previewStatus;
+  row.dataset.imageError = image.previewError ?? '';
+  row.dataset.imagePreview = image.previewAssetId ?? '';
+  row.dataset.imageMime = image.previewMime ?? '';
+  row.dataset.imageWidth = String(image.width ?? image.previewWidth ?? '');
+  row.dataset.imageHeight = String(image.height ?? image.previewHeight ?? '');
+  row.dataset.imageOrigin = String(image.origin);
+  const frame = document.createElement('div');
+  frame.className = 'generated-image-frame';
+  const width = image.width ?? image.previewWidth ?? 1;
+  const height = image.height ?? image.previewHeight ?? 1;
+  frame.style.aspectRatio = `${Math.max(1, width)} / ${Math.max(1, height)}`;
+  const note = document.createElement('p');
+  note.className = 'meta';
+  ui(note, 'textContent', () => availabilityText(image.previewStatus, image.previewError ?? ''));
+  if (image.previewStatus === 'unavailable') {
+    frame.classList.add('is-unavailable');
+    frame.append(note, imageStorageButton());
+  } else frame.append(note);
+  const said = document.createElement('div');
+  said.className = 'said native-image';
+  const title = document.createElement('b');
+  ui(title, 'textContent', () => t('ChatGPT generated image'));
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'image-set-open';
+  ui(open, 'textContent', () => t('Open'));
+  open.addEventListener('click', () => {
+    void openImageSetViewer({ row, sessionId: owner.sessionId, current: owner.current });
+  });
+  const download = button('image-set-download', () => t('Download original'));
+  const save = button('image-set-save', () => t('Save preview'));
+  keepImageActionInert(download);
+  keepImageActionInert(save);
+  said.append(title, frame, open, download, save);
+  const body = document.createElement('div');
+  body.className = 'ev-body';
+  body.append(said);
+  row.append(body);
+  return row;
+}
+
+/** Replace gallery membership with the canonical response order. Resident rows stay mounted. */
+export function applyImageSetMembers(gallery: HTMLElement, set: ImageSetView, owner: { sessionId: string; current: () => boolean }): void {
+  const resident = new Map<string, HTMLElement>();
+  for (const row of gallery.querySelectorAll<HTMLElement>(':scope > .ev-native_image')) {
+    const asset = row.dataset.imageAsset;
+    if (asset && !resident.has(asset)) resident.set(asset, row);
+  }
+  const members = set.images.map(image => resident.get(image.providerAssetId) ?? placeholderImageRow(image, set.responseId, owner));
+  reconcileChildren(gallery, members);
+  paintImageSetBar(gallery, members.length);
+}
+
+/** Load only the first image in each gallery. Thumbnails keep their reserved slot. */
+export function hydrateImageSetHeroes(galleries: readonly HTMLElement[], sessionId: string, current: () => boolean): void {
+  if (!window.api?.getSessionImage) return;
+  for (const gallery of galleries) {
+    const hero = gallery.querySelector<HTMLElement>(':scope > .ev-native_image');
+    if (!hero || hero.dataset.imageHydrated === 'true') continue;
+    const previewId = hero.dataset.imagePreview ?? '';
+    const mime = hero.dataset.imageMime ?? '';
+    if (!previewId || hero.dataset.imageStatus !== 'available' || !mime) continue;
+    const frame = hero.querySelector<HTMLElement>('.generated-image-frame');
+    if (!frame || frame.querySelector('img')) continue;
+    hero.dataset.imageHydrated = 'true';
+    void (async () => {
+      let data: unknown = null;
+      try { data = await run(window.api.getSessionImage(sessionId, previewId)); }
+      catch { data = null; }
+      if (!current() || !hero.isConnected || hero.dataset.imagePreview !== previewId) {
+        delete hero.dataset.imageHydrated;
+        return;
+      }
+      if (!localDataUrl(data, mime)) {
+        frame.classList.add('is-unavailable');
+        frame.replaceChildren(el('p', 'meta', () => t('Image preview unavailable')), imageStorageButton());
+        return;
+      }
+      const image = document.createElement('img');
+      image.src = data;
+      image.alt = t('ChatGPT generated image');
+      frame.replaceChildren(image);
+    })();
+  }
+}
+
+/** Ask for the exact responses on screen, then hydrate the hero of each resulting set. */
+export async function adoptImageSets(scope: ParentNode, sessionId: string, current: () => boolean, previewCurrent: () => boolean = current): Promise<void> {
+  const galleries = [...scope.querySelectorAll<HTMLElement>('.generated-image-gallery')];
+  if (!previewCurrent() || !window.api) return;
+  const load = window.api.getSessionImageSets;
+  let sets: ImageSetView[] = [];
+  if (typeof load === 'function') {
+    const responseIds = [...new Set(galleries.map(gallery => gallery.querySelector<HTMLElement>(':scope > .ev-native_image')?.dataset.imageMessage).filter((id): id is string => !!id))].slice(0, 64);
+    if (responseIds.length) {
+      try {
+        const reply = await load(sessionId, responseIds);
+        if (reply?.ok && reply.data && Array.isArray(reply.data.sets)) sets = reply.data.sets;
+      } catch { sets = []; }
+    }
+  }
+  if (!previewCurrent()) return;
+  if (current()) {
+    const byId = new Map(sets.map(set => [set.responseId, set]));
+    for (const gallery of galleries) {
+      if (!gallery.isConnected && !gallery.parentElement) continue;
+      const responseId = gallery.querySelector<HTMLElement>(':scope > .ev-native_image')?.dataset.imageMessage;
+      const set = responseId ? byId.get(responseId) : undefined;
+      if (set) applyImageSetMembers(gallery, set, { sessionId, current: previewCurrent });
+    }
+  }
+  hydrateImageSetHeroes(galleries.filter(gallery => gallery.isConnected || gallery.parentElement !== null), sessionId, previewCurrent);
+}
+
+async function canonicalMembers(owner: ImageSetViewerOwner): Promise<HTMLElement[]> {
+  const responseId = owner.row.dataset.imageMessage?.trim() ?? '';
+  const gallery = owner.row.closest<HTMLElement>('.generated-image-gallery');
+  const load = window.api?.getSessionImageSets;
+  if (gallery && responseId && typeof load === 'function') {
+    try {
+      const reply = await load(owner.sessionId, [responseId]);
+      const sets = reply?.ok && reply.data && Array.isArray(reply.data.sets) ? reply.data.sets : [];
+      const set = sets.find(item => item.responseId === responseId);
+      if (set && owner.current() && owner.row.isConnected) applyImageSetMembers(gallery, set, owner);
+    } catch { /* Resident rows remain the visible set. */ }
+  }
+  return membersOf(owner.row.isConnected ? owner.row : gallery?.querySelector<HTMLElement>('.ev-native_image') ?? owner.row);
+}
+
 /**
  * Local saved-preview viewer for one response-owned set.
  * It never reads a provider URL and never starts a download.
  */
 export async function openImageSetViewer(owner: ImageSetViewerOwner): Promise<void> {
   if (active || !owner.current() || !owner.row.isConnected) return;
-  const rows = membersOf(owner.row);
-  const start = Math.max(0, rows.indexOf(owner.row));
   const viewer: SetViewer = {
-    owner, dialog: null, focusGuard: null, index: start, scale: MIN_SCALE, panX: 0, panY: 0
+    owner, dialog: null, focusGuard: null, index: 0, scale: MIN_SCALE, panX: 0, panY: 0
   };
   active = viewer;
+  const rows = await canonicalMembers(owner);
+  if (active !== viewer || !owner.current() || !owner.row.isConnected) {
+    if (active === viewer) active = null;
+    return;
+  }
+  const start = Math.max(0, rows.indexOf(owner.row));
+  viewer.index = start;
 
   const dialog = document.createElement('dialog');
   dialog.className = 'image-set-viewer';
@@ -198,6 +351,7 @@ export async function openImageSetViewer(owner: ImageSetViewerOwner): Promise<vo
     const previewId = row.dataset.imagePreview ?? '';
     if (resident && localImageDataUrl(resident)) picture.src = resident;
     else if (previewId && status === 'available') {
+      picture.removeAttribute('src');
       let data: unknown = null;
       try {
         const reply = await window.api.getSessionImage(owner.sessionId, previewId);

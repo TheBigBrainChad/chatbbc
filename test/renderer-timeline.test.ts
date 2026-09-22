@@ -1200,7 +1200,7 @@ it('removes a withdrawn newest chat after sidebar pagination while preserving th
   expect(w.document.querySelector('[data-id="retained-chat"]')).not.toBeNull();
 });
 
-it('reserves geometry and hydrates multiple native generated images independently in source order', async () => {
+it('reserves geometry for every native image and hydrates only the hero preview', async () => {
   const app = await boot([]);
   const { w } = app;
   const pending = new Map<string, (value: unknown) => void>();
@@ -1223,14 +1223,12 @@ it('reserves geometry and hydrates multiple native generated images independentl
   const frames = rows.map(row => row.querySelector<HTMLElement>('.generated-image-frame')!);
   expect(frames.map(frame => frame.style.aspectRatio)).toEqual(['1254 / 1254', '1024 / 768']);
   expect(frames.every(frame => frame.textContent === 'Image preview is loading')).toBe(true);
-
-  pending.get('orange.webp')?.({ ok: true, data: 'data:image/webp;base64,b3Jhbmdl' });
-  await settle();
-  expect(frames[1]!.querySelector('img')?.getAttribute('src')).toContain('b3Jhbmdl');
-  expect(frames[0]!.querySelector('img')).toBeNull();
+  expect(pending.has('orange.webp')).toBe(false);
   pending.get('blue.webp')?.({ ok: true, data: 'data:image/webp;base64,Ymx1ZQ==' });
   await settle();
   expect(frames[0]!.querySelector('img')?.getAttribute('src')).toContain('Ymx1ZQ==');
+  expect(frames[1]!.querySelector('img')).toBeNull();
+  expect(frames[1]!.textContent).toContain('Image preview is loading');
 });
 
 it('inserts a locally supplied valid WebP for an image-only final without fabricating an assistant text row', async () => {
@@ -1312,6 +1310,38 @@ it('groups one response across metadata and keeps a different response separate'
   expect(galleries[0]?.querySelector('.image-set-download-all')?.getAttribute('aria-disabled')).toBe('true');
   expect(galleries[0]?.querySelector('.ev-native_image .image-set-download')?.getAttribute('aria-disabled')).toBe('true');
   expect(galleries[1]?.querySelector('.image-set-bar')).toBeNull();
+});
+
+it('keeps one response whole when a member is outside the resident page, then restores it after another session', async () => {
+  const app = await boot([]);
+  const messageId = 'response-a';
+  const resident = { providerAssetId: 'file-resident', origin: 1, previewStatus: 'available' as const, hasPreview: true,
+    previewAssetId: 'abcdef12.bin', previewMime: 'image/webp' as const, width: 20, height: 10 };
+  const evicted = { providerAssetId: 'file-evicted', origin: 2, previewStatus: 'pending' as const, hasPreview: false, width: 8, height: 8 };
+  let phase: 'A' | 'B' = 'A';
+  const getImage = vi.fn(async (_sessionId: string, _assetId: string) => ({ ok: true, data: 'data:image/webp;base64,UklGRgAAAAA=' }));
+  (app.w as any).api.getSessionImage = getImage;
+  (app.w as any).api.getSessionImageSets = vi.fn(async () => ({ ok: true, data: {
+    truncated: false,
+    sets: [{ responseId: messageId, origin: 1, completeness: 'partial' as const, images: phase === 'A' ? [resident, evicted] : [resident] }]
+  } }));
+  const image = (seq: number): SessionEvent => ({ seq, time: T0 + seq, source: 'extension', kind: 'native_image',
+    messageId, providerAssetId: 'file-resident', providerRole: 'tool', previewStatus: 'available', width: 20, height: 10,
+    asset: { id: 'abcdef12.bin', mimeType: 'image/webp', bytes: 12 } });
+  await app.append([image(1)]);
+  const gallery = app.w.document.querySelector('.generated-image-gallery')!;
+  expect(gallery.querySelectorAll('.ev-native_image')).toHaveLength(2);
+  expect(gallery.textContent).toContain('2 images');
+  expect(getImage.mock.calls.map(call => call[1])).toEqual(['abcdef12.bin']);
+  phase = 'B';
+  await app.append([image(2)]);
+  expect(app.w.document.querySelector('.generated-image-gallery')?.querySelectorAll('.ev-native_image')).toHaveLength(1);
+  expect(app.w.document.querySelector('.image-set-bar')).toBeNull();
+  phase = 'A';
+  await app.append([image(3)]);
+  expect(app.w.document.querySelector('.generated-image-gallery')?.querySelectorAll('.ev-native_image')).toHaveLength(2);
+  expect(app.w.document.querySelector('.generated-image-gallery')?.textContent).toContain('2 images');
+  expect(getImage.mock.calls.every(call => call[1] === 'abcdef12.bin')).toBe(true);
 });
 
 it('retains one exact-message gallery when only one image gains a proven turn', async () => {
