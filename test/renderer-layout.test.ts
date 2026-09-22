@@ -552,17 +552,18 @@ describe('the window as a whole', () => {
   });
 
   it('gives keyboard focus a shape that is not only accent, blue, or glow', () => {
-    const weak: string[] = [];
+    const covered = new Set<string>();
+    const seen = new Set<string>();
     for (const match of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-      const selector = match[1]!.trim();
-      if (!/:focus-visible\b/.test(selector)) continue;
       const body = match[2]!.replace(/\s+/g, ' ');
-      if (/outline:[^;]*var\(--ink\)/.test(body)) continue;
-      const outlineNone = /outline:\s*(?:none|0)\b/.test(body);
-      const accent = /outline:[^;]*var\(--(?:accent(?:-edge)?|blue|soft)\)/.test(body);
-      if (outlineNone || accent) weak.push(selector);
+      const geometric = /outline:\s*(?!none\b|0\b)[^;]*var\(--ink\)/.test(body);
+      for (const part of match[1]!.split(',').map(selector => selector.trim())) {
+        if (!/:focus-visible\b/.test(part)) continue;
+        seen.add(part);
+        if (geometric) covered.add(part);
+      }
     }
-    expect(weak).toEqual([]);
+    expect([...seen].filter(selector => !covered.has(selector))).toEqual([]);
   });
 
   it('removes nonessential motion when reduced motion is requested', () => {
@@ -582,6 +583,15 @@ describe('the window as a whole', () => {
     expect(rail.some(body => body.includes('border-inline-end'))).toBe(true);
     expect(workbench.some(body => body.includes('border-inline-start'))).toBe(true);
     expect(rail.some(body => /border-(?:left|right)\s*:/.test(body))).toBe(false);
+    expect(rail.some(body => body.includes('direction: ltr'))).toBe(true);
+    expect(rule('.msg.rich :is(pre, code, kbd)')).toContain('direction: ltr');
+    expect(rule('.sidebar-resize')).toContain('inset-inline-end: -4px');
+    expect(rule('.sidebar-resize')).not.toMatch(/\b(?:left|right)\s*:/);
+    expect(rule('.connection-popover')).toContain('inset-inline-start: 12px');
+    expect(rule('.connection-popover')).toContain('inset-inline-end: auto');
+    expect(rule('.connection-popover')).not.toMatch(/\b(?:left|right)\s*:/);
+    expect(rule('.connection-advanced > summary')).toContain('inset-inline-end: 8px');
+    expect(rule('.connection-advanced > summary')).not.toMatch(/\b(?:left|right)\s*:/);
   });
 
   it('keeps primary rail targets usable when text is enlarged', () => {

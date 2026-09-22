@@ -97,8 +97,12 @@ app.whenReady().then(async () => {
       getChatModels: () => ok(catalog), requestChatModels: () => ok(catalog),
       getUsage: () => ok(usage),
       sendInput: entry => { window.sent.push(entry); return ok(entry); },
-      listInputs: () => ok(window.sent),
-      draftTaskPlan: () => ok(['Check the notes', 'Confirm the result']),
+      listInputs: () => ok(window.sent.filter(entry => entry.mode === 'finish').map(entry => Object.assign({}, entry, { state: 'queued', owner: null, createdAt: entry.dueAt || Date.now(), conversationId: null }))),
+      draftTaskPlan: () => new Promise(resolve => {
+        const finish = () => resolve({ ok: true, data: ['Check the notes', 'Confirm the result'] });
+        if (window.releasePlan) finish();
+        else window.addEventListener('crystal-release-plan', finish, { once: true });
+      }),
       listProjectFiles: (projectId, directory) => ok({ projectId, projectName: project.name, directory: directory || '', entries: directory ? [] : [{ name: 'notes.md', path: 'notes.md', kind: 'file', bytes: 13 }], truncated: false }),
       previewProjectFile: () => ok(filePreview),
       watchProjectFiles: () => ok(true), onProjectFilesChanged: () => () => {},
@@ -191,7 +195,16 @@ app.whenReady().then(async () => {
     await click('document.querySelector("#composerSettings > summary")');
     await until('document.getElementById("composerSettings").open === true && document.getElementById("sessionControls").hidden === false');
     await click('document.getElementById("createPlan")');
-    await until('window.sent.some(row => Array.isArray(row.stages) && row.stages.length > 0) || !!document.querySelector(".plan-stage, .queued-input")');
+    await until('document.getElementById("composerStatusLine").hidden === false && document.getElementById("taskPlanPreview").hidden === false');
+    await click('document.getElementById("composerStatusToggle")');
+    await until('document.getElementById("composerStatusLine").open === true && document.getElementById("taskPlanPreview").getBoundingClientRect().height > 0 && document.getElementById("taskPlanPreview").textContent.trim().length > 0');
+    assert.equal(await js('document.activeElement && document.activeElement.id'), 'composerStatusToggle');
+    await js('window.dispatchEvent(new Event("crystal-release-plan"))');
+    await until('document.getElementById("finishQueue").hidden === false && document.getElementById("finishQueue").textContent.includes("Check the notes") && document.getElementById("finishQueue").textContent.includes("Confirm the result")');
+    if (!(await js('document.getElementById("composerStatusLine").open === true'))) await click('document.getElementById("composerStatusToggle")');
+    await until('document.getElementById("composerStatusLine").open === true && document.getElementById("finishQueue").getBoundingClientRect().height > 0');
+    await click('document.querySelector("#finishQueue .queue-label")');
+    await until('document.activeElement && document.activeElement.classList.contains("queue-label") && document.getElementById("finishQueue").contains(document.activeElement)');
 
     const history = await js(`(() => {
       const pane = document.getElementById('chatBody');
@@ -253,6 +266,63 @@ app.whenReady().then(async () => {
     assert.ok(Math.abs(returned.scroll - held.scroll) < 4, 'scroll moved from ' + held.scroll + ' to ' + returned.scroll);
     assert.equal(returned.focus, 'chats');
     assert.equal(await js('document.querySelector("[data-destination=chats]").getAttribute("aria-current")'), 'page');
+    win.webContents.setZoomFactor(1.5);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const zoom = win.webContents.getZoomFactor();
+    const target = await js(`(() => {
+      const rect = document.querySelector('#globalRail [data-destination="chats"]').getBoundingClientRect();
+      return { w: rect.width, h: rect.height };
+    })()`);
+    assert.ok(zoom >= 1.5, 'zoom ' + zoom);
+    assert.ok(target.w >= 44 && target.h >= 44 && target.w * zoom >= 44 && target.h * zoom >= 44, JSON.stringify({ zoom, target }));
+    win.webContents.setZoomFactor(1);
+    const directions = await js(`(() => {
+      const input = document.getElementById('chatInput');
+      const read = value => { input.value = value; return getComputedStyle(input).direction; };
+      const host = document.createElement('div');
+      host.className = 'msg rich';
+      host.setAttribute('dir', 'rtl');
+      host.innerHTML = '<p>مرحبا</p><pre><code>const value = 1;</code></pre>';
+      document.body.append(host);
+      const code = getComputedStyle(host.querySelector('code')).direction;
+      const rail = getComputedStyle(document.getElementById('globalRail')).direction;
+      const arabic = read('مرحبا');
+      const hebrew = read('שלום');
+      const english = read('Hello');
+      host.remove();
+      input.value = ${JSON.stringify('')} ;
+      return { arabic, hebrew, english, code, rail };
+    })()`);
+    await js('document.getElementById("chatInput").value = ' + JSON.stringify(held.value));
+    assert.equal(directions.arabic, 'rtl');
+    assert.equal(directions.hebrew, 'rtl');
+    assert.equal(directions.english, 'ltr');
+    assert.equal(directions.code, 'ltr');
+    assert.equal(directions.rail, 'ltr');
+    const outline = await js(`(() => {
+      const host = document.createElement('div');
+      host.className = 'delivery-choices';
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = 'Now';
+      host.append(button);
+      document.body.append(host);
+      button.focus({ focusVisible: true });
+      const style = getComputedStyle(button);
+      const result = { style: style.outlineStyle, width: style.outlineWidth };
+      host.remove();
+      return result;
+    })()`);
+    assert.equal(outline.style, 'solid');
+    assert.equal(outline.width, '2px');
+    win.setContentSize(700, 800);
+    await until('document.querySelector(".app").dataset.collapse === "navigator" || document.querySelector(".app").dataset.collapse === "rail"');
+    await click('document.querySelector("[data-destination=\\"chats\\"]")');
+    await until('document.querySelector(".app").dataset.navigatorOpen === "true"');
+    key('Tab');
+    await until('document.getElementById("chatNavigator").contains(document.activeElement)');
+    key('Tab', ['shift']);
+    await until('document.activeElement && document.activeElement.dataset.destination === "chats"');
     assert.deepEqual(await js('window.fixtureErrors'), []);
     fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify({
       sent: true, history: true, switched: true, fileDraft: true, terminal: true, agents: true, usage: true, settings: true, locale: 'es', scroll: returned.scroll, focus: returned.focus

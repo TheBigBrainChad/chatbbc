@@ -280,7 +280,7 @@
    Direction stays on text surfaces; the app shell and action rows do not mirror. */
 .msg:not(.rich), .pending-message-text { unicode-bidi: plaintext; text-align: start; }
 .msg.rich, textarea[dir='auto'], .queue-label[dir='auto'] { text-align: start; }
-.msg.rich :is(pre, code, kbd) { unicode-bidi: isolate; }
+.msg.rich :is(pre, code, kbd) { direction: ltr; unicode-bidi: isolate; }
 
 .msg.rich > :first-child {
   margin-top: 0;

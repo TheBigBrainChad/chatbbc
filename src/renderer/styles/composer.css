@@ -364,7 +364,8 @@
 .send-control:hover .send-options:not([hidden]), .send-control:focus-within .send-options:not([hidden]) { display: block; }
 .delivery-choices { display: grid; gap: 2px; padding: 5px; border: 1px solid var(--edge); border-radius: 0; background: var(--card); box-shadow: 0 8px 25px #0004; animation: surface-in 120ms ease-out; }
 .delivery-choices button { display: flex; align-items: center; justify-content: space-between; padding: 9px 10px; border: 0; border-radius: 0; background: transparent; color: var(--ink); font-family: var(--ui-font-mono); font-size: calc(13px * var(--text-scale, 1)); cursor: pointer; text-align: left; }
-.delivery-choices button:hover, .delivery-choices button:focus-visible { background: var(--hover); }
+.delivery-choices button:hover { background: var(--hover); }
+.delivery-choices button:focus-visible { background: var(--hover); outline: 2px solid var(--ink); outline-offset: 2px; }
 .delivery-choices button[aria-checked='false'] .ico { visibility: hidden; }
 .send-button.is-stop svg { display: none; }
 .send-button.is-stop::after { content: ''; width: 12px; height: 12px; border-radius: 0; background: currentColor; }
