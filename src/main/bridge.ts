@@ -29,7 +29,8 @@ import {
 } from './generated-asset-downloads.js';
 import {
   appendOriginalChunk,
-  finishOriginalTransfer
+  finishOriginalTransfer,
+  pendingOriginalTransfers
 } from './generated-assets.js';
 /**
  * The local bridge between the Chrome extension and this app.
@@ -2569,6 +2570,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         modelCatalogRequest: pendingChatModelRequest(),
         pluginRefreshRequests: getConfig().ui.autoRefreshPlugins === true ? pluginRefreshPublications().map(({ surface, schemaId, connectorName }) => ({ surface, schemaId, connectorName })) : [],
         generatedAssetDownloads: pendingGeneratedAssetDownloadOffers(),
+        generatedAssetOriginals: pendingOriginalTransfers(),
         browserPreferenceRequest: pendingBrowserPreferenceRequest(),
         inputOpeningIds: inputRows.filter(row => !['sent', 'failed', 'cancelled'].includes(row.state)).map(row => row.id),
         inputs: [...(await pendingBrowserInputs()).filter(input => !input.conversationId || runningToolCalls(input.conversationId) === 0),
