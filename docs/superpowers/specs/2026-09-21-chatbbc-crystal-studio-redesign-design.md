@@ -1,7 +1,7 @@
 # ChatBBC Crystal Studio redesign — design
 
 **Date:** 2026-09-21
-**Status:** approved in brainstorming; implementation plan suite ready for review
+**Status:** in implementation. Foundation and Workspace are on the branch; Rich Outputs is implemented and source/Electron-verified. Not yet implemented at the release level: Cutover deletion inventory, packaging acceptance and signed-in provider acceptance (see `docs/worklog-2026-09-21-crystal-studio.md`).
 **Supersedes:** [`2026-09-18-chatbbc-omarchy-redesign-design.md`](./2026-09-18-chatbbc-omarchy-redesign-design.md)
 
 ## 1. Purpose

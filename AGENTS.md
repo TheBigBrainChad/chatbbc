@@ -30,7 +30,10 @@ commitment.
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: **2026-09-21**, including the 2.1.19 release candidate. App/package/extension
+Source alignment: **2026-09-22** on branch `feature/crystal-studio`. Foundation and Workspace
+slices are committed; Rich Outputs (§12 generated images and the new "Human original downloads and
+agent retrieval" contract) is implemented and source/Electron-verified. Cutover deletion, packaging
+acceptance and signed-in provider acceptance are outstanding. App/package/extension
 declarations are **2.1.19**; main and extension declare bridge protocol **17** (`package.json`,
 `src/main/version.ts`, `extension/manifest.json`, `extension/background.js`). Protocol 16
 introduced bounded rich observations; 17 adds pre-observation recording generations and
@@ -2853,6 +2856,12 @@ shared-tree change may already have addressed them.
   disposable Ubuntu 24.04 DEB GUI startup are verified. Signed-in companion pairing,
   provider-generated single/gallery/image-only pixels, native choice/Continue postconditions
   and installed raster/accessibility remain unverified.
+- **Live human download and agent asset retrieval:** the main/extension custody, the five
+  download states, the opaque Core handles and the chunked original transfer are covered by
+  source tests and Electron fixtures. No signed-in page has produced a real ChatGPT
+  generated image for `Download original` or for `generated_assets` `save`, so
+  `chrome.downloads` completion, the companion's real signed-URL fetch and the atomic
+  original publish have never been exercised against the provider.
 - **Corresponding-source GVDB archive:** `docs/licenses/native/pinned/gvdb-53daeeb4.tar.gz`
   (24,716 bytes; SHA-256 `069a00aa1fc893f18423602f4e095583be5a220429f6e8a58d70511490b4b019`)
   is tracked in this tree.
