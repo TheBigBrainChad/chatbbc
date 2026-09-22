@@ -191,6 +191,54 @@ describe('extension release metadata', () => {
     expect(generatedAssetDownloads).toEqual({});
   });
 
+  it('reports unconfirmed and drops memory custody when Chrome accepted a download that could not be saved', async () => {
+    const code = backgroundSource.slice(
+      backgroundSource.indexOf('function validGeneratedAssetOffer('),
+      backgroundSource.indexOf('\nasync function maintainOnce(')
+    );
+    const offer = {
+      id: '22222222-3333-4444-8555-666666666666',
+      conversationId: '11111111-2222-4333-8444-555555555555',
+      logicalMessageId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      assetId: 'file_AuroraOriginal0001',
+      filename: 'ChatBBC image 01.png',
+      document: { tab: 42, documentId: 'doc-42', documentGeneration: 3, spaEpoch: 7 }
+    };
+    const calls: Array<{ route: string; body: any }> = [];
+    const generatedAssetDownloads: Record<string, any> = {};
+    const context = vm.createContext({
+      chrome: { downloads: { download: async () => 73 } },
+      URL,
+      cleanConversationId: (value: unknown) => typeof value === 'string' ? value : null,
+      conversationForTab: (tab: { url: string }) => new URL(tab.url).pathname.split('/').at(-1),
+      tabConversations: { '42': offer.conversationId },
+      tabDocuments: { '42': 'doc-42' },
+      tabEpochs: { '42': 7 },
+      registeredDocuments: { '42': { documentId: 'doc-42', epoch: 3 } },
+      ownsDocument: () => true,
+      tabReply: async () => ({ ok: true, logicalMessageId: offer.logicalMessageId, assetId: offer.assetId,
+        url: `https://chatgpt.com/backend-api/estuary/content?id=${offer.assetId}&sig=secret` }),
+      call: async (route: string, init: { body?: string }) => {
+        const body = JSON.parse(init.body || '{}');
+        calls.push({ route, body });
+        if (route === '/generated-assets/claim') return { ok: true, data: { claim: { ...offer, claimToken: 'a'.repeat(32) } } };
+        return { ok: false, data: { ok: false } };
+      },
+      generatedAssetDownloads,
+      MAX_GENERATED_ASSET_DOWNLOADS: 100,
+      persistLive: async () => { throw new Error('session storage full'); }
+    });
+    const api = vm.runInContext(`${code}\n({ processGeneratedAssetDownloads, lost: () => downloadCustodyNeedsReconcile })`, context);
+    await api.processGeneratedAssetDownloads([offer], [{
+      id: 42, active: true, url: `https://chatgpt.com/c/${offer.conversationId}`
+    }]);
+    expect(generatedAssetDownloads).toEqual({});
+    expect(calls.filter(entry => entry.route === '/generated-assets/result')).toHaveLength(3);
+    expect(calls.filter(entry => entry.route === '/generated-assets/result').every(entry => entry.body.state === 'unconfirmed')).toBe(true);
+    expect(api.lost()).toBe(true);
+    expect(JSON.stringify(calls)).not.toContain('sig=secret');
+  });
+
   it('settles restored Chrome download changes once, including cancellation, and ignores unknown receipts', async () => {
     expect(backgroundSource).toContain('async function settleGeneratedAssetDownloadChange(');
     const code = backgroundSource.slice(

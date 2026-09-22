@@ -2867,6 +2867,19 @@ async function settleGeneratedAssetDownloadChange(change) {
   return true;
 }
 
+let downloadCustodyNeedsReconcile = false;
+async function releaseUnpersistedDownload(offer, claim) {
+  delete generatedAssetDownloads[offer.id];
+  const detail = 'Chrome accepted the download, but receipt custody could not be saved.';
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const reply = await call('/generated-assets/result', { method: 'POST', body: JSON.stringify({
+      id: offer.id, claimToken: claim.claimToken, state: 'unconfirmed', detail
+    }) }).catch(() => null);
+    if (reply?.ok && reply.data?.ok === true) return;
+  }
+  downloadCustodyNeedsReconcile = true;
+}
+
 async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
   if (!chrome.downloads?.download || !Array.isArray(rawOffers)) return;
   const offers = rawOffers.filter(validGeneratedAssetOffer).slice(0, 20);
@@ -2967,13 +2980,14 @@ async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
       detail: null
     };
     const persisted = await rememberGeneratedAssetDownload(custody);
-    if (!persisted && generatedAssetDownloads[offer.id] === custody) {
-      custody.state = 'unconfirmed';
-      custody.detail = 'Chrome accepted the download, but receipt custody could not be saved.';
+    if (!persisted) {
+      await releaseUnpersistedDownload(offer, claim);
+      continue;
     }
-    if (generatedAssetDownloads[offer.id] !== custody) continue;
-    if (custody.state === 'started') await reconcileGeneratedAssetDownload(custody).catch(() => false);
-    if (generatedAssetDownloads[offer.id] === custody) await publishGeneratedAssetDownloadResult(custody).catch(() => false);
+    await reconcileGeneratedAssetDownload(generatedAssetDownloads[offer.id]).catch(() => false);
+    if (generatedAssetDownloads[offer.id]?.state === 'started') {
+      await publishGeneratedAssetDownloadResult(generatedAssetDownloads[offer.id]).catch(() => false);
+    }
   }
 }
 
@@ -3018,6 +3032,16 @@ async function maintainOnce() {
   if (!reply.ok || !reply.data) { await activeTabs?.revoke(); return; }
   await flushGeneratedAssetDownloadResults();
   await processGeneratedAssetDownloads(reply.data.generatedAssetDownloads, observedTabs);
+  if (downloadCustodyNeedsReconcile && intent === connectionEpoch && token && !disconnected) {
+    downloadCustodyNeedsReconcile = false;
+    await call('/status', { method: 'POST', body: JSON.stringify({
+      openConversations,
+      stalledConversations,
+      generatedAssetDownloadIds: Object.keys(generatedAssetDownloads),
+      generatedAssetDocuments: generatedAssetDocumentsTruncated ? [] : generatedAssetDocumentRows,
+      generatedAssetDocumentsTruncated
+    }) }).catch(() => undefined);
+  }
   const liveChats = new Set(Array.isArray(reply.data.nonDiscardableConversations) ? reply.data.nonDiscardableConversations : []);
   const liveOpenings = new Set(Array.isArray(reply.data.inputOpeningIds) ? reply.data.inputOpeningIds : []);
   const renderingWanted = tab => {
