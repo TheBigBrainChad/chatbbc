@@ -1,4 +1,5 @@
 import { parseRichResponse, type RichNode, type RichResponse } from '../shared/rich-response.js';
+import { mountStaticArtifact } from './static-artifact.js';
 import type { RichMediaState } from '../shared/session.js';
 import { isViewableRichImage, localDataUrl, openRichImageViewer } from './rich-image.js';
 
@@ -569,6 +570,20 @@ function renderNode(node: RichNode, images?: ImageRender): HTMLElement {
     return slot;
   }
   if (node.kind === 'control') return renderControl(node, images);
+  if (node.kind === 'artifact') {
+    const card = document.createElement('article');
+    card.className = 'rich-artifact';
+    card.dataset.richNodeId = node.id;
+    const title = document.createElement('h3');
+    title.textContent = node.title;
+    card.append(title);
+    if (node.mode === 'static' && node.html) {
+      const frameHost = document.createElement('div');
+      mountStaticArtifact(frameHost, { html: node.html });
+      card.append(frameHost);
+    }
+    return card;
+  }
 
   const tag = node.layout === 'card' ? 'article' : node.layout === 'list' ? 'ul' : 'div';
   const group = document.createElement(tag);

@@ -342,3 +342,17 @@ it('does not resolve a native family whose live structure was not proved', () =>
     expect(resolveRichControl({ control, groupId: 'g-a', value: 'yes' }, { groups: [] })).toEqual({ kind: 'unsupported' });
   }
 });
+
+it('accepts one bounded static artifact and rejects remote markup inside it', () => {
+  const artifact = {
+    id: 'art1', kind: 'artifact', mode: 'static', title: 'Sketch',
+    html: '<p>Hello</p>', media: ['shot']
+  };
+  expect(parseRichResponse(withNodes([artifact]))).toEqual(withNodes([artifact]));
+  expect(parseRichResponse(withNodes([{ ...artifact, html: '<script>alert(1)</script>' }]))).toBeNull();
+  expect(parseRichResponse(withNodes([{ ...artifact, media: ['shot', 'shot'] }]))).toBeNull();
+  expect(parseRichResponse(withNodes([{ ...artifact, mode: 'semantic', html: '<p>x</p>' }]))).toBeNull();
+  expect(parseRichResponse(withNodes([{ ...artifact, mode: 'semantic', html: null, media: [] }]))).toEqual(
+    withNodes([{ ...artifact, mode: 'semantic', html: null, media: [] }])
+  );
+});
