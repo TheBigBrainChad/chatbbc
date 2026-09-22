@@ -116,7 +116,7 @@ describe('switching tenants', () => {
 
     work.toggle('files');
     const mounted = [...work.body.children];
-    expect(mounted).toEqual([files.root, agents.root, terminal.root]);
+    expect(mounted).toEqual([work.outputInspector.element, files.root, agents.root, terminal.root]);
     expect(files.root.hidden).toBe(false);
     expect([agents.root.hidden, terminal.root.hidden]).toEqual([true, true]);
     // Retiring a pane already hidden would discard what it holds, so nobody is asked to hide.
@@ -316,6 +316,29 @@ describe('workbench selection', () => {
     expect(work.selection()?.ownerKey).toBe('project:b');
   });
 
+  it('hosts the output inspector and follows the studio frame on resize', () => {
+    const app = document.createElement('div');
+    app.className = 'app';
+    host.replaceWith(app);
+    app.append(host);
+    let studio = 800;
+    const box = (width: number) => ({ width, height: 700, top: 0, left: 0, right: width, bottom: 700, x: 0, y: 0, toJSON() { return {}; } }) as DOMRect;
+    app.getBoundingClientRect = () => box(studio);
+    host.getBoundingClientRect = () => box(420);
+    const work = createWorkPanel({ host });
+    const button = work.panel.querySelector<HTMLButtonElement>('[data-work-tab="inspector"]')!;
+    expect(button.disabled).toBe(false);
+    expect(work.panel.querySelector<HTMLButtonElement>('[data-work-tab="plan"]')!.disabled).toBe(true);
+    expect(work.panel.querySelector<HTMLButtonElement>('[data-work-tab="session"]')!.disabled).toBe(true);
+    work.select({ tab: 'inspector', ownerKey: 'session:A' });
+    expect(work.outputInspector.element.hidden).toBe(false);
+    expect(work.panel.contains(work.outputInspector.element)).toBe(true);
+    expect(work.panel.classList.contains('is-overlay')).toBe(true);
+    studio = 1400;
+    dom.window.dispatchEvent(new dom.window.Event('resize'));
+    expect(work.panel.classList.contains('is-overlay')).toBe(false);
+  });
+
   it('rejects an inspector payload from a replaced transcript origin', async () => {
     const { createOutputInspector } = await import('../src/renderer/output-inspector.js');
     const inspector = createOutputInspector();
@@ -333,5 +356,24 @@ describe('workbench selection', () => {
     expect(inspector.isEmpty()).toBe(false);
     expect(inspector.element.textContent).toContain('from B');
     expect(inspector.element.textContent).not.toContain('from A');
+  });
+
+  it('rejects a stale payload from the same origin', () => {
+    const work = createWorkPanel({ host });
+    const inspector = work.outputInspector;
+    inspector.select({ sessionId: 'A', generation: 1, origin: 8, payloadId: 'keep' });
+    inspector.select({ sessionId: 'A', generation: 1, origin: 8, payloadId: 'next' });
+    inspector.resolve(
+      { sessionId: 'A', generation: 1, origin: 8, payloadId: 'keep' },
+      { payloadId: 'keep', title: 'stale', kind: 'image' }
+    );
+    expect(inspector.isEmpty()).toBe(true);
+    inspector.resolve(
+      { sessionId: 'A', generation: 1, origin: 8, payloadId: 'next' },
+      { payloadId: 'next', title: 'current', kind: 'image' }
+    );
+    expect(inspector.element.querySelector('.output-inspector-meta')?.textContent).toBe('Image · next');
+    expect(inspector.element.textContent).toContain('current');
+    expect(inspector.element.textContent).not.toContain('stale');
   });
 });

@@ -17,6 +17,7 @@ it('keeps Prime selection independent and rejects late results after parent navi
   const panel = createAgentPanel({ host, toggle, load, render, openMain, working: () => false });
   const worker = { id: 'worker-session', title: 'Worker', updatedAt: 1 } as SessionSummary;
   panel.update('prime-session', [worker]); toggle.click();
+  expect(panel.beforeReplace({ tab: 'agents', ownerKey: 'another-prime' })).toBe(true);
   expect(host.textContent).toContain('History · 1');
   const opening = panel.open(worker.id);
   expect(openMain).not.toHaveBeenCalled();

@@ -1,10 +1,12 @@
 import { el } from './dom.js';
+import { t, ui } from './i18n.js';
 
-/** The transcript row that owns this inspection. A later row is a different owner. */
+/** The transcript row that owns this inspection. A later payload is a different owner. */
 export interface InspectorOwner {
   sessionId: string;
   generation: number;
   origin: number;
+  payloadId?: string;
 }
 
 export interface InspectorAction {
@@ -29,8 +31,17 @@ export interface OutputInspector {
   isEmpty(): boolean;
 }
 
-function sameOwner(left: InspectorOwner, right: InspectorOwner): boolean {
-  return left.sessionId === right.sessionId && left.generation === right.generation && left.origin === right.origin;
+function kindLabel(kind: InspectorPayload['kind']): string {
+  if (kind === 'message') return t('Message');
+  if (kind === 'image') return t('Image');
+  return t('Artifact');
+}
+
+function sameOwner(selected: InspectorOwner, claimed: InspectorOwner, payloadId: string): boolean {
+  if (selected.sessionId !== claimed.sessionId || selected.generation !== claimed.generation || selected.origin !== claimed.origin) return false;
+  if (selected.payloadId !== undefined && selected.payloadId !== payloadId) return false;
+  if (claimed.payloadId !== undefined && claimed.payloadId !== payloadId) return false;
+  return true;
 }
 
 /**
@@ -52,14 +63,20 @@ export function createOutputInspector(): OutputInspector {
   return {
     element,
     select(owner) {
-      selected = { sessionId: owner.sessionId, generation: owner.generation, origin: owner.origin };
+      selected = {
+        sessionId: owner.sessionId,
+        generation: owner.generation,
+        origin: owner.origin,
+        ...(owner.payloadId !== undefined ? { payloadId: owner.payloadId } : {})
+      };
       clear();
     },
     resolve(owner, payload) {
-      if (!selected || !sameOwner(selected, owner)) return;
+      if (!selected || !sameOwner(selected, owner, payload.payloadId)) return;
       element.hidden = false;
       const title = el('h2', 'output-inspector-title', payload.title);
-      const meta = el('p', 'output-inspector-meta', `${payload.kind} · ${payload.payloadId}`);
+      const meta = el('p', 'output-inspector-meta');
+      ui(meta, 'textContent', () => `${kindLabel(payload.kind)} · ${payload.payloadId}`);
       const nodes: HTMLElement[] = [title, meta];
       if (payload.detail) nodes.push(el('p', 'output-inspector-detail', payload.detail));
       if (payload.actions?.length) {

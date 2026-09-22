@@ -85,9 +85,9 @@ export function createAgentPanel(options: {
     hide,
     show,
     available: () => parent !== null,
-    beforeReplace(selection: WorkbenchSelection): boolean {
-      if (selection.tab !== 'agents' || !parent) return true;
-      return selection.ownerKey === parent || selection.ownerKey === `session:${parent}`;
+    beforeReplace(_selection: WorkbenchSelection): boolean {
+      // Parent navigation stays allowed. update() hides the previous session and drops late results.
+      return true;
     },
     open,
     update(id: string | null, next: SessionSummary[]): void {

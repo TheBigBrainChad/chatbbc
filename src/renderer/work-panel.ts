@@ -1,5 +1,6 @@
 import { el } from './dom.js';
 import { t } from './i18n.js';
+import { createOutputInspector, type OutputInspector } from './output-inspector.js';
 import { widenWorkPanel, workbenchMode } from './work-panel-resize.js';
 
 export type WorkTab = 'files' | 'agents' | 'terminal' | 'inspector' | 'plan' | 'session';
@@ -37,6 +38,7 @@ export interface WorkPanel {
   select: (selection: WorkbenchSelection, trigger?: HTMLElement | null) => void;
   close: () => void;
   selection: () => WorkbenchSelection | null;
+  outputInspector: OutputInspector;
   /** Re-read the panes after anything that changes what they have to offer. */
   refresh: () => void;
 }
@@ -103,8 +105,18 @@ export function createWorkPanel(options: {
   const visible = (): WorkTab | null =>
     TABS.find(tab => tenants.get(tab)?.element.hidden === false) ?? null;
 
+  function studioFrame(): HTMLElement {
+    return host.closest<HTMLElement>('.app') ?? host;
+  }
+
+  function studioWidth(): number {
+    const measured = studioFrame().getBoundingClientRect?.().width ?? 0;
+    if (measured > 0) return measured;
+    return host.ownerDocument.defaultView?.innerWidth ?? 0;
+  }
+
   function applyLayout(): void {
-    const width = host.getBoundingClientRect?.().width ?? 0;
+    const width = studioWidth();
     panel.classList.toggle('is-overlay', width > 0 && workbenchMode(width) === 'overlay');
   }
 
@@ -171,6 +183,10 @@ export function createWorkPanel(options: {
 
   panel.append(strip, body);
   host.append(panel);
+  const view = host.ownerDocument.defaultView;
+  view?.addEventListener('resize', applyLayout);
+  const FrameObserver = view?.ResizeObserver;
+  if (FrameObserver) new FrameObserver(() => applyLayout()).observe(studioFrame());
   panel.addEventListener('keydown', event => {
     if (event.key !== 'Escape' || event.defaultPrevented) return;
     event.preventDefault();
@@ -178,24 +194,35 @@ export function createWorkPanel(options: {
   });
   refresh();
 
+  function register(tab: WorkTab, tenant: WorkPanelTenant): void {
+    tenants.set(tab, tenant);
+    body.append(tenant.element);
+    const Observer = host.ownerDocument.defaultView?.MutationObserver;
+    if (Observer) new Observer(records => {
+      const revealed = records.map(record => record.target as HTMLElement).find(node => !node.hidden);
+      if (revealed) for (const value of tenants.values()) if (value.element !== revealed && !value.element.hidden) value.hide();
+      refresh();
+    }).observe(tenant.element, { attributes: true, attributeFilter: ['hidden'] });
+    refresh();
+  }
+
+  const outputInspector = createOutputInspector();
+  register('inspector', {
+    element: outputInspector.element,
+    show(): void { outputInspector.element.hidden = false; },
+    hide(): void { outputInspector.element.hidden = true; },
+    available: () => true
+  });
+
   return {
     host, panel, body,
-    register(tab, tenant): void {
-      tenants.set(tab, tenant);
-      body.append(tenant.element);
-      const Observer = host.ownerDocument.defaultView?.MutationObserver;
-      if (Observer) new Observer(records => {
-        const revealed = records.map(record => record.target as HTMLElement).find(node => !node.hidden);
-        if (revealed) for (const value of tenants.values()) if (value.element !== revealed && !value.element.hidden) value.hide();
-        refresh();
-      }).observe(tenant.element, { attributes: true, attributeFilter: ['hidden'] });
-      refresh();
-    },
+    register,
     show,
     toggle,
     select,
     close,
     selection: () => chosen ? { ...chosen } : null,
-    refresh
+    refresh,
+    outputInspector
   };
 }

@@ -2,14 +2,14 @@
    The right-side work panes: the sub-agent panel and plan, the file tree,
    preview, editor and PDF viewer, and the workspace terminal. Loaded fifth. */
 
-/* Right-side work column. Files, Sub-agents and Terminal are one geometry with three tenants,
+/* Right-side work column. The strip's tenants share one geometry,
    so the column is reserved by the panel that hosts them and never by a pane. */
 [data-panel='chat'].has-work-panel,
 [data-panel='chat'].has-agent-panel,
 [data-panel='chat'].has-file-panel { grid-template-columns: minmax(0, 1fr) var(--work-panel-width, minmax(340px, 42%)); }
 
 .work-panel { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--line); background: var(--page); }
-/* Three tabs share one row and shrink with an ellipsis, so the strip never scrolls sideways. */
+/* The strip shares one row and shrinks with an ellipsis, so it never scrolls sideways. */
 .work-panel-tabs { display: flex; flex: 0 0 auto; min-height: 38px; border-bottom: 1px solid var(--line); }
 .work-panel-tab { flex: 1; min-width: 0; padding: 8px 10px; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: transparent; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
 .work-panel-tab:first-child { border-left: 0; }
@@ -17,10 +17,11 @@
 .work-panel-tab.is-sel { background: var(--hover); color: var(--ink); }
 .work-panel-tab:disabled { opacity: .35; cursor: default; }
 .work-panel-body { flex: 1; min-width: 0; min-height: 0; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
-/* One cell, three tenants: whichever is showing fills it. The column owns the left edge now, so a
+/* One cell: whichever tenant is showing fills it. The column owns the left edge now, so a
    hosted pane drops the border it carried as a top-level column. */
 .work-panel-body > :is(.file-panel, .agent-panel, .workspace-terminal, .output-inspector) { grid-area: 1 / 1; border-left: 0; border-top: 0; }
-.work-panel.is-overlay { position: fixed; z-index: 40; inset-block: 0; inset-inline-end: 0; width: min(var(--work-panel-width, 360px), 92vw); box-shadow: 0 18px 48px var(--shadow); }
+/* shell.css overlays #contextWorkbench. This class only records that the studio is below the split. */
+.work-panel.is-overlay { --workbench-mode: overlay; }
 .output-inspector { min-width: 0; min-height: 0; overflow: auto; background: var(--glass-high, var(--page)); color: var(--ink); }
 .output-inspector-title { margin: 0; padding: 12px 14px 0; font-size: calc(14px * var(--text-scale, 1)); }
 .output-inspector-meta, .output-inspector-detail { margin: 0; padding: 8px 14px; color: var(--ink-muted, var(--soft)); font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); }
