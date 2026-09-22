@@ -192,3 +192,32 @@ export function parseRichResponse(input: unknown): RichResponse | null {
     return null;
   }
 }
+
+export type RichChoiceIdentity = { groupId: string | null; value: string | null; label: string };
+export type RichControlResolution = { kind: 'unsupported' | 'changed' | 'observed' };
+
+/** Physical choice identities already stored on a validated tree. This does not read the DOM. */
+export function collectChoices(tree: RichResponse): RichChoiceIdentity[] {
+  const found: RichChoiceIdentity[] = [];
+  const visit = (nodes: RichNode[]): void => {
+    for (const node of nodes) {
+      if (node.kind === 'control') found.push({ groupId: node.groupId, value: node.value, label: node.label });
+      if (node.kind === 'group' || node.kind === 'control') visit(node.children);
+    }
+  };
+  visit(tree.nodes);
+  return found;
+}
+
+/**
+ * Resolve a live native control.
+ *
+ * No signed-in inspection proved a provider group, value, or postcondition for any
+ * control family. Every family stays unsupported so a later task cannot click it.
+ */
+export function resolveRichControl(
+  _observation: { control: string; groupId: string | null; value: string | null },
+  _currentDom: { groups: Array<{ groupId: string; values: string[] }> }
+): RichControlResolution {
+  return { kind: 'unsupported' };
+}
