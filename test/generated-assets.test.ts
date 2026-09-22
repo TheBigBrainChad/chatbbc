@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,9 +6,13 @@ import sharp from 'sharp';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { defaultConfig, initConfigPath, updateConfig } from '../src/main/config.js';
 import {
+  appendOriginalChunk,
+  beginOriginalTransfer,
+  finishOriginalTransfer,
   listGeneratedAssets,
   resetGeneratedAssetsForTests,
-  saveGeneratedAsset
+  saveGeneratedAsset,
+  waitOriginalTransfer
 } from '../src/main/generated-assets.js';
 import {
   createSession,
@@ -137,5 +141,27 @@ describe('generated asset retrieval', () => {
       roots
     })).rejects.toMatchObject({ code: 'original_unavailable' });
     await expect(fs.stat(path.join(rootPath, 'original.png'))).rejects.toThrow();
+  });
+
+  it('saves original bytes only after the chunk digest matches', async () => {
+    const { session, roots, png } = await fixture();
+    const [row] = await listGeneratedAssets(session.id);
+    const id = beginOriginalTransfer({ sessionId: session.id, assetId: 'file_AuroraOriginal0001', logicalMessageId: responseId });
+    const pending = waitOriginalTransfer(id);
+    appendOriginalChunk(id, png.subarray(0, 40));
+    appendOriginalChunk(id, png.subarray(40));
+    finishOriginalTransfer(id, createHash('sha256').update(png).digest('hex'));
+    const bytes = await pending;
+    const saved = await saveGeneratedAsset({
+      ...saveBase,
+      source: 'original',
+      sessionId: session.id,
+      handle: row!.handle,
+      path: '/approved/original.png',
+      roots,
+      readOriginal: async () => bytes
+    });
+    expect(saved.sha256).toBe(createHash('sha256').update(png).digest('hex'));
+    expect(await fs.readFile(path.join(rootPath, 'original.png'))).toEqual(png);
   });
 });

@@ -225,7 +225,74 @@ export async function saveGeneratedAsset(input: SaveGeneratedAssetRequest): Prom
   };
 }
 
+interface OriginalTransfer {
+  id: string;
+  sessionId: string;
+  assetId: string;
+  logicalMessageId: string;
+  chunks: Buffer[];
+  bytes: number;
+  done: ((bytes: Buffer) => void) | null;
+  fail: ((error: Error) => void) | null;
+}
+
+const originalTransfers = new Map<string, OriginalTransfer>();
+
+export function beginOriginalTransfer(record: { sessionId: string; assetId: string; logicalMessageId: string }): string {
+  if (originalTransfers.size >= GENERATED_ASSET_LIMITS.maxConcurrentTransfers) {
+    throw new GeneratedAssetError('transfer_capacity');
+  }
+  const id = randomUUID();
+  originalTransfers.set(id, {
+    id,
+    sessionId: record.sessionId,
+    assetId: record.assetId,
+    logicalMessageId: record.logicalMessageId,
+    chunks: [],
+    bytes: 0,
+    done: null,
+    fail: null
+  });
+  return id;
+}
+
+export function appendOriginalChunk(id: string, chunk: Buffer): void {
+  const transfer = originalTransfers.get(id);
+  if (!transfer || chunk.length < 1 || chunk.length > GENERATED_ASSET_LIMITS.maxChunkBytes) {
+    throw new GeneratedAssetError('asset_chunk_refused');
+  }
+  if (transfer.bytes + chunk.length > GENERATED_ASSET_LIMITS.maxCompressedBytes) {
+    transfer.fail?.(new GeneratedAssetError('asset_oversize'));
+    originalTransfers.delete(id);
+    throw new GeneratedAssetError('asset_oversize');
+  }
+  transfer.chunks.push(Buffer.from(chunk));
+  transfer.bytes += chunk.length;
+}
+
+export function waitOriginalTransfer(id: string): Promise<Buffer> {
+  const transfer = originalTransfers.get(id);
+  if (!transfer) return Promise.reject(new GeneratedAssetError('asset_transfer_missing'));
+  const { promise, resolve, reject } = Promise.withResolvers<Buffer>();
+  transfer.done = resolve;
+  transfer.fail = reject;
+  return promise;
+}
+export function finishOriginalTransfer(id: string, sha256: string): void {
+  const transfer = originalTransfers.get(id);
+  if (!transfer) throw new GeneratedAssetError('asset_transfer_missing');
+  const bytes = Buffer.concat(transfer.chunks);
+  const actual = createHash('sha256').update(bytes).digest('hex');
+  originalTransfers.delete(id);
+  if (actual !== sha256) {
+    transfer.fail?.(new GeneratedAssetError('asset_digest_mismatch'));
+    throw new GeneratedAssetError('asset_digest_mismatch');
+  }
+  transfer.done?.(bytes);
+}
+
 export function resetGeneratedAssetsForTests(): void {
   handles.clear();
   transfers = 0;
+  originalTransfers.clear();
 }
