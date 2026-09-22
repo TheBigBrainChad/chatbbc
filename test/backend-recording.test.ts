@@ -34,6 +34,19 @@ it('redacts pasted credentials from nested browser arguments, protocol results a
   expect(args.fields[0]!.value).toBe(secret);
   expect(result.structuredContent.fields[0]!.value).toBe(secret);
 });
+
+it('redacts a signed generated-image URL from text without rewriting image bytes', async () => {
+  const signed = 'https://chatgpt.com/backend-api/estuary/content?id=file_AuroraOriginal0001&sig=secret-token';
+  const image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII=';
+  const id = await sessionForConversation('conv-signed-url');
+  await recordToolCall({ ...call('signed-url', 'conv-signed-url'), tool: 'read',
+    args: { note: signed },
+    content: [{ type: 'text', text: signed }, { type: 'image', data: image, mimeType: 'image/png' }] });
+  const event = (await readEvents(id!, { kinds: ['tool_call'] }))[0]!;
+  if (event.kind !== 'tool_call') throw new Error('missing recorded call');
+  expect(JSON.stringify(event)).not.toContain('sig=secret-token');
+  expect(await readAsset(id!, event.call.assets![0]!.id)).toEqual(Buffer.from(image, 'base64'));
+});
 beforeEach(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'clf-backend-'));
   initConfigPath(dir); initSessionStore(dir); initDurableStore(dir);
