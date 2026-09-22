@@ -438,7 +438,7 @@ function renderTableRow(node: RichNode, images?: ImageRender): HTMLElement {
 
 
 function cleanAdmittedArtifactMedia(value: ReadonlyMap<string, string> | undefined): ReadonlyMap<string, string> | undefined {
-  if (!value || typeof value.size !== 'number' || value.size > 4) return undefined;
+  if (!value || typeof value.size !== 'number' || value.size > 64) return undefined;
   const clean = new Map<string, string>();
   for (const [id, dataUrl] of value) {
     if (typeof id !== 'string' || typeof dataUrl !== 'string') return undefined;

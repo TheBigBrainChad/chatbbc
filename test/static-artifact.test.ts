@@ -81,3 +81,18 @@ it('mounts a sandboxed iframe and replaces a rejected artifact with text', () =>
   expect(host.querySelector('iframe')).toBeNull();
   expect(host.textContent).toContain('Open original in ChatGPT');
 });
+
+it('rejects malformed fragments and CSS image functions, and keeps URL prose', () => {
+  expect(clean('<div><p></div></p>').rejected).toBe('malformed');
+  expect(clean('<p>Hi</div>').rejected).toBe('malformed');
+  expect(clean('<div').rejected).toBe('malformed');
+  expect(clean('<p style="background: image-set(url(http://remote/x) 1x)">x</p>').rejected).not.toBeNull();
+  expect(clean('<p style="background: -webkit-image-set(url(http://remote/x) 1x)">x</p>').rejected).not.toBeNull();
+  expect(clean('<p style="color: \\72 ed">x</p>').rejected).not.toBeNull();
+  const prose = clean('<p>see https://example.test</p>');
+  expect(prose.rejected).toBeNull();
+  expect(prose.html).toContain('https://example.test');
+  const nested = (depth: number) => `${'<div>'.repeat(depth)}x${'</div>'.repeat(depth)}`;
+  expect(clean(nested(24)).rejected).toBeNull();
+  expect(clean(nested(25)).rejected).not.toBeNull();
+});

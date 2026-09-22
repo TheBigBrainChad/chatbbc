@@ -771,9 +771,64 @@ describe('exact native rich response observation (no action authority)', () => {
     expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
     expect((live.window as any).CLF_DOM.richCaptureReason(root)).toBe('unsupported');
     artifact.innerHTML = '<p>Hello</p><img src="https://remote/x" alt="remote">';
-    expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+    const replaced = controlsOf((live.window as any).CLF_DOM.captureRichRoot(root));
+    expect(replaced).toHaveLength(1);
+    expect(replaced[0]?.html ?? '').not.toMatch(/https:|\ssrc=/i);
+    expect(replaced[0]?.media?.[0]).toMatch(/^media-/);
     artifact.innerHTML = '<form action="/x"><button>go</button></form>';
     expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+  });
+
+  it('acquires an owned artifact image, stops at the two-second deadline, and admits depth 24', async () => {
+    live = await harness();
+    const { root, surface } = rootFixture(live.document);
+    const artifact = live.document.createElement('section');
+    artifact.setAttribute('data-clf-owned-artifact', '');
+    artifact.setAttribute('aria-label', 'Sketch');
+    surface.append(artifact);
+    const nest = (depth: number) => `${'<div>'.repeat(depth)}Text${'</div>'.repeat(depth)}`;
+    artifact.innerHTML = nest(24);
+    expect((live.window as any).CLF_DOM.captureRichRoot(root)).not.toBeNull();
+    artifact.innerHTML = nest(25);
+    expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+    expect((live.window as any).CLF_DOM.richCaptureReason(root)).toBe('oversized');
+    artifact.innerHTML = '<img src="https://images.example/cat.png" alt="cat">';
+    const seen: Array<{ alt: string | null; nodeId: string }> = [];
+    const nodes = (live.window as any).CLF_DOM.captureRichRoot(root, (element: Element, nodeId: string) => {
+      seen.push({ alt: element.getAttribute('alt'), nodeId });
+    });
+    const found: Array<Record<string, any>> = [];
+    const visit = (entries: Array<Record<string, any>>) => {
+      for (const entry of entries ?? []) {
+        if (entry.kind === 'artifact') found.push(entry);
+        if (Array.isArray(entry.children)) visit(entry.children);
+      }
+    };
+    visit(nodes);
+    const acquired = seen.filter(row => row.alt === 'cat');
+    expect(acquired).toHaveLength(1);
+    expect(found).toHaveLength(1);
+    const mediaId = found[0]?.media?.[0];
+    expect(mediaId).toMatch(/^media-n-[\d-]+-0$/);
+    expect(found[0]?.html ?? '').toContain(`data-media-id="${mediaId}"`);
+    expect(found[0]?.html ?? '').not.toMatch(/https:|\ssrc=/i);
+    expect(acquired[0]?.nodeId).toContain('-img');
+    artifact.innerHTML = '<p style="background: image-set(url(http://remote/x) 1x)">x</p>';
+    expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+    artifact.innerHTML = '<p>Hello</p>';
+    const clock = live.window.Date;
+    const realNow = clock.now.bind(clock);
+    let reads = 0;
+    clock.now = () => {
+      reads += 1;
+      return reads < 3 ? realNow() : realNow() + 5_000;
+    };
+    try {
+      expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+      expect((live.window as any).CLF_DOM.richCaptureReason(root)).toBe('oversized');
+    } finally {
+      clock.now = realNow;
+    }
   });
 
   it('rejects more than 1024 hostile sibling nodes before iterating their NodeList', async () => {

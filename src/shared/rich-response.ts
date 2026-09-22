@@ -163,7 +163,7 @@ export function parseRichResponse(input: unknown): RichResponse | null {
           if (fields.html !== null || media.length !== 0) return null;
           return { id: fields.id, kind: 'artifact', mode: 'semantic', title: fields.title, html: null, media };
         }
-        if (!string(fields.html, 131_072) || /<script|onclick|https:|<form|@import|\bhref=/i.test(fields.html)) return null;
+        if (!string(fields.html, 131_072) || /<script|onclick|<form|@import|\bhref=/i.test(fields.html)) return null;
         return { id: fields.id, kind: 'artifact', mode: 'static', title: fields.title, html: fields.html, media };
       }
 

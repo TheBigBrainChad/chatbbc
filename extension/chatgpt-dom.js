@@ -582,16 +582,20 @@ var CLF_DOM = (() => {
 
   const richFailure = new WeakMap();
 
-  function captureOwnedArtifact(element, id) {
+  function captureOwnedArtifact(element, id, onImage = null) {
     const allowed = new Set(['div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'pre', 'code', 'strong', 'em', 'b', 'i', 'br', 'hr', 'section', 'article', 'header', 'footer', 'figure', 'figcaption', 'blockquote', 'img']);
     const styleProps = new Set(['color', 'background', 'background-color', 'font', 'font-size', 'font-weight', 'font-family', 'font-style', 'text-align', 'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'border', 'border-color', 'display', 'width', 'height', 'max-width', 'gap', 'line-height', 'white-space', 'overflow-wrap']);
+    const dangerousStyle = /url\s*\(|image-set\s*\(|-webkit-image-set\s*\(|@import|expression\s*\(|javascript:|https?:|\/\/|\\/i;
+    const startedAt = Date.now();
+    const expired = () => Date.now() - startedAt > 2000;
+    if (expired()) return { rejected: 'deadline' };
     const doc = element.ownerDocument;
     const host = doc.createElement('div');
     let nodes = 0, textLength = 0, cssLength = 0;
     const media = [];
     const seen = new Set();
     const styleOf = value => {
-      if (/url\s*\(|@import|expression\s*\(|javascript:/i.test(value)) return null;
+      if (dangerousStyle.test(value)) return null;
       const kept = [];
       for (const part of value.split(';')) {
         const trimmed = part.trim();
@@ -600,7 +604,7 @@ var CLF_DOM = (() => {
         if (split <= 0) return null;
         const prop = trimmed.slice(0, split).trim().toLowerCase();
         const raw = trimmed.slice(split + 1).trim();
-        if (!styleProps.has(prop) || /[{}<>]|url\s*\(/i.test(raw)) return null;
+        if (!styleProps.has(prop) || /[{}<>]/.test(raw) || dangerousStyle.test(raw)) return null;
         kept.push(`${prop}: ${raw}`);
       }
       const style = kept.join('; ');
@@ -608,10 +612,11 @@ var CLF_DOM = (() => {
       return cssLength <= 65536 ? style : null;
     };
     const walk = (source, parent, depth) => {
-      if (depth > 24) return 'oversized';
+      if (expired()) return 'deadline';
       const rawChildren = source.childNodes;
       if (rawChildren.length > 1024 - nodes) return 'oversized';
       for (let index = 0; index < rawChildren.length; index++) {
+        if (expired()) return 'deadline';
         const child = rawChildren[index];
         if (child.nodeType === 3) {
           const value = child.nodeValue || '';
@@ -621,18 +626,27 @@ var CLF_DOM = (() => {
           continue;
         }
         if (child.nodeType !== 1) return 'unsupported';
+        if (depth >= 24) return 'oversized';
         const tag = child.tagName.toLowerCase();
         if (!allowed.has(tag)) return 'unsupported';
         if (++nodes > 1024) return 'oversized';
         for (const attr of [...child.attributes]) {
           const name = attr.name.toLowerCase();
+          if (name === 'src' && tag === 'img') continue;
           if (name.startsWith('on') || name === 'href' || name === 'src' || name === 'srcset' || name === 'action' || name === 'formaction') return 'unsupported';
           if (name !== 'style' && !(tag === 'img' && (name === 'alt' || name === 'data-media-id'))) return 'unsupported';
         }
         const next = doc.createElement(tag);
         if (tag === 'img') {
-          const mediaId = child.getAttribute('data-media-id') || '';
-          if (!/^[\w:-]{1,80}$/.test(mediaId) || seen.has(mediaId) || child.hasAttribute('src')) return 'unsupported';
+          const supplied = child.getAttribute('data-media-id') || '';
+          const hasSrc = child.hasAttribute('src');
+          let mediaId = supplied;
+          if (hasSrc || !supplied) {
+            if (child.hasAttribute('srcset')) return 'unsupported';
+            mediaId = `media-${id}-${media.length}`;
+            if (typeof onImage === 'function') onImage(child, `${id}-img${media.length}`);
+          }
+          if (!/^[\w:-]{1,80}$/.test(mediaId) || seen.has(mediaId)) return 'unsupported';
           if (media.length >= 4) return 'oversized';
           seen.add(mediaId);
           media.push(mediaId);
@@ -653,8 +667,9 @@ var CLF_DOM = (() => {
       }
       return null;
     };
-    const reason = walk(element, host, 1);
+    const reason = walk(element, host, 0);
     if (reason) return { rejected: reason };
+    if (expired()) return { rejected: 'deadline' };
     const html = host.innerHTML;
     const bytes = typeof TextEncoder === 'function' ? new TextEncoder().encode(html).byteLength : html.length * 4;
     if (bytes > 131072) return { rejected: 'oversized' };
@@ -693,9 +708,9 @@ var CLF_DOM = (() => {
         }
         const id = `n-${path.join('-')}`;
         if (element.hasAttribute('data-clf-owned-artifact')) {
-          const artifact = captureOwnedArtifact(element, id);
+          const artifact = captureOwnedArtifact(element, id, onImage);
           if (!artifact || artifact.rejected) {
-            if (artifact && artifact.rejected === 'oversized') return overLimit();
+            if (artifact && (artifact.rejected === 'oversized' || artifact.rejected === 'deadline')) return overLimit();
             richFailure.set(root, 'unsupported');
             return null;
           }

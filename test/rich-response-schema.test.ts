@@ -355,3 +355,9 @@ it('accepts one bounded static artifact and rejects remote markup inside it', ()
     withNodes([{ ...artifact, mode: 'semantic', html: null, media: [] }])
   );
 });
+
+it('keeps an external URL visible as artifact text', () => {
+  const html = '<p>see https://example.test</p>';
+  const node = { id: 'art1', kind: 'artifact', mode: 'static', title: 'Sketch', html, media: [] };
+  expect(parseRichResponse(withNodes([node]))).toEqual(withNodes([node]));
+});

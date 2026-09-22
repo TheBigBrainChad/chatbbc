@@ -26,8 +26,41 @@ const STYLE_PROPS = new Set([
 
 const reject = (reason: string): SanitizedArtifact => ({ html: '', rejected: reason });
 
+const VOID_TAGS = new Set(['br', 'hr', 'img']);
+const DANGEROUS_STYLE = /url\s*\(|image-set\s*\(|-webkit-image-set\s*\(|@import|expression\s*\(|javascript:|https?:|\/\/|\\/i;
+
+/** Require an explicitly closed fragment. HTML repair must not become admission. */
+export function wellFormedFragment(html: string): boolean {
+  const stack: string[] = [];
+  let index = 0;
+  while (index < html.length) {
+    const open = html.indexOf('<', index);
+    if (open < 0) break;
+    if (html.startsWith('<!--', open)) {
+      const end = html.indexOf('-->', open + 4);
+      if (end < 0) return false;
+      index = end + 3;
+      continue;
+    }
+    const close = html.indexOf('>', open + 1);
+    if (close < 0) return false;
+    const raw = html.slice(open + 1, close).trim();
+    const closing = raw.startsWith('/');
+    const body = (closing ? raw.slice(1) : raw).trim();
+    const name = /^([a-zA-Z][\w:-]*)/.exec(body);
+    if (!name) return false;
+    const tag = name[1]!.toLowerCase();
+    if (closing) {
+      if (stack.pop() !== tag) return false;
+    } else if (!raw.endsWith('/') && !VOID_TAGS.has(tag)) stack.push(tag);
+    index = close + 1;
+  }
+  return stack.length === 0;
+}
+
+
 function safeStyle(value: string, css: { n: number }): string | null {
-  if (/url\s*\(|@import|expression\s*\(|javascript:/i.test(value)) return null;
+  if (DANGEROUS_STYLE.test(value)) return null;
   const parts = value.split(';').map(part => part.trim()).filter(Boolean);
   const kept: string[] = [];
   for (const part of parts) {
@@ -35,7 +68,7 @@ function safeStyle(value: string, css: { n: number }): string | null {
     if (split <= 0) return null;
     const prop = part.slice(0, split).trim().toLowerCase();
     const raw = part.slice(split + 1).trim();
-    if (!STYLE_PROPS.has(prop) || /[{}<>]|url\s*\(/i.test(raw)) return null;
+    if (!STYLE_PROPS.has(prop) || /[{}<>]/.test(raw) || DANGEROUS_STYLE.test(raw)) return null;
     kept.push(`${prop}: ${raw}`);
   }
   const style = kept.join('; ');
@@ -56,6 +89,7 @@ export function sanitizeStaticArtifact(
   if (expired()) return reject('deadline');
   const html = input.html;
   if (typeof html !== 'string' || new TextEncoder().encode(html).length > STATIC_ARTIFACT_LIMITS.bytes) return reject('bytes');
+  if (!wellFormedFragment(html)) return reject('malformed');
   const media = input.media ?? [];
   if (media.length > STATIC_ARTIFACT_LIMITS.images) return reject('images');
   const seenMedia = new Set<string>();

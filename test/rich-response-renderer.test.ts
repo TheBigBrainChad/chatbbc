@@ -778,3 +778,23 @@ it('does not paint an unadmitted artifact image or a data URL that was not alrea
   expect(remote.querySelector('iframe')).toBeNull();
   expect(remote.innerHTML).not.toMatch(/https:/i);
 });
+
+it('shows an external URL as artifact text and admits one image from a larger local map', () => {
+  const prose = renderRichResponse(fixture([
+    artifact('static', '<p>see https://example.test</p>')
+  ]), 'source');
+  const frame = prose.querySelector('iframe');
+  expect(frame?.srcdoc).toContain('https://example.test');
+  expect(frame?.srcdoc).not.toMatch(/<a |href=/i);
+  const dataUrl = 'data:image/png;base64,aaaa';
+  const admitted = new Map<string, string>([
+    ['other-1', dataUrl], ['other-2', dataUrl], ['other-3', dataUrl], ['other-4', dataUrl], ['shot', dataUrl]
+  ]);
+  const view = renderRichResponse(fixture([
+    artifact('static', '<img data-media-id="shot" alt="cat">', ['shot'])
+  ]), 'source', {
+    sessionId: '2026-09-02-test0001', media: [], current: () => true, admittedArtifactMedia: admitted
+  });
+  expect(view.querySelector('iframe')?.srcdoc).toContain(dataUrl);
+  expect(view.querySelector('iframe')?.srcdoc).not.toMatch(/https:/i);
+});
