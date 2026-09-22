@@ -2815,17 +2815,22 @@ function validGeneratedAssetOffer(row) {
 
 async function publishGeneratedAssetDownloadResult(row) {
   if (['complete', 'failed', 'unconfirmed'].includes(row.state)) {
-    // Persist the terminal fact before sending it, so a lost HTTP response can be retried
-    // after a worker or browser restart instead of leaving main claimed forever.
+    // Persist the terminal fact before sending it. Without this barrier a lost HTTP response
+    // after a worker restart would leave main claimed forever.
     if (!generatedAssetResults.some(entry => entry.id === row.id && entry.state === row.state)) {
       generatedAssetResults.push({ id: row.id, claimToken: row.claimToken, state: row.state,
         ...(row.detail ? { detail: row.detail } : {}) });
       generatedAssetResults = generatedAssetResults.slice(-MAX_GENERATED_ASSET_DOWNLOADS);
-      await persistLive().catch(() => undefined);
+      try { await persistLive(); }
+      catch {
+        // The fact could not be made durable. Keep it in memory and still try to deliver it;
+        // a later pass can retry, and the row is not retired below.
+        return call('/generated-assets/result', { method: 'POST', body: JSON.stringify({
+          id: row.id, claimToken: row.claimToken, state: row.state,
+          ...(row.detail ? { detail: row.detail } : {})
+        }) }).then(reply => reply.ok && reply.data?.ok === true).catch(() => false);
+      }
     }
-    // The terminal fact is durable now; the in-memory row must not be re-offered for download.
-    if (['complete', 'failed', 'unconfirmed'].includes(row.state) &&
-        generatedAssetDownloads[row.id] === row) delete generatedAssetDownloads[row.id];
   }
   const reply = await call('/generated-assets/result', {
     method: 'POST',
@@ -3008,10 +3013,8 @@ async function processGeneratedAssetDownloads(rawOffers, observedTabs) {
     };
     const persisted = await rememberGeneratedAssetDownload(custody);
     if (!persisted) {
-      // Chrome accepted the download, but our own receipt could not be written. The terminal
-      // fact still belongs in the durable outbox; the in-memory row is dropped so no later
-      // pass can re-offer this exact download.
-      delete generatedAssetDownloads[offer.id];
+      // Our own receipt could not be written durably. Keep the in-memory row for a later pass,
+      // and report unconfirmed now rather than silently retiring the browser side effect.
       await publishGeneratedAssetDownloadResult({
         ...custody,
         state: 'unconfirmed',
@@ -3096,6 +3099,9 @@ async function processGeneratedAssetOriginals(rawOffers, observedTabs) {
     let offset = offer.offset;
     let failed = false;
     while (offset < bytes.length) {
+      // Ownership must still hold at this instant; a navigation during the fetch or digest
+      // invalidates the whole transfer rather than posting bytes for a dead document.
+      if (!ownsDocument(document)) { failed = true; break; }
       const slice = bytes.subarray(offset, offset + 512 * 1024);
       let binary = '';
       for (const value of slice) binary += String.fromCharCode(value);
@@ -3106,6 +3112,7 @@ async function processGeneratedAssetOriginals(rawOffers, observedTabs) {
       offset += slice.length;
     }
     if (failed) continue;
+    if (!ownsDocument(document)) continue;
     await call('/generated-assets/original/finish', { method: 'POST', body: JSON.stringify({
       id: offer.id, sha256: digest, source
     }) }).catch(() => undefined);

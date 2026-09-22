@@ -236,10 +236,11 @@ describe('extension release metadata', () => {
     await processDownloads([offer], [{
       id: 42, active: true, url: `https://chatgpt.com/c/${offer.conversationId}`
     }]);
-    // The in-memory row is dropped, but the terminal fact survives for a later acknowledgement.
-    expect(generatedAssetDownloads).toEqual({});
+    // The durable write failed, so the terminal fact is retained for a later pass instead of
+    // being retired unacknowledged.
     expect(generatedAssetResults).toHaveLength(1);
     expect(generatedAssetResults[0]).toMatchObject({ id: offer.id, state: 'unconfirmed' });
+    expect(calls.some(entry => entry.route === '/generated-assets/result' && entry.body.state === 'unconfirmed')).toBe(true);
     expect(JSON.stringify(calls)).not.toContain('sig=secret');
   });
 

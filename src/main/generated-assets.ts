@@ -5,7 +5,7 @@ import { getSession, readAsset, sessionImageSets } from './session/store.js';
 import { SandboxError, resolvePath } from './sandbox.js';
 import sharp from './sharp.js';
 import { wakeBrowserWork } from './browser-wake.js';
-import { GENERATED_ASSET_LIMITS } from '../shared/generated-assets.js';
+import { GENERATED_ASSET_LIMITS, type GeneratedAssetDownloadDocument } from '../shared/generated-assets.js';
 import { liveDocumentFor } from './generated-asset-downloads.js';
 import type { Root } from '../shared/types.js';
 
@@ -249,6 +249,7 @@ interface OriginalTransfer {
 }
 
 const originalTransfers = new Map<string, OriginalTransfer>();
+let originalAdmissionClosed = false;
 
 export function beginOriginalTransfer(record: {
   sessionId: string;
@@ -257,6 +258,7 @@ export function beginOriginalTransfer(record: {
   logicalMessageId: string;
   document: OriginalTransferDocument;
 }): string {
+  if (originalAdmissionClosed) throw new GeneratedAssetError('transfer_shutdown');
   if (originalTransfers.size >= GENERATED_ASSET_LIMITS.maxConcurrentTransfers) {
     throw new GeneratedAssetError('transfer_capacity');
   }
@@ -277,15 +279,30 @@ export function beginOriginalTransfer(record: {
   return id;
 }
 
+/** True when the frozen document is still the one live document main proves for the conversation. */
+function sameLiveDocument(conversationId: string, document: GeneratedAssetDownloadDocument): boolean {
+  const live = liveDocumentFor(conversationId);
+  return Boolean(live) && live!.tab === document.tab && live!.documentId === document.documentId &&
+    live!.documentGeneration === document.documentGeneration && live!.spaEpoch === document.spaEpoch;
+}
+
 export async function readOriginalForHandle(sessionId: string, handle: string): Promise<Buffer> {
   const record = handles.get(handle);
   if (!record || record.sessionId !== sessionId) throw new GeneratedAssetError('asset_handle_refused');
   const session = await getSession(sessionId);
   if (!session?.conversationId) throw new GeneratedAssetError('download_session_unavailable');
+  // Shutdown may have begun while this read was awaiting. Recheck before admitting, so an
+  // already-admitted save cannot escape the ordered teardown.
+  if (originalAdmissionClosed) throw new GeneratedAssetError('transfer_shutdown');
   // The document is frozen here, from main's own proven-unique observation. The companion must
   // present this exact document before any byte is accepted, so a retry cannot retarget.
   const document = liveDocumentFor(session.conversationId);
   if (!document) throw new GeneratedAssetError('original_unavailable');
+  // Recheck the document is still the live one and shutdown has not begun, with no await between
+  // this point and publication.
+  if (originalAdmissionClosed || !sameLiveDocument(session.conversationId, document)) {
+    throw new GeneratedAssetError('transfer_shutdown');
+  }
   const id = beginOriginalTransfer({
     sessionId,
     conversationId: session.conversationId,
@@ -383,8 +400,9 @@ export function finishOriginalTransfer(id: string, sha256: string): void {
   transfer.done?.(bytes);
 }
 
-/** Fail every in-flight original waiter and drop its bytes. Called from ordered shutdown. */
+/** Fail every in-flight original waiter and drop its bytes, then close admission. */
 export function stopOriginalTransfers(): number {
+  originalAdmissionClosed = true;
   const count = originalTransfers.size;
   for (const transfer of originalTransfers.values()) {
     transfer.fail?.(new GeneratedAssetError('transfer_shutdown'));
@@ -397,4 +415,5 @@ export function resetGeneratedAssetsForTests(): void {
   handles.clear();
   transfers = 0;
   originalTransfers.clear();
+  originalAdmissionClosed = false;
 }
