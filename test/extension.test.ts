@@ -293,6 +293,37 @@ describe('extension release metadata', () => {
     expect(JSON.stringify(calls)).not.toContain('sig=secret');
   });
 
+  it('retires a browser download only after main acknowledges its terminal result', async () => {
+    const code = backgroundSource.slice(
+      backgroundSource.indexOf('async function publishGeneratedAssetDownloadResult('),
+      backgroundSource.indexOf('\nasync function flushGeneratedAssetResults(')
+    );
+    const id = '22222222-3333-4444-8555-666666666666';
+    const generatedAssetDownloads: Record<string, any> = { [id]: { id, claimToken: 'a'.repeat(32), state: 'complete' } };
+    const generatedAssetResults: Array<Record<string, unknown>> = [];
+    const persisted = { writes: 0 };
+    let acknowledged = false;
+    const context = vm.createContext({
+      generatedAssetDownloads,
+      generatedAssetResults,
+      MAX_GENERATED_ASSET_DOWNLOADS: 100,
+      persistLive: async () => { persisted.writes += 1; },
+      call: async () => (acknowledged ? { ok: true, data: { ok: true } } : { ok: false, data: { ok: false } })
+    });
+    const publish = vm.runInContext(`${code}\npublishGeneratedAssetDownloadResult`, context);
+    const outbox = () => vm.runInContext('generatedAssetResults', context);
+    const row = generatedAssetDownloads[id];
+    // An unacknowledged result must not retire the row or empty the outbox.
+    expect(await publish(row)).toBe(false);
+    expect(generatedAssetDownloads[id]).toBeDefined();
+    expect(outbox()).toHaveLength(1);
+    acknowledged = true;
+    expect(await publish(row)).toBe(true);
+    expect(generatedAssetDownloads[id]).toBeUndefined();
+    expect(outbox()).toEqual([]);
+    expect(persisted.writes).toBeGreaterThan(0);
+  });
+
   it('settles restored Chrome download changes once, including cancellation, and ignores unknown receipts', async () => {
     expect(backgroundSource).toContain('async function settleGeneratedAssetDownloadChange(');
     const code = backgroundSource.slice(
