@@ -5,6 +5,28 @@ import { initSidebarResize } from '../src/renderer/sidebar-resize.js';
 
 let dom: JSDOM;
 afterEach(() => { dom?.window.close(); vi.unstubAllGlobals(); });
+it('migrates the legacy width and collapse once, then deletes the legacy keys', () => {
+  dom = new JSDOM(readFileSync(new URL('../src/renderer/index.html', import.meta.url), 'utf8'), { url: 'https://local.test' });
+  vi.stubGlobal('window', dom.window); vi.stubGlobal('document', dom.window.document); vi.stubGlobal('localStorage', dom.window.localStorage);
+  const doc = dom.window.document;
+  const app = doc.querySelector<HTMLElement>('.app')!;
+  doc.getElementById('sidebar')!.getBoundingClientRect = () => ({ width: 300 }) as DOMRect;
+  dom.window.localStorage.setItem('chatbbc.sidebar-width', '300');
+  dom.window.localStorage.setItem('chatbbc.sidebar-width.collapsed', 'true');
+  initSidebarResize();
+  expect(dom.window.localStorage.getItem('chatbbc.navigator-width')).toBe('300');
+  expect(dom.window.localStorage.getItem('chatbbc.navigator-collapsed')).toBe('true');
+  expect(dom.window.localStorage.getItem('chatbbc.sidebar-width')).toBeNull();
+  expect(dom.window.localStorage.getItem('chatbbc.sidebar-width.collapsed')).toBeNull();
+  expect(app.classList.contains('is-sidebar-collapsed')).toBe(true);
+  // The new key is authoritative on the next load: no legacy value can override it.
+  dom.window.localStorage.setItem('chatbbc.navigator-width', '200');
+  dom.window.localStorage.setItem('chatbbc.sidebar-width', '480');
+  initSidebarResize();
+  expect(app.style.getPropertyValue('--sidebar-width')).toBe('200px');
+  expect(dom.window.localStorage.getItem('chatbbc.sidebar-width')).toBeNull();
+});
+
 it('bounds dragging, releases capture, preserves width through collapse and smaller windows, and resets', () => {
   dom = new JSDOM(readFileSync(new URL('../src/renderer/index.html', import.meta.url), 'utf8'), { url: 'https://local.test' });
   vi.stubGlobal('window', dom.window); vi.stubGlobal('document', dom.window.document); vi.stubGlobal('localStorage', dom.window.localStorage);
