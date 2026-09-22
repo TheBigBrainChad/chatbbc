@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import sharp from 'sharp';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_GOAL_SYSTEM_PROMPT } from '../src/shared/goal.js';
 import { prependUserPrompt } from '../src/shared/user-prompt.js';
 import type { Handoff, RichMediaState, SessionEvent, SessionSummary } from '../src/shared/session.js';
@@ -19,6 +19,8 @@ vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTermina
 }) }));
 vi.mock('../src/renderer/pet.js', () => ({ initPet: () => () => {} }));
 import { positionOf, projectTimeline } from '../src/shared/chronology.js';
+import { el } from '../src/renderer/dom.js';
+import type { DeliveryHost } from '../src/renderer/outbox-view.js';
 
 /**
  * The session timeline as the user reads it while a chat is running.
@@ -372,16 +374,19 @@ it('reports startup New Chat, sidebar A→B→A, same-id Write Directly and New 
 it('reports Settings and hidden Chat as null, then freshly witnesses the selected session on return', async () => {
   const { w, live } = await boot([]);
   const id = summary([]).id;
+  // The rail's Chats destination is how the workspace is left for the timeline now; the legacy
+  // back-to-chat button it replaced is gone.
+  const backToChat = () => (w.document.querySelector('[data-destination="chats"]') as HTMLElement).click();
   w.document.getElementById('chatSettingsBtn')!.click();
   await settle();
   expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
-  w.document.getElementById('backToChat')!.click();
+  backToChat();
   await settle();
   expect(live.selectionReports.at(-1)?.sessionId).toBe(id);
   w.document.getElementById('sidebarPlugins')!.click();
   await settle();
   expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
-  w.document.getElementById('backToChat')!.click();
+  backToChat();
   await settle();
   expect(live.selectionReports.at(-1)?.sessionId).toBe(id);
 });
@@ -3839,4 +3844,145 @@ it('keeps a cancelled automatic draft at its creation time as later messages arr
   await app.append([]);
   expect(timeline.textContent).not.toContain('Unused automatic instruction');
   expect(live.sent).toHaveLength(0);
+});
+
+/**
+ * The conversation stage is the transcript's owner identity.
+ *
+ * Every async page names the session and generation it was read for, and the stage adopts both
+ * before any read starts. That is what makes A → B → A safe: the reader may leave a chat and come
+ * back to it, and neither the page they left nor the earlier page of the chat they returned to
+ * may reach the rows. These tests drive the stage directly, because the fence has to hold for a
+ * page that arrives after the stage moved on — which is a state no real IPC read can be asked to
+ * reproduce on demand.
+ */
+describe('conversation stage', () => {
+  /** The outbox reads a paint actually makes: pending rows, the selection, and the activity fence. */
+  function outboxStub(): DeliveryHost {
+    return {
+      pendingComposerInputs: () => [],
+      selectedId: () => null,
+      selectionGeneration: () => 0,
+      pendingNewInput: () => null,
+      selectedProjectId: () => null,
+      startingInputs: () => new Map(),
+      transcriptOwns: () => false,
+      projectGroup: () => null,
+      hasLaterModelActivity: () => false
+    } as unknown as DeliveryHost;
+  }
+
+  function timelineFixture(): void {
+    dom = new JSDOM(
+      '<div id="chatBody"><div id="chatAgentFilter" hidden></div><div id="timeline"></div>' +
+      '<div id="inputQueue"></div><p id="timelineEmpty" hidden></p></div>',
+      { url: 'https://local.test/', pretendToBeVisual: true }
+    );
+    const w = dom.window;
+    Object.assign(globalThis, {
+      window: w, document: w.document, HTMLElement: w.HTMLElement, Element: w.Element, Node: w.Node
+    });
+    if (!(w.HTMLElement.prototype as any).scrollIntoView) (w.HTMLElement.prototype as any).scrollIntoView = () => {};
+  }
+
+  const answer = (seq: number, messageId: string, body: string): SessionEvent => ({
+    seq, time: T0 + seq, source: 'extension', kind: 'assistant_message', messageId,
+    message: text(body), final: true
+  });
+
+  async function stageFor(outbox: DeliveryHost) {
+    timelineFixture();
+    const { createConversationStage } = await import('../src/renderer/conversation-stage.js');
+    return createConversationStage({
+      pane: () => document.getElementById('chatBody')!,
+      timeline: () => document.getElementById('timeline')!,
+      outbox,
+      origin: () => null,
+      developerMode: () => true,
+      renderMarkdown: source => el('p', 'msg', source),
+      renderMessage: (_html, fallback) => el('p', 'msg', fallback),
+      openOriginal: async () => false,
+      workerChat: () => null
+    });
+  }
+
+  it('discards stale A and B pages in an A → B → A switch', async () => {
+    const stage = await stageFor(outboxStub());
+    stage.select('A', 1);
+    stage.select('B', 2);
+    stage.select('A', 3);
+    expect(stage.update({ sessionId: 'B', events: [answer(1, 'b-page', 'B PAGE')], total: 1, mode: 'open' }, 2)).toBe(false);
+    expect(stage.update({ sessionId: 'A', events: [answer(1, 'old-a', 'OLD A')], total: 1, mode: 'open' }, 1)).toBe(false);
+    expect(stage.update({ sessionId: 'A', events: [answer(1, 'new-a', 'NEW A')], total: 1, mode: 'open' }, 3)).toBe(true);
+    expect(stage.current()).toEqual({ sessionId: 'A', generation: 3 });
+    const timeline = document.getElementById('timeline')!;
+    expect(timeline.textContent).toContain('NEW A');
+    expect(timeline.textContent).not.toContain('OLD A');
+    expect(timeline.textContent).not.toContain('B PAGE');
+  });
+
+  it('refuses a page whose generation matches but whose session is not the one it adopted', async () => {
+    const stage = await stageFor(outboxStub());
+    stage.select('A', 7);
+    expect(stage.update({ sessionId: 'B', events: [answer(1, 'b', 'B PAGE')], total: 1, mode: 'open' }, 7)).toBe(false);
+    expect(document.getElementById('timeline')!.textContent).not.toContain('B PAGE');
+  });
+
+  it('keeps the previous transcript mounted, and does not paint, until the adopted page arrives', async () => {
+    const stage = await stageFor(outboxStub());
+    const timeline = document.getElementById('timeline')!;
+    stage.select('A', 1);
+    expect(stage.update({ sessionId: 'A', events: [answer(1, 'a-one', 'PAGE A')], total: 1, mode: 'open' }, 1)).toBe(true);
+    expect(stage.awaiting()).toBe(false);
+    stage.select('B', 2);
+    expect(stage.awaiting()).toBe(true);
+    expect(stage.paint()).toBeNull();
+    expect(timeline.textContent).toContain('PAGE A'); // the reader's chat stays mounted, inert
+    stage.select('A', 3);
+    expect(stage.awaiting()).toBe(true);
+    expect(stage.paint()).toBeNull();
+    expect(stage.update({ sessionId: 'A', events: [answer(2, 'a-two', 'PAGE A TWO')], total: 2, mode: 'open' }, 3)).toBe(true);
+    expect(stage.awaiting()).toBe(false);
+    expect(timeline.textContent).toContain('PAGE A TWO');
+  });
+
+  it('pages from an immutable origin, never from a revision sequence, and returns focus by origin', async () => {
+    const stage = await stageFor(outboxStub());
+    stage.select('A', 1);
+    // A revised answer keeps the position it was authored at: origin 2, revision seq 1000.
+    stage.update({
+      sessionId: 'A',
+      events: [
+        answer(1, 'first', 'FIRST'),
+        { ...answer(1000, 'revised', 'REVISED'), origin: 2 } as SessionEvent,
+        answer(3, 'third', 'THIRD')
+      ],
+      total: 3,
+      mode: 'open'
+    }, 1);
+    expect(stage.newerOrigin()).toBeNull(); // at the live tail
+    expect(stage.browsing()).toBe(false);
+    expect(stage.olderOrigin()).toBe(1);
+    expect(stage.focusOrigin(2)).toBe(true);
+    expect((document.activeElement as HTMLElement).dataset.timelineOrigin).toBe('2');
+    // An origin that is not on screen is not a reason to read history, or to retarget the row.
+    const before = document.activeElement;
+    expect(stage.focusOrigin(404)).toBe(false);
+    expect(document.activeElement).toBe(before);
+
+    stage.update({
+      sessionId: 'A',
+      events: [answer(1, 'older', 'OLDER PAGE')],
+      total: 4,
+      mode: 'prepend',
+      boundary: 1
+    }, 1);
+    expect(stage.browsing()).toBe(true);
+    expect(stage.olderOrigin()).toBe(1);
+    // Forward paging resumes from the newest resident origin, exactly where the reader is.
+    expect(stage.newerOrigin()).toBe(3);
+    const timeline = document.getElementById('timeline')!;
+    expect(timeline.textContent).toContain('OLDER PAGE');
+    expect(timeline.textContent).toContain('THIRD');
+  });
 });

@@ -168,6 +168,18 @@
   border: 0; border-left: 2px solid var(--cat, var(--line)); background: transparent;
 }
 
+/* --------------------------------------------------------- message language
+
+   The family rules above own the identity: each family's rail, its accent and its glyph. What a
+   *drawn* row looks like is a second question, and Crystal answers it with three planes rather
+   than one grid of boxes — the answer is a reading surface, the user's message is a compact
+   accent card, and everything the app did stays on the activity rail. These rules come after the
+   cards, so a family that drops its card keeps its rail and stays identifiable. */
+
+/* The answer is the reading plane: borderless, and given a little more room to be read in. */
+.ev.cat-prose { padding: 13px 0; }
+.cat-prose:has(> .ev-body .msg) { border: 0; border-left: 2px solid var(--cat, var(--line)); background: transparent; }
+
 /* An identity reaching the chrome of the rows that already exist. Each fallback is the
    value the rule resolved to before this system, so an uncategorised row is unchanged. */
 .cat-tool .tool-ico { color: var(--cat, var(--faint)); }
@@ -228,7 +240,18 @@
 .said.is-user.has-reaction-slot.has-input-receipt { margin-bottom: 26px; }
 /* Delivery stays at the right edge; a reaction shares the footer to its left. */
 .has-reaction-slot.has-input-receipt > .message-reaction { inset-inline-end: 30px; }
-.user-message-text, .pending-message-text { max-width: 100%; padding: 16px 20px; border-radius: 0; background: var(--hover); }
+/* Crystal language: the user's own message is one compact accent glass card. The soft radius,
+   the accent edge and the tinted translucent fill are the same three tokens the shell uses for
+   every other floating surface, so the question reads as raised over the reading plane without
+   becoming a second, louder conversation. */
+.user-message-text, .pending-message-text {
+  max-width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--accent-edge);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--accent) 12%, var(--glass-medium));
+  backdrop-filter: blur(14px) saturate(120%);
+}
 
 .said b {
   display: none;

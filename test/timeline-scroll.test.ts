@@ -1,6 +1,9 @@
 import { JSDOM } from 'jsdom';
 import { expect, it } from 'vitest';
-import { preserveTimelineViewport } from '../src/renderer/timeline-scroll.js';
+import {
+  clearTimelineReserve, focusTimelineMessage, focusTimelineOrigin, preserveTimelineViewport,
+  TIMELINE_RESERVE_PROPERTY
+} from '../src/renderer/timeline-scroll.js';
 
 it('anchors the logical reader row across late growth and replacement, while retaining nested tool scroll', () => {
   const dom = new JSDOM('<div id="pane"><div id="timeline"><div data-timeline-key="reader"><details open><p>Tool result</p></details></div></div></div>');
@@ -60,5 +63,52 @@ it('uses another visible row when a paged activity group loses its old key', () 
     restore();
     expect(message.getBoundingClientRect().top).toBe(30);
     expect(pane.scrollTop).toBe(2000);
+  } finally { dom.window.close(); }
+});
+
+it('focuses the row drawn from one immutable origin, and refuses one that is not on screen', () => {
+  const dom = new JSDOM('<div id="pane"><div id="timeline">' +
+    '<div data-timeline-key="first" data-timeline-origin="1"><p>First</p></div>' +
+    '<div data-timeline-key="revised" data-timeline-origin="2"><p>Revised</p></div>' +
+    '</div></div>');
+  try {
+    const document = dom.window.document;
+    const pane = document.getElementById('pane')!;
+    const timeline = document.getElementById('timeline')!;
+    (dom.window.HTMLElement.prototype as any).scrollIntoView = () => {};
+    pane.scrollTop = 120;
+    expect(focusTimelineOrigin(timeline, 2)).toBe(true);
+    const focused = document.activeElement as HTMLElement;
+    expect(focused.getAttribute('data-timeline-key')).toBe('revised');
+    // An origin that is not resident is not a reason to read history, or to move the reader.
+    expect(focusTimelineOrigin(timeline, 404)).toBe(false);
+    expect(document.activeElement).toBe(focused);
+    expect(pane.scrollTop).toBe(120);
+  } finally { dom.window.close(); }
+});
+
+it('focuses one generated-image gallery by its exact message id', () => {
+  const dom = new JSDOM('<div id="timeline"><div class="generated-image-gallery">' +
+    '<div class="ev" data-image-message="kept"></div><div class="ev" data-image-message="other"></div></div></div>');
+  try {
+    const document = dom.window.document;
+    const timeline = document.getElementById('timeline')!;
+    (dom.window.HTMLElement.prototype as any).scrollIntoView = () => {};
+    const gallery = timeline.firstElementChild as HTMLElement;
+    expect(gallery.querySelectorAll('.ev')).toHaveLength(2);
+    expect(focusTimelineMessage(timeline, 'other')).toBe(true);
+    expect(document.activeElement).toBe(gallery);
+    expect(focusTimelineMessage(timeline, 'missing')).toBe(false);
+    expect(document.activeElement).toBe(gallery);
+  } finally { dom.window.close(); }
+});
+
+it('clears a stale tail reserve, so a new selection owns its own space', () => {
+  const dom = new JSDOM('<div id="timeline"></div>');
+  try {
+    const timeline = dom.window.document.getElementById('timeline')!;
+    timeline.style.setProperty(TIMELINE_RESERVE_PROPERTY, '420px');
+    clearTimelineReserve(timeline);
+    expect(timeline.style.getPropertyValue(TIMELINE_RESERVE_PROPERTY)).toBe('');
   } finally { dom.window.close(); }
 });

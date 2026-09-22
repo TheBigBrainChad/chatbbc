@@ -24,6 +24,24 @@ describe('renderer chat split', () => {
     expect(chat.split('\n').length).toBeLessThan(4200);
   });
 
+  it('moves the transcript rows and the resident window out of chat.ts', async () => {
+    const chat = await fs.readFile(path.join(renderer, 'chat.ts'), 'utf8');
+    const view = await fs.readFile(path.join(renderer, 'timeline-view.ts'), 'utf8');
+    const stage = await fs.readFile(path.join(renderer, 'conversation-stage.ts'), 'utf8');
+    expect(view).toContain('export function createTimelineView');
+    expect(view).toMatch(/update\(page: TimelinePage, generation: number\): boolean/);
+    expect(stage).toContain('export function createConversationStage');
+    expect(stage).toMatch(/select\(sessionId: string \| null, generation: number\): void/);
+    expect(stage).toMatch(/update\(page: TimelinePage, generation: number\): boolean/);
+    expect(stage).toMatch(/focusOrigin\(origin: number\): boolean/);
+    expect(stage).toMatch(/dispose\(\): void/);
+    expect(chat).toContain('createConversationStage({');
+    // The row builders, the eviction projections and the row cache are the view's, not this
+    // file's: a repaint or a paging decision has one owner.
+    expect(chat).not.toMatch(/function (eventBody|eventRow|toolBody|compactionRow|retainTimelinePage|boundedTimeline|groupToolRows|groupImageRows|tagImageRow|visibleEvents|paintAgentFilter)\(/);
+    expect(chat).not.toMatch(/^let (detailFor|historyBefore|events)\b/m);
+  });
+
   it('reads session, selection, draft, and app state from the presentation store', async () => {
     const chat = await fs.readFile(path.join(renderer, 'chat.ts'), 'utf8');
     const main = await fs.readFile(path.join(renderer, 'main.ts'), 'utf8');
