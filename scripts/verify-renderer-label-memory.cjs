@@ -72,6 +72,18 @@ app.whenReady().then(async () => {
       return document.querySelector('button').title;
     })()`);
     assert.equal(translated, '移除 0');
+    const detached = await win.webContents.executeJavaScript(`(() => {
+      const orphan = labels.ui(document.createElement('span'), 'textContent', () => labels.t('Remove {0}', [7]));
+      document.body.append(orphan);
+      labels.setLanguage('es');
+      const mounted = orphan.textContent;
+      orphan.remove();
+      labels.setLanguage('zh-CN');
+      return { mounted, afterDetach: orphan.textContent, connected: orphan.isConnected };
+    })()`);
+    assert.equal(detached.mounted, 'Quitar 7');
+    assert.equal(detached.afterDetach, 'Quitar 7');
+    assert.equal(detached.connected, false);
     console.log('PASS: row memory stays bounded and mounted labels still translate');
   } finally { clearTimeout(deadline); win.destroy(); }
   app.quit();

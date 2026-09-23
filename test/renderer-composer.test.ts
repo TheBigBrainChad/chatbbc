@@ -15,6 +15,7 @@ import { readRendererStyles } from './helpers.js';
 import { paintComposerStatusLine } from '../src/renderer/composer-status-line.js';
 import { renderAgentPlan } from '../src/renderer/agent-plan.js';
 import { renderRecoveryCountdowns } from '../src/renderer/recovery.js';
+import { createComposerController } from '../src/renderer/composer-controller.js';
 import type { AgentPlan } from '../src/shared/agent-plan.js';
 
 let document: Document;
@@ -101,7 +102,23 @@ describe('the composer dock', () => {
     // The queue block is painted from its own module, and the line follows that paint.
     expect(bodyOf(outboxSource, 'refreshInputQueue')).toContain('paintComposerStatusLine()');
   });
+  it('anchors one floating composer and reads queue, plan, and recovery downward', () => {
+    expect(rule('.composer textarea')).toContain('field-sizing: content');
+    expect(rule('.composer textarea')).toContain('max-height: 220px');
+    expect(rule('.composer')).toContain('position: relative');
+    expect(rule('.composer')).toContain('var(--glass-high)');
+    expect(rule('.composer-status-body')).toContain('flex-direction: column');
+    const body = htmlSource.slice(htmlSource.indexOf('id="composerStatusBody"'), htmlSource.indexOf('id="composer"'));
+    let at = -1;
+    for (const id of ['agentPlan', 'recoveryStatus', 'taskPlanPreview', 'finishQueue', 'activeGoalRow']) {
+      const next = body.indexOf(`id="${id}"`);
+      expect(next, id).toBeGreaterThan(at);
+      at = next;
+    }
+  });
+
 });
+
 
 /**
  * The line's observable behaviour: what the user reads for a given set of live blocks.
@@ -110,6 +127,7 @@ describe('the composer dock', () => {
  * how `plan x/y` and `settling …` went missing while their blocks were on screen. These paint
  * the real modules into the shipped markup and read the summary back.
  */
+
 describe('the composer status line', () => {
   const plan: AgentPlan = {
     updatedAt: 1,
@@ -247,5 +265,125 @@ describe('the delivery row', () => {
     // to the row rather than left to collide with it.
     expect(outboxSource).toContain("el('div', 'pending-message msg')");
     expect(css).toContain('.pending-message.msg > .msg-head');
+  });
+});
+
+describe('composer draft ownership', () => {
+  type Attachment = { name: string };
+  const files = [new File(['a'], 'a.png', { type: 'image/png' })];
+  const attachmentsA: Attachment[] = [{ name: 'a.png' }];
+  const stateA = { text: 'draft A' };
+  const stateB = { text: '' };
+
+  function owner(key: string, generation: number) {
+    return { key, generation };
+  }
+  function settle(): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, 0));
+  }
+
+  /** The image draft map is the store. `stageFiles` is the async choose/drop the controller awaits. */
+  function fixture() {
+    const imageDrafts = new Map<string, Attachment[]>();
+    let resolveChosen: (value: Attachment[] | null) => void = () => {};
+    return {
+      imageDrafts,
+      resolveImport(pending: Promise<unknown>, attachments: Attachment[]) {
+        void pending;
+        resolveChosen(attachments);
+      },
+      host: {
+        imageDrafts,
+        stageFiles: (_files: readonly File[]) => new Promise<Attachment[] | null>(resolve => { resolveChosen = resolve; })
+      }
+    };
+  }
+
+  it('rejects a late attachment import after draft owner replacement', async () => {
+    const { host, imageDrafts, resolveImport } = fixture();
+    const composer = createComposerController(host);
+    composer.update(owner('A', 1), stateA);
+    const importA = composer.importFiles(files);
+    composer.update(owner('B', 2), stateB);
+    resolveImport(importA, attachmentsA);
+    await settle();
+    expect(composer.currentDraft().attachments).toEqual([]);
+    expect(imageDrafts.get('A') ?? []).toEqual([]);
+    expect(imageDrafts.get('B') ?? []).toEqual([]);
+    composer.dispose();
+  });
+
+  it('rejects a late attachment import after replaceDraft', async () => {
+    const { host, imageDrafts, resolveImport } = fixture();
+    const composer = createComposerController(host);
+    composer.update(owner('A', 1), stateA);
+    const importA = composer.importFiles(files);
+    composer.replaceDraft({ key: 'A', generation: 2, text: 'draft A', attachments: [] });
+    resolveImport(importA, attachmentsA);
+    await settle();
+    expect(composer.currentDraft().attachments).toEqual([]);
+    expect(imageDrafts.get('A') ?? []).toEqual([]);
+    composer.dispose();
+  });
+
+  it('appends a timely import to the image draft map and reads that same array back', async () => {
+    const { host, imageDrafts, resolveImport } = fixture();
+    const composer = createComposerController(host);
+    composer.update(owner('A', 1), stateA);
+    const importA = composer.importFiles(files);
+    resolveImport(importA, attachmentsA);
+    await settle();
+    expect(imageDrafts.get('A')).toEqual(attachmentsA);
+    expect(composer.currentDraft().attachments).toBe(imageDrafts.get('A'));
+    composer.update(owner('B', 2), stateB);
+    expect(composer.currentDraft().attachments).toEqual([]);
+    expect(imageDrafts.get('A')).toEqual(attachmentsA);
+    composer.dispose();
+  });
+
+  it('replaces the attachment array so an in-flight send can see the draft change', async () => {
+    const imageDrafts = new Map<string, Attachment[]>();
+    const prior = [{ name: 'kept.png' }];
+    imageDrafts.set('A', prior);
+    const composer = createComposerController({
+      imageDrafts,
+      stageFiles: async () => attachmentsA
+    });
+    composer.update(owner('A', 1), stateA);
+    const snapshot = imageDrafts.get('A')!;
+    await composer.importFiles(files);
+    expect(imageDrafts.get('A')).toEqual([{ name: 'kept.png' }, ...attachmentsA]);
+    expect(imageDrafts.get('A')).not.toBe(snapshot);
+    expect(snapshot).toEqual(prior);
+    composer.dispose();
+  });
+
+  it('keeps focused dirty text when a state push arrives', () => {
+    const dom = new JSDOM('<!doctype html><textarea id="chatInput"></textarea>', { url: 'https://local.test/' });
+    vi.stubGlobal('document', dom.window.document);
+    vi.stubGlobal('window', dom.window);
+    try {
+      const input = dom.window.document.getElementById('chatInput') as HTMLTextAreaElement;
+      input.value = 'typed locally';
+      input.focus();
+      const imageDrafts = new Map<string, Attachment[]>();
+      const composer = createComposerController({
+        imageDrafts,
+        stageFiles: async () => null,
+        text: () => input.value
+      });
+      composer.update(owner('project:alpha', 1), { text: 'pushed' });
+      expect(dom.window.document.activeElement).toBe(input);
+      expect(input.value).toBe('typed locally');
+      expect(composer.currentDraft().text).toBe('typed locally');
+      input.blur();
+      composer.update(owner('project:alpha', 1), { text: 'pushed' });
+      expect(input.value).toBe('pushed');
+      expect(composer.currentDraft().attachments).toEqual([]);
+      composer.dispose();
+    } finally {
+      dom.window.close();
+      vi.unstubAllGlobals();
+    }
   });
 });

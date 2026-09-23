@@ -20,7 +20,12 @@ import { validateInputImages } from './session/input-images.js';
 import { stageInputAttachment, type AttachmentSource } from './session/input-attachments.js';
 import { recordDeliveredInput, recordedInputImage } from './session/input-history.js';
 import { UI_BASE_ZOOM, titleBarOverlayForTheme, windowBackgroundForTheme } from './window-layout.js';
-import { readOmarchyTheme } from './omarchy-theme.js';
+import {
+  currentOmarchyThemeState,
+  onOmarchyThemeChange,
+  retryOmarchyThemeObservation
+} from './omarchy-theme.js';
+import { DEFAULT_GLASS_SUPPORT, type GlassSupport } from './window-glass.js';
 import { usageOverview } from './session/usage.js';
 import { inputArgs, listInputs, editQueuedInput, reorderQueuedInputs, setInputAutomation, configureInputDelivery, pausedBrowserHelpers, cancelFinishInputs } from './session/input.js';
 import { draftOpeningMessage, onGoalChange, nativeGoalFailure } from './goal.js';
@@ -31,6 +36,13 @@ import { requestBrowserPreferences } from './browser-preferences.js';
 import { sendDesktopInput, cancelDesktopInput, retryQueuedInputBrowser } from './session/start-input.js';
 import { wakeBrowserUrl } from './browser-startup.js';
 import { registerPluginIpc } from './plugins-ipc.js';
+import {
+  generatedAssetDownloadsForSession,
+  requestGeneratedAssetDownloads,
+  subscribeGeneratedAssetDownloads
+} from './generated-asset-downloads.js';
+import { MAX_GENERATED_ASSET_DOWNLOADS } from '../shared/generated-assets.js';
+import { prepareGeneratedAssetPreviewSave, saveGeneratedAssetPreviews } from './generated-assets.js';
 /**
  * IPC surface.
  *
@@ -98,7 +110,8 @@ import {
   findSessionByConversation,
   readEvents,
   readRecentEvents,
-  readHandoff
+  readHandoff,
+  sessionImageSets
 } from './session/store.js';
 import { activeSessionId, forgetSession, onSessionChange } from './session/recorder.js';
 import { blockedChatIds, setChatBlocked } from './session/blocked-chats.js';
@@ -378,7 +391,7 @@ function resolvedBinary(config: Config): string | null {
   return null;
 }
 
-async function buildState(): Promise<AppState> {
+async function buildState(glass: GlassSupport, glassGeneration: number): Promise<AppState> {
   const config = getConfig();
   return {
     config,
@@ -394,9 +407,9 @@ async function buildState(): Promise<AppState> {
     bridge: await bridgeStatus(),
     update: updateStatus(),
     desktopAccess: getMacOSDesktopAccess(),
-    // Read on every state snapshot: this is how a theme change on the desktop reaches the
-    // running app, and how the renderer sees it. Bounded and never throws.
-    omarchy: readOmarchyTheme()
+    omarchy: currentOmarchyThemeState(),
+    glass,
+    glassGeneration
   };
 }
 
@@ -419,11 +432,124 @@ function handle<T>(channel: string, fn: (payload: unknown) => Promise<T>): void 
   });
 }
 
-export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall: () => void): void {
+interface IpcAppearanceBridge {
+  glassSupport(): GlassSupport;
+  glassGeneration(): number;
+  appearancePainted(generation: number): boolean;
+  updateBackground(background: string): void;
+}
+
+
+export function registerIpc(
+  getWindow: () => BrowserWindow | null,
+  quitToInstall: () => void,
+  appearance?: IpcAppearanceBridge
+): () => void {
+  const currentState = (): Promise<AppState> => buildState(
+    appearance?.glassSupport() ?? DEFAULT_GLASS_SUPPORT,
+    appearance?.glassGeneration() ?? 0
+  );
   registerWorkspaceTerminalIpc(getWindow);
   const uiSelection = registerUiSelection(getWindow);
   // This channel must keep Electron's actual event: the ordinary handle() discards sender proof.
   ipcMain.handle('sessions:uiSelection', (event, payload: unknown) => uiSelection.report(event, payload));
+  const stopGeneratedAssetPush = subscribeGeneratedAssetDownloads(batch => {
+    const window = getWindow();
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed() ||
+        currentUiSelectionFor(window.webContents)?.sessionId !== batch.sessionId) return;
+    window.webContents.send('sessions:generatedAssetDownloadChanged', batch);
+  });
+  const generatedAssetDownloadRequest = z.object({
+    sessionId: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i),
+    logicalMessageId: z.string().min(1).max(512).refine(id => !/[\u0000-\u001f\u007f]/.test(id)),
+    assetIds: z.array(z.string().regex(/^file_[A-Za-z0-9_-]{8,100}$/))
+      .min(1).max(MAX_GENERATED_ASSET_DOWNLOADS)
+  }).strict().refine(value => new Set(value.assetIds).size === value.assetIds.length);
+  ipcMain.handle('sessions:downloadGeneratedAssets', async (event, payload: unknown) => {
+    const parsed = generatedAssetDownloadRequest.safeParse(payload);
+    if (!parsed.success) return { ok: false as const, error: 'Invalid input' };
+    const selected = (): number | null => {
+      const window = getWindow();
+      if (!window || window.isDestroyed() || window.webContents.isDestroyed() ||
+          !event?.sender || event.sender !== window.webContents || !event.senderFrame ||
+          event.senderFrame !== window.webContents.mainFrame) return null;
+      const witness = currentUiSelectionFor(event.sender);
+      return witness?.sessionId === parsed.data.sessionId ? witness.generation : null;
+    };
+    const generation = selected();
+    const stillSelected = (): boolean => generation !== null && selected() === generation;
+    if (!stillSelected()) return { ok: false as const, error: 'That chat is no longer selected' };
+    try {
+      const batch = await requestGeneratedAssetDownloads(parsed.data, stillSelected);
+      return stillSelected()
+        ? { ok: true as const, data: batch }
+        : { ok: false as const, error: 'That chat is no longer selected' };
+    } catch (error) {
+      return { ok: false as const, error: error instanceof Error ? error.message : 'Download request failed' };
+    }
+  });
+  ipcMain.handle('sessions:saveGeneratedAssetPreviews', async (event, payload: unknown) => {
+    const parsed = generatedAssetDownloadRequest.safeParse(payload);
+    if (!parsed.success) return { ok: false as const, error: 'Invalid input' };
+    const selected = (): number | null => {
+      const window = getWindow();
+      if (!window || window.isDestroyed() || window.webContents.isDestroyed() ||
+          !event?.sender || event.sender !== window.webContents || !event.senderFrame ||
+          event.senderFrame !== window.webContents.mainFrame) return null;
+      const witness = currentUiSelectionFor(event.sender);
+      return witness?.sessionId === parsed.data.sessionId ? witness.generation : null;
+    };
+    const generation = selected();
+    const stillSelected = (): boolean => generation !== null && selected() === generation;
+    if (!stillSelected()) return { ok: false as const, error: 'That chat is no longer selected' };
+    try {
+      const { sessionId, logicalMessageId, assetIds } = parsed.data;
+      const selection = await prepareGeneratedAssetPreviewSave(
+        sessionId, logicalMessageId, assetIds, stillSelected
+      );
+      const window = getWindow();
+      if (!window || !stillSelected()) return { ok: false as const, error: 'That chat is no longer selected' };
+      if (selection.images.length === 1) {
+        const choice = await dialog.showSaveDialog(window, {
+          title: 'Save recorded image preview',
+          defaultPath: selection.images[0]!.filename,
+          filters: [{ name: 'WebP preview', extensions: ['webp'] }]
+        });
+        if (choice.canceled || !choice.filePath) {
+          return { ok: true as const, data: { saved: 0, failed: 0, cancelled: true } };
+        }
+        return { ok: true as const, data: await saveGeneratedAssetPreviews(
+          selection, { kind: 'file', path: choice.filePath }, stillSelected
+        ) };
+      }
+      const choice = await dialog.showOpenDialog(window, {
+        title: 'Choose a folder for recorded image previews',
+        properties: ['openDirectory']
+      });
+      if (choice.canceled || !choice.filePaths[0]) {
+        return { ok: true as const, data: { saved: 0, failed: 0, cancelled: true } };
+      }
+      return { ok: true as const, data: await saveGeneratedAssetPreviews(
+        selection, { kind: 'directory', path: choice.filePaths[0] }, stillSelected
+      ) };
+    } catch (error) {
+      return { ok: false as const, error: error instanceof Error ? error.message : 'Preview save failed' };
+    }
+  });
+  ipcMain.handle('sessions:generatedAssetDownloads', async (event, payload: unknown) => {
+    const parsed = z.object({
+      sessionId: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i)
+    }).strict().safeParse(payload);
+    if (!parsed.success) return { ok: false as const, error: 'Invalid input' };
+    const window = getWindow();
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed() ||
+        !event?.sender || event.sender !== window.webContents || !event.senderFrame ||
+        event.senderFrame !== window.webContents.mainFrame ||
+        currentUiSelectionFor(event.sender)?.sessionId !== parsed.data.sessionId) {
+      return { ok: false as const, error: 'That chat is no longer selected' };
+    }
+    return { ok: true as const, data: generatedAssetDownloadsForSession(parsed.data.sessionId) };
+  });
   const richStatusRequest = z.object({
     sessionId: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i),
     actionId: z.string().uuid()
@@ -589,18 +715,31 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       try { if (request.action === 'remove') await setSecret(setupApiKeySlot(request.id), ''); }
       finally { await applySettings(); }
     });
-    return buildState();
+    return currentState();
   });
   registerPluginIpc(handle, getWindow);
   handle('usage:get', () => usageOverview());
   handle('state:get', async () => {
-    const state = await buildState();
+    const state = await currentState();
     // Native package smoke uses this as the end-to-end renderer readiness barrier. Unlike
     // `did-finish-load`, it can only happen after the renderer's first IPC request has completed
     // secure-storage availability/decryption probes and the rest of the initial state snapshot.
     logInfo('renderer state ready');
     return state;
   });
+  ipcMain.handle('glass:appearanceReady', (event, payload: unknown) => {
+    const target = getWindow();
+    if (!target || target.isDestroyed() || target.webContents !== event.sender) {
+      return { ok: false as const, error: 'The window is no longer current' };
+    }
+    const request = z.object({ generation: z.number().int().nonnegative() }).strict().safeParse(payload);
+    if (!request.success) return { ok: false as const, error: 'Invalid input' };
+    if (!appearance?.appearancePainted(request.data.generation)) {
+      return { ok: false as const, error: 'The appearance acknowledgement is stale' };
+    }
+    return { ok: true as const, data: true };
+  });
+  handle('omarchy:retry', async () => retryOmarchyThemeObservation());
 
   handle('settings:save', async (payload) => {
     const request = settingsSave.parse(payload);
@@ -620,16 +759,16 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     // system theme until restart (and startup still defaulted to system before index.ts applies it).
     // A followed desktop theme resolves to its own mode and palette, so the native chrome tracks
     // what the renderer actually paints rather than the saved manual colours.
-    const liveTheme = readOmarchyTheme(), chromeTheme = effectiveTheme(next.ui, liveTheme);
+    const liveTheme = currentOmarchyThemeState().theme, chromeTheme = effectiveTheme(next.ui, liveTheme);
     nativeTheme.themeSource = chromeTheme;
     if (process.platform === 'win32') {
       getWindow()?.setTitleBarOverlay(titleBarOverlayForTheme(chromeTheme, effectiveAppearance(next.ui, liveTheme)));
     }
-    // BrowserWindow's native backing color is fixed at construction unless updated explicitly.
-    // Keep it in lock-step too: the default macOS application menu exposes Reload, and after a
-    // live theme switch an old opposite background otherwise flashes behind the renderer while it
-    // paints again. This is also the color Electron shows during any later renderer reload/failure.
-    getWindow()?.setBackgroundColor(windowBackgroundForTheme(chromeTheme, effectiveAppearance(next.ui, liveTheme)));
+    // Keep reload/startup backing readable until the renderer has painted this palette. Once the
+    // transparent handshake releases it, a live palette update stays in the renderer layers.
+    const background = windowBackgroundForTheme(chromeTheme, effectiveAppearance(next.ui, liveTheme));
+    if (appearance) appearance.updateBackground(background);
+    else getWindow()?.setBackgroundColor(background);
     if (
       before.goal.enabled !== next.goal.enabled ||
       // The mode is authority too: a draft started as a gate must not be typed after the user
@@ -702,7 +841,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     }
     if (authorityPersistError) throw authorityPersistError;
     if (loginStartupError) throw loginStartupError;
-    return buildState();
+    return currentState();
   });
 
   /** Approves one folder by path. The picker dialog and the drop zone both end here. */
@@ -715,7 +854,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       return { ...config, roots: [...config.roots, { name, path: real }] };
     });
     logInfo(`approved folder /${addedName}`);
-    return buildState();
+    return currentState();
   };
 
   handle('roots:add', async () => {
@@ -725,7 +864,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       title: 'Approve a folder for ChatGPT',
       properties: ['openDirectory']
     });
-    if (result.canceled || !result.filePaths[0]) return buildState();
+    if (result.canceled || !result.filePaths[0]) return currentState();
     return approveRoot(result.filePaths[0]);
   });
 
@@ -805,7 +944,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     forgetWorkspaceRoot(name);
     projectFileWatches.close();
     logInfo(`removed folder /${name}`);
-    return buildState();
+    return currentState();
   });
 
   handle('roots:rename', async (payload) => {
@@ -824,7 +963,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       };
     });
     renameWorkspaceRoot(name, newName);
-    return buildState();
+    return currentState();
   });
 
   const projectFileId = z.string().uuid();
@@ -918,7 +1057,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     if (key === activeGoalKey) retireGoalDrafts();
     const what = key === 'openRouterApiKey' ? 'openrouter key' : key === 'customProviderApiKey' ? 'custom provider key' : 'api key';
     logInfo(value.trim() === '' ? `${what} cleared` : `${what} stored`);
-    return buildState();
+    return currentState();
   });
 
   /**
@@ -941,7 +1080,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       properties: ['openFile'],
       ...(process.platform === 'win32' ? { filters: [{ name: 'Programs', extensions: ['exe'] }] } : {})
     });
-    if (result.canceled || !result.filePaths[0]) return buildState();
+    if (result.canceled || !result.filePaths[0]) return currentState();
     await updateConfig((config) => ({
       ...config,
       tunnel: { ...config.tunnel, binaryPath: result.filePaths[0]! }
@@ -950,23 +1089,23 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     // Apply it immediately when connected rather than saving a path the running child never
     // uses until some unrelated future reconnect.
     await applySettings();
-    return buildState();
+    return currentState();
   });
 
   handle('connection:connect', async () => {
     await connect();
-    return buildState();
+    return currentState();
   });
 
   handle('connection:disconnect', async () => {
     await disconnect();
-    return buildState();
+    return currentState();
   });
 
   handle('diagnostics:run', async () => runDiagnostics());
   handle('desktop:requestAccessibility', async () => {
     await refreshMacOSDesktopAccess({ promptAccessibility: true });
-    return buildState();
+    return currentState();
   });
 
   handle('log:get', async () => getLog());
@@ -1052,6 +1191,13 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   handle('sessions:image', async (payload) => {
     const { id, assetId } = z.object({ id: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i), assetId: z.string().max(100).regex(/^[a-f0-9]{8,64}\.(?:bin|png|jpg)$/) }).parse(payload);
     return recordedInputImage(id, assetId);
+  });
+  handle('sessions:imageSets', async (payload) => {
+    const { id, responseIds } = z.object({
+      id: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i),
+      responseIds: z.array(z.string().min(1).max(256)).max(64).optional()
+    }).parse(payload);
+    return sessionImageSets(id, responseIds);
   });
   handle('sessions:imageStorage', async () => getImageStorage());
   handle('sessions:clearImageStorage', async (payload) => {
@@ -1257,7 +1403,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
 
   handle('bridge:unpair', async () => {
     await unpair();
-    return buildState();
+    return currentState();
   });
 
   handle('bridge:diagnostics', async () => companionDiagnostics());
@@ -1395,13 +1541,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   let statePushGeneration = 0;
   const pushState = (): void => {
     const generation = ++statePushGeneration;
-    void buildState().then((state) => {
+    void currentState().then((state) => {
       if (generation !== statePushGeneration) return;
       push('state:changed', state);
     });
   };
   onStatusChange(pushState);
   onBridgeChange(pushState);
+  const stopOmarchyStatePush = onOmarchyThemeChange(pushState);
   // Draft stages belong to session controls; state:changed only refreshes settings.
   onGoalChange(() => push('session:changed'));
   handle('tasks:cancel', async payload => cancelTaskRequest(z.object({ requestId: z.string().uuid() }).parse(payload).requestId));
@@ -1430,4 +1577,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   onLog((entry) => push('log:entry', entry));
   onSessionChange(() => push('session:changed'));
   onSwarmChange(() => push('swarm:changed', swarmState()));
+  return () => {
+    stopGeneratedAssetPush();
+    stopOmarchyStatePush();
+  };
 }

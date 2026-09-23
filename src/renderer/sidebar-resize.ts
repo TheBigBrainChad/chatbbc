@@ -5,16 +5,30 @@ export function initSidebarResize(): void {
   const handle = document.getElementById('sidebarResize')!;
   const toggle = document.getElementById('sidebarToggle')!;
   const menu = document.getElementById('viewMenu') as HTMLDetailsElement;
-  const key = 'chatbbc.sidebar-width';
+  const legacyKey = 'chatbbc.sidebar-width';
+  const key = 'chatbbc.navigator-width';
+  const collapsedKey = 'chatbbc.navigator-collapsed';
+  const legacyCollapsedKey = `${legacyKey}.collapsed`;
   const minimum = 180;
   const maximum = () => Math.max(minimum, Math.min(480, window.innerWidth / 2));
   let preferred: number | null = null;
   let collapsed = false;
   let drag: { id: number; x: number; width: number } | null = null;
   try {
+    // One-time migration. The old keys are deleted here, in the same read that consumes
+    // them, so no runtime branch or duplicate preference survives this call.
+    if (localStorage.getItem(key) == null) {
+      const legacy = localStorage.getItem(legacyKey);
+      if (legacy != null) localStorage.setItem(key, legacy);
+    }
+    if (localStorage.getItem(collapsedKey) == null && localStorage.getItem(legacyCollapsedKey) != null) {
+      localStorage.setItem(collapsedKey, localStorage.getItem(legacyCollapsedKey) === 'true' ? 'true' : 'false');
+    }
+    localStorage.removeItem(legacyKey);
+    localStorage.removeItem(legacyCollapsedKey);
     const saved = Number(localStorage.getItem(key));
     if (Number.isFinite(saved) && saved >= minimum) preferred = Math.min(480, saved);
-    collapsed = localStorage.getItem(`${key}.collapsed`) === 'true';
+    collapsed = localStorage.getItem(collapsedKey) === 'true';
   } catch { /* Layout remains usable when storage is unavailable. */ }
   function render(): void {
     app.classList.toggle('is-sidebar-collapsed', collapsed);
@@ -71,7 +85,7 @@ export function initSidebarResize(): void {
     collapsed = !collapsed;
     if (collapsed && sidebar.contains(document.activeElement)) toggle.focus();
     render();
-    try { localStorage.setItem(`${key}.collapsed`, String(collapsed)); } catch { /* Optional persistence. */ }
+    try { localStorage.setItem(collapsedKey, String(collapsed)); } catch { /* Optional persistence. */ }
   }
   toggle.addEventListener('click', toggleSidebar);
   document.getElementById('sidebarMenuToggle')!.addEventListener('click', toggleSidebar);

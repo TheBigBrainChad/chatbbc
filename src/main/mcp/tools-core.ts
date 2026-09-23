@@ -4,6 +4,7 @@ import { CONNECTOR_BRAND } from './surfaces.js';
 import { goalWorkerChat } from '../bridge.js';
 import { announceSessionFinish, sessionFinishDeadline } from '../session/finish.js';
 import { getConfig } from '../config.js';
+import { GeneratedAssetError, listGeneratedAssets, readOriginalForHandle, saveGeneratedAsset } from '../generated-assets.js';
 /**
  * The Core connector: reading, changing and running code on this PC.
  *
@@ -1004,6 +1005,47 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
     });
   }
 
+  // ------------------------------------------------- generated assets (read + write)
+
+  // One tool covers reading and creating files. An edit-only permission cannot safely
+  // publish a generated asset without risking a concurrent writer's existing file.
+  if ((exposedCaps.read || exposedCaps.browse || exposedCaps.metadata) && exposedCaps.create) {
+    reg.register('generated_assets', toolDeclaration('generated_assets', () => ({
+      description: 'List or save images ChatGPT generated in this exact session. list returns one opaque handle per image, including every image of a multi-image response; filename suggests an original name, while previewFilename is a WebP suggestion only when a local preview exists. save creates a new file at an approved path and never replaces one. Use a .webp path when source is preview: those bytes are a locally recorded preview, never the original. A handle from another session is refused; an unavailable original is never replaced with a preview.',
+      inputSchema: z.object({
+        action: z.enum(['list', 'save']),
+        handle: z.string().regex(/^[A-Za-z0-9_-]{32}$/).optional(),
+        path: z.string().min(1).max(4096).optional(),
+        source: z.enum(['original', 'preview']).optional()
+      }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+    })), async (input) => {
+      const caller = currentCaller();
+      if (!caller.sessionId) return failIdentity('Exact session identity is required');
+      const config = getConfig();
+      try {
+        if (input.action === 'list') {
+          const assets = await listGeneratedAssets(caller.sessionId);
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ assets }) }] };
+        }
+        if (!input.handle || !input.path || !input.source) return fail('save requires handle, path, and source');
+        const saved = await saveGeneratedAsset({
+          sessionId: caller.sessionId,
+          handle: input.handle,
+          path: input.path,
+          source: input.source,
+          roots: reg.ctx.roots,
+          readOnly: config.readOnly,
+          canCreate: config.capabilities.create === true && !config.readOnly,
+          ...(input.source === 'original' ? { readOriginal: () => readOriginalForHandle(caller.sessionId!, input.handle!) } : {})
+        });
+        return { content: [{ type: 'text' as const, text: JSON.stringify(saved) }] };
+      } catch (error) {
+        if (error instanceof GeneratedAssetError) return fail(`${error.code}: ${error.message}`);
+        throw error;
+      }
+    });
+  }
 
   // ----------------------------------------------------------------- agents
 

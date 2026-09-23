@@ -7,7 +7,8 @@ export type RichNode =
   | { id: string; kind: 'text'; text: string; style: 'body' | 'heading' | 'caption' | 'code' }
   | { id: string; kind: 'group'; layout: 'row' | 'column' | 'grid' | 'card' | 'list' | 'table' | 'diagram'; children: RichNode[] }
   | { id: string; kind: 'image'; mediaId: string; alt: string; width: number | null; height: number | null }
-  | { id: string; kind: 'control'; control: 'choice' | 'continue' | 'button' | 'checkbox' | 'radio' | 'select' | 'input' | 'link'; label: string; groupId: string | null; value: string | null; selected: boolean; disabled: boolean; children: RichNode[] };
+  | { id: string; kind: 'control'; control: 'choice' | 'continue' | 'button' | 'checkbox' | 'radio' | 'select' | 'input' | 'link'; label: string; groupId: string | null; value: string | null; selected: boolean; disabled: boolean; children: RichNode[] }
+  | { id: string; kind: 'artifact'; mode: 'semantic' | 'static'; title: string; html: string | null; media: string[] };
 
 export type RichResponse = {
   version: 1;
@@ -125,6 +126,7 @@ export function parseRichResponse(input: unknown): RichResponse | null {
       const names = kind === 'text' ? ['id', 'kind', 'text', 'style'] :
         kind === 'image' ? ['id', 'kind', 'mediaId', 'alt', 'width', 'height'] :
           kind === 'group' ? ['id', 'kind', 'layout', 'children'] :
+            kind === 'artifact' ? ['id', 'kind', 'mode', 'title', 'html', 'media'] :
             kind === 'control' ? [
               'id', 'kind', 'control', 'label', 'groupId', 'value', 'selected', 'disabled', 'children'
             ] : null;
@@ -144,6 +146,25 @@ export function parseRichResponse(input: unknown): RichResponse | null {
           !geometry(fields.width) || !geometry(fields.height) || ++media > RICH_LIMITS.media) return null;
         return { id: fields.id, kind: 'image', mediaId: fields.mediaId, alt: fields.alt,
           width: fields.width, height: fields.height };
+      }
+
+      if (kind === 'artifact') {
+        const mediaIds = arrayElements(fields.media);
+        if (!mediaIds || mediaIds.length > 4 || !string(fields.title, 200) ||
+          (fields.mode !== 'static' && fields.mode !== 'semantic')) return null;
+        const media: string[] = [];
+        const seenMedia = new Set<string>();
+        for (const mediaId of mediaIds) {
+          if (!opaque(mediaId) || seenMedia.has(mediaId) || !string(mediaId, 190)) return null;
+          seenMedia.add(mediaId);
+          media.push(mediaId);
+        }
+        if (fields.mode === 'semantic') {
+          if (fields.html !== null || media.length !== 0) return null;
+          return { id: fields.id, kind: 'artifact', mode: 'semantic', title: fields.title, html: null, media };
+        }
+        if (!string(fields.html, 131_072) || /<script|onclick|<form|@import|\bhref=/i.test(fields.html)) return null;
+        return { id: fields.id, kind: 'artifact', mode: 'static', title: fields.title, html: fields.html, media };
       }
 
       const sourceChildren = arrayElements(fields.children);
@@ -191,4 +212,29 @@ export function parseRichResponse(input: unknown): RichResponse | null {
     // Proxy traps, cyclic arrays and other hostile non-JSON values are invalid observations.
     return null;
   }
+}
+
+export type RichChoiceIdentity = {
+  control: Extract<RichNode, { kind: 'control' }>['control'];
+  groupId: string | null;
+  value: string | null;
+  label: string;
+  selected: boolean;
+  disabled: boolean;
+};
+
+/** Stored choice fields from a validated tree. This does not read the live page. */
+export function collectChoices(tree: RichResponse): RichChoiceIdentity[] {
+  const found: RichChoiceIdentity[] = [];
+  const visit = (nodes: RichNode[]): void => {
+    for (const node of nodes) {
+      if (node.kind === 'control') found.push({
+        control: node.control, groupId: node.groupId, value: node.value, label: node.label,
+        selected: node.selected, disabled: node.disabled
+      });
+      if (node.kind === 'group' || node.kind === 'control') visit(node.children);
+    }
+  };
+  visit(tree.nodes);
+  return found;
 }

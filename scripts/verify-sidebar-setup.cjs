@@ -16,7 +16,15 @@ app.setPath('userData', path.join(output, 'runtime'));
 app.whenReady().then(async () => {
   const { createServer } = await import('vite');
   const fixture = `
+    window.fixtureErrors=[];
+    window.addEventListener('error',event=>window.fixtureErrors.push(event.error?.stack||event.message));
+    window.addEventListener('unhandledrejection',event=>window.fixtureErrors.push(event.reason?.stack||String(event.reason)));
     localStorage.removeItem('chatbbc.sidebar-order');
+    localStorage.setItem('chatbbc.sidebar-order',JSON.stringify([
+      ['demo-project',Array.from({length:18},(_,i)=>'task-'+i)],
+      ['second-project',['task-18','task-19','task-20']],
+      ['', ['task-21']]
+    ]));
     localStorage.removeItem('cos.ui.language');
     const config = {
       roots: [{name:'demo',path:'C:/demo'}], readOnly:true,
@@ -27,19 +35,35 @@ app.whenReady().then(async () => {
       multiAgent:{enabled:false,maxWorkers:2,allowUnattributedCalls:false,recoverAgentTabs:false},
       goal:{enabled:false,model:'fixture',reasoning:'default',prompt:'Fixture'}
     };
-    const state = {config,hasApiKey:false,hasGoalKey:false,resolvedBinary:null,bundledTunnelVersion:null,
+    const state = {config,hasApiKey:false,hasGoalKey:false,hasCustomProviderKey:false,
+      resolvedBinary:null,bundledTunnelVersion:null,
+      platform:{family:'linux',name:'Linux',desktopAutomation:false},
+      secureStorage:{available:true,backend:'secret-service',detail:null},
       status:{state:'disconnected',detail:'',publicUrl:null,localUrl:null,handshakeAt:null,lastRequestAt:null,lastToolCallAt:null,health:null,surfaces:[]},
       bridge:{running:false,port:0,paired:false,present:false,lastSeenAt:null,extensionVersion:null},
-      update:{current:'2.0.9',latest:null,stage:'idle',error:null,checkedAt:null}};
+      update:{current:'2.0.9',latest:null,stage:'idle',error:null,checkedAt:null},
+      omarchy:{generation:0,theme:null,diagnostic:null},
+      glass:{mode:'atmospheric',transparent:false,diagnostic:null},glassGeneration:0};
     const project = {id:'demo-project',name:'VideoClipper',path:'C:/demo',createdAt:1};
-    const rows = Array.from({length:22},(_,i)=>({id:'task-'+i,title:'Project chat '+(i+1),projectId:project.id,
+    const secondProject = {id:'second-project',name:'Second project',path:'C:/second',createdAt:2};
+    const rows = Array.from({length:22},(_,i)=>({id:'task-'+i,title:'Project chat '+(i+1),
+      projectId:i<18?project.id:i<21?secondProject.id:null,
       conversationId:'chat-'+i,chatIds:['chat-'+i],startedAt:1,updatedAt:100-i,endedAt:2,events:0,userMessages:0,
       toolCalls:0,lastToolCallAt:null,processExitNonzero:0,toolRejected:0,toolInternalErrors:0,errors:0,
       estimatedTokens:0,contextTokens:0,lastHandoffId:null,lastHandoffAt:null,lastTurnOutcome:null,activeTurnId:null,agents:[],origin:null}));
+    const detailEvents = [
+      {seq:1,time:1,source:'extension',kind:'user_message',messageId:'navigator-authored',authoredText:'Navigator authored needle',message:{text:'Navigator authored needle',chars:25,truncated:false}},
+      {seq:2,time:2,source:'extension',kind:'native_image',messageId:'navigator-image-set',providerAssetId:'file-navigator',providerRole:'tool',providerChannel:'final',previewStatus:'pending'}
+    ];
     const ok=data=>Promise.resolve({ok:true,data});
     window.api = new Proxy({ getState:()=>ok(state),getLog:()=>ok([]),
-      listProjects:()=>ok([project]),listSessions:()=>ok({sessions:rows,total:22,nextCursor:null,activeId:null,pressure:[],blocked:[]}),
-      getSwarm:()=>ok({running:false,runId:null,agents:[],maxWorkers:2,pendingReports:0}),
+      listProjects:()=>ok([project,secondProject]),listSessions:()=>ok({sessions:rows,total:22,nextCursor:null,activeId:null,pressure:[],blocked:[]}),
+      getSession:id=>ok({summary:rows.find(row=>row.id===id),events:detailEvents,total:detailEvents.length,nextFrom:3}),
+      listProjectFiles:(projectId,directory)=>ok({projectId,projectName:projectId===project.id?project.name:secondProject.name,directory,
+        entries:directory?[]:[{name:'Aurora-notes.md',path:'Aurora-notes.md',kind:'file',bytes:12}],truncated:false}),
+      previewProjectFile:(projectId,path)=>{window.navigatorFileOpened=projectId+':'+path;return ok({projectId,projectName:project.name,path,name:path,bytes:12,
+        modifiedAt:new Date(0).toISOString(),revision:'a'.repeat(64),binary:false,text:'Aurora file preview',truncated:false})},
+      watchProjectFiles:()=>ok(true),onProjectFilesChanged:()=>()=>{},
       getChatModels:()=>ok({state:'unknown',models:[]}),
       saveSettings:patch=>{state.config={...state.config,...patch};return ok(state)},
       addSetupProfile:name=>{
@@ -67,15 +91,15 @@ app.whenReady().then(async () => {
     await server.listen(); fs.mkdirSync(output,{recursive:true});
     win = new BrowserWindow({show:false,width:1100,height:900,webPreferences:{sandbox:true,backgroundThrottling:false}});
     await win.loadURL(server.resolvedUrls.local[0]+'fixture.html');
-    win.webContents.setZoomFactor(1);
-    const js = code=>win.webContents.executeJavaScript(code);
-    const screenshot = async name => {
-      await win.webContents.capturePage(undefined,{stayHidden:true,stayAwake:true});
-      await new Promise(r=>setTimeout(r,200));
-      fs.writeFileSync(path.join(output,name),(await win.webContents.capturePage(undefined,{stayHidden:true,stayAwake:true})).toPNG());
+    const js = async code => {
+      try { return await win.webContents.executeJavaScript(code); }
+      catch (error) { throw new Error(`Renderer expression failed: ${code}\n${error?.stack || error}`); }
     };
-    for(let i=0;i<100 && !(await js('!!window.fixtureReady && document.querySelectorAll(".project-group > .sess").length === 5'));i++) await new Promise(r=>setTimeout(r,25));
+    for(let i=0;i<100 && !(await js('!!window.fixtureReady && document.querySelectorAll(".project-group[data-project-id=\\"demo-project\\"] > .sess").length === 5'));i++) await new Promise(r=>setTimeout(r,25));
+    assert.equal(await js('window.fixtureReady===true'),true,JSON.stringify(await js('window.fixtureErrors')));
     await js(`window.disclosureEvents=[]; for(const type of ['keydown','keypress','keyup','click']) document.addEventListener(type,e=>window.disclosureEvents.push({type,key:e.key,tag:e.target.tagName,cls:e.target.className,open:document.querySelector('.project-group')?.open}),true)`);
+    assert.equal(await js(`document.querySelectorAll('.project-group[data-project-id="demo-project"] > .sess').length`),5,
+      JSON.stringify(await js(`({errors:window.fixtureErrors,body:document.body.innerText.slice(0,500)})`)));
     // Project groups start closed. Exercise native summary activation before the
     // existing visible-row geometry, drag ordering and pagination checks.
     assert.equal(await js(`document.querySelector('.project-group').open`), false);
@@ -110,103 +134,145 @@ app.whenReady().then(async () => {
     assert.equal(geometry.color,'rgb(255, 255, 255)'); assert.equal(geometry.icon,'#i-pencil');
     await js('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
     await new Promise(r=>setTimeout(r,200));
-    const points=await js(`[...document.querySelectorAll('.project-group > .sess')].map(row=>{const r=row.getBoundingClientRect();return {x:Math.round(r.left+35),y:Math.round(r.top+r.height/2)}})`);
+    const points=await js(`[...document.querySelectorAll('.project-group[data-project-id="demo-project"] > .sess')].map(row=>{const r=row.getBoundingClientRect();return {x:Math.round(r.left+35),y:Math.round(r.top+r.height/2)}})`);
     win.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...points[0]});
     await new Promise(r=>setTimeout(r,25));
     win.webContents.sendInputEvent({type:'mouseMove',...points[2],y:points[2].y+12});
     await new Promise(r=>setTimeout(r,40));
     win.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...points[2],y:points[2].y+12});
     await new Promise(r=>setTimeout(r,40));
-    const moved=await js(`[...document.querySelectorAll('.project-group > .sess')].map(row=>row.dataset.id)`);
+    const moved=await js(`[...document.querySelectorAll('.project-group[data-project-id="demo-project"] > .sess')].map(row=>row.dataset.id)`);
     assert.deepEqual(moved,['task-1','task-2','task-0','task-3','task-4']);
     assert.equal(await js(`document.querySelector('.sess.is-sel') === null`),true);
     await new Promise(r=>setTimeout(r,200));
-    await screenshot('sidebar.png');
     win.webContents.setZoomFactor(1.17);
     await js('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
     assert.equal(await js('document.documentElement.scrollWidth <= innerWidth'),true);
-    await screenshot('sidebar-base-zoom.png');
     win.webContents.setZoomFactor(1);
     await js(`document.querySelector('.project-show-more').click()`);
-    assert.equal(await js(`document.querySelectorAll('.project-group > .sess').length`),13);
-    await js(`document.querySelector('[data-tab="workspace"]').click();document.getElementById('openSetup').click(); document.getElementById('wizExpand').click()`);
-    assert.equal(await js(`document.getElementById('wizard').classList.contains('is-tidy')`),true);
+    assert.equal(await js(`document.querySelectorAll('.project-group[data-project-id="demo-project"] > .sess').length`),13);
+    const groups=await js(`[...document.querySelectorAll('.project-group')].map(group=>({id:group.dataset.projectId,open:group.open}))`);
+    assert.equal(groups.some(group=>group.id==='second-project'),true,JSON.stringify(groups));
+    await js(`document.querySelector('.project-group[data-project-id="second-project"]').open=true`);
+    await js('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
+    const cross=await js(`(() => {
+      const source=document.querySelector('.project-group[data-project-id="demo-project"] > .sess');
+      const target=document.querySelector('.project-group[data-project-id="second-project"] > .sess');
+      const a=source.getBoundingClientRect(),b=target.getBoundingClientRect();
+      return {source:{x:Math.round(a.left+35),y:Math.round(a.top+a.height/2)},target:{x:Math.round(b.left+35),y:Math.round(b.top+b.height/2)}};
+    })()`);
+    win.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...cross.source});
+    await new Promise(r=>setTimeout(r,25));
+    win.webContents.sendInputEvent({type:'mouseMove',...cross.target});
+    await new Promise(r=>setTimeout(r,40));
+    win.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...cross.target});
+    await new Promise(r=>setTimeout(r,40));
+    const clamped=await js(`(() => {
+      const ids=id=>[...document.querySelectorAll('.project-group[data-project-id="'+id+'"] > .sess')].map(row=>row.dataset.id);
+      return {first:ids('demo-project'),second:ids('second-project'),saved:JSON.parse(localStorage.getItem('chatbbc.sidebar-order'))};
+    })()`);
+    assert.deepEqual(clamped.first,['task-2','task-0','task-3','task-4','task-5','task-6','task-7','task-8','task-9','task-10','task-11','task-12','task-1']);
+    assert.deepEqual(clamped.second,['task-18','task-19','task-20']);
+    const savedFirst=clamped.saved.find(([scope])=>scope==='demo-project')[1];
+    assert.deepEqual(savedFirst.slice(-5),['task-13','task-14','task-15','task-16','task-17']);
+    assert.equal(savedFirst.some(id=>['task-18','task-19','task-20'].includes(id)),false);
+    const unfiledCross=await js(`(() => {
+      const source=document.querySelector('.project-group[data-project-id="demo-project"] > .sess');
+      const target=document.querySelector('#chatList > .sess[data-id="task-21"]');
+      const a=source.getBoundingClientRect(),b=target.getBoundingClientRect();
+      return {source:{x:Math.round(a.left+35),y:Math.round(a.top+a.height/2)},target:{x:Math.round(b.left+35),y:Math.round(b.top+b.height/2)}};
+    })()`);
+    win.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...unfiledCross.source});
+    await new Promise(r=>setTimeout(r,25));
+    win.webContents.sendInputEvent({type:'mouseMove',...unfiledCross.target});
+    await new Promise(r=>setTimeout(r,40));
+    win.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...unfiledCross.target});
+    await new Promise(r=>setTimeout(r,40));
+    const unfiledClamped=await js(`(() => {
+      const ids=id=>[...document.querySelectorAll('.project-group[data-project-id="'+id+'"] > .sess')].map(row=>row.dataset.id);
+      return {first:ids('demo-project'),second:ids('second-project'),
+        unfiled:[...document.querySelectorAll('#chatList > .sess')].map(row=>row.dataset.id),
+        saved:JSON.parse(localStorage.getItem('chatbbc.sidebar-order'))};
+    })()`);
+    assert.deepEqual(unfiledClamped.first,['task-0','task-3','task-4','task-5','task-6','task-7','task-8','task-9','task-10','task-11','task-12','task-1','task-2']);
+    assert.deepEqual(unfiledClamped.second,['task-18','task-19','task-20']);
+    assert.deepEqual(unfiledClamped.unfiled,['task-21']);
+    const unfiledSavedFirst=unfiledClamped.saved.find(([scope])=>scope==='demo-project')[1];
+    assert.deepEqual(unfiledSavedFirst.slice(-5),['task-13','task-14','task-15','task-16','task-17']);
+    assert.equal(unfiledSavedFirst.includes('task-21'),false);
+    assert.deepEqual(unfiledClamped.saved.find(([scope])=>scope==='')[1],['task-21']);
+    await js(`(() => {
+      const search=document.getElementById('navigatorSearch');
+      search.value='Project chat 14';
+      search.dispatchEvent(new Event('input',{bubbles:true}));
+    })()`);
+    assert.equal(await js(`document.querySelectorAll('#navigatorResults [data-id="task-13"]').length`),1);
+    await js(`document.querySelector('#navigatorResults [data-id="task-13"]').click()`);
+    for(let i=0;i<100 && !(await js(`document.getElementById('timeline').textContent.includes('Navigator authored needle')`));i++) await new Promise(r=>setTimeout(r,25));
+    await js(`(() => {const search=document.getElementById('navigatorSearch');search.value='Navigator authored needle';search.dispatchEvent(new Event('input',{bubbles:true}))})()`);
+    assert.equal(await js(`document.querySelector('#navigatorResults [data-id="task-13"]')!==null`),true);
+    await js(`(() => {const search=document.getElementById('navigatorSearch');search.value='';search.dispatchEvent(new Event('input',{bubbles:true}))})()`);
+    const railPoint = async destination => js(`(() => {const r=document.querySelector('[data-destination="${destination}"]').getBoundingClientRect();return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)}})()`);
+    const filesPoint = await railPoint('files');
+    win.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...filesPoint});
+    win.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...filesPoint});
+    for(let i=0;i<100 && !(await js(`document.querySelector('.file-tree-row[data-path="Aurora-notes.md"]')`));i++) await new Promise(r=>setTimeout(r,25));
+    assert.equal(await js(`document.querySelector('[data-destination="chats"]').getAttribute('aria-current')`),'page');
+    assert.equal(await js(`document.getElementById('appShell').dataset.workbenchOpen`),'true');
+    assert.equal(await js(`document.querySelector('[data-work-tab="files"]').getAttribute('aria-selected')`),'true');
+    await js(`document.querySelector('[data-destination="chats"]').click()`);
+    await js(`(() => {const search=document.getElementById('navigatorSearch');search.value='Aurora-notes';search.dispatchEvent(new Event('input',{bubbles:true}))})()`);
+    assert.equal(await js(`document.querySelector('#navigatorResults [data-path="Aurora-notes.md"]')!==null`),true);
+    await js(`document.querySelector('#navigatorResults [data-path="Aurora-notes.md"]').click()`);
+    for(let i=0;i<100 && !(await js(`window.navigatorFileOpened==='demo-project:Aurora-notes.md'`));i++) await new Promise(r=>setTimeout(r,25));
+    assert.equal(await js(`document.querySelector('.file-tree-row[data-path="Aurora-notes.md"]').classList.contains('is-selected')`),true);
+    await js(`document.querySelector('[data-destination="chats"]').click()`);
+    await js(`(() => {const search=document.getElementById('navigatorSearch');search.value='ChatGPT generated image';search.dispatchEvent(new Event('input',{bubbles:true}))})()`);
+    assert.equal(await js(`document.querySelector('#navigatorResults [data-image-set]')!==null`),true);
+    await js(`document.querySelector('#navigatorResults [data-image-set]').click()`);
+    assert.equal(await js(`document.activeElement.closest('.generated-image-gallery,.said.native-image')!==null`),true);
+    await js(`(() => {const search=document.getElementById('navigatorSearch');search.value='';search.dispatchEvent(new Event('input',{bubbles:true}))})()`);
+    await js(`document.querySelector('[data-destination="agents"]').focus()`);
+    win.webContents.sendInputEvent({type:'keyDown',keyCode:'Enter'});
+    win.webContents.sendInputEvent({type:'char',keyCode:'\r'});
+    win.webContents.sendInputEvent({type:'keyUp',keyCode:'Enter'});
+    await new Promise(r=>setTimeout(r,40));
+    assert.equal(await js(`document.querySelector('[data-destination="chats"]').getAttribute('aria-current')`),'page');
+    assert.equal(await js(`document.querySelector('[data-work-tab="agents"]').getAttribute('aria-selected')`),'true');
+    await js(`document.querySelector('[data-destination="usage"]').click()`);
+    assert.equal(await js(`document.querySelector('[data-panel="usage"]').classList.contains('is-active')`),true);
+    assert.equal(await js(`document.querySelector('[data-destination="usage"]').getAttribute('aria-current')`),'page');
+    await js(`document.querySelector('[data-destination="settings"]').click()`);
+    for (const [index,panel] of ['workspace','automation','appearance'].entries()) {
+      if(index%2===0) {
+        const point=await js(`(() => {const r=document.querySelector('[data-settings-panel="${panel}"]').getBoundingClientRect();return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)}})()`);
+        win.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...point});
+        win.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...point});
+      } else {
+        await js(`document.querySelector('[data-settings-panel="${panel}"]').focus()`);
+        win.webContents.sendInputEvent({type:'keyDown',keyCode:'Space'});
+        win.webContents.sendInputEvent({type:'keyUp',keyCode:'Space'});
+      }
+      await new Promise(r=>setTimeout(r,25));
+      const targetPanel=panel==='automation'?'chat':panel;
+      assert.equal(await js(`document.querySelector('[data-panel="${targetPanel}"]').classList.contains('is-active')`),true,panel);
+    }
+    await js(`document.querySelector('[data-settings-panel="activity"]').focus()`);
+    win.webContents.sendInputEvent({type:'keyDown',keyCode:'Enter'});
+    win.webContents.sendInputEvent({type:'char',keyCode:'\r'});
+    win.webContents.sendInputEvent({type:'keyUp',keyCode:'Enter'});
+    await new Promise(r=>setTimeout(r,40));
+    assert.equal(await js(`document.querySelector('[data-panel="activity"]').classList.contains('is-active')`),true);
+    await js(`document.querySelector('[data-settings-panel="workspace"]').click();document.getElementById('openSetup').click();document.getElementById('wizExpand').click()`);
     assert.equal(await js(`document.querySelector('[data-panel="setup"]').classList.contains('is-active')`),true);
     await new Promise(r=>setTimeout(r,200));
-    await screenshot('setup-collapsed.png');
     await js(`document.getElementById('wizExpand').click()`);
     assert.equal(await js(`document.getElementById('wizard').classList.contains('is-tidy')`),false);
-    assert.equal(await js(`document.querySelector('[data-panel="setup"]').contains(document.getElementById('setupProfile'))`),false);
     await new Promise(r=>setTimeout(r,100));
-    await screenshot('setup-clean.png');
-    await js(`document.querySelector('[data-tab="appearance"]').click(); document.getElementById('uiLanguage').scrollIntoView({block:'center'});`);
-    for(const [width,zoom] of [[1100,1],[800,1],[1100,1.17],[800,1.17],[1100,1.5]]) {
-      win.setSize(width,900); win.webContents.setZoomFactor(zoom);
-      await js('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
-      await js(`document.getElementById('setupProfile').scrollIntoView({block:'center'});document.getElementById('setupProfile').click()`);
-      await js('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
-      const profileBounds = await js(`(() => {const r=document.getElementById('setupProfileMenu').getBoundingClientRect();return {width:r.width,left:r.left,right:r.right,top:r.top,bottom:r.bottom,viewport:[innerWidth,innerHeight],open:document.getElementById('setupProfileMenu').matches(':popover-open')}})()`);
-      assert.ok(profileBounds.width>0 && profileBounds.right<=profileBounds.viewport[0] && profileBounds.left>=0 && profileBounds.top>=0 && profileBounds.bottom<=profileBounds.viewport[1],JSON.stringify({width,zoom,profileBounds}));
-      assert.equal(await js(`document.querySelector('[data-remove-profile-id]').disabled`),true);
-      await js(`document.getElementById('setupProfileMenu').hidePopover()`);
-    }
-    win.setSize(1100,900);win.webContents.setZoomFactor(1);
-    await js('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
-    await js(`document.getElementById('setupProfileAdd').click()`);
-    assert.equal(await js(`document.getElementById('setupProfileDialog').open && document.activeElement.id==='setupProfileName'`),true);
-    await js(`document.getElementById('setupProfileName').value='Work';document.getElementById('setupProfileForm').requestSubmit()`);
-    for(let i=0;i<100 && await js(`document.getElementById('setupProfileDialog').open`);i++) await new Promise(r=>setTimeout(r,25));
-    assert.equal(await js(`document.getElementById('setupProfileCurrent').textContent`),'Work');
-    await js(`document.getElementById('setupProfile').scrollIntoView({block:'center'});document.getElementById('setupProfile').click()`);
-    assert.equal(await js(`document.querySelectorAll('[data-remove-profile-id]:not(:disabled)').length`),2);
-    const compactProfiles = await js(`(() => {
-      const menu = document.getElementById('setupProfileMenu').getBoundingClientRect();
-      const trigger = document.getElementById('setupProfile').getBoundingClientRect();
-      const rows = [...document.querySelectorAll('.setup-profile-option')].map(row => {
-        const choice = row.firstElementChild.getBoundingClientRect();
-        const remove = row.lastElementChild.getBoundingClientRect();
-        return {left:choice.left, choiceRight:choice.right, removeLeft:remove.left, removeRight:remove.right};
-      });
-      return {width:menu.width, right:menu.right, triggerWidth:trigger.width, triggerRight:trigger.right, rows};
-    })()`);
-    assert.ok(compactProfiles.width >= compactProfiles.triggerWidth && compactProfiles.width <= 190, JSON.stringify(compactProfiles));
-    assert.ok(Math.abs(compactProfiles.right - compactProfiles.triggerRight) <= 1, JSON.stringify(compactProfiles));
-    for (const row of compactProfiles.rows) {
-      assert.ok(compactProfiles.right - row.removeRight <= 12, JSON.stringify(compactProfiles));
-      assert.ok(Math.abs(row.removeLeft - compactProfiles.rows[0].removeLeft) <= 1, JSON.stringify(compactProfiles));
-      assert.ok(row.choiceRight <= row.removeLeft, JSON.stringify(compactProfiles));
-    }
-    // Wake the hidden fixture's compositor before retaining the final frame.
-    await win.webContents.capturePage(undefined,{stayHidden:true,stayAwake:true});
-    await new Promise(r=>setTimeout(r,250));
-    fs.writeFileSync(path.join(output,'settings-profiles.png'),(await win.webContents.capturePage(undefined,{stayHidden:true,stayAwake:true})).toPNG());
-    const longProfile = await js(`(() => {
-      const choice = document.querySelector('.setup-profile-option > :first-child');
-      const text = choice.textContent; choice.textContent = 'Long-profile-'.repeat(6);
-      const menu = document.getElementById('setupProfileMenu');
-      const bounds = menu.getBoundingClientRect();
-      const label = choice.getBoundingClientRect();
-      const remove = choice.nextElementSibling.getBoundingClientRect();
-      const result = {width:bounds.width, left:bounds.left, right:bounds.right, viewport:innerWidth,
-        labelRight:label.right, removeLeft:remove.left, removeRight:remove.right,
-        overflow:menu.scrollWidth > menu.clientWidth + 1};
-      choice.textContent = text;
-      return result;
-    })()`);
-    assert.ok(longProfile.width <= 260 && longProfile.left >= 0 && longProfile.right <= longProfile.viewport, JSON.stringify(longProfile));
-    assert.ok(longProfile.labelRight <= longProfile.removeLeft && !longProfile.overflow, JSON.stringify(longProfile));
-    assert.ok(longProfile.right - longProfile.removeRight <= 12, JSON.stringify(longProfile));
-    win.webContents.sendInputEvent({type:'keyDown',keyCode:'Escape'});
-    win.webContents.sendInputEvent({type:'keyUp',keyCode:'Escape'});
-    await new Promise(r=>setTimeout(r,50));
-    assert.equal(await js(`document.getElementById('setupProfileMenu').matches(':popover-open')`),false);
-    await js(`const language=document.getElementById('uiLanguage');language.value='zh-CN';language.dispatchEvent(new Event('change'));document.getElementById('setupProfile').click()`);
-    assert.equal(await js(`document.getElementById('setupProfileLabel').textContent`),'连接配置');
-    assert.equal(await js(`document.getElementById('setupProfileCurrent').textContent`),'Work');
-    assert.equal(await js(`document.querySelector('[data-remove-profile-id="default"]').getAttribute('aria-label')`),'删除配置：Default');
-    await js(`document.querySelector('[data-remove-profile-id="default"]').click()`);
-    for(let i=0;i<100 && await js(`document.querySelectorAll('[data-remove-profile-id]').length!==1`);i++) await new Promise(r=>setTimeout(r,25));
-    assert.equal(await js(`document.querySelector('[data-remove-profile-id]').disabled`),true);
-    console.log(JSON.stringify({projectDisclosure:{initiallyCollapsed:true,pointer:true,space:true,enter:true},geometry,drag:moved,showMore:13,collapse:true,profileLayout:compactProfiles,longProfile,output}));
+    await js(`document.querySelector('[data-destination="chats"]').click()`);
+    assert.equal(await js(`document.getElementById('appShell').dataset.screen`),'chat');
+    assert.equal(await js(`document.getElementById('appShell').dataset.workbenchOpen`),'false');
+    assert.equal(await js(`document.querySelector('[data-destination="chats"]').getAttribute('aria-current')`),'page');
+    console.log(JSON.stringify({projectDisclosure:{initiallyCollapsed:true,pointer:true,space:true,enter:true},geometry,drag:moved,dragClamp:{project:clamped,unfiled:unfiledClamped},showMore:13,navigatorSearch:{chat:true,authoredPreview:true,file:true,imageSet:true},rail:{files:true,agents:true,usage:true,settings:true,chats:true},settingsPanels:true,collapse:true,output}));
   } finally { win?.destroy(); await server.close(); app.quit(); }
 }).catch(error=>{console.error(error);app.exit(1)});

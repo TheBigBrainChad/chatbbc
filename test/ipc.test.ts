@@ -11,7 +11,9 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import sharp from 'sharp';
 import type { RichActionRecord } from '../src/main/rich-actions.js';
+import { retryOmarchyThemeObservation, startOmarchyThemeObservation } from '../src/main/omarchy-theme.js';
 
 type Handler = (event: unknown, payload: unknown) => Promise<unknown>;
 const handlers = new Map<string, Handler>();
@@ -23,7 +25,10 @@ vi.mock('electron', () => ({
   },
   BrowserWindow: class {},
   clipboard: { readText: () => '', writeText: () => undefined },
-  dialog: { showOpenDialog: vi.fn(async () => ({ canceled: true, filePaths: [] as string[] })) },
+  dialog: {
+    showOpenDialog: vi.fn(async () => ({ canceled: true, filePaths: [] as string[] })),
+    showSaveDialog: vi.fn(async () => ({ canceled: true, filePath: '' }))
+  },
   shell: { openExternal: vi.fn(async () => undefined), openPath: vi.fn(async () => '') },
   nativeTheme: { themeSource: 'system' },
   safeStorage: {
@@ -41,7 +46,7 @@ vi.mock('../src/main/browser.js', () => ({ openInPreferredBrowser: vi.fn(async (
 
 const { defaultConfig, getConfig, initConfigPath, saveConfig, updateConfig } = await import('../src/main/config.js');
 const { initSecretsPath, resetSecretsCacheForTests } = await import('../src/main/secrets.js');
-const { appendEvent, createSession, initSessionStore, rebindSession, resetSessionStoreForTests, upsertMessageEvent, upsertRichMedia, upsertRichMessage } = await import('../src/main/session/store.js');
+const { appendEvent, createSession, initSessionStore, rebindSession, resetSessionStoreForTests, upsertMessageEvent, upsertNativeImageEvent, upsertRichMedia, upsertRichMessage, writeAsset } = await import('../src/main/session/store.js');
 const { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } = await import('../src/main/durable.js');
 const { pendingCommands, resetBridgeForTests, setBrowserOpener, startBridge, stopBridge } = await import(
   '../src/main/bridge.js'
@@ -1223,6 +1228,7 @@ beforeEach(async () => {
   nativeTheme.themeSource = 'system';
   vi.mocked(safeStorage.isAsyncEncryptionAvailable).mockResolvedValue(true);
   vi.mocked(shell.openPath).mockReset().mockResolvedValue('');
+  vi.mocked(dialog.showSaveDialog).mockReset().mockResolvedValue({ canceled: true, filePath: '' });
   vi.mocked(shell.openExternal).mockReset().mockResolvedValue(undefined);
   vi.mocked(app.getVersion).mockReset().mockReturnValue('0.0.0');
   resetSwarm();
@@ -1240,10 +1246,100 @@ beforeEach(async () => {
   }));
 });
 
+describe('human-selected generated preview save IPC', () => {
+  const messageId = 'assistant:image-set:human-preview';
+  const assetId = 'file_ManualPreview0001';
+  async function page() {
+    const session = await createSession({ title: 'human preview', conversationId: randomUUID() });
+    const png = await sharp({ create: { width: 8, height: 6, channels: 3, background: '#224488' } }).png().toBuffer();
+    const asset = await writeAsset(session.id, png, 'image/png');
+    await upsertNativeImageEvent(session.id, {
+      time: 1, source: 'extension', kind: 'native_image', messageId,
+      providerAssetId: assetId, providerRole: 'tool', previewStatus: 'available',
+      previewWidth: 8, previewHeight: 6, asset
+    });
+    const { event, webContents } = selectionWindow();
+    expect(await handlers.get('sessions:uiSelection')!(event, {
+      sessionId: session.id, rendererGeneration: 1
+    })).toMatchObject({ ok: true });
+    return { session, event, webContents };
+  }
+  const savePreview = (event: unknown, sessionId: string, ids = [assetId]): Promise<unknown> =>
+    handlers.get('sessions:saveGeneratedAssetPreviews')!(event, {
+      sessionId, logicalMessageId: messageId, assetIds: ids
+    });
+
+  it('saves one local preview as WebP through Save As without granting a root', async () => {
+    const { session, event } = await page();
+    const filePath = path.join(dir, `${randomUUID()}.webp`);
+    vi.mocked(dialog.showSaveDialog).mockResolvedValueOnce({ canceled: false, filePath });
+    expect(await savePreview(event, session.id)).toEqual({
+      ok: true, data: { saved: 1, failed: 0, cancelled: false }
+    });
+    expect((await sharp(await fs.readFile(filePath)).metadata()).format).toBe('webp');
+    await fs.rm(filePath);
+  });
+
+  it('saves a canonical image set to a chosen folder without replacing either local preview', async () => {
+    const { session, event } = await page();
+    const png = await sharp({ create: { width: 6, height: 8, channels: 3, background: '#881122' } }).png().toBuffer();
+    const asset = await writeAsset(session.id, png, 'image/png');
+    const secondId = 'file_ManualPreview0002';
+    await upsertNativeImageEvent(session.id, {
+      time: 2, source: 'extension', kind: 'native_image', messageId,
+      providerAssetId: secondId, providerRole: 'tool', previewStatus: 'available',
+      previewWidth: 6, previewHeight: 8, asset
+    });
+    const folder = await fs.mkdtemp(path.join(dir, 'gallery-'));
+    vi.mocked(dialog.showOpenDialog).mockResolvedValueOnce({ canceled: false, filePaths: [folder] });
+    expect(await savePreview(event, session.id, [assetId, secondId])).toEqual({
+      ok: true, data: { saved: 2, failed: 0, cancelled: false }
+    });
+    expect((await sharp(await fs.readFile(path.join(folder, 'ChatBBC image 01.webp'))).metadata()).format).toBe('webp');
+    expect((await sharp(await fs.readFile(path.join(folder, 'ChatBBC image 02.webp'))).metadata()).format).toBe('webp');
+    expect(dialog.showSaveDialog).not.toHaveBeenCalled();
+  });
+
+  it('cancels without writing and refuses foreign senders or noncanonical members', async () => {
+    const { session, event, webContents } = await page();
+    expect(await savePreview(event, session.id)).toEqual({
+      ok: true, data: { saved: 0, failed: 0, cancelled: true }
+    });
+    expect(await savePreview({ sender: {}, senderFrame: webContents.mainFrame }, session.id))
+      .toMatchObject({ ok: false });
+    expect(await savePreview(event, session.id, ['file_UnownedPreview0001']))
+      .toMatchObject({ ok: false });
+  });
+
+  it('refuses a stale A→B→A selection after the dialog resolves without writing', async () => {
+    const { session, event } = await page();
+    const other = await createSession({ title: 'different preview owner', conversationId: randomUUID() });
+    const filePath = path.join(dir, `${randomUUID()}.webp`);
+    let release!: (choice: { canceled: boolean; filePath: string }) => void;
+    let entered!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    vi.mocked(dialog.showSaveDialog).mockImplementationOnce(async () => {
+      entered();
+      return new Promise(resolve => { release = resolve; });
+    });
+    const pending = savePreview(event, session.id);
+    await reached;
+    expect(await handlers.get('sessions:uiSelection')!(event, {
+      sessionId: other.id, rendererGeneration: 2
+    })).toMatchObject({ ok: true });
+    expect(await handlers.get('sessions:uiSelection')!(event, {
+      sessionId: session.id, rendererGeneration: 3
+    })).toMatchObject({ ok: true });
+    release({ canceled: false, filePath });
+    expect(await pending).toMatchObject({ ok: true, data: { saved: 0, failed: 1, cancelled: false } });
+    await expect(fs.stat(filePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
 it('keeps origin history navigation separate from live revision cursors over IPC', async () => {
   const session = await createSession({ title: 'History cursors' });
   const message = { kind: 'assistant_message' as const, source: 'extension' as const, time: 10,
     messageId: 'review', message: { text: 'Detailed review', truncated: false, chars: 15 }, final: true };
+
   const first = await upsertMessageEvent(session.id, message);
   await appendEvent(session.id, { kind: 'note', source: 'app', time: 20, message: { text: 'Later work', truncated: false, chars: 10 } });
   const revision = await upsertMessageEvent(session.id, { ...message, renderedHtml: { text: '<p>Detailed review</p>', truncated: false, chars: 22 } });
@@ -2090,6 +2186,38 @@ describe('session IPC contracts', () => {
   });
 });
 
+
+describe('IPC state publication lifetime', () => {
+  it('stops theme-driven state pushes when the main IPC lifetime is disposed', async () => {
+    const home = path.join(dir, 'omarchy-ipc-lifetime');
+    const theme = path.join(home, '.local/state/omarchy/current/theme');
+    await fs.mkdir(theme, { recursive: true });
+    await fs.writeFile(path.join(theme, 'colors.toml'), 'background = "#111c18"\naccent = "#509475"\n');
+    await fs.writeFile(path.join(home, '.local/state/omarchy/current/theme.name'), 'Before');
+    const sent = vi.fn();
+    const dispose = registerIpc(
+      () => ({ isDestroyed: () => false, webContents: { send: sent } }) as never,
+      () => {}
+    ) as unknown as (() => void) | undefined;
+    const stop = startOmarchyThemeObservation({ home });
+    try {
+      await fs.writeFile(path.join(theme, 'colors.toml'), 'background = "#202128"\naccent = "#8e79d6"\n');
+      retryOmarchyThemeObservation();
+      await vi.waitFor(() => expect(sent).toHaveBeenCalledWith('state:changed', expect.anything()));
+      expect(dispose).toBeTypeOf('function');
+      dispose!();
+      sent.mockClear();
+
+      await fs.writeFile(path.join(theme, 'colors.toml'), 'background = "#303138"\naccent = "#a98df4"\n');
+      retryOmarchyThemeObservation();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(sent).not.toHaveBeenCalled();
+    } finally {
+      if (typeof dispose === 'function') dispose();
+      stop();
+    }
+  });
+});
 describe('renderer pushes after the window is gone', () => {
   it('does not touch a destroyed BrowserWindow, whose members all throw', async () => {
     // Electron keeps the object after the window is destroyed, so the existing `?.` on
@@ -2130,5 +2258,85 @@ describe('Stop IPC exact session and turn authority', () => {
     expect((await invoke({ id: session.id, expectedTurnId: 'ipc-stop-one' })).ok).toBe(false);
     const missing = await createSession({ title: 'No browser ownership', conversationId: null });
     expect(await invoke({ id: missing.id, expectedTurnId: 'ipc-stop-one' })).toMatchObject({ ok: false, error: 'session_not_recorded' });
+  });
+});
+
+describe('glass navigation acknowledgement', () => {
+  it('publishes the current generation and rejects stale or foreign renderer readiness', async () => {
+    const appearancePainted = vi.fn((generation: number) => generation === 9);
+    const sender = { send: vi.fn() };
+    currentWindow = {
+      setBackgroundColor: vi.fn(),
+      setTitleBarOverlay: vi.fn(),
+      isDestroyed: () => false,
+      webContents: sender
+    };
+    registerIpc(
+      () => currentWindow as any,
+      () => undefined,
+      {
+        glassSupport: () => ({ mode: 'hyprland-blur', transparent: true, diagnostic: null }),
+        glassGeneration: () => 9,
+        appearancePainted,
+        updateBackground: () => undefined
+      }
+    );
+
+    const stateReply = await handlers.get('state:get')!(null, undefined) as any;
+    expect(stateReply).toMatchObject({
+      ok: true,
+      data: {
+        glass: { mode: 'hyprland-blur', transparent: true, diagnostic: null },
+        glassGeneration: 9
+      }
+    });
+
+    const acknowledge = handlers.get('glass:appearanceReady')!;
+    expect(await acknowledge({ sender }, { generation: 8 })).toMatchObject({ ok: false });
+    expect(await acknowledge({ sender: {} }, { generation: 9 })).toMatchObject({ ok: false });
+    expect(await acknowledge({ sender }, { generation: 9 })).toEqual({ ok: true, data: true });
+    expect(appearancePainted.mock.calls).toEqual([[8], [9]]);
+  });
+
+  it('keeps the new document backing after a delayed old acknowledgement following reload', async () => {
+    const { createGlassBackingHandshake } = await import('../src/main/window-glass.js');
+    const colors: string[] = [];
+    const handshake = createGlassBackingHandshake(
+      { setBackgroundColor: color => colors.push(color) },
+      { mode: 'hyprland-blur', transparent: true, diagnostic: null },
+      '#181818'
+    );
+    const sender = { send: vi.fn() };
+    currentWindow = {
+      setBackgroundColor: vi.fn(),
+      setTitleBarOverlay: vi.fn(),
+      isDestroyed: () => false,
+      webContents: sender
+    };
+    registerIpc(
+      () => currentWindow as never,
+      () => undefined,
+      {
+        glassSupport: () => ({ mode: 'hyprland-blur', transparent: true, diagnostic: null }),
+        glassGeneration: () => handshake.generation(),
+        appearancePainted: generation => handshake.appearancePainted(generation),
+        updateBackground: background => handshake.updateBackground(background)
+      }
+    );
+
+    const acknowledge = handlers.get('glass:appearanceReady');
+    expect(acknowledge).toBeTypeOf('function');
+    const oldGeneration = handshake.loading('#181818');
+    handshake.didFinishLoad();
+    expect(await acknowledge!({ sender }, { generation: oldGeneration })).toEqual({ ok: true, data: true });
+    expect(colors.at(-1)).toBe('#00000000');
+
+    const reloadedGeneration = handshake.loading('#f4f4f5');
+    handshake.didFinishLoad();
+    expect(colors.at(-1)).toBe('#f4f4f5');
+    expect(await acknowledge!({ sender }, { generation: oldGeneration })).toMatchObject({ ok: false });
+    expect(colors.at(-1)).toBe('#f4f4f5');
+    expect(await acknowledge!({ sender }, { generation: reloadedGeneration })).toEqual({ ok: true, data: true });
+    expect(colors.at(-1)).toBe('#00000000');
   });
 });

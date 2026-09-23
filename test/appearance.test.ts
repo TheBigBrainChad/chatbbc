@@ -36,6 +36,19 @@ describe('custom appearance', () => {
     }
   });
 
+  it('derives the complete Crystal token family from one palette', () => {
+    const tokens = paletteTokens('#14101d', '#c8a6ff', 60, { green: '#8ee7de', red: '#ff7898' });
+    expect(tokens).toMatchObject({
+      '--canvas': '#14101d',
+      '--ink-on-accent': '#000000'
+    });
+    for (const name of ['--canvas-atmosphere', '--glass-low', '--glass-medium', '--glass-high',
+      '--glass-readable', '--ink-muted', '--accent-readable', '--accent-glow', '--hairline',
+      '--shadow', '--scrim']) expect(tokens[name], name).toBeTruthy();
+    expect(contrastRatio(tokens['--accent-readable']!, tokens['--canvas']!)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(tokens['--ink']!, tokens['--glass-readable']!)).toBeGreaterThanOrEqual(4.5);
+  });
+
   it('merges stale windows per color and per theme without overwriting concurrent edits', () => {
     const base = defaultAppearance(), live = defaultAppearance(), wanted = defaultAppearance();
     live.dark.sidebar = '#ff0066'; live.light.background = '#f1f2f3'; live.font = 'serif';
@@ -106,7 +119,7 @@ const OSAKA: OmarchyTheme = {
 };
 
 describe('following the desktop theme', () => {
-  it('emits exactly the pre-existing tokens when no status palette is supplied', () => {
+  it('retains every pre-existing token while adding the complete semantic families', () => {
     const defaults = defaultAppearance();
     for (const theme of ['dark', 'light'] as const) {
       const { background, accent, contrast } = defaults[theme];
@@ -114,10 +127,14 @@ describe('following the desktop theme', () => {
       for (const [key, value] of Object.entries(BEFORE_STATUS[theme])) {
         expect(tokens[key], `${theme} ${key}`).toBe(value);
       }
-      // Every pre-existing name survives, and the four category tokens are the only additions:
-      // a renamed or dropped token would silently unstyle a rule that still reads it.
+      // A renamed or dropped legacy token would silently unstyle a rule that still reads it,
+      // while a missing semantic role would leave a Crystal surface without a fallback.
       const added = Object.keys(tokens).filter(key => !(key in BEFORE_STATUS[theme]!)).sort();
-      expect(added, `${theme} new tokens`).toEqual(['--cyan', '--ice', '--magenta', '--yellow']);
+      expect(added, `${theme} new tokens`).toEqual([
+        '--accent-glow', '--accent-readable', '--canvas', '--canvas-atmosphere', '--cyan',
+        '--glass-high', '--glass-low', '--glass-medium', '--glass-readable', '--hairline',
+        '--ice', '--ink-muted', '--ink-on-accent', '--magenta', '--scrim', '--shadow', '--yellow'
+      ]);
       expect(Object.keys(BEFORE_STATUS[theme]!).filter(key => !(key in tokens))).toEqual([]);
     }
   });

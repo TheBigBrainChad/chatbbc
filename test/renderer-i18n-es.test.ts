@@ -49,6 +49,11 @@ describe('Spanish app interface', () => {
     }
   });
 
+  it('covers every runtime t() string, not only keys shared with another catalog', async () => {
+    const { missingLocaleKeys } = await import('../src/renderer/i18n.js');
+    expect(missingLocaleKeys('es')).toEqual([]);
+  });
+
   it('covers the complete source catalog and preserves every numbered argument', () => {
     expect(Object.keys(es).sort()).toEqual(Object.keys(zhCN).sort());
     for (const [source, translation] of Object.entries(es)) {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { windowLayoutForWorkArea } from '../src/main/window-layout.js';
+import { defaultAppearance } from '../src/shared/appearance.js';
+import { windowBackgroundForTheme, windowLayoutForWorkArea } from '../src/main/window-layout.js';
 
 describe('main window accessibility', () => {
   it('caps its initial outer bounds to a small Windows work area', () => {
@@ -41,5 +42,14 @@ describe('main window accessibility', () => {
       width: 1600,
       height: 900
     });
+  });
+
+  it('keeps the persisted palette as the readable native fallback backing', () => {
+    const appearance = defaultAppearance();
+    appearance.dark.background = '#123456';
+    appearance.light.background = '#abcdef';
+
+    expect(windowBackgroundForTheme('dark', appearance)).toBe('#123456');
+    expect(windowBackgroundForTheme('light', appearance)).toBe('#abcdef');
   });
 });

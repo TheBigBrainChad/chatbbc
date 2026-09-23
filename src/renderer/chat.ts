@@ -3,35 +3,39 @@ import { ui, t } from './i18n.js';
 import { initComposerStatusLine, paintComposerStatusLine } from './composer-status-line.js';
 import { initSkills } from './skills.js';
 import { initSkillsLibrary, type SkillsLibraryView } from './skills-library.js';
-import { imageStorageButton } from './image-storage.js';
 import { applyChatModels, applyComposerSessionModel, initChatModels, confirmedComposerModel, ensureComposerModel } from './chat-models.js';
 import { marked, Marked } from 'marked';
 import { safeExternalLink } from '../shared/external-link.js';
 import { createAgentPanel } from './agent-panel.js';
 import { createFilePanel } from './file-panel.js';
 import { createWorkPanel } from './work-panel.js';
+import { presentationStore } from './presentation-store.js';
 import { renderAgentPlan } from './agent-plan.js';
 import { userPromptText } from '../shared/user-prompt.js';
-import { messageReaction, withoutMessageReaction } from '../shared/message-reaction.js';
+import { withoutMessageReaction } from '../shared/message-reaction.js';
 import { goalErrorMessage } from '../shared/goal-errors.js';
 import type { GoalModel } from '../shared/goal-reasoning.js';
 import { renderGoalReasoning } from './goal-reasoning.js';
-import { renderRichResponse } from './rich-response.js';
-import { localDataUrl, retireRichImageViewer, retireRichImageViewerWithin, retireStaleRichImageViewer } from './rich-image.js';
-import { RICH_LIMITS } from '../shared/rich-response.js';
-import { preserveTimelineViewport } from './timeline-scroll.js';
-import { createSidebarOrder } from './sidebar-order.js';
-import { toolResultText } from './tool-result.js';
-import { chatErrorPresentation, duplicateChatErrors } from './chat-error.js';
-import { categoryFor, categoryClass } from './transcript-categories.js';
-import { frontendSegments, type FrontendSegment } from './session-spine.js';
+import { retireRichImageViewer } from './rich-image.js';
+import { imageSetsForTimeline, retireImageSetViewer } from './image-set.js';
+import { createConversationStage, type ConversationStage } from './conversation-stage.js';
+import { richFocusStatus } from './rich-focus-status.js';
+import { createComposerController, type ComposerController } from './composer-controller.js';
+import { TIMELINE_PAGE_ROWS, timelinePageRows, type TimelinePage } from './timeline-view.js';
+import { createSidebarOrder, type SidebarOrder } from './sidebar-order.js';
+import {
+  createChatNavigator,
+  type ChatNavigator,
+  type NavigatorFile,
+  type NavigatorImageSet,
+  type NavigatorSession
+} from './chat-navigator.js';
 import { renderRecoveryCountdowns } from './recovery.js';
 import type { RecoveryCountdown } from '../shared/recovery.js';
-import { communicationTitle, foldAgentCommunication } from './agent-communication.js';
 import { initContextMeter, paintContextMeter } from './context-meter.js';
 import { isProModel } from '../shared/chat-models.js';
 import type { InputImage, InputAttachment, InputAutomation } from '../shared/input.js';
-import { injectableAttachments, MAX_INPUT_IMAGES } from '../shared/input.js';
+import { injectableAttachments } from '../shared/input.js';
 import type { InputEntry } from '../main/session/input.js';
 import type { LocalProject } from '../shared/projects.js';
 import type { TaskProgress } from '../shared/task-progress.js';
@@ -51,15 +55,8 @@ import type {
   SwarmState,
   TokenPressure
 } from '../shared/session.js';
-import {
-  ATTRIBUTION_LABELS,
-  CHAT_ACTIVE_MS,
-  continuationMarkerOf,
-  TURN_OUTCOME_LABELS,
-  foldProgress,
-  toolCallSummary
-} from '../shared/session.js';
-import { chronological, positionOf } from '../shared/chronology.js';
+import { CHAT_ACTIVE_MS, TURN_OUTCOME_LABELS } from '../shared/session.js';
+import { positionOf } from '../shared/chronology.js';
 import { recentChatActivity } from '../shared/session-activity.js';
 import {
   DEFAULT_GOAL_MODEL,
@@ -69,16 +66,15 @@ import {
   MAX_GOAL_SYSTEM_PROMPT_CHARS
 } from '../shared/goal.js';
 import { browserExtensionRequired, type AppState, type Config } from '../shared/types.js';
-import { $, ago, applySettingsFilter, clockTime, compactNumber, el, icon, reconcileChildren, run, toast } from './dom.js';
+import { $, ago, applySettingsFilter, compactNumber, el, icon, run, toast } from './dom.js';
 import {
-  KIND_ICON, mergeSessionRows, maybePageSessions, paintSessions, pressureOf, projectGroup,
+  mergeSessionRows, maybePageSessions, paintSessions as paintSessionList, pressureOf, projectGroup,
   repaintBadges, selectedLocalProject, sessionWorking, unattributedBlocked,
   type SessionListHost, type SessionRowActions
 } from './session-list.js';
 import {
-  adoptAcceptedOpening, attachmentCard, dismissInputNotice, dockAction, historicalAutomaticInput,
-  inputMessageRow, inputNotices, paintComposerImages, paintDeliveryControls, paintPendingInputs,
-  pendingComposerInput, refreshInputQueue,
+  adoptAcceptedOpening, dismissInputNotice, dockAction,
+  paintComposerImages, paintDeliveryControls, pendingComposerInput, refreshInputQueue,
   type DeliveryHost
 } from './outbox-view.js';
 
@@ -90,26 +86,8 @@ const api = window.api;
  * A little over one row, so the fetch starts while there is still something to read.
  */
 const GOAL_SCROLL_MARGIN = 72;
-/** Page size and bounded staging capacity. A page is not a viewport: hundreds of
- * collapsed tool records can occupy less space than one authored message. */
-const MAX_TIMELINE_ROWS = 160;
-const MAX_TIMELINE_RESIDENT_ROWS = MAX_TIMELINE_ROWS * 2;
-const MAX_TIMELINE_TEXT_CHARS = 2 * 1024 * 1024;
 const MAX_RENDERED_HTML_CHARS = 256 * 1024;
 const SESSION_PAGE_SIZE = 60;
-
-/**
- * Which agent's events the timeline is showing.
- *
- * `null` is everything. `UNATTRIBUTED` is its own bucket rather than being folded into
- * "all", because a call this app could not tie to any agent is a real category — with
- * ChatGPT's stateless connector it is the *default* category — and hiding it inside the
- * total would let a filtered view look complete when it is not.
- */
-const UNATTRIBUTED = '\u0000unattributed';
-let agentFilter: string | null = null;
-/** The session the current filter was chosen in; selecting a different one resets it. */
-let filterFor: string | null = null;
 
 interface Deps {
   /** The renderer's single save path — reads every control, including ours. */
@@ -119,6 +97,10 @@ interface Deps {
 
 let deps: Deps;
 let visible = false;
+/** The mounted transcript: which session its rows belong to, and the rows themselves. */
+let stage: ConversationStage;
+/** Composer events and the draft-import fence. Sibling of the stage; #composer stays mounted. */
+let composerController: ComposerController | undefined;
 
 let sessions: SessionSummary[] = [];
 let pressure = new Map<string, TokenPressure>();
@@ -128,7 +110,12 @@ let sessionPageLoading = false;
 /** True after the user has explicitly paged beyond the newest page. */
 let loadedOlderSessions = false;
 let activeId: string | null = null;
-let selectedId: string | null = null;
+function selectedId(): string | null {
+  return presentationStore.getState().selectedSessionId;
+}
+function selectionGeneration(): number {
+  return presentationStore.getState().selectionGeneration;
+}
 let newChatSelected = true;
 let selectedProjectId: string | null = null;
 let projects: LocalProject[] = [];
@@ -137,9 +124,113 @@ const expandedProjects = new Set<string>();
 const projectVisibleCounts = new Map<string, number>();
 let workspaceTerminal: ReturnType<typeof createWorkspaceTerminal> | null = null;
 
-let sidebarOrder: ReturnType<typeof createSidebarOrder> | undefined;
-function draftKey(): string { return selectedId ?? (selectedProjectId ? `project:${selectedProjectId}` : 'new'); }
-let selectionGeneration = 0;
+let sidebarOrder: SidebarOrder | undefined;
+let chatNavigator: ChatNavigator | null = null;
+function navigatorSessions(): NavigatorSession[] {
+  const sessionId = selectedId();
+  if (!sessionId || stage.awaiting()) return sessions;
+  const resident = stage.events();
+  let authored: Extract<SessionEvent, { kind: 'user_message' }> | undefined;
+  for (let index = resident.length - 1; index >= 0; index--) {
+    const event = resident[index]!;
+    if (event.kind !== 'user_message') continue;
+    authored = event;
+    break;
+  }
+  if (!authored) return sessions;
+  const preview = (authored.authoredText ?? userPromptText(authored.message.text.trimStart()) ?? authored.message.text)
+    .slice(0, 500);
+  return sessions.map(session => session.id === sessionId ? { ...session, preview } : session);
+}
+
+function loadedNavigatorFiles(): NavigatorFile[] {
+  const project = selectedLocalProject(sessionHost);
+  if (!project || !filePanel) return [];
+  return [...filePanel.element.querySelectorAll<HTMLElement>('.file-tree-row[data-kind="file"][data-path]')]
+    .slice(0, 100)
+    .map(row => ({
+      projectId: project.id,
+      path: row.dataset.path!,
+      name: row.querySelector<HTMLElement>('.file-tree-name')?.textContent ?? row.dataset.path!,
+      ...(row.classList.contains('is-selected')
+        ? { preview: filePanel!.element.querySelector<HTMLElement>('.file-preview')?.textContent?.slice(0, 500) }
+        : {})
+    }));
+}
+
+function loadedNavigatorImageSets(): NavigatorImageSet[] {
+  const sessionId = selectedId();
+  if (!sessionId || stage.awaiting()) return [];
+  const projectId = sessions.find(session => session.id === sessionId)?.projectId ?? null;
+  return imageSetsForTimeline(stage.events()).slice(0, 100).map(set => ({
+    key: `${sessionId}:${set.responseId}`,
+    sessionId,
+    projectId,
+    title: t('ChatGPT generated image'),
+    anchorMessageId: set.responseId
+  }));
+}
+function openNavigatorFile(file: NavigatorFile): void {
+  const instance = filePanel, sessionId = selectedId(), generation = selectionGeneration();
+  if (!instance || selectedLocalProject(sessionHost)?.id !== file.projectId) return;
+  const row = [...instance.element.querySelectorAll<HTMLButtonElement>('.file-tree-row[data-kind="file"][data-path]')]
+    .find(candidate => candidate.dataset.path === file.path);
+  if (!row) return;
+  workPanel?.show('files');
+  if (filePanel !== instance || selectedId() !== sessionId || selectionGeneration() !== generation) return;
+  row.focus({ preventScroll: true });
+  row.click();
+}
+
+function openNavigatorImageSet(set: NavigatorImageSet): void {
+  if (selectedId() !== set.sessionId || stage.awaiting() || !set.anchorMessageId) return;
+  // Focus the gallery drawn from that exact native message. An anchor that is not resident is
+  // left alone: a focus request never reads history to find one.
+  stage.focusMessage(set.anchorMessageId);
+}
+
+function paintNavigator(host: SessionListHost): void {
+  if (!chatNavigator) {
+    paintSessionList(host);
+    return;
+  }
+  filePanel?.update(selectedLocalProject(sessionHost));
+  chatNavigator.update({
+    sessions: navigatorSessions(),
+    projects,
+    selectedSessionId: selectedId(),
+    files: loadedNavigatorFiles(),
+    imageSets: loadedNavigatorImageSets(),
+    order: sidebarOrder
+  });
+}
+function projectedDraftKey(): string {
+  const sessionId = presentationStore.getState().selectedSessionId;
+  return sessionId ?? (selectedProjectId ? `project:${selectedProjectId}` : 'new');
+}
+function draftKey(): string {
+  return presentationStore.getState().draft.key;
+}
+function advanceSelectionGeneration(): void {
+  presentationStore.dispatch({ type: 'selectionGenerationAdvanced' });
+}
+function publishSelectedSession(sessionId: string | null): void {
+  presentationStore.dispatch({
+    type: 'sessionSelected',
+    sessionId,
+    generation: presentationStore.getState().selectionGeneration
+  });
+  syncDraftKey();
+}
+function syncDraftKey(): void {
+  const key = projectedDraftKey();
+  presentationStore.dispatch({
+    type: 'draftOwnerChanged',
+    key,
+    generation: presentationStore.getState().draft.generation
+  });
+  composerController?.update(composerDraftOwner(), {});
+}
 let selectionReportSequence = 0;
 let reportedSessionId: string | null = null;
 let acknowledgedUiSelection: { sessionId: string | null; rendererGeneration: number; generation: number } | null = null;
@@ -147,7 +238,7 @@ let currentChatView = 'timeline';
 
 /** Presentation only. Main validates the sender, current window and session before witnessing. */
 function reportVisibleSelection(force = false): void {
-  const sessionId = visible && currentChatView === 'timeline' && !document.hidden ? selectedId : null;
+  const sessionId = visible && currentChatView === 'timeline' && !document.hidden ? selectedId() : null;
   if (!force && sessionId === reportedSessionId && acknowledgedUiSelection?.sessionId === sessionId) return;
   reportedSessionId = sessionId;
   acknowledgedUiSelection = null;
@@ -162,13 +253,24 @@ function reportVisibleSelection(force = false): void {
 // Async file import belongs to one visible composer draft, not just to a session key.
 // Replacing that draft retires in-flight imports even when navigation returns to the
 // same key or a send failure later restores the submitted text.
-let composerDraftGeneration = 0;
 type ComposerDraftOwner = { key: string; generation: number };
-function composerDraftOwner(): ComposerDraftOwner { return { key: draftKey(), generation: composerDraftGeneration }; }
-function ownsComposerDraft(owner: ComposerDraftOwner): boolean {
-  return owner.key === draftKey() && owner.generation === composerDraftGeneration;
+function composerDraftOwner(): ComposerDraftOwner {
+  return { key: draftKey(), generation: presentationStore.getState().draft.generation };
 }
-function replaceComposerDraft(): void { composerDraftGeneration++; skillPicker?.close(); }
+function ownsComposerDraft(owner: ComposerDraftOwner): boolean {
+  const draft = presentationStore.getState().draft;
+  return owner.key === draft.key && owner.generation === draft.generation;
+}
+function replaceComposerDraft(): void {
+  const key = projectedDraftKey();
+  presentationStore.dispatch({
+    type: 'draftOwnerChanged',
+    key,
+    generation: presentationStore.getState().draft.generation + 1
+  });
+  skillPicker?.close();
+  composerController?.update(composerDraftOwner(), {});
+}
 let pendingNewInput: { id: string; generation: number } | null = null;
 let agentPanel: ReturnType<typeof createAgentPanel> | null = null;
 let filePanel: ReturnType<typeof createFilePanel> | null = null;
@@ -183,7 +285,7 @@ const dismissedRecoveryNotices = new Map<string, string>();
 function authoredComposerText(): string { return skillPicker?.authoredText() ?? $<HTMLTextAreaElement>('chatInput').value; }
 function rememberDraft(): void {
   inputDrafts.set(draftKey(), authoredComposerText());
-  if (selectedId === null) newChatTasks.set(draftKey(), {
+  if (selectedId() === null) newChatTasks.set(draftKey(), {
     objective: $<HTMLTextAreaElement>('sessionObjective').value,
     automation: $<HTMLSelectElement>('chatAutomation').value,
     loopDelivery: $<HTMLSelectElement>('loopDelivery').value
@@ -201,7 +303,7 @@ function restoreDraft(): void {
   $('activeGoalRow').hidden = true; $('recoveryStatus').hidden = true;
   $<HTMLTextAreaElement>('chatInput').value = inputDrafts.get(draftKey()) ?? '';
   skillPicker?.restore();
-  const task = selectedId === null ? newChatTasks.get(draftKey()) : undefined;
+  const task = selectedId() === null ? newChatTasks.get(draftKey()) : undefined;
   const automation = $<HTMLSelectElement>('chatAutomation'); automation.value = task?.automation ?? 'off'; delete automation.dataset.edited;
   $<HTMLSelectElement>('loopDelivery').value = task?.loopDelivery ?? 'finish';
   $<HTMLTextAreaElement>('sessionObjective').value = task?.objective ?? '';
@@ -209,12 +311,8 @@ function restoreDraft(): void {
   paintTaskPlan(); paintComposerImages(deliveryHost);
 }
 
-let events: SessionEvent[] = [];
-let totalEvents = 0;
-/** The session whose `events`/cursor pair belongs together. */
-let detailFor: string | null = null;
+/** First sequence not yet read for the selected session, passed back as `from` for live deltas. */
 let detailCursor: number | null = null;
-let historyBefore: number | null = null;
 let historyLoading = false;
 /** The last swarm the app reported, so the header can summarise it without the log. */
 let swarm: SwarmState | null = null;
@@ -248,45 +346,42 @@ let handoffLoadGeneration = 0;
 async function toggleUnattributedBlock(blocked: boolean): Promise<void> {
   $<HTMLInputElement>('allowUnattributedCalls').checked = !blocked;
   await deps.save();
-  paintSessions(sessionHost);
+  paintNavigator(sessionHost);
 }
 
 async function toggleSessionBlock(id: string, blocked: boolean): Promise<void> {
   const next = await run(api.setSessionBlocked(id, blocked));
   if (next === null) return;
   blockedChats = new Set(next);
-  paintSessions(sessionHost);
+  paintNavigator(sessionHost);
 }
 
 /** One selection retirement path for deletion and independently confirmed disappearance. */
 function clearSelectedSession(): void {
   retireRichImageViewer();
+  retireImageSetViewer();
   rememberDraft();
-  selectionGeneration++;
+  advanceSelectionGeneration();
   replaceComposerDraft();
-  selectedId = null;
+  publishSelectedSession(null);
   newChatSelected = true;
   pendingNewInput = null;
-  events = [];
-  totalEvents = 0;
-  detailFor = null;
   detailCursor = null;
-  historyBefore = null;
   handoff = null;
   handoffFor = null;
   detailLoadGeneration++;
+  stage.select(null, selectionGeneration());
   handoffLoadGeneration++;
   // Deletion and confirmed absence arrive outside selectSession/selectNewChat. Retire the old
   // recorded controls and their cached rows on this same stack, before reporting null or
   // awaiting another list/detail read that could fail or stall indefinitely.
   $('timeline').setAttribute('inert', '');
   $('inputQueue').setAttribute('inert', '');
-  $('timeline').replaceChildren();
+  stage.clear();
   $('inputQueue').replaceChildren();
-  forgetTimelineRows();
   restoreDraft();
   void refreshSessionControls();
-  paintSessions(sessionHost);
+  paintNavigator(sessionHost);
   paintDetail(false);
   paintHandoff();
   reportVisibleSelection(true);
@@ -294,11 +389,11 @@ function clearSelectedSession(): void {
 
 async function deleteSession(id: string): Promise<void> {
   const done = await run(api.deleteSession(id));
-  if (done === null) { if (selectedId === id) reportVisibleSelection(true); return; }
+  if (done === null) { if (selectedId() === id) reportVisibleSelection(true); return; }
   sessions = sessions.filter((entry) => entry.id !== id);
   pressure.delete(id);
   sessionTotal = Math.max(0, sessionTotal - 1);
-  if (selectedId === id) {
+  if (selectedId() === id) {
     clearSelectedSession();
   }
   toast(t("Session deleted"));
@@ -311,7 +406,7 @@ async function loadSessions(): Promise<void> {
   const generation = ++sessionsLoadGeneration;
   const [list, catalog] = await Promise.all([run(api.listSessions({ limit: SESSION_PAGE_SIZE })), run(api.listProjects())]);
   if (!list || generation !== sessionsLoadGeneration) return;
-  const previouslySelected = sessions.find(row => row.id === selectedId);
+  const previouslySelected = sessions.find(row => row.id === selectedId());
   if (catalog) projects = catalog;
   // Once older pages have been requested, a hot refresh only replaces/updates the newest page.
   // Throwing the older rows away here would make scrolling history vanish every 400 ms while a
@@ -340,16 +435,17 @@ async function loadSessions(): Promise<void> {
   } else {
     pressure = new Map(list.pressure.map((entry) => [entry.id, entry]));
   }
-  if (selectedId !== null && !sessions.some((s) => s.id === selectedId)) {
+  const wanted = selectedId();
+  if (wanted !== null && !sessions.some((s) => s.id === wanted)) {
     // A bounded newest page cannot prove an older selected session was removed.
-    const wanted = selectedId, selection = selectionGeneration;
+    const selection = selectionGeneration();
     let resolved: SessionSummary | null | undefined;
     try {
       const reply = await api.getSession(wanted, { limit: 1 });
       if (reply.ok && reply.data.summary?.id === wanted) resolved = reply.data.summary;
       else if (!reply.ok && /session not found/i.test(reply.error)) resolved = null;
     } catch { /* A read error is unknown, never an authoritative deletion. */ }
-    if (generation !== sessionsLoadGeneration || selection !== selectionGeneration || selectedId !== wanted) return;
+    if (generation !== sessionsLoadGeneration || selection !== selectionGeneration() || selectedId() !== wanted) return;
     if (resolved === null) clearSelectedSession();
     else {
       // Preserve the selected row and title across pagination and transient read failures.
@@ -357,7 +453,7 @@ async function loadSessions(): Promise<void> {
       if (retained) sessions = mergeSessionRows(sessions, [retained]);
     }
   }
-  paintSessions(sessionHost);
+  paintNavigator(sessionHost);
   await loadDetail();
   void refreshInputQueue(deliveryHost);
 }
@@ -375,7 +471,7 @@ async function loadMoreSessions(): Promise<void> {
     sessionPageCursor = page.nextCursor;
     blockedChats = new Set(page.blocked);
     for (const entry of page.pressure) pressure.set(entry.id, entry);
-    paintSessions(sessionHost);
+    paintNavigator(sessionHost);
   } finally {
     sessionPageLoading = false;
   }
@@ -399,41 +495,7 @@ function scheduleToolActivityExpiry(): void {
     if (expiry > now) nearest = Math.min(nearest, expiry);
   }
   if (!Number.isFinite(nearest)) return;
-  toolActivityTimer = window.setTimeout(() => paintSessions(sessionHost), Math.max(1, nearest - now + 1));
-}
-
-function canonicalMessageKey(event: SessionEvent): string | null {
-  if (event.kind === 'tool_call') return `tool_call\u0000${event.call.callId}`;
-  if (event.kind === 'native_image') return `native_image\u0000${event.messageId}\u0000${event.providerAssetId}`;
-  if ((event.kind === 'user_message' || event.kind === 'assistant_message') && event.messageId) {
-    return `${event.kind}\u0000${event.messageId}`;
-  }
-  return null;
-}
-
-/** Merge one sequence-cursor delta without letting canonical message revisions duplicate rows. */
-function mergeDetailDelta(delta: SessionEvent[]): void {
-  const merged = [...events];
-  const floor = events.length ? Math.min(...events.map(positionOf)) : 0;
-  const messageRows = new Map<string, number>();
-  for (let index = 0; index < merged.length; index++) {
-    const key = canonicalMessageKey(merged[index]!);
-    if (key) messageRows.set(key, index);
-  }
-  for (const event of delta) {
-    const key = canonicalMessageKey(event);
-    const index = key ? messageRows.get(key) : undefined;
-    if (index !== undefined) merged[index] = event;
-    else {
-      // An old canonical revision is not newly authored history. Its original
-      // page still owns it; admitting it here would evict an unrelated live row.
-      if (positionOf(event) < floor) continue;
-      if (key) messageRows.set(key, merged.length);
-      merged.push(event);
-    }
-  }
-  const folded = chronological(foldProgress(merged));
-  events = retainTimelinePage(folded, 'newer');
+  toolActivityTimer = window.setTimeout(() => paintNavigator(sessionHost), Math.max(1, nearest - now + 1));
 }
 
 let controlsGeneration = 0;
@@ -463,11 +525,11 @@ let finishGoalDraftView: GoalDraftPresentation | null = null;
 function paintGoalProgress(): void {
   let row = document.getElementById('goalLifecycle');
   if (!row) { row = el('div', 'queued-input'); row.id = 'goalLifecycle'; row.setAttribute('role', 'status'); $('activeGoalRow').before(row); }
-  const progress = goalProgress?.selection === selectionGeneration ? goalProgress : null;
+  const progress = goalProgress?.selection === selectionGeneration() ? goalProgress : null;
   const entry = progress?.inputId ? pendingComposerInputs.find(item => item.id === progress.inputId) : undefined;
-  const finishDraft = controlledSessionId === selectedId && controlledSelection === selectionGeneration ? finishGoalDraftView : null;
-  const draft = finishDraft ?? (controlledSessionId === selectedId && controlledSelection === selectionGeneration ? goalDraftView : null);
-  const wait = controlledSessionId === selectedId && controlledSelection === selectionGeneration ? goalWaitView : null;
+  const finishDraft = controlledSessionId === selectedId() && controlledSelection === selectionGeneration() ? finishGoalDraftView : null;
+  const draft = finishDraft ?? (controlledSessionId === selectedId() && controlledSelection === selectionGeneration() ? goalDraftView : null);
+  const wait = controlledSessionId === selectedId() && controlledSelection === selectionGeneration() ? goalWaitView : null;
   const off = $<HTMLSelectElement>('chatAutomation').value === 'off';
   if (off && !finishDraft) { row.hidden = true; row.replaceChildren(); row.setAttribute('aria-busy', 'false'); paintComposerStatusLine(); return; }
   let phase = progress?.phase ?? '';
@@ -511,7 +573,7 @@ let durationTimer: number | undefined;
 function paintActiveGoal(): void {
   const row = $('activeGoalRow');
   const mode = $<HTMLSelectElement>('chatAutomation').value;
-  row.hidden = !selectedId || mode === 'off';
+  row.hidden = !selectedId() || mode === 'off';
   if (row.hidden) { row.replaceChildren(); paintComposerStatusLine(); return; }
   const objective = $<HTMLTextAreaElement>('sessionObjective').value.trim();
   const label = el('span', 'queue-label', () => `${mode === 'loop' ? t("Loop") : t("Pursuing goal")}${objective ? ' · ' + objective : ''}`);
@@ -566,7 +628,7 @@ async function createTaskPlan(backend: 'api' | 'chatgpt'): Promise<void> {
   const input = $<HTMLTextAreaElement>('chatInput'), text = authoredComposerText().trim();
   const key = draftKey();
   cancelTaskPlan(key);
-  const sessionId = selectedId, projectId = selectedId ? sessions.find(row => row.id === selectedId)?.projectId ?? null : selectedProjectId;
+  const sessionId = selectedId(), projectId = selectedId() ? sessions.find(row => row.id === selectedId())?.projectId ?? null : selectedProjectId;
   const requestId = text ? crypto.randomUUID() : null;
   const plan: TaskPlanDraft = { text, requestId, stages: null, sending: false, progress: null, error: null };
   taskPlans.set(key, plan); paintTaskPlan();
@@ -628,7 +690,7 @@ function paintPreparedPlan(): void {
       if (plan.stages.length) { paintPreparedPlan(); paintDeliveryControls(deliveryHost); } else cancelTaskPlan();
     });
     edit.disabled = remove.disabled = field.disabled = plan.sending;
-    ui(heading, 'title', () => selectedId ? t("Queued at Session finish; edit or delete this checkpoint independently.") : index === 0 ? t("Send includes your complete request and the full plan. Later stages are queued as verification checkpoints.") : t("Included in the first message, then queued as a checkpoint at Session finish or after a completed answer when enabled."));
+    ui(heading, 'title', () => selectedId() ? t("Queued at Session finish; edit or delete this checkpoint independently.") : index === 0 ? t("Send includes your complete request and the full plan. Later stages are queued as verification checkpoints.") : t("Included in the first message, then queued as a checkpoint at Session finish or after a completed answer when enabled."));
     heading.append(label, text, edit, remove); row.append(heading, field, error); return row;
   }));
   paintComposerStatusLine();
@@ -636,8 +698,9 @@ function paintPreparedPlan(): void {
 async function sendPreparedPlan(): Promise<void> {
   const key = draftKey(), plan = currentPreparedPlan();
   if (!plan || plan.sending) return;
-  if (selectedId) {
-    await queuePreparedPlan(key, plan, selectedId, sessions.find(row => row.id === selectedId)?.projectId ?? null);
+  const sessionId = selectedId();
+  if (sessionId) {
+    await queuePreparedPlan(key, plan, sessionId, sessions.find(row => row.id === sessionId)?.projectId ?? null);
     return;
   }
   const tasks = plan.stages.map(stage => stage.trim());
@@ -700,7 +763,7 @@ function paintLoopDelivery(): void {
     !model || !isProModel(model.model, model.reasoningEffort);
 }
 function openingLoopDelivery(): boolean | undefined {
-  return selectedId === null ? $<HTMLSelectElement>('loopDelivery').value === 'after-turn' : undefined;
+  return selectedId() === null ? $<HTMLSelectElement>('loopDelivery').value === 'after-turn' : undefined;
 }
 function paintAutomationSwitch(): void {
   paintLoopDelivery();
@@ -721,11 +784,11 @@ function paintAutomationSwitch(): void {
   paintTaskActions();
 }
 async function refreshSessionControls(): Promise<void> {
-  const id = selectedId, generation = ++controlsGeneration;
+  const id = selectedId(), generation = ++controlsGeneration;
   const planHost = $('agentPlan');
   if (planHost.dataset.sessionId !== (id ?? '')) { renderAgentPlan(planHost, id, null); paintComposerStatusLine(); }
   const menu = $('sessionControls');
-  if (controlledSessionId !== id || controlledSelection !== selectionGeneration) {
+  if (controlledSessionId !== id || controlledSelection !== selectionGeneration()) {
     // Retire the previous selection's projection before awaiting the new owner's IPC.
     // Replace the translation binding too, so a locale refresh cannot revive its status.
     ui($('sessionControlStatus'), 'textContent', () => '');
@@ -739,7 +802,7 @@ async function refreshSessionControls(): Promise<void> {
     return; }
   const opening = pendingComposerInputs.find(row => row.opening && row.sessionId === id && ['queued', 'browser'].includes(row.state));
   if (!sessions.find(row => row.id === id)?.conversationId) {
-    controlledSessionId = id; controlledSelection = selectionGeneration; controlledTurnId = null;
+    controlledSessionId = id; controlledSelection = selectionGeneration(); controlledTurnId = null;
     controlledCanInject = false; controlledCanSendDirectly = false; controlledQueueAtFinish = false;
     controlledStopPending = false; controlledFinishWaiting = false;
     menu.hidden = false;
@@ -754,11 +817,11 @@ async function refreshSessionControls(): Promise<void> {
     return;
   }
   const controls = await run(api.getSessionControls(id));
-  if (generation !== controlsGeneration || id !== selectedId) return;
+  if (generation !== controlsGeneration || id !== selectedId()) return;
   renderAgentPlan(planHost, id, controls?.plan ?? null);
   paintComposerStatusLine();
   controlledSessionId = id;
-  controlledSelection = selectionGeneration;
+  controlledSelection = selectionGeneration();
   controlledTurnId = controls?.activeTurnId ?? null;
   goalDraftView = controls?.goalDraft ?? null;
   goalWaitView = controls?.goalWait ?? null;
@@ -796,34 +859,37 @@ async function refreshSessionControls(): Promise<void> {
 
 async function loadDetail(navigate = false, olderBefore?: number, newerFrom?: number): Promise<void> {
   const prepend = olderBefore !== undefined;
-  const wanted = selectedId;
-  if (wanted !== null && historyBefore !== null && detailFor === wanted && !navigate) { void refreshSessionControls(); paintDetail(); return; }
-  const generation = ++detailLoadGeneration;
+  const wanted = selectedId();
+  const generation = selectionGeneration();
+  // A repaint while the reader is off the tail neither fetches nor moves: their place in
+  // recorded history is the one thing a background refresh must not take away.
+  if (wanted !== null && stage.browsing() && !stage.awaiting() && !navigate) { void refreshSessionControls(); paintDetail(); return; }
+  const request = ++detailLoadGeneration;
   void refreshSessionControls();
   if (wanted === null) {
     handoffLoadGeneration++;
-    historyBefore = null;
-    events = [];
-    totalEvents = 0;
-    detailFor = null;
     detailCursor = null;
-    $('timeline').style.removeProperty('--timeline-scroll-reserve');
+    stage.update({ sessionId: null, events: [], total: 0, mode: 'open' }, generation);
     paintDetail();
     return;
   }
-  const opening = detailFor !== wanted;
-  if (opening) historyBefore = null;
+  const opening = stage.awaiting();
   // Live deltas must not evict a historical page while the user is reading it.
-  const incremental = !prepend && newerFrom === undefined && historyBefore === null && detailFor === wanted && detailCursor !== null;
+  const incremental = !prepend && newerFrom === undefined && !stage.browsing() && !opening && detailCursor !== null;
   const detail = await run(
-    api.getSession(wanted, newerFrom !== undefined ? { after: newerFrom, limit: MAX_TIMELINE_ROWS / 2 } : incremental ? { from: detailCursor!, limit: MAX_TIMELINE_ROWS } : { ...(olderBefore !== undefined ? { before: olderBefore } : historyBefore !== null ? { before: historyBefore } : {}), limit: prepend ? MAX_TIMELINE_ROWS / 2 : MAX_TIMELINE_ROWS })
+    api.getSession(wanted, newerFrom !== undefined
+      ? { after: newerFrom, limit: timelinePageRows('append') }
+      : incremental
+        ? { from: detailCursor!, limit: timelinePageRows('delta') }
+        : { ...(olderBefore !== undefined ? { before: olderBefore } : {}),
+          limit: timelinePageRows(prepend ? 'prepend' : 'open') })
   );
-  if (generation !== detailLoadGeneration || selectedId !== wanted) return;
+  if (request !== detailLoadGeneration || selectedId() !== wanted) return;
   if (!detail) {
     // A failed destination read must not leave another chat displayed indefinitely.
     // run() already presents the read error; keep the destination empty and retryable.
     if (opening) {
-      $('timeline').replaceChildren();
+      stage.clear();
       $('timeline').removeAttribute('inert');
       $('timeline').removeAttribute('aria-busy');
     }
@@ -831,53 +897,41 @@ async function loadDetail(navigate = false, olderBefore?: number, newerFrom?: nu
   }
   // An empty older page is not navigation. Keep the live cursor and viewport intact.
   if (prepend && !detail.events.length) return;
-  // User/assistant prose is canonical in messages.json, while structured page activity stays
-  // append-only by design: ChatGPT can grow one commentary caption or rewrite one activity
-  // label several times. `foldProgress` turns those snapshots back into the one logical row
-  // their stable progressId/messageId names, then chronology places that row at its first
-  // appearance. This helper existed already but was never wired into the desktop reader,
-  // which is why "Inspecting…" and "Inspected…" still appeared as siblings.
-  if (incremental) mergeDetailDelta(detail.events);
-  else {
-    const folded = chronological(foldProgress(detail.events));
-    if (newerFrom !== undefined) {
-      events = retainTimelinePage(chronological(foldProgress([...events, ...folded])), 'newer');
-      // Reaching the live tail restores ordinary delta reads. Paging itself preserves
-      // the reader's row even when they were at the bottom of the previous window.
-      if (detail.events.length < MAX_TIMELINE_ROWS / 2) historyBefore = null;
-    } else if (prepend) {
-      const boundary = olderBefore!;
-      historyBefore = boundary;
-      const retained = events.filter(event => positionOf(event) >= boundary);
-      events = retainTimelinePage(chronological(foldProgress([...folded, ...retained])), 'older');
-    } else events = chronological([...folded].sort((a, b) => positionOf(a) - positionOf(b)).slice(-MAX_TIMELINE_ROWS));
-    detailFor = wanted;
-  }
+  // Pages are merged and drawn by the stage, which refuses any page naming a different session
+  // or generation than the one it adopted: A → B → A retires B's page and A's earlier one here,
+  // before either can reach the rows.
+  const mode: TimelinePage['mode'] = incremental ? 'delta' : newerFrom !== undefined ? 'append' : prepend ? 'prepend' : 'open';
+  const accepted = stage.update({
+    sessionId: wanted,
+    events: detail.events,
+    total: detail.total,
+    mode,
+    ...(prepend ? { boundary: olderBefore! } : {})
+  }, generation);
   detailCursor = Math.max(opening ? 0 : detailCursor ?? 0,
     typeof detail.nextFrom === 'number'
       ? detail.nextFrom
       : detail.events.reduce((cursor, event) => Math.max(cursor, event.seq + 1), incremental ? detailCursor! : 0));
-  totalEvents = detail.total;
-  if (opening) $('timeline').style.removeProperty('--timeline-scroll-reserve');
-  paintDetail(!prepend && newerFrom === undefined);
-  // A selection opens at the latest message; the previous chat's viewport is not
-  // a reading position in this one. Apply only after the current load has rendered.
-  if (opening) $('chatBody').scrollTop = $('chatBody').scrollHeight;
+  // Selection armed #inputQueue and hid #chatFoot until this page arrived. The outbox
+  // read can return first and paint while that wait is still on, and a later live delta
+  // is this same path, so it does not repair them. The accepted page releases both.
+  // Follow the bottom only for an opening page or a live delta.
+  if (accepted) paintDetail(mode === 'open' || mode === 'delta');
   void loadHandoff();
   // A burst can contain more than one renderer-sized page between coalesced notifications.
   // Drain it page by page rather than silently jumping the cursor or lifting the payload cap.
-  if (incremental && detail.events.length === MAX_TIMELINE_ROWS && selectedId === wanted) {
+  if (incremental && detail.events.length === TIMELINE_PAGE_ROWS && selectedId() === wanted) {
     window.setTimeout(() => void loadDetail(), 0);
   }
 }
 
 async function loadHandoff(): Promise<void> {
-  const sessionId = selectedId;
+  const sessionId = selectedId();
   const generation = ++handoffLoadGeneration;
   const summary = sessions.find((s) => s.id === sessionId) ?? null;
   const wanted = summary?.lastHandoffId ?? null;
   if (wanted === null) {
-    if (generation !== handoffLoadGeneration || selectedId !== sessionId) return;
+    if (generation !== handoffLoadGeneration || selectedId() !== sessionId) return;
     handoff = null;
     handoffFor = null;
     paintHandoff();
@@ -885,26 +939,13 @@ async function loadHandoff(): Promise<void> {
   }
   if (handoffFor === wanted) return;
   const loaded = await run(api.getHandoff(summary!.id, wanted));
-  if (generation !== handoffLoadGeneration || selectedId !== sessionId) return;
+  if (generation !== handoffLoadGeneration || selectedId() !== sessionId) return;
   handoff = loaded ?? null;
   handoffFor = wanted;
   paintHandoff();
 }
 
 // ------------------------------------------------------------------ timeline
-
-function textBlock(className: string, value: string, truncated: boolean, chars: number): HTMLElement {
-  const node = el('p', className, value);
-  // Recorded text is whatever language the user and ChatGPT were speaking. The stylesheet is
-  // written left-to-right throughout, so an Arabic or Hebrew message rendered without this
-  // reads with its punctuation and numbers on the wrong side. `auto` resolves from the first
-  // strong character, so Latin text is unaffected.
-  node.setAttribute('dir', 'auto');
-  if (truncated) {
-    node.append(el('span', 'cut', () => t(" … cut, {0} characters in the original", [compactNumber(chars)])));
-  }
-  return node;
-}
 
 const RENDERED_TAGS = new Set([
   'A', 'BLOCKQUOTE', 'BR', 'CODE', 'DEL', 'DIV', 'EM', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
@@ -1124,981 +1165,15 @@ export function renderedMessage(html: StoredText | null | undefined, fallback: s
   return box;
 }
 
-/**
- * Tool calls the user has opened, by their durable call id.
- *
- * The timeline is redrawn from scratch whenever anything is recorded, and a fresh
- * `<details>` is closed. So opening a call to read its arguments and then having ChatGPT
- * make one more MCP call — which is to say, the normal case — silently collapsed what you
- * were reading, several times a minute. Remembering the open set outside the DOM is what
- * makes a redraw invisible; the ids are the recorder's own, so they survive the rebuild.
- *
- * Cleared when a different session is selected, not on every repaint: the whole point is
- * that a repaint must not be able to change what is open.
- */
-const openTools = new Set<string>();
-
-/**
- * The rows currently on screen, by timeline key, with the signature they were drawn from.
- *
- * A repaint rebuilds only the rows whose signature changed and reuses every other element
- * as it is. That is what keeps the scroll position honest: a row the user has opened keeps
- * its height and its place, so the pane does not lurch when ChatGPT records one more call —
- * and the rebuilt-from-scratch list, which made the whole pane re-lay out on every event,
- * is what made reading an open call impossible while a chat was working.
- */
-const rowCache = new Map<string, { sig: string; row: HTMLElement }>();
-
-function forgetTimelineRows(): void {
-  openTools.clear();
-  rowCache.clear();
-}
-
-function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?: { id: string; current: () => boolean }): HTMLElement {
-  const { call } = event;
-  const summary = toolCallSummary(call);
-  const box = document.createElement('details');
-  box.className = `tool tone-${call.summary.tone}`;
-  box.open = openTools.has(call.callId);
-  box.addEventListener('toggle', () => {
-    if (box.open) openTools.add(call.callId);
-    else openTools.delete(call.callId);
-  });
-
-  const head = document.createElement('summary');
-  head.append(icon(KIND_ICON[call.summary.kind] ?? 'i-bolt', 'ico tool-ico'));
-  head.append(el('b', '', call.summary.title));
-  if (call.summary.detail) head.append(el('em', '', call.summary.detail));
-  if (summary.metric) head.append(el('span', 'metric', summary.metric));
-  box.append(head);
-
-  const raw = el('div', 'raw');
-  const facts = el('p', 'raw-facts');
-  ui(facts, 'textContent', () => `${call.tool} · ${call.outcome} · ${Math.round(call.durationMs)} ms · ` +
-    t("placed by {0}", [ATTRIBUTION_LABELS[call.attribution] ?? call.attribution]));
-  raw.append(facts);
-
-  if (call.changes && call.changes.length > 0) {
-    const changes = el('ul', 'changes');
-    for (const change of call.changes) {
-      const li = el('li');
-      li.append(el('code', '', change.path));
-      const counts = `+${change.added} −${change.removed}${change.approximate ? t(" (approx.)") : ''}`;
-      li.append(el('span', 'metric', counts));
-      changes.append(li);
-    }
-    raw.append(changes);
-  }
-
-  raw.append(el('h4', '', () => t("Arguments")));
-  raw.append(textBlock('pre', call.args.text, call.args.truncated, call.args.chars));
-  raw.append(el('h4', '', () => t("Result")));
-  const images = call.assets?.filter(asset => ['image/png', 'image/jpeg', 'image/webp'].includes(asset.mimeType)) ?? [];
-  const readable = toolResultText(call.result.text, call.result.truncated, images.length > 0);
-  if (readable) raw.append(textBlock('pre', readable, call.result.truncated && images.length === 0, call.result.chars));
-  // Older recordings did not retain the reason an image asset was omitted. Explain
-  // the missing local preview without inferring a historical provider receipt.
-  if (call.tool === 'view_image' && call.outcome === 'ok' && images.length === 0) {
-    raw.append(el('p', 'meta', () => t("No image preview was retained in this recording.")));
-  }
-  if (images.length && (context?.id || selectedId)) {
-    const id = context?.id ?? selectedId!, generation = selectionGeneration;
-    const attachments = el('div', 'tool-images');
-    let loaded = false;
-    const load = async () => {
-      if (!box.open || loaded) return;
-      loaded = true;
-      for (const asset of images) {
-        const data = await run(api.getSessionImage(id, asset.id));
-        if (context ? !context.current() : id !== selectedId || generation !== selectionGeneration) return;
-        if (!data) { attachments.append(el('p', 'meta', () => t("Image unavailable"))); continue; }
-        const image = document.createElement('img');
-        image.src = data; image.alt = t("{0} result", [call.tool]); image.loading = 'lazy';
-        image.style.cssText = 'display:block;max-width:100%;max-height:600px;object-fit:contain;margin:8px 0';
-        attachments.append(image);
-      }
-    };
-    box.addEventListener('toggle', () => void load());
-    raw.append(attachments);
-    void load();
-  }
-  if (call.result.assetId) raw.append(el('p', 'raw-facts', () => t("Full recorded response: {0}", [call.result.assetId])));
-
-  for (const asset of call.assets ?? []) {
-    raw.append(el('p', 'raw-facts', () => t("asset {0} · {1} · {2} bytes", [asset.id, asset.mimeType, compactNumber(asset.bytes)])));
-  }
-
-  box.append(raw);
-  return box;
-}
-
-function hasLaterModelActivity(time: number): boolean {
-  return events.some(event => event.time > time && ['assistant_message', 'native_image', 'tool_call', 'page_tool', 'agent_message'].includes(event.kind));
-}
-
-function paintInputReceipt(row: HTMLElement, item: ReturnType<typeof timelineItems>[number]): void {
-  if (item.kind !== 'event' || item.event.kind !== 'user_message') return;
-  const receipt = row.querySelector<HTMLElement>('.input-receipt');
-  if (!receipt) return;
-  receipt.hidden = hasLaterModelActivity(item.event.time);
-  receipt.parentElement?.classList.toggle('has-input-receipt', !receipt.hidden);
-}
-
-/** The exact outbox input retains preview bytes until optional history storage succeeds. */
-function retainedInputImages(event: Extract<SessionEvent, { kind: 'user_message' }>, sessionId: string | null): InputImage[] {
-  if (!sessionId || !event.inputId) return [];
-  const root = pendingComposerInputs.find(entry => entry.id === event.inputId &&
-    (entry.sessionId ?? entry.deliveredSessionId) === sessionId &&
-    (entry.messageId ? entry.messageId === event.messageId : event.messageId === `input:${entry.id}`));
-  if (!root) return [];
-  const companion = root.companionInputId ? pendingComposerInputs.find(entry => entry.id === root.companionInputId &&
-    (entry.sessionId ?? entry.deliveredSessionId) === sessionId && entry.messageId === root.messageId) : undefined;
-  // Match combinedInput's canonical image order for asset-index fallback.
-  return [...root.images ?? [], ...companion?.images ?? [], ...root.toolImages ?? []].slice(0, MAX_INPUT_IMAGES);
-}
-
-function paintMessageReaction(box: HTMLElement, value: unknown): void {
-  const reaction = messageReaction(value);
-  const existing = box.querySelector<HTMLElement>('.message-reaction');
-  if (!reaction) { existing?.remove(); return; }
-  if (existing?.textContent === reaction) return;
-  const badge = existing ?? el('span', 'message-reaction');
-  badge.textContent = reaction;
-  badge.setAttribute('role', 'img');
-  ui(badge, 'aria-label', () => t("ChatGPT reacted with {0}", [reaction]));
-  if (!existing) box.append(badge);
-}
-
-function eventBody(event: SessionEvent, context?: { id: string; current: () => boolean; history: readonly SessionEvent[] }): HTMLElement {
-  switch (event.kind) {
-    case 'session_start':
-      return el('p', 'meta', () => t("Session started — {0}", [event.title]));
-    case 'user_message': {
-      const box = el('div', 'said is-user');
-      box.classList.add('has-reaction-slot');
-      box.append(el('b', '', () => t("You")));
-      const attachments = el('div', 'message-attachments');
-      if (event.attachments?.length) attachments.append(...event.attachments.map(file => attachmentCard(file)));
-      const assets = event.assets?.filter(asset => asset.mimeType === 'image/webp').slice(0, MAX_INPUT_IMAGES) ?? [];
-      const retained = retainedInputImages(event, context?.id ?? selectedId);
-      const preview = (data: string, retainedOnly = false, slot?: HTMLElement) => {
-        const image = document.createElement('img');
-        image.src = data; image.alt = t("User attachment"); image.loading = 'lazy';
-        const frame = slot ?? el('div', 'user-image-slot');
-        frame.replaceChildren(image);
-        if (!slot) attachments.append(frame);
-        if (retainedOnly) {
-          const notice = el('span', 'retained-image-notice', () => t("Not saved to history"));
-          ui(notice, 'title', () => t("Image preview retained with this delivery; not yet saved to history."));
-          frame.append(notice);
-        }
-      };
-      // History selection measures the viewport before IPC completes. Reserve each saved
-      // image's final footprint now; loading, pixels and failure all occupy the same slot.
-      const slots = assets.map(() => {
-        const slot = el('div', 'user-image-slot');
-        slot.append(el('span', 'meta', () => t("Image preview is loading")));
-        attachments.append(slot);
-        return slot;
-      });
-      if (event.attachments?.length || assets.length || retained.length) box.append(attachments);
-      if (!assets.length) for (const image of retained) preview(image.dataUrl, true);
-      // Native ChatGPT can prepend a blank paragraph. Ignore it only when a
-      // complete instruction frame validates; keep the authored suffix exact.
-      const userText = event.authoredText ?? userPromptText(event.message.text.trimStart()) ?? event.message.text;
-      if (userText) box.append(textBlock('msg user-message-text', userText, event.authoredText === undefined && event.message.truncated, event.authoredText?.length ?? event.message.chars));
-      paintMessageReaction(box, event.reaction);
-      if (event.inputDelivery) {
-        box.classList.add('has-input-receipt');
-        const receipt = el('span', 'input-receipt');
-        const label = event.inputDelivery === 'offered' ? t("Sent to the active turn · awaiting receipt") : t("Delivery confirmed");
-        receipt.title = label; receipt.setAttribute('aria-label', label);
-        receipt.append(icon(event.inputDelivery === 'offered' ? 'i-clock' : 'i-check'));
-        box.append(receipt);
-      }
-      if (assets.length && (context?.id || selectedId)) {
-        const id = context?.id ?? selectedId!, generation = selectionGeneration;
-        void (async () => {
-          for (const [index, asset] of assets.entries()) {
-            const data = await run(api.getSessionImage(id, asset.id));
-            if (context ? !context.current() : id !== selectedId || generation !== selectionGeneration) return;
-            const slot = slots[index]!;
-            if (data) preview(data, false, slot);
-            else if (retained[index]) preview(retained[index]!.dataUrl, true, slot);
-            else slot.replaceChildren(el('span', 'meta', () => t("Image unavailable")));
-          }
-        })();
-      }
-      return box;
-    }
-    case 'assistant_message': {
-      const box = el('div', 'said');
-      box.append(el('b', '', () => event.final ? 'ChatGPT' : t("ChatGPT (partial)")));
-      const id = context?.id ?? selectedId;
-      const generation = selectionGeneration;
-      const currentRichRow = () => context ? context.current() : selectedId === id && selectionGeneration === generation;
-      box.append(event.rich ? renderRichResponse(event.rich, event.message.text, id ? {
-        sessionId: id,
-        media: event.richMedia ?? [],
-        current: currentRichRow,
-        // Displaying persisted richOrigin is not a URL grant. The explicit button
-        // performs no action or browser input: main rereads the exact canonical
-        // historical assistant under the current window/selection witness.
-        ...(event.richOrigin && event.messageId ? { openOriginal: async () => {
-          const selected = acknowledgedUiSelection;
-          if (!currentRichRow() || selected?.sessionId !== id) return false;
-          try {
-            const reply = await api.openRichOriginal(id, event.messageId!);
-            return currentRichRow() && acknowledgedUiSelection?.generation === selected.generation &&
-              reply.ok && reply.data === true;
-          } catch { return false; }
-        } } : {})
-      } : undefined)
-        : renderedMarkdown(event.message.text, event.renderedHtml));
-      if (event.richMediaUnavailable) {
-        box.append(el('p', 'meta rich-media-unavailable', () => t("Image preview unavailable — open original in ChatGPT")));
-      }
-      return box;
-    }
-    case 'native_image': {
-      const box = el('div', 'said native-image');
-      box.append(el('b', '', () => t("ChatGPT generated image")));
-      const frame = el('div', 'generated-image-frame');
-      const width = event.width ?? event.previewWidth ?? 1;
-      const height = event.height ?? event.previewHeight ?? 1;
-      frame.style.aspectRatio = `${Math.max(1, width)} / ${Math.max(1, height)}`;
-      const unavailable = () => {
-        frame.classList.toggle('is-unavailable', event.previewStatus !== 'pending');
-        frame.replaceChildren(el('p', 'meta', () => {
-        if (event.previewStatus === 'pending') return t("Image preview is loading");
-        if (event.previewError === 'removed') return t("Image removed from local storage");
-        if (event.previewError === 'quota') return t("Image preview unavailable — recording storage is full");
-        if (event.previewError === 'oversized') return t("Image preview unavailable — image exceeds the recording limit");
-        return t("Image preview unavailable");
-        }));
-        if (event.previewStatus !== 'pending') frame.append(imageStorageButton());
-      };
-      if (event.asset) frame.append(el('p', 'meta', () => t("Image preview is loading")));
-      else unavailable();
-      box.append(frame);
-      const id = context?.id ?? selectedId;
-      if (event.asset && id) {
-        const generation = selectionGeneration;
-        void (async () => {
-          const data = await run(api.getSessionImage(id, event.asset!.id));
-          if (context ? !context.current() : id !== selectedId || generation !== selectionGeneration) return;
-          // Only the fixed local image reader's bounded bytes may become an IMG source.
-          // A malformed IPC reply must never trigger a remote image request or paint a
-          // different MIME under this exact canonical generated-image asset.
-          if (!localDataUrl(data, event.asset!.mimeType)) {
-            const pane = context ? box.closest<HTMLElement>('.agent-panel-body') : $('chatBody');
-            const timeline = context ? pane : $('timeline');
-            const restore = pane && timeline && box.isConnected ? preserveTimelineViewport(pane, timeline) : () => {};
-            unavailable(); restore();
-            return;
-          }
-          const image = document.createElement('img');
-          image.src = data;
-          image.alt = t("ChatGPT generated image");
-          frame.replaceChildren(image);
-        })();
-      }
-      return box;
-    }
-    case 'progress':
-      return el('p', 'meta is-progress', event.message.text);
-    case 'page_tool': {
-      const line = el('p', 'meta is-progress thinking-line');
-      line.append(icon('i-globe', 'ico thinking-ico'), el('span', '', event.label));
-      return line;
-    }
-    case 'turn_start':
-      return el('p', 'meta', () => event.detail ? t("Turn reopened — {0}", [event.detail]) : t("Turn started"));
-    case 'turn_end': {
-      const line = el(
-        'p',
-        event.outcome === 'completed' ? 'meta' : 'meta is-warn',
-        () => t("Turn {0}{1}", [t(TURN_OUTCOME_LABELS[event.outcome]), event.detail ? ` — ${event.detail}` : ''])
-      );
-      return line;
-    }
-    case 'chat_error': {
-      const notice = el('div', 'chat-error-notice');
-      notice.setAttribute('role', 'status');
-      const presentation = () => chatErrorPresentation(event, context?.history ?? events);
-      // The timeline signature includes this projection, so later completion/work repaints it.
-      notice.classList.toggle('is-resolved', presentation().resolved);
-      const title = el('strong', '', () => presentation().title);
-      notice.append(title, textBlock('msg', presentation().message, event.message.truncated, event.message.chars),
-        el('p', 'chat-error-next', () => presentation().next));
-      return notice;
-    }
-    case 'tool_call':
-      return toolBody(event, context);
-    case 'note':
-      return el('p', 'meta', event.message.text);
-    /**
-     * Rendered rather than left to fall through to "Unknown event".
-     *
-     * The timeline is how the user checks what the agents actually said to each other, and
-     * a run of grey "Unknown event" rows in the middle of a multi-agent session reads as a
-     * broken log — the one impression a session recorder cannot afford to give.
-     */
-    case 'agent_message': {
-      const box = document.createElement('details');
-      box.className = 'agent-communication';
-      // Which end of the message this record is. The same message is written once here and
-      // once in the other agent's session, so without this a pair reads as two messages.
-      ui(box, 'title', () => event.delivery === 'sent'
-          ? t("Sent by {0}; recorded when the app accepted it", [event.from])
-          : t("Received by {0}; recorded when it acknowledged delivery", [event.to]));
-      const summary = el('summary');
-      const worker = event.from === 'prime' ? event.to : event.from;
-      const avatar = el('span', 'agent-avatar', worker.replace(/^worker-/, ''));
-      avatar.dataset.color = String([...worker].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 6);
-      avatar.setAttribute('aria-hidden', 'true');
-      summary.append(avatar, el('span', '', () => communicationTitle(event)));
-      const communicationKey = `agent:${context?.id ?? selectedId}:${event.seq}`;
-      box.open = openTools.has(communicationKey);
-      box.addEventListener('toggle', () => { if (box.open) openTools.add(communicationKey); else openTools.delete(communicationKey); });
-      box.append(summary);
-      box.append(textBlock('msg', event.message.text, event.message.truncated, event.message.chars));
-      if (!context) {
-        const matches = sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId && entry.origin.agentId === worker);
-        if (matches.length === 1) {
-          const open = el('button', 'btn agent-chat-open'); open.setAttribute('type', 'button');
-          ui(open, 'aria-label', () => t("Open {0} chat", [worker]));
-          const arrow = icon('i-out'); arrow.setAttribute('aria-hidden', 'true');
-          open.append(el('span', '', () => t("Open worker chat")), arrow);
-          open.onclick = () => void agentPanel?.open(matches[0]!.id); box.append(open);
-        }
-      }
-      return box;
-    }
-    case 'handoff':
-      return el(
-        'p',
-        'meta is-good',
-        () => t("Handoff saved — {0} characters ({1})", [compactNumber(event.chars), event.reason])
-      );
-    default:
-      return el('p', 'meta', () => t("Unknown event"));
-  }
-}
-
-function eventRow(event: SessionEvent): HTMLElement {
-  // One class per content family, so the stylesheet owns what a family looks like and
-  // this builder only says which family a row belongs to. `ev-<kind>` stays: it is the
-  // hook the reconciliation, grouping and fixtures already select on.
-  const row = el('div', `ev ev-${event.kind} tl-row ${categoryClass(categoryFor(event.kind))}`);
-  if (event.kind === 'assistant_message' && !event.rich && !event.richMediaUnavailable &&
-      !withoutMessageReaction(event.message.text).trim()) row.hidden = true;
-  tagImageRow(row, event);
-  const time = document.createElement('time');
-  time.textContent = clockTime(event.time);
-  time.title = new Date(event.time).toLocaleString();
-  const body = el('div', 'ev-body');
-  const currentWorker = sessions.find(session => session.id === selectedId)?.origin;
-  if (event.agent && event.agent !== 'prime' && !(currentWorker?.kind === 'worker' && currentWorker.agentId === event.agent)) {
-    body.append(el('span', 'chip', event.agent));
-  }
-  body.append(eventBody(event));
-  // A refused call from a chat Compact & Resume already replaced is not a placement failure:
-  // its request id proved exactly which chat it came from, and that chat's stopped turn simply
-  // kept calling from OpenAI's side. Say so beside the row, or a full Unattributed bucket of
-  // these reads as the attribution chain having broken.
-  if (event.kind === 'tool_call' && event.call.attributionMethod === 'superseded') {
-    body.append(
-      el(
-        'p',
-        'meta',
-        () => t("From a chat that Compact & Resume had already replaced — ChatGPT kept running its stopped turn there. Refused by design; nothing to repair.")
-      )
-    );
-  }
-  row.append(time, body);
-  return row;
-}
-
-/**
- * The agent chips above the timeline.
- *
- * Drawn only when this session actually has more than one attribution in it, so a
- * single-agent session — which is every session unless multi-agent mode is running —
- * keeps exactly the view it had before.
- */
-function paintAgentFilter(): void {
-  const box = $('chatAgentFilter');
-  if (!deps.state()?.config.ui.developerMode) { box.hidden = true; agentFilter = null; return; }
-  const named = [...new Set(events.flatMap((event) => (event.agent ? [event.agent] : [])))].sort();
-  const anyUnattributed = events.some((event) => !event.agent);
-  // A filter belongs to the session it was chosen in. Carrying it across a selection
-  // change showed the next session's timeline as empty with no chip lit to explain why —
-  // and agent ids repeat between runs, so it could also silently hide half of one. The
-  // same guard catches an agent that simply is not in this session's events.
-  if (filterFor !== selectedId) {
-    agentFilter = null;
-    filterFor = selectedId;
-  } else if (agentFilter !== null && agentFilter !== UNATTRIBUTED && !named.includes(agentFilter)) {
-    agentFilter = null;
-  }
-  if (named.length === 0 || (named.length === 1 && !anyUnattributed)) {
-    box.hidden = true;
-    box.replaceChildren();
-    agentFilter = null;
-    return;
-  }
-  const buttons: HTMLElement[] = [];
-  const chip = (value: string | null, label: string): HTMLElement => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = label;
-    button.dataset.agent = value ?? '';
-    if (agentFilter === value) button.classList.add('is-sel');
-    return button;
-  };
-  buttons.push(chip(null, t("All")));
-  for (const agent of named) buttons.push(chip(agent, agent));
-  if (anyUnattributed) buttons.push(chip(UNATTRIBUTED, t("Unattributed")));
-  box.replaceChildren(...buttons);
-  box.hidden = false;
-}
-
-function visibleEvents(): SessionEvent[] {
-  if (agentFilter === null) return events;
-  if (agentFilter === UNATTRIBUTED) return events.filter((event) => !event.agent);
-  return events.filter((event) => event.agent === agentFilter);
-}
-
-function eventTextCost(event: SessionEvent): number {
-  switch (event.kind) {
-    case 'user_message':
-      return event.message.text.length;
-    case 'assistant_message':
-      // Charge the schema's maximum rather than traversing an untrusted tree for each page.
-      // Text/HTML plus rich must share the existing 2 MiB resident paint budget.
-      return event.message.text.length + (event.renderedHtml?.text.length ?? 0) +
-        (event.rich ? RICH_LIMITS.bytes : 0) + (event.richMediaUnavailable ? 128 : 0);
-    case 'progress':
-    case 'chat_error':
-    case 'note':
-    case 'agent_message':
-      return event.message.text.length;
-    case 'tool_call':
-      return (
-        event.call.args.text.length +
-        event.call.result.text.length +
-        event.call.summary.title.length +
-        (event.call.summary.detail?.length ?? 0)
-      );
-    case 'page_tool':
-      return event.label.length;
-    case 'turn_end':
-      return event.detail?.length ?? 0;
-    default:
-      return 128;
-  }
-}
-
-/** Eviction follows the measured reader viewport, not an arbitrary half-page.
- * Keep the current visible rows plus the incoming stage; ordinary tall histories
- * still settle at 160 records. Dense collapsed activity has bounded extra room. */
-function retainTimelinePage(source: SessionEvent[], direction: 'older' | 'newer'): SessionEvent[] {
-  // Residency and navigation share the immutable origin domain. Display order
-  // can move a final across its turn's tools, but must not cut a hole in a page.
-  source = [...source].sort((a, b) => positionOf(a) - positionOf(b));
-  const pane = $('chatBody');
-  const edge = pane.getBoundingClientRect().top;
-  const protectedKeys = new Set<string>();
-  for (const row of $('timeline').querySelectorAll<HTMLElement>('[data-timeline-key]')) {
-    const rect = row.getBoundingClientRect();
-    if (rect.height <= 0 || rect.bottom <= edge - pane.clientHeight) continue;
-    if (rect.top >= edge + 2 * pane.clientHeight) break;
-    protectedKeys.add(row.dataset.timelineKey!);
-    if (row.matches('.tool-group:not([open])')) {
-      for (const child of row.querySelectorAll<HTMLElement>('[data-timeline-key]')) protectedKeys.add(child.dataset.timelineKey!);
-    }
-  }
-  const protectedSeqs = new Set<number>();
-  for (const item of timelineItems(source)) {
-    if (item.kind !== 'compaction' || !protectedKeys.has(itemKey(item))) continue;
-    const block = item.block;
-    protectedSeqs.add(block.seq);
-    for (const event of [block.prompt, block.brief, block.end, block.handoff, block.resume, ...block.notes]) {
-      if (event) protectedSeqs.add(event.seq);
-    }
-  }
-  const protectedIndexes = source.flatMap((event, index) => protectedSeqs.has(event.seq) || protectedKeys.has(itemKey({ kind: 'event', event })) ? [index] : []);
-  const first = protectedIndexes[0] ?? source.length;
-  const last = protectedIndexes.at(-1) ?? -1;
-  if (direction === 'older') {
-    const end = Math.min(source.length, Math.max(MAX_TIMELINE_ROWS, last + 1));
-    return chronological(source.slice(0, Math.min(end, MAX_TIMELINE_RESIDENT_ROWS)));
-  }
-  const start = Math.max(0, Math.min(source.length - MAX_TIMELINE_ROWS, first));
-  return chronological(source.slice(Math.max(start, source.length - MAX_TIMELINE_RESIDENT_ROWS)));
-}
-
-/** Newest-first selection, returned chronologically, under resident and text/HTML budgets. */
-function boundedTimeline(source: SessionEvent[]): { shown: SessionEvent[]; omitted: number } {
-  let chars = 0;
-  let start = source.length;
-  while (start > 0 && source.length - start < MAX_TIMELINE_RESIDENT_ROWS) {
-    const next = source[start - 1]!;
-    const cost = Math.min(eventTextCost(next), MAX_TIMELINE_TEXT_CHARS);
-    if (start < source.length && chars + cost > MAX_TIMELINE_TEXT_CHARS) break;
-    chars += cost;
-    start -= 1;
-  }
-  return { shown: foldAgentCommunication(source.slice(start)), omitted: start };
-}
-
-// ------------------------------------------------------------ compaction rows
-
-/**
- * One Compact & Resume, folded out of the rows the recorder wrote for it.
- *
- * The recorder stores a compaction as it happened: the brief request typed into chat A, the
- * brief ChatGPT answered with, the app's own "handoff saved" line, and the bootstrap typed
- * into chat B — four rows, three of them long, in an order that reflects when each was
- * observed rather than what they were. Read as a timeline they look like three separate
- * things going on; they are one thing with three steps, and this is that thing.
- */
-interface CompactionBlock {
-  token: string;
-  /** The row this card takes the place of. */
-  seq: number;
-  time: number;
-  prompt: Extract<SessionEvent, { kind: 'user_message' }> | null;
-  /**
-   * The turn ChatGPT answered the brief request in. The request is typed by the app, so its
-   * row carries no local turn id of its own; the turn is the one that opens right after it.
-   */
-  turnId: string | null;
-  brief: Extract<SessionEvent, { kind: 'assistant_message' }> | null;
-  end: Extract<SessionEvent, { kind: 'turn_end' }> | null;
-  handoff: Extract<SessionEvent, { kind: 'handoff' }> | null;
-  resume: Extract<SessionEvent, { kind: 'user_message' }> | null;
-  /** What the app said about this compaction, newest last — an abandonment and why. */
-  notes: Array<Extract<SessionEvent, { kind: 'note' }>>;
-}
-
-type TimelineItem = { kind: 'event'; event: SessionEvent } | { kind: 'compaction'; block: CompactionBlock };
-
-function continuationMarker(event: SessionEvent): { kind: 'HANDOFF' | 'RESUME'; token: string } | null {
-  if (event.kind !== 'user_message') return null;
-  const match = continuationMarkerOf(event.message.text);
-  return match ? { kind: match.kind, token: match.token } : null;
-}
-
-/**
- * The timeline with each compaction folded into one item.
- *
- * A card opens at the marked brief request and absorbs what belongs to it: the turn
- * that answers it, the answer (the brief), the app's
- * handoff line. The marked bootstrap in the replacement chat closes the same card by token,
- * wherever it lands, and so does an app note naming the token. A bootstrap whose request has
- * scrolled out of the window still gets a card, with the steps it implies already done.
- *
- * Which turn answers the request is read from the log, not from the request row. The
- * request is typed by the app into the chat, so the extension records it with no local turn
- * id (or, on a reload, with the previous turn's); the generation ChatGPT opens for it is the
- * first `turn_start` after it. Keying on the request's own `turnId` left that start, the
- * brief, the end and the handoff as four loose rows under an empty card — the live shape.
- */
-function timelineItems(source: SessionEvent[]): TimelineItem[] {
-  const items: TimelineItem[] = [];
-  const blocks = new Map<string, CompactionBlock>();
-  let open: CompactionBlock | null = null;
-  const blockFor = (token: string, event: SessionEvent): CompactionBlock => {
-    let block = blocks.get(token);
-    if (!block) {
-      block = {
-        token,
-        seq: event.seq,
-        time: event.time,
-        prompt: null,
-        turnId: null,
-        brief: null,
-        end: null,
-        handoff: null,
-        resume: null,
-        notes: []
-      };
-      blocks.set(token, block);
-      items.push({ kind: 'compaction', block });
-    }
-    return block;
-  };
-  for (const event of source) {
-    const marker = continuationMarker(event);
-    if (marker && event.kind === 'user_message') {
-      const block = blockFor(marker.token, event);
-      if (marker.kind === 'HANDOFF') {
-        block.prompt = event;
-        block.turnId = event.turnId ?? null;
-        open = block;
-        // Chronology puts a turn's start before the message that opened it, so the request
-        // turn's own start row is already on the list; it belongs to the card like the rest.
-        const previous = items[items.length - 2];
-        if (
-          previous?.kind === 'event' &&
-          previous.event.kind === 'turn_start' &&
-          event.turnId !== undefined &&
-          previous.event.turnId === event.turnId
-        ) {
-          items.splice(items.length - 2, 1);
-        }
-      } else {
-        block.resume = event;
-        if (open === block) open = null;
-      }
-      continue;
-    }
-    if (event.kind === 'note' && event.continuation) {
-      const block = blockFor(event.continuation, event);
-      block.notes.push(event);
-      if (open === block) open = null;
-      continue;
-    }
-    if (open) {
-      if (event.kind === 'handoff') {
-        open.handoff = event;
-        continue;
-      }
-      if (event.kind === 'assistant_message') {
-        if (open.turnId && event.turnId && event.turnId !== open.turnId) {
-          items.push({ kind: 'event', event });
-          continue;
-        }
-        open.brief = event;
-        if (event.turnId !== undefined) open.turnId = event.turnId;
-        continue;
-      }
-      if (event.kind === 'turn_start' && !open.brief && !open.handoff && !open.end) {
-        open.turnId = event.turnId ?? null;
-        continue;
-      }
-      const sameTurn = open.turnId !== null && event.turnId === open.turnId;
-      if (sameTurn && (event.kind === 'turn_end' || event.kind === 'progress' || event.kind === 'page_tool')) {
-        if (event.kind === 'turn_end') open.end = event;
-        continue;
-      }
-      // Local calls can finish or be refused after the source request. They remain
-      // ordinary visible rows and cannot close the summary's grouping or decide its fate.
-      // Only another authored user message starts an unrelated conversation step.
-      if (event.kind === 'user_message') open = null;
-    }
-    items.push({ kind: 'event', event });
-  }
-  return items;
-}
-
-type CompactionTone = 'good' | 'wait' | 'bad';
-
-const ABANDONED_NOTE = /^Compact & Resume abandoned\s*[\u2014-]\s*/i;
-
-/**
- * One sentence for where the compaction is, or where it died.
- *
- * Success and failure come from the recorded continuation, never from later activity
- * in this timeline. Refused source calls are compatible with a still-running handoff.
- */
-function compactionState(block: CompactionBlock): { text: string; tone: CompactionTone } {
-  const chars = block.handoff ? t(" ({0} characters)", [compactNumber(block.handoff.chars)]) : '';
-  if (block.resume) return { text: t("New chat opened at {0}{1}", [clockTime(block.resume.time), chars]), tone: 'good' };
-  const abandoned = [...block.notes].reverse().find((note) => ABANDONED_NOTE.test(note.message.text));
-  if (abandoned) return { text: t("Failed — {0}", [abandoned.message.text.replace(ABANDONED_NOTE, '')]), tone: 'bad' };
-  if (block.handoff) {
-    return { text: t("Summary saved{0} — opening the new chat…", [chars]), tone: 'wait' };
-  }
-  if (block.end && block.end.outcome !== 'completed') {
-    const status = block.end.outcome === 'stopped' ? t("Summary generation stopped")
-      : block.end.outcome === 'failed' ? t("Summary generation failed")
-      : t("Summary generation ended without a completed handoff");
-    return { text: block.end.detail ? t("{0} — {1}", [status, block.end.detail]) : status, tone: 'bad' };
-  }
-  if (block.brief?.final) {
-    return { text: t("Summary written — saving the handoff…"), tone: 'wait' };
-  }
-  if (block.brief) return { text: t("ChatGPT is writing the summary…"), tone: 'wait' };
-  return { text: t("Summary requested — waiting for ChatGPT…"), tone: 'wait' };
-}
-
-function compactionRow(block: CompactionBlock, previous?: HTMLElement): HTMLElement {
-  const key = `compaction:${block.token}`;
-  const state = compactionState(block);
-
-  // A Compact & Resume card is where the `handoff` family's rows went: the fold replaces the
-  // brief/request/end/handoff events with one card, so it carries that family's identity
-  // rather than inventing a kind of its own.
-  const row = previous ?? el('div', `ev ev-compaction tl-row ${categoryClass('handoff')}`);
-  const box = previous?.querySelector<HTMLDetailsElement>('details.compaction') ?? document.createElement('details');
-  box.className = `tool compaction tone-${state.tone}`;
-  if (!previous) {
-    box.open = openTools.has(key);
-    box.addEventListener('toggle', () => {
-      if (box.open) openTools.add(key);
-      else openTools.delete(key);
-    });
-  }
-
-  if (!previous) {
-    const head = document.createElement('summary');
-    head.append(icon('i-steps', 'ico tool-ico'));
-    head.append(el('b', '', () => t("Compact & Resume:")));
-    head.append(el('span', 'state'));
-    box.append(head);
-  }
-  ui(box.querySelector<HTMLElement>('summary .state')!, 'textContent', () => compactionState(block).text);
-
-  const raw = el('div', 'raw');
-  if (block.prompt) {
-    raw.append(el('h4', '', () => t("Brief request")));
-    // The routing marker is the app's, not the user's; the card already says what this is.
-    const prompt = userPromptText(block.prompt.message.text) ?? block.prompt.message.text;
-    // The marker is stripped in whichever form the page recorded it; `marker` is the exact
-    // text that matched, so an escaped one is removed as completely as a clean one.
-    const request = prompt.replace(continuationMarkerOf(prompt)?.marker ?? '', '');
-    raw.append(textBlock('pre', request, block.prompt.message.truncated, block.prompt.message.chars));
-  }
-  if (block.brief) {
-    const brief = block.brief;
-    raw.append(el('h4', '', () => brief.final ? t("Summary") : t("Summary (still writing)")));
-    raw.append(renderedMarkdown(block.brief.message.text));
-  }
-  if (block.handoff) {
-    const saved = block.handoff;
-    raw.append(
-      el('p', 'raw-facts', () => t("Handoff saved — {0} characters ({1})", [compactNumber(saved.chars), saved.reason]))
-    );
-  }
-  if (block.resume) {
-    const resumed = block.resume;
-    raw.append(
-      el(
-        'p',
-        'raw-facts',
-        () => t("Bootstrap sent into the new chat — {0} characters at {1}", [compactNumber(resumed.message.chars), clockTime(resumed.time)])
-      )
-    );
-  }
-  for (const note of block.notes) raw.append(el('p', 'raw-facts', `${clockTime(note.time)} — ${note.message.text}`));
-  const oldRaw = box.querySelector<HTMLElement>('.raw');
-  if (oldRaw) {
-    // Streaming changes only the affected section. Keep the disclosure, focus and
-    // unchanged request mounted instead of replacing the whole reading surface.
-    const oldParts = [...oldRaw.children];
-    reconcileChildren(oldRaw, [...raw.children].map((part, index) =>
-      (oldParts[index]?.isEqualNode(part) ? oldParts[index] : part) as HTMLElement));
-  } else box.append(raw);
-
-  if (previous) return row;
-  const time = document.createElement('time');
-  time.textContent = clockTime(block.time);
-  time.title = new Date(block.time).toLocaleString();
-  const body = el('div', 'ev-body');
-  body.append(box);
-  row.append(time, body);
-  return row;
-}
-
-/**
- * The header that opens one ChatGPT frontend's run inside this durable local session.
- *
- * The spine itself is drawn by the `.spine` container; these headers are the labelled divisions
- * on it. They read only what the session metadata and recorded events already say — the segment
- * list comes from `frontendSegments`, so nothing here decides lineage.
- */
-function spineSegmentRow(segment: FrontendSegment): HTMLElement {
-  const row = el('div', 'spine-seg');
-  row.dataset.spineSegment = String(segment.index);
-  const label = el('span', 'spine-seg-label', segment.label);
-  row.append(label);
-  if (segment.startsWithHandoff) row.classList.add('is-after-handoff');
-  return row;
-}
-
-/**
- * Insert a frontend segment header ahead of each segment's first row.
- *
- * Compaction rows are the joints on the spine: a segment after the first begins immediately after
- * one. The existing row pipeline is untouched — a header is spliced between rows rather than
- * tagging every row. When a segment contributes no rows of its own (a compaction recorded before
- * any answer) its header is still emitted at the boundary, so the reader sees that it existed.
- */
-function withSpineSegments(rows: HTMLElement[], spine: FrontendSegment[]): HTMLElement[] {
-  const out: HTMLElement[] = [spineSegmentRow(spine[0]!)];
-  let next = 1;
-  for (const row of rows) {
-    out.push(row);
-    // A joint closes the segment above it and opens the one below.
-    if (next < spine.length && row.classList.contains('ev-compaction')) {
-      out.push(spineSegmentRow(spine[next]!));
-      next++;
-    }
-  }
-  return out;
-}
-
-/** What a row was drawn from; a different signature is a different row. */
-function itemSignature(item: TimelineItem): string {
-  if (item.kind === 'compaction') {
-    const { block } = item;
-    return [
-      block.token,
-      block.prompt?.seq ?? '',
-      block.brief ? `${block.brief.seq}:${block.brief.message.chars}:${block.brief.renderedHtml?.chars ?? 0}:${block.brief.state}` : '',
-      block.end ? `${block.end.seq}:${block.end.outcome}:${block.end.detail ?? ''}` : '',
-      block.handoff?.seq ?? '',
-      block.resume?.seq ?? '',
-      block.notes.map((note) => note.seq).join(',')
-    ].join('|');
-  }
-  const { event } = item;
-  const parts: Array<string | number> = [event.kind === 'user_message' ? '' : event.seq, event.time, event.kind, event.agent ?? ''];
-  switch (event.kind) {
-    case 'user_message': {
-      // A badge-only revision patches the existing bubble, preserving loaded images
-      // and selection. Every other recorded field still invalidates its body.
-      const { seq: _seq, reaction: _reaction, ...body } = event;
-      parts.push(JSON.stringify(body));
-      // Bytes are immutable for an accepted input. Queue arrival must repaint a
-      // canonical row even if its recorded revision did not change.
-      parts.push(...retainedInputImages(event, selectedId).map(image => `${image.name}:${image.dataUrl.length}`));
-      break;
-    }
-    case 'progress':
-    case 'chat_error':
-    case 'note':
-    case 'agent_message':
-      parts.push(event.message.chars);
-      break;
-    case 'assistant_message':
-      parts.push(event.message.chars, event.renderedHtml?.chars ?? 0, event.state ?? '', event.final ? 'final' : '',
-        event.rich?.revision ?? '', event.rich?.status ?? '', event.rich?.reason ?? '',
-        event.richMediaUnavailable ?? '', JSON.stringify(event.richMedia ?? []),
-        JSON.stringify(event.retiredRichImageAssetIds ?? []));
-      break;
-    case 'native_image':
-      parts.push(event.messageId, event.providerAssetId, event.providerStatus ?? '', event.previewStatus, event.asset?.id ?? '',
-        event.previewWidth ?? '', event.previewHeight ?? '', event.previewError ?? '');
-      break;
-    case 'tool_call':
-      parts.push(
-        event.call.outcome,
-        event.call.attribution,
-        event.call.durationMs,
-        event.call.args.chars,
-        event.call.result.chars,
-        event.call.summary.title,
-        event.call.summary.detail ?? ''
-      );
-      break;
-    case 'page_tool':
-      parts.push(event.label);
-      break;
-    case 'turn_end':
-      parts.push(event.outcome, event.detail ?? '');
-      break;
-    case 'handoff':
-      parts.push(event.chars);
-      break;
-    default:
-      break;
-  }
-  return parts.join('|');
-}
-
-function itemKey(item: TimelineItem): string {
-  if (item.kind === 'compaction') return `compaction:${item.block.token}`;
-  // A canonical revision advances the update cursor, not the identity of the row
-  // anchoring the viewport and the following activity disclosure.
-  const message = canonicalMessageKey(item.event);
-  return message ? `message:${message}` : `event:${item.event.seq}`;
-}
-
-/** One activity disclosure between authored messages; communication keeps its own identity inside. */
-const toolGroups = new Map<string, HTMLDetailsElement>();
-/** Keep retained scroll containers mounted: rebuilding a feed must not restart
- * disclosure animations or detach a result while the user is scrolling it. */
-function groupToolRows(rows: HTMLElement[], scope = selectedId, groups = toolGroups): HTMLElement[] {
-  const grouped: HTMLElement[] = [], retained = new Set<string>();
-  for (let i = 0; i < rows.length;) {
-    if (!rows[i]!.matches('.ev-tool_call, .ev-page_tool, .ev-agent_message')) { grouped.push(rows[i++]!); continue; }
-    let end = i + 1;
-    while (end < rows.length && rows[end]!.matches('.ev-tool_call, .ev-page_tool, .ev-agent_message') && rows[end]!.dataset.activityBoundary === rows[i]!.dataset.activityBoundary) end++;
-    if (end - i === 1) { grouped.push(rows[i++]!); continue; }
-    // Paging can extend or trim the beginning of an activity group. Its first
-    // member is therefore not a new disclosure/viewport identity.
-    const previous = rows.slice(i, end).map(row => row.closest<HTMLElement>('.tool-group'))
-      .find(group => group?.dataset.timelineKey && groups.get(group.dataset.timelineKey) === group && !retained.has(group.dataset.timelineKey));
-    const key = previous?.dataset.timelineKey ?? `group:${scope}:${rows[i]!.dataset.timelineKey}`;
-    retained.add(key);
-    let group = groups.get(key);
-    if (!group) {
-      group = document.createElement('details'); group.className = 'tool-group';
-      group.dataset.timelineKey = key;
-      const summary = document.createElement('summary');
-      summary.append(el('span', 'activity-symbol'), el('span', 'activity-title'), icon('i-chev', 'ico activity-chevron'));
-      group.append(summary, el('div', 'tool-group-body'));
-      group.addEventListener('toggle', () => { if (group!.open) openTools.add(key); else openTools.delete(key); });
-      group.open = openTools.has(key) || rows.slice(i, end).some((row) => row.querySelector('details[open]')); groups.set(key, group);
-    }
-    const latest = rows[end - 1]!;
-    const latestHead = latest.querySelector('.tool > summary, .agent-communication > summary, .thinking-line');
-    const label = latestHead?.querySelector('b, span:not(.agent-avatar)')?.textContent || t("Activity");
-    group.querySelector('.activity-title')!.textContent = label;
-    ui(group.querySelector('summary')!, 'title', () => t("{0} actions · {1}", [end - i, label]));
-    const symbol = latestHead?.querySelector('svg, .agent-avatar');
-    group.querySelector('.activity-symbol')!.replaceChildren(...(symbol ? [symbol.cloneNode(true)] : []));
-    reconcileChildren(group.lastElementChild!, rows.slice(i, end));
-    grouped.push(group); i = end;
-  }
-  for (const key of groups.keys()) if (!retained.has(key)) groups.delete(key);
-  return grouped;
-}
-
-/** Adjacent images from one response share a compact gallery, retaining canonical rows. */
-function tagImageRow(row: HTMLElement, event: SessionEvent): void {
-  if (event.kind !== 'native_image') return;
-  row.dataset.imageAgent = event.agent ?? '';
-  row.dataset.imageMessage = event.messageId;
-  row.dataset.imageTurn = event.turnId ?? '';
-}
-function groupImageRows(rows: HTMLElement[]): HTMLElement[] {
-  const result: HTMLElement[] = [];
-  for (let i = 0; i < rows.length;) {
-    const first = rows[i]!;
-    if (!first.dataset.imageMessage) { result.push(first); i++; continue; }
-    const messages = new Set([first.dataset.imageMessage]);
-    const turns = new Set(first.dataset.imageTurn ? [first.dataset.imageTurn] : []);
-    let end = i + 1;
-    while (end < rows.length) {
-      const next = rows[end]!.dataset;
-      if (!next.imageMessage || next.imageAgent !== first.dataset.imageAgent) break;
-      if (!messages.has(next.imageMessage) && !(next.imageTurn && turns.has(next.imageTurn))) break;
-      messages.add(next.imageMessage);
-      if (next.imageTurn) turns.add(next.imageTurn);
-      end++;
-    }
-    const gallery = rows.slice(i, end).map(row => row.closest<HTMLElement>('.generated-image-gallery'))
-      .find((node): node is HTMLElement => !!node) ?? el('div', 'generated-image-gallery');
-    reconcileChildren(gallery, rows.slice(i, end));
-    result.push(gallery); i = end;
-  }
-  return result;
-}
-
 function composerSessionSelection(summary: SessionSummary | null | undefined) {
   if (summary?.conversationId) return summary.selectedModel;
   const opening = pendingComposerInputs.find(row => row.opening && row.sessionId === summary?.id && ['queued', 'browser'].includes(row.state));
   return opening?.model ? { model: opening.model, reasoningEffort: opening.reasoningEffort ?? undefined, observedAt: opening.createdAt } : null;
 }
-function paintDetail(followBottom = historyBefore === null): void {
+function paintDetail(followBottom = !stage.browsing()): void {
   paintStateLine();
-  const summary = sessions.find((s) => s.id === selectedId) ?? null;
-  applyComposerSessionModel(selectedId ? `${selectedId}:${selectionGeneration}` : null, composerSessionSelection(summary) ?? null);
+  const summary = sessions.find((s) => s.id === selectedId()) ?? null;
+  applyComposerSessionModel(selectedId() ? `${selectedId()}:${selectionGeneration()}` : null, composerSessionSelection(summary) ?? null);
   const config = deps.state()?.config;
   if (config) paintContextMeter(summary, config, confirmedComposerModel());
   const project = selectedLocalProject(sessionHost);
@@ -2107,138 +1182,26 @@ function paintDetail(followBottom = historyBefore === null): void {
   ui($('chatTitle'), 'textContent', () => summary ? summary.title || t("Untitled session") : t("New chat"));
 
   paintDeliveryControls(deliveryHost);
-  paintAgentFilter();
-  // Selection retires data/control ownership immediately, but the last painted rows
-  // remain inert until the destination arrives. Queue/status repaints must not turn
-  // this short loading interval into the New Chat welcome screen.
-  if (selectedId !== null && detailFor !== selectedId) {
+  // Selection retires data/control ownership immediately, but the last painted rows remain
+  // inert until the destination arrives. Queue/status repaints must not turn this short loading
+  // interval into the New Chat welcome screen.
+  if (stage.awaiting()) {
     $('inputQueue').setAttribute('inert', '');
     $('timelineEmpty').hidden = true;
     $('chatFoot').hidden = true;
     return;
   }
-  $('timeline').removeAttribute('inert');
-  $('timeline').removeAttribute('aria-busy');
   $('inputQueue').removeAttribute('inert');
-  const filtered = visibleEvents();
-  const windowed = boundedTimeline(filtered);
-  const shown = windowed.shown;
-
-  // Preserve the visible logical row when late transcript revisions change the
-  // height above it; retaining absolute scrollTop would move the reader's content.
-  const pane = $('chatBody');
-  const restoreViewport = preserveTimelineViewport(pane, $('timeline'), followBottom);
-  let restoreRichFocus: (() => void) | null = null;
-  const timelineRows: HTMLElement[] = [];
-  const keep = new Set<string>();
-  let activityBoundary = '';
   paintRecoveryStatus();
-  const oldest = shown.length ? Math.min(...shown.map(event => event.time)) : 0;
-  const newest = shown.length ? Math.max(...shown.map(event => event.time)) : 0;
-  const retiredInputs = pendingComposerInputs.filter(entry => historicalAutomaticInput(entry) &&
-    (entry.sessionId ?? entry.deliveredSessionId) === selectedId && !inputNotices().has(entry.id) &&
-    agentFilter === null && entry.createdAt >= oldest && (historyBefore === null || entry.createdAt <= newest))
-    .sort((a, b) => a.createdAt - b.createdAt);
-  const appendRetiredInputs = (until: number) => {
-    while (retiredInputs.length && retiredInputs[0]!.createdAt <= until) {
-      const entry = retiredInputs.shift()!;
-      const key = `retired-input:${entry.id}`;
-      const sig = JSON.stringify([entry.text, entry.error, entry.createdAt]);
-      keep.add(key);
-      const cached = rowCache.get(key);
-      const row = cached?.sig === sig ? cached.row : inputMessageRow(deliveryHost, entry, true);
-      if (row !== cached?.row) {
-        const time = document.createElement('time');
-        time.textContent = new Date(entry.createdAt).toLocaleString();
-        row.prepend(time);
-      }
-      row.dataset.timelineKey = key;
-      rowCache.set(key, { sig, row });
-      timelineRows.push(row);
-      activityBoundary = key;
-    }
-  };
-  const duplicateErrors = duplicateChatErrors(events);
-  for (const item of timelineItems(shown)) {
-    if (item.kind === 'event' && duplicateErrors.has(item.event.seq)) continue;
-    appendRetiredInputs(item.kind === 'event' ? item.event.time : item.block.time);
-    if (item.kind === 'compaction' || !['tool_call', 'page_tool', 'agent_message'].includes(item.event.kind)) activityBoundary = itemKey(item);
-    if (!deps.state()?.config.ui.developerMode && item.kind === 'event' && item.event.source === 'app' && item.event.kind === 'progress' && item.event.progressId?.startsWith('browser-repair:')) continue;
-    if (!deps.state()?.config.ui.developerMode && item.kind === 'event' && ['session_start', 'session_end', 'turn_start', 'turn_end', 'note'].includes(item.event.kind)) continue;
-    const key = itemKey(item);
-    const sig = itemSignature(item) + (item.kind === 'event' && item.event.kind === 'chat_error'
-      ? JSON.stringify(chatErrorPresentation(item.event, events)) : '');
-    keep.add(key);
-    const cached = rowCache.get(key);
-    if (cached && cached.sig === sig) {
-      cached.row.dataset.activityBoundary = activityBoundary;
-      if (item.kind === 'event' && item.event.kind === 'user_message') {
-        paintMessageReaction(cached.row.querySelector<HTMLElement>('.said.is-user')!, item.event.reaction);
-      }
-      paintInputReceipt(cached.row, item);
-      timelineRows.push(cached.row);
-      continue;
-    }
-    let row = item.kind === 'compaction' ? compactionRow(item.block, cached?.row) : eventRow(item.event);
-    if (cached && item.kind === 'event' && item.event.kind === 'assistant_message') {
-      // Revision cursor changes a bubble's contents, not its immutable viewport identity.
-      // Keep the outer row mounted and recover keyboard focus by validated semantic node id.
-      const active = document.activeElement as HTMLElement | null;
-      const focused = active && cached.row.contains(active) ? active.closest<HTMLElement>('[data-rich-node-id]') : null;
-      const focusId = focused?.dataset.richNodeId;
-      const focusTag = active?.tagName;
-      const oldDisclosure = cached.row.querySelector<HTMLDetailsElement>('details.rich-source');
-      const newDisclosure = row.querySelector<HTMLDetailsElement>('details.rich-source');
-      if (oldDisclosure?.open && newDisclosure) newDisclosure.open = true;
-      retireRichImageViewerWithin(cached.row);
-      cached.row.replaceChildren(...row.childNodes);
-      cached.row.hidden = row.hidden;
-      cached.row.className = row.className;
-      row = cached.row;
-      if (focusId && focusTag) restoreRichFocus = () => {
-        const owner = [...row.querySelectorAll<HTMLElement>('[data-rich-node-id]')]
-          .find(node => node.dataset.richNodeId === focusId);
-        const target = owner?.tagName === focusTag ? owner
-          : [...(owner?.querySelectorAll<HTMLElement>('*') ?? [])].find(node => node.tagName === focusTag);
-        target?.focus({ preventScroll: true });
-      };
-    }
-    row.dataset.timelineKey = key;
-    row.dataset.activityBoundary = activityBoundary;
-    paintInputReceipt(row, item);
-    rowCache.set(key, { sig, row });
-    timelineRows.push(row);
-  }
-  appendRetiredInputs(Infinity);
-  for (const key of rowCache.keys()) if (!keep.has(key)) rowCache.delete(key);
-
-  // The spine is a projection of recorded lineage: no handoff and no continuation origin means no
-  // spine, and the transcript renders exactly as it did before this existed. A session that has
-  // been compacted reads as one continuous column with a labelled frontend per run.
-  //
-  // It reads the session's full loaded history, not the windowed page or the filtered view: the
-  // number of frontends a session has run in is a fact about the session, so it must not change as
-  // the reader scrolls, and an agent filter must not erase a segment's joint.
-  const spine = frontendSegments(events, summary?.origin ?? null);
-  const timeline = $('timeline');
-  timeline.classList.toggle('spine', spine.length > 0);
-  reconcileChildren(timeline, spine.length === 0
-    ? groupImageRows(groupToolRows(timelineRows))
-    : withSpineSegments(groupImageRows(groupToolRows(timelineRows)), spine));
-  retireStaleRichImageViewer();
-  paintPendingInputs(deliveryHost);
-  $('timelineEmpty').hidden = selectedId !== null || timelineRows.length > 0 || $('inputQueue').childElementCount > 0;
-  restoreViewport();
-  restoreRichFocus?.();
+  const painted = stage.paint({ followBottom });
+  if (!painted) return;
 
   const facts: string[] = [];
   if (summary) {
-    facts.push(t(totalEvents === 1 ? '{0} event' : '{0} events', [totalEvents]));
-    if (events.length < totalEvents) facts.push(t("showing a bounded page of {0}", [events.length]));
-    if (agentFilter !== null) {
-      facts.push(t("filtered to {0} — {1} matched", [agentFilter === UNATTRIBUTED ? 'unattributed' : agentFilter, filtered.length]));
-    }
-    if (windowed.omitted > 0) facts.push(t("{0} newest rendered", [shown.length]));
+    facts.push(t(painted.total === 1 ? '{0} event' : '{0} events', [painted.total]));
+    if (painted.resident < painted.total) facts.push(t("showing a bounded page of {0}", [painted.resident]));
+    if (painted.filter) facts.push(t("filtered to {0} — {1} matched", [painted.filter.label, painted.filter.matched]));
+    if (painted.omitted > 0) facts.push(t("{0} newest rendered", [painted.shown]));
     facts.push(t("~{0} rough current-chat context tokens", [compactNumber(summary.contextTokens)]));
     const level = pressureOf(pressure, summary.id);
     if (level && level.level !== 'ok') {
@@ -2254,7 +1217,8 @@ function paintDetail(followBottom = historyBefore === null): void {
   }
   $('chatFoot').textContent = facts.join(' · ');
   $('chatFoot').hidden = !deps.state()?.config.ui.developerMode;
-  $('chatFoot').classList.toggle('is-warn', pressureOf(pressure, selectedId ?? '')?.level === 'huge');
+  $('chatFoot').classList.toggle('is-warn', pressureOf(pressure, selectedId() ?? '')?.level === 'huge');
+  if (chatNavigator) paintNavigator(sessionHost);
 }
 
 // -------------------------------------------------------------------- handoff
@@ -2290,13 +1254,13 @@ function paintHandoff(): void {
 /** The live deadline takes precedence over the existing dismissible repair receipt. */
 function paintRecoveryStatus(): boolean {
   const host = $('recoveryStatus');
-  const countdowns = selectedId && controlledSessionId === selectedId && controlledSelection === selectionGeneration ? controlledRecovery : [];
+  const countdowns = selectedId() && controlledSessionId === selectedId() && controlledSelection === selectionGeneration() ? controlledRecovery : [];
   if (renderRecoveryCountdowns(host, countdowns)) { paintComposerStatusLine(); return true; }
-  const recovery = detailFor === selectedId ? [...events].reverse().find(event => event.source === 'app' && event.kind === 'progress' && event.progressId?.startsWith('browser-repair:')) : undefined;
-  const sessionId = selectedId;
+  const recovery = stage.awaiting() ? undefined : [...stage.events()].reverse().find(event => event.source === 'app' && event.kind === 'progress' && event.progressId?.startsWith('browser-repair:'));
+  const sessionId = selectedId();
   const revision = recovery?.kind === 'progress' ? JSON.stringify([recovery.progressId, recovery.time, recovery.message.text]) : '';
   // Newer questions retire this live notice; the original receipt stays in history.
-  const advanced = recovery && events.some(event => positionOf(event) > positionOf(recovery) &&
+  const advanced = recovery && stage.events().some(event => positionOf(event) > positionOf(recovery) &&
     ((event.kind === 'turn_start' && event.turnId !== recovery.turnId) ||
       (event.kind === 'user_message' && event.source === 'extension')));
   host.hidden = !recovery || !!advanced || Date.now() - recovery.time > 120000 || (!!sessionId && dismissedRecoveryNotices.get(sessionId) === revision);
@@ -2325,7 +1289,7 @@ function paintStateLine(): void {
   // Running state and timer ownership cannot depend on a translated label.
   note.classList.toggle('is-working', working === true);
   const recovering = paintRecoveryStatus();
-  const goalWaiting = controlledSessionId === selectedId && controlledSelection === selectionGeneration && !!goalWaitView;
+  const goalWaiting = controlledSessionId === selectedId() && controlledSelection === selectionGeneration() && !!goalWaitView;
   if (goalWaiting) paintGoalProgress();
   if (visible && (ticking || recovering || goalWaiting)) durationTimer = window.setTimeout(paintStateLine, 1000);
   repaintBadges(sessionHost);
@@ -2334,15 +1298,15 @@ function paintStateLine(): void {
 
 function stateLine(): { text: string; tone: '' | 'is-live' | 'is-bad'; working?: boolean; ticking?: boolean } {
   if (!deps.state()?.config.ui.developerMode) {
-    const summary = sessions.find(entry => entry.id === selectedId);
-    if (!summary || detailFor !== selectedId) return { text: '', tone: '' };
-    const active = controlledSessionId === selectedId && controlledSelection === selectionGeneration ? controlledTurnId : null;
-    const lastBoundary = [...events].reverse().find(event => event.kind === 'turn_start' || event.kind === 'turn_end');
+    const summary = sessions.find(entry => entry.id === selectedId());
+    if (!summary || stage.awaiting()) return { text: '', tone: '' };
+    const active = controlledSessionId === selectedId() && controlledSelection === selectionGeneration() ? controlledTurnId : null;
+    const lastBoundary = [...stage.events()].reverse().find(event => event.kind === 'turn_start' || event.kind === 'turn_end');
     const turnId = active ?? lastBoundary?.turnId;
     if (!turnId) return { text: '', tone: '' };
     const startedAt = summary.finishTurn?.turnId === turnId ? summary.finishTurn.startedAt
-      : events.find(event => event.kind === 'turn_start' && event.turnId === turnId)?.time;
-    const endedAt = events.find(event => event.kind === 'turn_end' && event.turnId === turnId)?.time;
+      : stage.events().find(event => event.kind === 'turn_start' && event.turnId === turnId)?.time;
+    const endedAt = stage.events().find(event => event.kind === 'turn_end' && event.turnId === turnId)?.time;
     if (startedAt === undefined) return { text: active ? t("Working…") : '', tone: '', working: !!active };
     if (!active && endedAt === undefined) return { text: '', tone: '' };
     const seconds = Math.max(0, Math.floor(((active ? Date.now() : endedAt!) - startedAt) / 1000));
@@ -2352,7 +1316,7 @@ function stateLine(): { text: string; tone: '' | 'is-live' | 'is-bad'; working?:
   // connector carrying nothing that identifies its caller, so work driven from the phone,
   // from another browser or from another machine can only be recorded as what it is:
   // real, complete, and not placeable in any chat this app can observe.
-  const selected = sessions.find((entry) => entry.id === selectedId) ?? null;
+  const selected = sessions.find((entry) => entry.id === selectedId()) ?? null;
   if (selected && selected.conversationId === null) {
     return {
       text: t("Work this app could not place in a chat — driven from another device, or with no ChatGPT tab open"),
@@ -2413,7 +1377,7 @@ function paintSwarm(state: SwarmState): void {
   paintStateLine();
   // Session rows borrow their live badge from the swarm, so a worker that just went to sleep
   // must not keep saying "active" until some unrelated session update repaints the list.
-  paintSessions(sessionHost);
+  paintNavigator(sessionHost);
   const list = $('swarmList');
   if (state.agents.length === 0) {
     list.replaceChildren(
@@ -2903,8 +1867,8 @@ const CHAT_INPUTS = [
 /** Writes app state into this panel's controls. Called from the renderer's apply(). */
 export function chatApply(state: AppState, previous?: Config): void {
   const { config, bridge } = state;
-  if (visible && selectedId) void refreshSessionControls();
-  paintContextMeter(sessions.find(session => session.id === selectedId) ?? null, config, confirmedComposerModel());
+  if (visible && selectedId()) void refreshSessionControls();
+  paintContextMeter(sessions.find(session => session.id === selectedId()) ?? null, config, confirmedComposerModel());
   applyChatModels(config, previous);
 
   applyChatChecked($<HTMLInputElement>('sessRecord'), config.sessions.record, previous?.sessions.record);
@@ -2954,14 +1918,14 @@ export function chatApply(state: AppState, previous?: Config): void {
   $('bridgeState').classList.toggle('is-warn', browserRequired && (!bridge.present || !secureStorageAvailable));
   void showExtensionPath();
 
-  if (sessions.length > 0) paintSessions(sessionHost);
+  if (sessions.length > 0) paintNavigator(sessionHost);
 }
 
 /** Called when the Chat tab becomes visible or is left, so it only polls when shown. */
 export function chatVisible(next: boolean): void {
   if (visible === next) return;
   visible = next;
-  reportVisibleSelection(next && selectedId !== null);
+  reportVisibleSelection(next && selectedId() !== null);
   if (next) void refreshAll();
   else {
     window.clearTimeout(toolActivityTimer);
@@ -2996,23 +1960,23 @@ function scheduleReload(): void {
 /** Local admission moves the draft; a native receipt alone may mark it sent. */
 
 async function stopCurrentTurn(): Promise<void> {
-  const id = selectedId, turnId = controlledTurnId, generation = selectionGeneration;
+  const id = selectedId(), turnId = controlledTurnId, generation = selectionGeneration();
   if (!id || controlledSessionId !== id || controlledSelection !== generation || !turnId || controlledStopPending) return;
   controlledStopPending = true; paintDeliveryControls(deliveryHost);
   try { await run(api.stopSessionTurn(id, turnId)); }
-  finally { if (selectedId === id && selectionGeneration === generation) { controlledStopPending = false; void refreshSessionControls(); } }
+  finally { if (selectedId() === id && selectionGeneration() === generation) { controlledStopPending = false; void refreshSessionControls(); } }
 }
 let composerDiscoveryGeneration = 0;
 async function sendComposer(delivery?: 'finish', plan?: string[], planObjective?: string): Promise<boolean | void> {
   const input = $<HTMLTextAreaElement>('chatInput');
   const key = draftKey();
-  const projectId = selectedId ? sessions.find(row => row.id === selectedId)?.projectId ?? null : selectedProjectId;
+  const projectId = selectedId() ? sessions.find(row => row.id === selectedId())?.projectId ?? null : selectedProjectId;
   const images = imageDrafts.get(key) ?? [];
   const text = plan?.[0] ?? (authoredComposerText().trim() || (images.length ? 'Please look at the attached files.' : ''));
   if ($<HTMLButtonElement>('chatSend').disabled) return;
   if (!text) {
-    const target = selectedId, selection = selectionGeneration;
-    const sameSelection = () => selectedId === target && selectionGeneration === selection;
+    const target = selectedId(), selection = selectionGeneration();
+    const sameSelection = () => selectedId() === target && selectionGeneration() === selection;
     await refreshSessionControls();
     if (!sameSelection()) return;
     // An actual turn takes precedence over queued follow-ups. Stop never silently
@@ -3039,24 +2003,24 @@ async function sendComposer(delivery?: 'finish', plan?: string[], planObjective?
     return;
   }
   const discoveryGeneration = ++composerDiscoveryGeneration;
-  const discoverySelection = selectionGeneration, discoverySession = selectedId, discoveryDraft = authoredComposerText();
+  const discoverySelection = selectionGeneration(), discoverySession = selectedId(), discoveryDraft = authoredComposerText();
   const modelSettings = confirmedComposerModel() ?? await ensureComposerModel();
   // Discovery can outlive navigation or draft edits. Only the latest unchanged
   // authored send may continue; a second click must never send the same text twice.
-  if (discoveryGeneration !== composerDiscoveryGeneration || discoverySelection !== selectionGeneration || discoverySession !== selectedId ||
+  if (discoveryGeneration !== composerDiscoveryGeneration || discoverySelection !== selectionGeneration() || discoverySession !== selectedId() ||
       authoredComposerText() !== discoveryDraft || (imageDrafts.get(key) ?? []).some((image, index) => image !== images[index]) ||
       (imageDrafts.get(key)?.length ?? 0) !== images.length) return false;
   if (!modelSettings) { toast(t("Model discovery could not confirm your selection. Choose an available model and thinking effort, then send again.")); return false; }
-  const sessionId = selectedId;
-  const generation = selectionGeneration;
+  const sessionId = selectedId();
+  const generation = selectionGeneration();
   const chosenMode = delivery ?? $<HTMLSelectElement>('sendMode').value;
-  const mode = chosenMode === 'tool' ? 'auto' : chosenMode === 'after-turn' && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledQueueAtFinish ? 'finish' : chosenMode;
+  const mode = chosenMode === 'tool' ? 'auto' : chosenMode === 'after-turn' && controlledSessionId === selectedId() && controlledSelection === selectionGeneration() && controlledQueueAtFinish ? 'finish' : chosenMode;
   const dueAt = Date.now();
   const id = crypto.randomUUID();
   const authoredDraft = authoredComposerText();
   const attachmentPayload = { images: images.filter((file): file is InputImage => 'dataUrl' in file), attachments: images.filter((file): file is InputAttachment => 'id' in file),
     ...(chosenMode === 'tool' && !plan ? { delivery: 'tool' as const } : {}),
-    ...(mode === 'auto' && !plan && selectedId && controlledSessionId === selectedId && controlledSelection === generation &&
+    ...(mode === 'auto' && !plan && selectedId() && controlledSessionId === selectedId() && controlledSelection === generation &&
       controlledCanInject && images.some(file => 'id' in file) && injectableAttachments(images) ? { attachmentDelivery: 'tool' as const } : {}) };
   const objective = plan ? planObjective : mode === 'finish' ? undefined : $<HTMLTextAreaElement>('sessionObjective').value.trim() || undefined;
   const authoredSource = plan ? 'objective' as const : 'text' as const;
@@ -3081,7 +2045,7 @@ async function sendComposer(delivery?: 'finish', plan?: string[], planObjective?
         await adoptAcceptedOpening(deliveryHost, retained);
         return true;
       }
-      if (selectedId === sessionId && selectionGeneration === generation && !authoredComposerText()) {
+      if (selectedId() === sessionId && selectionGeneration() === generation && !authoredComposerText()) {
         inputDrafts.set(key, authoredDraft); input.value = authoredDraft; skillPicker?.restore();
       }
       else if (!inputDrafts.get(key)) inputDrafts.set(key, authoredDraft);
@@ -3094,10 +2058,10 @@ async function sendComposer(delivery?: 'finish', plan?: string[], planObjective?
     // that durable row visible while the next listing crosses the process boundary.
     inputQueueGeneration++;
     pendingComposerInputs = [...pendingComposerInputs.filter(row => row.id !== result.id), result];
-    if (sessionId === null && selectionGeneration === generation && pendingNewInput?.id === id && result.automation &&
+    if (sessionId === null && selectionGeneration() === generation && pendingNewInput?.id === id && result.automation &&
         ($<HTMLSelectElement>('chatAutomation').value !== result.automation || openingLoopDelivery() !== result.loopAfterTurn))
       await run(api.setInputAutomation(result.id, $<HTMLSelectElement>('chatAutomation').value as InputAutomation, openingLoopDelivery()));
-    if (sessionId === null && selectionGeneration === generation) {
+    if (sessionId === null && selectionGeneration() === generation) {
       pendingNewInput = { id: result.id, generation };
       await adoptAcceptedOpening(deliveryHost, result);
     }
@@ -3145,16 +2109,18 @@ function showView(name: string): void {
 
 function selectSession(id: string): void {
   retireRichImageViewer();
-  const ownerChanged = id !== selectedId;
+  retireImageSetViewer();
+  const ownerChanged = id !== selectedId();
   rememberDraft();
-  selectionGeneration++; replaceComposerDraft();
+  advanceSelectionGeneration(); replaceComposerDraft();
   inputQueueGeneration++;
   $('finishQueue').replaceChildren(); $('finishQueue').hidden = true;
   newChatSelected = false;
-  selectedId = id;
+  publishSelectedSession(id);
+  stage.select(id, selectionGeneration());
   reportVisibleSelection(true);
   const selected = sessions.find(row => row.id === id);
-  applyComposerSessionModel(`${id}:${selectionGeneration}`, composerSessionSelection(selected) ?? null);
+  applyComposerSessionModel(`${id}:${selectionGeneration()}`, composerSessionSelection(selected) ?? null);
   const parent = selected?.origin?.kind === 'worker' ? selected.origin.fromSessionId : null;
   if (parent) expandedWorkers.add(parent);
   selectedProjectId = projectGroup(projects, parent ? sessions.find(row => row.id === parent)?.projectId : selected?.projectId);
@@ -3164,19 +2130,14 @@ function selectSession(id: string): void {
   if (ownerChanged) {
     // Retire the prior owner now; retain only its inert painted transcript until the
     // selected detail arrives. Existing async image/load generation fences still apply.
-    events = [];
-    totalEvents = 0;
-    historyBefore = null;
-    detailFor = null;
     detailCursor = null;
-    forgetTimelineRows();
     $('timeline').setAttribute('inert', '');
     $('timeline').setAttribute('aria-busy', 'true');
     handoff = null;
     handoffFor = null;
     handoffLoadGeneration++;
   }
-  paintSessions(sessionHost);
+  paintNavigator(sessionHost);
   if (ownerChanged) {
     paintDetail(false);
     paintHandoff();
@@ -3187,22 +2148,24 @@ function selectSession(id: string): void {
 
 function selectNewChat(projectId: string | null = null): void {
   retireRichImageViewer();
-  rememberDraft(); selectionGeneration++; replaceComposerDraft(); pendingNewInput = null;
+  retireImageSetViewer();
+  rememberDraft(); advanceSelectionGeneration(); replaceComposerDraft(); pendingNewInput = null;
   inputQueueGeneration++;
   $('finishQueue').replaceChildren(); $('finishQueue').hidden = true;
-  newChatSelected = true; selectedId = null; selectedProjectId = projectId; detailFor = null; detailCursor = null;
+  newChatSelected = true; publishSelectedSession(null); stage.select(null, selectionGeneration());
+  selectedProjectId = projectId; syncDraftKey(); detailCursor = null;
   reportVisibleSelection(true);
   if (projectId) expandedProjects.add(projectId);
   applyComposerSessionModel(null, null);
   // New Chat selects its existing draft, just like a session. Navigation is not
   // permission to discard authored text, attachments or a prepared workflow.
   $('inputQueue').replaceChildren();
-  restoreDraft(); showView('timeline'); paintSessions(sessionHost); void loadDetail();
+  restoreDraft(); showView('timeline'); paintNavigator(sessionHost); void loadDetail();
   if (!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
     $('composer').animate?.([{ opacity: 0.45 }, { opacity: 1 }], { duration: 150, easing: 'ease-out' });
   }
   ui($<HTMLTextAreaElement>('chatInput'), 'placeholder', () => projectId ? t("Message in {0}…", [projects.find(project => project.id === projectId)?.name ?? 'project']) : t("Ask anything…"));
-  $<HTMLTextAreaElement>('chatInput').focus();
+  composerController?.focus();
 }
 
 
@@ -3216,13 +2179,13 @@ function selectNewChat(projectId: string | null = null): void {
 const sessionHost: SessionListHost = {
   sessions: () => sessions,
   projects: () => projects,
-  selectedId: () => selectedId,
+  selectedId: () => selectedId(),
   sidebarOrder: () => sidebarOrder,
   expandedWorkers,
   expandedProjects,
   projectVisibleCounts,
   paint: () => ({
-    selectedId, activeId, blockedChats, swarm,
+    selectedId: selectedId(), activeId, blockedChats, swarm,
     unattributedBlocked: () => unattributedBlocked(deps.state()),
     actions: sessionActions
   }),
@@ -3243,8 +2206,8 @@ const sessionActions: SessionRowActions = {
 
 /** The outbox's read-and-call surface, live for the same reason as the sidebar's. */
 const deliveryHost: DeliveryHost = {
-  selectedId: () => selectedId,
-  selectionGeneration: () => selectionGeneration,
+  selectedId: () => selectedId(),
+  selectionGeneration: () => selectionGeneration(),
   controlledSessionId: () => controlledSessionId,
   controlledTurnId: () => controlledTurnId,
   controlledSelection: () => controlledSelection,
@@ -3264,7 +2227,7 @@ const deliveryHost: DeliveryHost = {
   pendingNewInput: () => pendingNewInput,
   setPendingNewInput: next => { pendingNewInput = next; },
   authoredComposerText,
-  hasLaterModelActivity,
+  hasLaterModelActivity: time => stage.hasLaterActivity(time),
   restoreDraftToComposer,
   paintGoalProgress,
   projectGroup: id => projectGroup(projects, id),
@@ -3290,7 +2253,7 @@ const deliveryHost: DeliveryHost = {
  * project terminal — belong to this file, so the list asks for the re-point rather than doing it.
  */
 function updatePanels(): void {
-  agentPanel?.update(selectedId, sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId && selectedId !== null));
+  agentPanel?.update(selectedId(), sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId() && selectedId() !== null));
   filePanel?.update(selectedLocalProject(sessionHost));
   workspaceTerminal?.update(selectedLocalProject(sessionHost));
   // The Skills page lists what this session's project can see, and its scope is the same object
@@ -3305,7 +2268,7 @@ function updatePanels(): void {
 
 /** The Skills page's scope, kept in step with the composer picker's own. */
 function skillsLibraryScope(): { sessionId: string | null; projectId: string | null } {
-  return { sessionId: selectedId, projectId: selectedLocalProject(sessionHost)?.id ?? selectedProjectId };
+  return { sessionId: selectedId(), projectId: selectedLocalProject(sessionHost)?.id ?? selectedProjectId };
 }
 
 /**
@@ -3315,15 +2278,16 @@ function skillsLibraryScope(): { sessionId: string | null; projectId: string | n
  * this file's detail state, so the outbox asks rather than keeping a second copy of it.
  */
 function transcriptOwns(entry: InputEntry): boolean {
-  return detailFor === selectedId && !!(events.some(event =>
+  const resident = stage.events();
+  return !stage.awaiting() && !!(resident.some(event =>
     event.kind === 'user_message' && (event.inputId === entry.id ||
       event.messageId === (entry.messageId ?? `input:${entry.id}`))) ||
     // History owns committed off-page rows. Keep only receipts newer than our loaded
     // publication cursor while the corresponding live snapshot arrives.
     ((entry.historyAnchored || entry.historyRecorded) &&
-      (historyBefore !== null || (entry.historySeq !== undefined
+      (stage.browsing() || (entry.historySeq !== undefined
         ? (detailCursor ?? 0) > entry.historySeq
-        : events.length > 0))));
+        : resident.length > 0))));
 }
 
 /** Put a failed message's payload back in the composer, attachments and all, for review. */
@@ -3333,7 +2297,7 @@ function restoreDraftToComposer(entry: InputEntry): void {
   input.value = entry.text;
   if (entry.images?.length) imageDrafts.set(draftKey(), [...entry.images]);
   if (entry.attachments?.length) imageDrafts.set(draftKey(), [...(entry.images ?? []), ...entry.attachments]);
-  rememberDraft(); skillPicker?.restore(); paintComposerImages(deliveryHost); paintDeliveryControls(deliveryHost); input.focus();
+  rememberDraft(); skillPicker?.restore(); paintComposerImages(deliveryHost); paintDeliveryControls(deliveryHost); composerController?.focus();
 }
 
 /**
@@ -3350,10 +2314,10 @@ async function removeProject(id: string): Promise<void> {
   projects = projects.map(row => row.id === id ? removed : row);
   expandedProjects.delete(id); projectVisibleCounts.delete(id);
   if (selectedProjectId === id) {
-    if (!selectedId) {
+    if (!selectedId()) {
       const oldKey = draftKey();
       const authoredDraft = authoredComposerText();
-      selectedProjectId = null; selectionGeneration++; replaceComposerDraft();
+      selectedProjectId = null; syncDraftKey(); advanceSelectionGeneration(); replaceComposerDraft();
       reportVisibleSelection(true);
       // Keep the visible draft and its attachments while moving to unfiled.
       inputDrafts.set(draftKey(), authoredDraft); inputDrafts.delete(oldKey); newChatTasks.delete(oldKey);
@@ -3365,15 +2329,82 @@ async function removeProject(id: string): Promise<void> {
       $<HTMLTextAreaElement>('chatInput').placeholder = 'Ask anything…';
     } else selectedProjectId = null;
   }
-  paintSessions(sessionHost); void refreshInputQueue(deliveryHost);
+  paintNavigator(sessionHost); void refreshInputQueue(deliveryHost);
   toast('Project removed; conversations kept');
+}
+
+
+/**
+ * The rail writes which workbench tab is open. The pane owner is the only one that can show it.
+ *
+ * `refresh()` reports the result, including a close whose tab becomes null. That report is a new
+ * store value, so this listener ignores the report it caused and does nothing when the pane is
+ * already in the requested state. WorkPanel has show and toggle, not hide.
+ */
+function followShellWorkbench(work: NonNullable<typeof workPanel>): void {
+  let applying = false;
+  presentationStore.subscribe(state => state.shell.workbench, workbench => {
+    if (applying) return;
+    applying = true;
+    try {
+      if (workbench.open && workbench.tab) {
+        work.show(workbench.tab);
+        return;
+      }
+      if (work.panel.hidden) return;
+      const tab = work.panel.querySelector<HTMLElement>('[data-work-tab][aria-selected="true"]')?.dataset.workTab;
+      if (tab === 'files' || tab === 'agents' || tab === 'terminal') work.toggle(tab);
+    } finally {
+      applying = false;
+    }
+  });
 }
 
 export function initChat(next: Deps): void {
   sidebarOrder = createSidebarOrder($('sessionList'), () => sessions
     .filter(entry => (entry.conversationId || entry.origin?.kind === 'desktop') && entry.origin?.kind !== 'worker')
-    .map(entry => ({ id: entry.id, scope: projectGroup(projects, entry.projectId) ?? '' })), () => paintSessions(sessionHost));
+    .map(entry => ({ id: entry.id, scope: projectGroup(projects, entry.projectId) ?? '' })), () => paintNavigator(sessionHost));
   deps = next;
+  // One mounted transcript for the page's life. A stage from a previous init is retired rather
+  // than left holding rows nothing draws into.
+  stage?.dispose();
+  composerController?.dispose();
+  stage = createConversationStage({
+    pane: () => $('chatBody'),
+    timeline: () => $('timeline'),
+    outbox: deliveryHost,
+    origin: () => sessions.find(session => session.id === selectedId())?.origin ?? null,
+    developerMode: () => deps.state()?.config.ui.developerMode === true,
+    renderMarkdown: (source, capture) => renderedMarkdown(source, capture),
+    renderMessage: (html, fallback) => renderedMessage(html, fallback),
+    openOriginal: async (sessionId, messageId, current) => {
+      // Displaying persisted richOrigin is not a URL grant. The explicit button performs no
+      // action or browser input: main rereads the exact canonical historical assistant under
+      // the current window/selection witness.
+      const acknowledged = acknowledgedUiSelection;
+      if (!current() || acknowledged?.sessionId !== sessionId) return false;
+      try {
+        const reply = await api.openRichOriginal(sessionId, messageId);
+        return current() && acknowledgedUiSelection?.generation === acknowledged.generation && reply.ok && reply.data === true;
+      } catch { return false; }
+    },
+    richFocusStatus,
+    workerChat: agent => {
+      const matches = sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId() && entry.origin.agentId === agent);
+      return matches.length === 1 ? () => void agentPanel?.open(matches[0]!.id) : null;
+    }
+  });
+  chatNavigator = createChatNavigator({
+    root: $('chatNavigator'),
+    host: sessionHost,
+    store: presentationStore,
+    selectSession: id => {
+      pendingNewInput = null;
+      selectSession(id);
+    },
+    openFile: openNavigatorFile,
+    openImageSet: openNavigatorImageSet
+  });
   reportVisibleSelection(true); // Initial New Chat/null is explicit; activity never supplies selection.
   document.addEventListener('visibilitychange', () => reportVisibleSelection(!document.hidden));
   window.addEventListener('focus', () => reportVisibleSelection(true));
@@ -3388,56 +2419,47 @@ export function initChat(next: Deps): void {
   const agentToolGroups = new Map<string, HTMLDetailsElement>();
   const workHost = document.querySelector<HTMLElement>('[data-panel="chat"]')!;
   // The column is created before its tenants so it owns the host from the start.
-  const work = workPanel = createWorkPanel({ host: workHost });
+  const work = workPanel = createWorkPanel({
+    host: workHost,
+    onChange: presentation => presentationStore.dispatch({ type: 'workbenchChanged', open: presentation.open, tab: presentation.tab })
+  });
+  followShellWorkbench(work);
   agentPanel = createAgentPanel({
     host: workHost, toggle: agentToggle,
     onShow: () => filePanel?.hide(),
-    load: id => run(api.getSession(id, { limit: 160 })), openMain: selectSession, working: sessionWorking,
-    render: (source, id, current) => {
-      let boundary = '';
-      const rows = boundedTimeline(source).shown.flatMap(event => {
-        if (!['tool_call', 'page_tool', 'agent_message'].includes(event.kind)) boundary = `event:${event.seq}`;
-        if (!['user_message', 'assistant_message', 'native_image', 'tool_call', 'page_tool', 'agent_message', 'chat_error'].includes(event.kind)) return [];
-        const row = el('div', `ev ev-${event.kind} tl-row ${categoryClass(categoryFor(event.kind))}`); const body = el('div', 'ev-body');
-        tagImageRow(row, event);
-        row.dataset.timelineKey = `event:${event.seq}`; row.dataset.activityBoundary = boundary;
-        body.append(eventBody(event, { id, current, history: source })); row.append(body); return [row];
-      });
-      return groupImageRows(groupToolRows(rows, `pane:${id}`, agentToolGroups));
-    }
+    load: id => run(api.getSession(id, { limit: TIMELINE_PAGE_ROWS })), openMain: selectSession, working: sessionWorking,
+    // The pane previews a session with the transcript's own row builder: one definition of a
+    // row, so a tool call reads the same whether it is the selected chat or a worker's.
+    render: (source, id, current) => stage.previewRows(source, id, current, agentToolGroups)
   });
   initChatModels(() => {
     paintLoopDelivery();
     const config = deps.state()?.config;
-    if (config) paintContextMeter(sessions.find(session => session.id === selectedId) ?? null, config, confirmedComposerModel());
+    if (config) paintContextMeter(sessions.find(session => session.id === selectedId()) ?? null, config, confirmedComposerModel());
   });
-  $('queueAtFinish').addEventListener('click', () => {
+  const onQueueAtFinish = () => {
     if ($('queueAtFinish').hidden) return;
     $<HTMLSelectElement>('sendMode').value = 'after-turn';
     const input = $<HTMLTextAreaElement>('chatInput');
     if (input.value.trim() || imageDrafts.get(draftKey())?.length) void sendComposer('finish');
     else { input.focus(); paintDeliveryControls(deliveryHost); }
-  });
-  $('sendOptions').addEventListener('click', event => {
-    const button = (event.target as HTMLElement).closest<HTMLElement>('[data-delivery]');
-    if (!button || $('sendOptions').hidden) return;
-    $<HTMLSelectElement>('sendMode').value = button.dataset.delivery!;
+  };
+  const onChooseDelivery = (mode: string) => {
+    $<HTMLSelectElement>('sendMode').value = mode;
     paintDeliveryControls(deliveryHost);
-  });
-  $('automationSwitch').addEventListener('click', (event) => {
-    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-mode]');
-    if (!button || button.disabled) return;
+  };
+  const onChooseAutomation = (mode: string) => {
     const select = $<HTMLSelectElement>('chatAutomation');
-    select.value = button.dataset.mode!;
+    select.value = mode;
     select.dispatchEvent(new Event('change'));
-  });
-  $('chatAutomation').addEventListener('change', async () => {
+  };
+  const onAutomationChanged = async () => {
     goalIntentGeneration++;
     const select = $<HTMLSelectElement>('chatAutomation');
     cancelGoalRequest();
     if (select.value === 'off') goalDraftView = null;
     select.dataset.edited = 'true'; paintAutomationSwitch();
-    const id = selectedId, generation = selectionGeneration;
+    const id = selectedId(), generation = selectionGeneration();
     const mode = select.value as InputAutomation;
     const opening = id && pendingComposerInputs.find(row => row.sessionId === id && row.opening && !row.deliveredAt && ['queued', 'browser'].includes(row.state));
     if (opening) {
@@ -3455,12 +2477,12 @@ export function initChat(next: Deps): void {
     try { await run(api.setSessionAutomation(id, mode)); }
     finally {
       select.disabled = false;
-      if (id === selectedId && generation === selectionGeneration) { delete select.dataset.edited; void refreshSessionControls(); }
+      if (id === selectedId() && generation === selectionGeneration()) { delete select.dataset.edited; void refreshSessionControls(); }
       paintAutomationSwitch();
     }
-  });
-  $('loopDelivery').addEventListener('change', async () => {
-    const id = selectedId, generation = selectionGeneration;
+  };
+  const onLoopDeliveryChanged = async () => {
+    const id = selectedId(), generation = selectionGeneration();
     const select = $<HTMLSelectElement>('loopDelivery');
     const opening = id && pendingComposerInputs.find(row => row.sessionId === id && row.opening && !row.deliveredAt && ['queued', 'browser'].includes(row.state));
     if (opening) {
@@ -3480,21 +2502,20 @@ export function initChat(next: Deps): void {
     try { await run(api.setSessionAutomation(id, 'loop', select.value === 'after-turn')); }
     finally {
       select.disabled = false;
-      if (id === selectedId && generation === selectionGeneration) void refreshSessionControls();
+      if (id === selectedId() && generation === selectionGeneration()) void refreshSessionControls();
     }
-  });
-  $('sessionObjective').addEventListener('input', () => { cancelGoalRequest(); goalIntentGeneration++; $('sessionObjective').dataset.edited = 'true'; delete $('sessionObjective').dataset.saved; paintTaskActions(); });
-  $('sessionObjectiveMode').addEventListener('change', () => { cancelGoalRequest(); goalIntentGeneration++; $('sessionObjective').dataset.edited = 'true'; delete $('sessionObjective').dataset.saved; paintTaskActions(); });
-  for (const buttonId of ['saveSessionObjective'] as const) {
-    $(buttonId).addEventListener('click', async () => {
-      const id = selectedId;
+  };
+  const onObjectiveEdited = () => { cancelGoalRequest(); goalIntentGeneration++; $('sessionObjective').dataset.edited = 'true'; delete $('sessionObjective').dataset.saved; paintTaskActions(); };
+  const onSaveObjective = async () => {
+    const buttonId = 'saveSessionObjective' as const;
+      const id = selectedId();
       const objective = $<HTMLTextAreaElement>('sessionObjective');
       if (!id) {
         const draft = objective.value, mode = $<HTMLSelectElement>('sessionObjectiveMode').value as 'goal' | 'loop';
         if (!draft.trim()) return;
         const settings = confirmedComposerModel();
         if (!settings) { toast('Reload model choices and select an available model and thinking effort before sending.'); return; }
-        const selection = selectionGeneration, intent = goalIntentGeneration, requestId = crypto.randomUUID();
+        const selection = selectionGeneration(), intent = goalIntentGeneration, requestId = crypto.randomUUID();
         const projectId = selectedProjectId;
         const { model, reasoningEffort } = settings;
         const automation = $<HTMLSelectElement>('chatAutomation');
@@ -3502,7 +2523,7 @@ export function initChat(next: Deps): void {
         automation.dataset.edited = 'true'; paintAutomationSwitch();
         goalProgress = { requestId, selection, phase: 'preparing', text: '' };
         const button = $<HTMLButtonElement>(buttonId); button.dataset.busy = 'true'; paintTaskActions(); paintGoalProgress();
-        const current = () => selectedId === null && selectionGeneration === selection && goalIntentGeneration === intent && objective.value === draft && automation.value === mode;
+        const current = () => selectedId() === null && selectionGeneration() === selection && goalIntentGeneration === intent && objective.value === draft && automation.value === mode;
         try {
           const result = await api.draftGoalOpening(draft.trim(), mode, requestId);
           const opening = result.ok ? result.data : null;
@@ -3520,7 +2541,7 @@ export function initChat(next: Deps): void {
             if (accepted) { inputQueueGeneration++; pendingComposerInputs = [...pendingComposerInputs.filter(row => row.id !== inputId), accepted];
               // Off may arrive while sendInput is still validating/enqueuing, before
               // the outbox row exists. Reconcile that same pending intent after acceptance.
-              if (selectionGeneration === selection && pendingNewInput?.id === inputId &&
+              if (selectionGeneration() === selection && pendingNewInput?.id === inputId &&
                   (automation.value !== mode || openingLoopDelivery() !== entry.loopAfterTurn))
                 await run(api.setInputAutomation(inputId, automation.value as InputAutomation, openingLoopDelivery()));
               await adoptAcceptedOpening(deliveryHost, accepted);
@@ -3531,7 +2552,7 @@ export function initChat(next: Deps): void {
         return;
       }
       if (objective.dataset.sessionId !== id) return;
-      const selection = selectionGeneration, draft = objective.value;
+      const selection = selectionGeneration(), draft = objective.value;
       const text = objective.value.trim();
       if (!text) return;
       const mode = $<HTMLSelectElement>('sessionObjectiveMode').value as 'goal' | 'loop';
@@ -3540,29 +2561,92 @@ export function initChat(next: Deps): void {
       try {
         const saved = await run(api.setSessionObjective(id, text, mode));
         if (goalProgress?.requestId === requestId) { goalProgress.phase = saved ? 'saved' : 'failed'; if (!saved) goalProgress.error = 'Task could not be saved'; paintGoalProgress(); }
-        if (saved && selectedId === id && selectionGeneration === selection && objective.value === draft &&
+        if (saved && selectedId() === id && selectionGeneration() === selection && objective.value === draft &&
             $<HTMLSelectElement>('sessionObjectiveMode').value === mode) { delete objective.dataset.edited; objective.dataset.saved = objective.value; }
       } finally {
         delete button.dataset.busy; paintTaskActions();
-        if (selectedId === id) void refreshSessionControls();
+        if (selectedId() === id) void refreshSessionControls();
       }
-    });
-  }
-  for (const [buttonId, cancel] of [['compactSession', false], ['cancelCompaction', true]] as const) {
-    $(buttonId).addEventListener('click', async () => {
-      const id = selectedId; if (!id) return;
-      const button = $<HTMLButtonElement>(buttonId); button.disabled = true;
-      try { await run(cancel ? api.cancelSessionCompaction(id) : api.compactSession(id)); }
-      finally { button.disabled = false; if (selectedId === id) void refreshSessionControls(); }
-    });
-  }
+    
+  };
+  const onCompact = async (cancel: boolean) => {
+    const id = selectedId(); if (!id) return;
+    const button = $<HTMLButtonElement>(cancel ? 'cancelCompaction' : 'compactSession'); button.disabled = true;
+    try { await run(cancel ? api.cancelSessionCompaction(id) : api.compactSession(id)); }
+    finally { button.disabled = false; if (selectedId() === id) void refreshSessionControls(); }
+  };
+  const onGenerateFinishGoal = async () => {
+    const button = $<HTMLButtonElement>('generateFinishGoal'), id = selectedId(), turnId = controlledTurnId;
+    if (!id || !turnId || button.hidden || button.disabled || controlledSessionId !== id || controlledSelection !== selectionGeneration()) return;
+    const owner = `${id}:${turnId}`;
+    button.dataset.busy = owner; paintDeliveryControls(deliveryHost);
+    try { await run(api.generateFinishGoal(id, turnId)); }
+    finally {
+      if (button.dataset.busy === owner) delete button.dataset.busy;
+      if (selectedId() === id) void refreshSessionControls();
+      else paintDeliveryControls(deliveryHost);
+    }
+  };
+  const onComposerInput = () => {
+    const hasText = !!authoredComposerText().trim();
+    const plan = taskPlans.get(draftKey());
+    if (plan && !plan.stages && (plan.requestId || !hasText)) {
+      cancelTaskPlan();
+      if (hasText) taskPlans.set(draftKey(), { text: '', requestId: null, stages: null, sending: false, progress: null, error: null });
+    }
+    paintDeliveryControls(deliveryHost); paintTaskActions();
+  };
+  const onComposerKeydown = (event: KeyboardEvent) => {
+    if (skillPicker?.keydown(event)) return;
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (currentPreparedPlan() || authoredComposerText().trim() || imageDrafts.get(draftKey())?.length) $<HTMLFormElement>('composer').requestSubmit(); }
+  };
+  const onCreatePlan = () => { if (taskPlans.has(draftKey())) cancelTaskPlan(); else void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); };
+  const onComposerSubmit = (event: Event) => { event.preventDefault(); if (currentPreparedPlan()) void sendPreparedPlan(); else if (taskPlans.has(draftKey())) { if (!$('createPlan').dataset.busy) void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); } else void sendComposer(); };
+  skillPicker = initSkills({ input: $<HTMLTextAreaElement>('chatInput'), host: $('skillPicker'),
+    openButton: $('composerSkills'), addButton: $('composerAddSkill'),
+    selectedHost: $('composerSelectedSkills'), owner: () => `${draftKey()}:${presentationStore.getState().draft.generation}`,
+    scope: () => ({ sessionId: selectedId(), projectId: selectedLocalProject(sessionHost)?.id ?? selectedProjectId }),
+    draft: () => inputDrafts.get(draftKey()), saveDraft: text => inputDrafts.set(draftKey(), text),
+    list: scope => api.skillLibrary(scope), command: name => {
+      if (name === 'plan') { $('createPlan').click(); return; }
+      if (name === 'compact') { $('compactSession').click(); return; }
+      const automation = $<HTMLSelectElement>('chatAutomation'); automation.value = name;
+      automation.dispatchEvent(new Event('change', { bubbles: true }));
+    } });
+  skillPicker.restore();
+  composerController = createComposerController({
+    imageDrafts,
+    inputDrafts,
+    taskPlans,
+    pendingInputs: () => pendingComposerInputs,
+    stageFiles: async files => (await run(api.dropFiles([...files]))) ?? null,
+    chooseFiles: () => run(api.chooseFiles()),
+    attachText: async text => (await run(api.attachText(text))) ?? null,
+    notify: message => { toast(message); },
+    text: () => $<HTMLTextAreaElement>('chatInput').value,
+    onAttachments: () => { paintComposerImages(deliveryHost); },
+    surface: {
+      queueAtFinish: onQueueAtFinish,
+      chooseDelivery: onChooseDelivery,
+      chooseAutomation: onChooseAutomation,
+      automationChanged: onAutomationChanged,
+      loopDeliveryChanged: onLoopDeliveryChanged,
+      objectiveEdited: onObjectiveEdited,
+      saveObjective: onSaveObjective,
+      compact: onCompact,
+      generateFinishGoal: onGenerateFinishGoal,
+      composerInput: onComposerInput,
+      composerKeydown: onComposerKeydown,
+      settingsToggled: paintTaskActions,
+      createPlan: onCreatePlan,
+      submit: onComposerSubmit
+    }
+  });
+  composerController.update(composerDraftOwner(), {});
   const appendImages = (owner: ComposerDraftOwner, chosen: InputAttachment[] | null | undefined): boolean => {
     if (!chosen?.length) return false;
     if (!ownsComposerDraft(owner)) { toast(t("Files were not added because the draft changed.")); return false; }
-    const combined = [...(imageDrafts.get(owner.key) ?? []), ...chosen];
-    if (combined.length > 20 || combined.reduce((sum, file) => sum + ('size' in file ? file.size : 0), 0) > 512 * 1024 * 1024) { toast(t("Attach up to 20 files and 512 MB per message")); return false; }
-    imageDrafts.set(owner.key, combined); paintComposerImages(deliveryHost);
-    return true;
+    return composerController!.acceptAttachments(owner, chosen);
   };
   filePanel = createFilePanel({
     host: workHost, toggle: fileToggle,
@@ -3572,6 +2656,9 @@ export function initChat(next: Deps): void {
       return attachment => appendImages(owner, [attachment]);
     }
   });
+  const NavigatorMutationObserver = filePanel.element.ownerDocument.defaultView?.MutationObserver;
+  if (NavigatorMutationObserver) new NavigatorMutationObserver(() => paintNavigator(sessionHost))
+    .observe(filePanel.element, { childList: true, subtree: true, characterData: true });
   filePanel.update(selectedLocalProject(sessionHost));
   workspaceTerminal = createWorkspaceTerminal({ host: workHost });
   workspaceTerminal.update(selectedLocalProject(sessionHost));
@@ -3584,22 +2671,6 @@ export function initChat(next: Deps): void {
   // pane, so its tab stays reachable exactly as its header button always was.
   work.register('terminal', workspaceTerminal);
   work.refresh();
-  $('attachImages').addEventListener('click', async () => {
-    const owner = composerDraftOwner();
-    appendImages(owner, await run(api.chooseFiles()));
-  });
-  skillPicker = initSkills({ input: $<HTMLTextAreaElement>('chatInput'), host: $('skillPicker'),
-    openButton: $('composerSkills'), addButton: $('composerAddSkill'),
-    selectedHost: $('composerSelectedSkills'), owner: () => `${draftKey()}:${composerDraftGeneration}`,
-    scope: () => ({ sessionId: selectedId, projectId: selectedLocalProject(sessionHost)?.id ?? selectedProjectId }),
-    draft: () => inputDrafts.get(draftKey()), saveDraft: text => inputDrafts.set(draftKey(), text),
-    list: scope => api.skillLibrary(scope), command: name => {
-      if (name === 'plan') { $('createPlan').click(); return; }
-      if (name === 'compact') { $('compactSession').click(); return; }
-      const automation = $<HTMLSelectElement>('chatAutomation'); automation.value = name;
-      automation.dispatchEvent(new Event('change', { bubbles: true }));
-    } });
-  skillPicker.restore();
   // Same scope as the picker above, so the page and the composer can never disagree about which
   // skills exist: a repo skill in the open project belongs on both, or on neither.
   skillsLibrary = initSkillsLibrary({
@@ -3611,56 +2682,14 @@ export function initChat(next: Deps): void {
   // Loaded when the settings sheet is opened (`showView`), not here: a launch that never opens
   // Settings should not pay for the scan.
   skillsLibraryScopeKey = JSON.stringify(skillsLibraryScope());
-  $('generateFinishGoal').addEventListener('click', async () => {
-    const button = $<HTMLButtonElement>('generateFinishGoal'), id = selectedId, turnId = controlledTurnId;
-    if (!id || !turnId || button.hidden || button.disabled || controlledSessionId !== id || controlledSelection !== selectionGeneration) return;
-    const owner = `${id}:${turnId}`;
-    button.dataset.busy = owner; paintDeliveryControls(deliveryHost);
-    try { await run(api.generateFinishGoal(id, turnId)); }
-    finally {
-      if (button.dataset.busy === owner) delete button.dataset.busy;
-      if (selectedId === id) void refreshSessionControls();
-      else paintDeliveryControls(deliveryHost);
-    }
-  });
-  $('composer').addEventListener('dragover', event => {
-    if (!event.dataTransfer?.types.some(type => type === 'text/plain') || event.dataTransfer.types.includes('Files')) return;
-    event.preventDefault(); event.dataTransfer.dropEffect = 'copy';
-  });
-  $('composer').addEventListener('drop', async event => {
-    if (!event.dataTransfer?.types.some(type => type === 'text/plain') || event.dataTransfer.types.includes('Files')) return;
-    event.preventDefault();
-    const text = event.dataTransfer.getData('text/plain'), owner = composerDraftOwner();
-    if (text) { const file = await run(api.attachText(text)); if (file) appendImages(owner, [file]); }
-  });
-  window.addEventListener('paste', async event => {
-    const files = Array.from(event.clipboardData?.files ?? []).filter(file => file.type.startsWith('image/'));
-    if (!files.length) return;
-    event.preventDefault();
-    const owner = composerDraftOwner();
-    if (files.length + (imageDrafts.get(owner.key)?.length ?? 0) > 20) { toast('Attach up to 20 files per message'); return; }
-    appendImages(owner, await run(api.dropFiles(files)));
-  });
-  window.addEventListener('dragover', event => {
-    if ((event.target as Element | null)?.closest?.('#foldersCard') || !event.dataTransfer?.types?.includes?.('Files')) return;
-    event.preventDefault(); event.dataTransfer.dropEffect = 'copy';
-  });
-  window.addEventListener('drop', async event => {
-    if ((event.target as Element | null)?.closest?.('#foldersCard') || !event.dataTransfer?.types?.includes?.('Files')) return;
-    event.preventDefault();
-    const files = Array.from(event.dataTransfer.files), owner = composerDraftOwner();
-    if (!files.length) return;
-    if (files.length + (imageDrafts.get(owner.key)?.length ?? 0) > 20) { toast('Attach up to 20 files per message'); return; }
-    appendImages(owner, await run(api.dropFiles(files)));
-  });
-  api.onWriteSession?.(id => { selectSession(id); $<HTMLTextAreaElement>('chatInput').focus(); });
+  api.onWriteSession?.(id => { selectSession(id); composerController?.focus(); });
   $('newChat').addEventListener('click', () => {
     selectNewChat();
   });
   $('addProject').addEventListener('click', async event => {
     event.preventDefault();
     const button = $<HTMLButtonElement>('addProject'); button.disabled = true;
-    const generation = selectionGeneration;
+    const generation = selectionGeneration();
     try {
       const project = await run(api.addProject());
       if (!project) return;
@@ -3669,40 +2698,13 @@ export function initChat(next: Deps): void {
       ++sessionsLoadGeneration;
       projects = [...projects.filter(row => row.id !== project.id), project];
       expandedProjects.add(project.id);
-      if (generation === selectionGeneration) selectNewChat(project.id); else paintSessions(sessionHost);
+      if (generation === selectionGeneration()) selectNewChat(project.id); else paintNavigator(sessionHost);
     } finally { button.disabled = false; }
   });
   $('settingsSearch').addEventListener('input', () => applySettingsFilter());
-  const composerMenus = [...document.querySelectorAll<HTMLDetailsElement>('.composer-menu, .session-controls')];
-  document.addEventListener('click', (event) => {
-    for (const menu of composerMenus) if (!menu.contains(event.target as Node) || ((event.target as HTMLElement).closest('button') && !(event.target as HTMLElement).closest('[data-keep-menu]'))) menu.open = false;
-  });
-  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') for (const menu of composerMenus) menu.open = false; });
-  $('chatInput').addEventListener('input', () => {
-    const hasText = !!authoredComposerText().trim();
-    const plan = taskPlans.get(draftKey());
-    if (plan && !plan.stages && (plan.requestId || !hasText)) {
-      cancelTaskPlan();
-      if (hasText) taskPlans.set(draftKey(), { text: '', requestId: null, stages: null, sending: false, progress: null, error: null });
-    }
-    paintDeliveryControls(deliveryHost); paintTaskActions();
-  });
-  $('chatInput').addEventListener('keydown', (event) => {
-    if (skillPicker?.keydown(event)) return;
-    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (currentPreparedPlan() || authoredComposerText().trim() || imageDrafts.get(draftKey())?.length) $<HTMLFormElement>('composer').requestSubmit(); }
-  });
-  $('composerSettings').addEventListener('toggle', paintTaskActions);
   initContextMeter();
   initComposerStatusLine();
-  $('createPlan').addEventListener('click', () => { if (taskPlans.has(draftKey())) cancelTaskPlan(); else void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); });
-  $('composer').addEventListener('submit', (event) => { event.preventDefault(); if (currentPreparedPlan()) void sendPreparedPlan(); else if (taskPlans.has(draftKey())) { if (!$('createPlan').dataset.busy) void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); } else void sendComposer(); });
 
-  $('sessionList').addEventListener('click', (event) => {
-    const row = (event.target as HTMLElement).closest<HTMLElement>('[data-id]');
-    if (!row?.dataset.id || row.dataset.id === selectedId) return;
-    pendingNewInput = null;
-    selectSession(row.dataset.id);
-  });
   $('sessionList').closest<HTMLElement>('.scroll')?.addEventListener('scroll', () => maybePageSessions({
     visible, cursor: sessionPageCursor, loaded: sessions.length, total: sessionTotal,
     loadMore: () => void loadMoreSessions()
@@ -3713,30 +2715,29 @@ export function initChat(next: Deps): void {
   let historyIntent: string | null = null;
   let historyDirection = 0;
   const loadAtEdge = () => {
-    if (!historyIntent || historyIntent !== selectedId || historyLoading || !selectedId || detailFor !== selectedId) return;
+    if (!historyIntent || historyIntent !== selectedId() || historyLoading || !selectedId() || stage.awaiting()) return;
     const older = historyDirection < 0 && historyPane.scrollTop <= 80;
-    const newer = historyDirection > 0 && historyBefore !== null && historyPane.scrollHeight - historyPane.clientHeight - historyPane.scrollTop <= 80;
+    const newer = historyDirection > 0 && stage.browsing() && historyPane.scrollHeight - historyPane.clientHeight - historyPane.scrollTop <= 80;
     if (!older && !newer) return;
     historyIntent = null;
     if (newer) {
-      const from = events.reduce((cursor, event) => Math.max(cursor, positionOf(event)), 0);
+      const from = stage.newerOrigin();
+      if (from === null) return;
       historyLoading = true;
       void loadDetail(true, undefined, from).finally(() => { historyLoading = false; });
       return;
     }
-    const windowed = boundedTimeline(visibleEvents());
-    const boundaryRows = windowed.omitted > 0 && windowed.shown.length ? windowed.shown : events;
-    const before = boundaryRows.length ? Math.min(...boundaryRows.map(positionOf)) : 1;
-    if (before <= 1) return;
+    const before = stage.olderOrigin();
+    if (before === null || before <= 1) return;
     historyLoading = true;
     void loadDetail(true, before).finally(() => { historyLoading = false; });
   };
-  historyPane.addEventListener('wheel', event => { historyIntent = selectedId; historyDirection = Math.sign(event.deltaY); loadAtEdge(); }, { passive: true });
+  historyPane.addEventListener('wheel', event => { historyIntent = selectedId(); historyDirection = Math.sign(event.deltaY); loadAtEdge(); }, { passive: true });
   let pointerScrollTop: number | null = null;
   historyPane.addEventListener('pointerdown', () => { pointerScrollTop = historyPane.scrollTop; });
   window.addEventListener('pointerup', () => { pointerScrollTop = null; });
   historyPane.addEventListener('keydown', event => {
-    historyIntent = selectedId;
+    historyIntent = selectedId();
     historyDirection = ['ArrowUp', 'PageUp', 'Home'].includes(event.key) ? -1 : ['ArrowDown', 'PageDown', 'End'].includes(event.key) ? 1 : 0;
     loadAtEdge();
   });
@@ -3744,7 +2745,7 @@ export function initChat(next: Deps): void {
     if (pointerScrollTop !== null) {
       historyDirection = Math.sign(historyPane.scrollTop - pointerScrollTop);
       pointerScrollTop = historyPane.scrollTop;
-      historyIntent = selectedId;
+      historyIntent = selectedId();
     }
     loadAtEdge();
   }, { passive: true });
@@ -3759,7 +2760,7 @@ export function initChat(next: Deps): void {
   $('chatAgentFilter').addEventListener('click', (event) => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-agent]');
     if (!button) return;
-    agentFilter = button.dataset.agent === '' ? null : (button.dataset.agent ?? null);
+    stage.setFilter(button.dataset.agent === '' ? null : (button.dataset.agent ?? null));
     paintDetail();
   });
 
@@ -3815,7 +2816,7 @@ export function initChat(next: Deps): void {
 
   api.onSessionChanged(scheduleReload);
   api.onTaskProgress(progress => {
-    if (!goalProgress || progress.requestId !== goalProgress.requestId || goalProgress.selection !== selectionGeneration) return;
+    if (!goalProgress || progress.requestId !== goalProgress.requestId || goalProgress.selection !== selectionGeneration()) return;
     Object.assign(goalProgress, progress); paintGoalProgress();
   });
   api.onSwarmChanged(paintSwarm);

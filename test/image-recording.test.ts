@@ -82,3 +82,18 @@ it('exposes a recording write failure without leaking filesystem error text into
   expect(call.summary.detail).toContain('recording write failed');
   expect(JSON.stringify(call)).not.toContain('PRIVATE_LOCAL_PATH');
 });
+
+it('keeps a native response set apart from a recorded view_image tool call', async () => {
+  await callImage();
+  const native = (messageId: string, asset: string, time: number) => store.upsertNativeImageEvent(sessionId, {
+    time, source: 'extension', kind: 'native_image', messageId, providerAssetId: asset,
+    providerRole: 'tool', previewStatus: 'pending'
+  });
+  await native('response-a', 'asset-a', 1);
+  await native('response-a', 'asset-b', 2);
+  await native('response-b', 'asset-c', 3);
+  const { imageSetsForTimeline } = await import('../src/shared/chronology.js');
+  const sets = imageSetsForTimeline(await store.readEvents(sessionId));
+  expect(sets.map(set => [set.responseId, set.images.length])).toEqual([['response-a', 2], ['response-b', 1]]);
+  expect(JSON.stringify(sets)).not.toMatch(/base64|https?:|data:/);
+});

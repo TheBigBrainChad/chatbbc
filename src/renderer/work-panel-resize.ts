@@ -1,9 +1,40 @@
-const STORAGE_KEY = 'chatbbc.work-panel-width';
+const LEGACY_KEY = 'chatbbc.work-panel-width';
+const STORAGE_KEY = 'chatbbc.workbench-width';
 const MIN_WIDTH = 280;
 const MIN_MAIN_WIDTH = 360;
 
+export const WORKBENCH_SPLIT_MIN = 1100;
+
+/** Wide hosts keep the resizable split. Medium and narrow hosts use the overlay. */
+export function workbenchMode(width: number): 'split' | 'overlay' {
+  return width >= WORKBENCH_SPLIT_MIN ? 'split' : 'overlay';
+}
+
+function migrateWorkbenchWidth(view: Window | null | undefined): void {
+  try {
+    const storage = view?.localStorage;
+    if (!storage) return;
+    // One-time migration, then the legacy key is deleted in the same read so no runtime
+    // branch or duplicate preference survives this call.
+    if (storage.getItem(STORAGE_KEY) == null) {
+      const legacy = storage.getItem(LEGACY_KEY);
+      if (legacy != null) storage.setItem(STORAGE_KEY, legacy);
+    }
+    storage.removeItem(LEGACY_KEY);
+  } catch { /* Layout persistence is optional. */ }
+}
+
+function mirrorWorkbenchWidth(host: HTMLElement, width: string | null): void {
+  const shell = host.closest<HTMLElement>('.app');
+  if (!shell) return;
+  if (width == null) shell.style.removeProperty('--workbench-width');
+  else shell.style.setProperty('--workbench-width', width);
+}
+
 function hostWidth(host: HTMLElement): number {
-  const measured = host.getBoundingClientRect().width || host.clientWidth || host.ownerDocument.defaultView?.innerWidth || 0;
+  const shell = host.closest<HTMLElement>('.app');
+  const shellWidth = shell?.getBoundingClientRect().width || 0;
+  const measured = shellWidth || host.getBoundingClientRect().width || host.clientWidth || host.ownerDocument.defaultView?.innerWidth || 0;
   return Math.max(MIN_WIDTH + MIN_MAIN_WIDTH, measured);
 }
 
@@ -22,6 +53,7 @@ function currentWidth(host: HTMLElement, pane: HTMLElement): number {
 function setWidth(host: HTMLElement, width: number, persist = false): number {
   const next = Math.round(Math.max(MIN_WIDTH, Math.min(maximum(host), width)));
   host.style.setProperty('--work-panel-width', `${next}px`);
+  mirrorWorkbenchWidth(host, `${next}px`);
   // Files, Sub-agents and Terminal are three projections of one work slot. Keep every separator's
   // accessibility state synchronized even while its pane is hidden.
   for (const handle of host.querySelectorAll<HTMLElement>('.work-panel-resize')) {
@@ -65,6 +97,7 @@ export function widenWorkPanel(host: HTMLElement, pane: HTMLElement): () => void
  */
 export function attachWorkPanelResize(host: HTMLElement, pane: HTMLElement): HTMLElement {
   const view = host.ownerDocument.defaultView;
+  migrateWorkbenchWidth(view);
   if (!host.style.getPropertyValue('--work-panel-width')) {
     try {
       const saved = Number(view?.localStorage.getItem(STORAGE_KEY));
@@ -109,6 +142,7 @@ export function attachWorkPanelResize(host: HTMLElement, pane: HTMLElement): HTM
 
   handle.addEventListener('dblclick', () => {
     host.style.removeProperty('--work-panel-width');
+    mirrorWorkbenchWidth(host, null);
     try { view?.localStorage.removeItem(STORAGE_KEY); } catch { /* optional */ }
     paintAria();
   });

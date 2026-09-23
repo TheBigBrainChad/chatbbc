@@ -6,6 +6,7 @@ import { marked } from 'marked';
 import { t, ui } from './i18n.js';
 import { el, humanBytes, icon, run, toast } from './dom.js';
 import { attachWorkPanelResize } from './work-panel-resize.js';
+import type { WorkbenchSelection } from './work-panel.js';
 import type { ProjectCodeEditor } from './file-code-editor.js';
 import type { ProjectPdfViewer } from './file-pdf-viewer.js';
 
@@ -1076,6 +1077,10 @@ export function createFilePanel(options: FilePanelOptions) {
     hide,
     show: () => void show(),
     available: () => project !== null,
+    beforeReplace(selection: WorkbenchSelection): boolean {
+      if (!project || !editingPath || !editorDirty) return true;
+      return selection.ownerKey === project.id || selection.ownerKey === `project:${project.id}`;
+    },
     visible: () => !pane.hidden,
     update(next: LocalProject | null): void {
       const changed = project?.id !== next?.id;

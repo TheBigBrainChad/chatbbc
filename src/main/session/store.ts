@@ -46,7 +46,7 @@ import { continuationMarkerOf, eventTokens, MAX_TOOL_RESULT_TOKENS, normalizedTo
 import { parseRichResponse, type RichNode, type RichResponse } from '../../shared/rich-response.js';
 import { parseRichOrigin } from './rich-response.js';
 import { applyTurnIdentity, authoredTimeOf, chronological, injectedUserMessage, positionOf, projectTimeline,
-  recordedRequestTurn, responseTurnId, type Chronological, type TimelineTurns } from '../../shared/chronology.js';
+  imageSetsForTimeline, recordedRequestTurn, responseTurnId, IMAGE_SET_METADATA_LIMIT, type Chronological, type ImageSetView, type TimelineTurns } from '../../shared/chronology.js';
 import { automaticTitle, firstTitleMessage, legacyContextTitle, refreshUserTitle } from './title.js';
 import { agentPlanSchema, agentPlanUpdateSchema, MAX_AGENT_PLAN_BYTES, type AgentPlan, type AgentPlanUpdate } from '../../shared/agent-plan.js';
 import { getConfig, getRecordingRevision, recordingGenerationGrant, recordingWriteAllowed, registerRecordingWriteDrain } from '../config.js';
@@ -3266,6 +3266,60 @@ export async function readRecentEvents(
   assertSessionId(sessionId);
   await flushSession(sessionId);
   return readRecentEventsFromDisk(sessionId, limit, options);
+}
+
+function acceptedImageResponseId(value: string): string | null {
+  const id = value.trim();
+  if (!id || id.length > 256 || /[\u0000-\u001f\u007f]/.test(id)) return null;
+  return id;
+}
+
+function boundImageSets(sets: ImageSetView[]): { sets: ImageSetView[]; imagesTruncated: boolean } {
+  const limited = sets.slice(0, IMAGE_SET_METADATA_LIMIT);
+  const imagesTruncated = limited.some(set => set.images.length > IMAGE_SET_METADATA_LIMIT);
+  return {
+    imagesTruncated,
+    sets: limited.map(set => ({ ...set, images: set.images.slice(0, IMAGE_SET_METADATA_LIMIT) }))
+  };
+}
+
+/** Bounded image-set metadata for one session. No preview bytes and no provider URL.
+ * A response-id list reads those canonical rows, not the recent window. */
+export async function sessionImageSets(sessionId: string, responseIds?: readonly string[]): Promise<{ sets: ImageSetView[]; truncated: boolean }> {
+  assertSessionId(sessionId);
+  if (!(await getSession(sessionId))) return { sets: [], truncated: false };
+  await flushSession(sessionId);
+  if (responseIds) {
+    const unique: string[] = [];
+    const seen = new Set<string>();
+    for (const value of responseIds) {
+      const id = acceptedImageResponseId(value);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      unique.push(id);
+    }
+    const ids = unique.slice(0, IMAGE_SET_METADATA_LIMIT);
+    const active = open.get(sessionId);
+    const messages = active?.messages ?? await readCanonicalMessages(sessionId);
+    const wanted = new Set(ids);
+    const events: NativeImageEvent[] = [];
+    for (const event of messages.values()) {
+      if (event.kind === 'native_image' && wanted.has(event.messageId)) events.push(event);
+    }
+    events.sort((left, right) => (left.origin ?? left.seq) - (right.origin ?? right.seq) || left.seq - right.seq);
+    const built = new Map(imageSetsForTimeline(events).map(set => [set.responseId, set]));
+    const ordered = ids.flatMap(id => {
+      const set = built.get(id);
+      return set ? [set] : [];
+    });
+    const bounded = boundImageSets(ordered);
+    return { sets: bounded.sets, truncated: unique.length > IMAGE_SET_METADATA_LIMIT || bounded.imagesTruncated };
+  }
+  const events = await readRecentEvents(sessionId, 320, { kinds: ['native_image'], orderByOrigin: true });
+  const projected = imageSetsForTimeline(events);
+  const bounded = boundImageSets(projected);
+  // A full recent window can hide older images, so a full read is not proof of completeness.
+  return { sets: bounded.sets, truncated: bounded.imagesTruncated || projected.length > IMAGE_SET_METADATA_LIMIT || events.length >= 320 };
 }
 
 /**

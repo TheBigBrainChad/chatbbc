@@ -1,4 +1,7 @@
 import { parseRichResponse, type RichNode, type RichResponse } from '../shared/rich-response.js';
+import { t, ui } from './i18n.js';
+import { admitArtifactMedia } from '../shared/static-artifact.js';
+import { mountStaticArtifact } from './static-artifact.js';
 import type { RichMediaState } from '../shared/session.js';
 import { isViewableRichImage, localDataUrl, openRichImageViewer } from './rich-image.js';
 
@@ -8,6 +11,10 @@ export type RichImageContext = {
   current: () => boolean;
   /** A fixed, main-verified manual history opener, not an action/Continue/retry. */
   openOriginal?: () => Promise<boolean>;
+  /** Data URLs already admitted for this message. Remote values are ignored. */
+  admittedArtifactMedia?: ReadonlyMap<string, string>;
+  /** Ledger text for a focused artifact or decision. Absent until a result exists. */
+  focusStatus?: 'pending' | 'confirmed' | 'changed' | 'unavailable' | 'unconfirmed';
 };
 
 type ImageRender = RichImageContext & { rich: RichResponse; imageCounts: Map<string, number> };
@@ -431,6 +438,49 @@ function renderTableRow(node: RichNode, images?: ImageRender): HTMLElement {
   return row;
 }
 
+
+function cleanAdmittedArtifactMedia(value: ReadonlyMap<string, string> | undefined): ReadonlyMap<string, string> | undefined {
+  if (!value || typeof value.size !== 'number' || value.size > 64) return undefined;
+  const clean = new Map<string, string>();
+  for (const [id, dataUrl] of value) {
+    if (typeof id !== 'string' || typeof dataUrl !== 'string') return undefined;
+    if (!/^[\w:-]{1,80}$/.test(id) || !/^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(dataUrl)) return undefined;
+    clean.set(id, dataUrl);
+  }
+  return clean;
+}
+
+
+function containsControl(node: RichNode): boolean {
+  if (node.kind === 'control') return true;
+  if (node.kind === 'group') return node.children.some(containsControl);
+  return false;
+}
+
+/** Ask the conversation stage to enlarge this card. The click is local UI, not a provider action. */
+function appendFocus(host: HTMLElement, nodeId: string): void {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'rich-focus-open';
+  ui(button, 'textContent', () => t('Focus'));
+  button.addEventListener('click', () => {
+    const box = button.closest<HTMLElement>('.rich-response');
+    const row = button.closest<HTMLElement>('[data-timeline-origin]');
+    const logicalMessageId = box?.dataset.richMessageId ?? '';
+    const revision = Number(box?.dataset.richRevision);
+    const origin = Number(row?.getAttribute('data-timeline-origin'));
+    if (!/^[a-z0-9:_-]{1,190}$/i.test(logicalMessageId) || !/^[a-z0-9:_-]{1,190}$/i.test(nodeId)) return;
+    if (!Number.isSafeInteger(revision) || revision < 0 || !Number.isSafeInteger(origin) || origin < 0) return;
+    const view = button.ownerDocument.defaultView;
+    if (!view) return;
+    button.dispatchEvent(new view.CustomEvent('rich-focus-request', {
+      bubbles: true,
+      detail: { logicalMessageId, nodeId, revision, origin }
+    }));
+  });
+  host.append(button);
+}
+
 function renderNode(node: RichNode, images?: ImageRender): HTMLElement {
   if (node.kind === 'text') {
     const tag = node.style === 'heading' ? 'h3' : node.style === 'code' ? 'pre' : 'p';
@@ -569,6 +619,27 @@ function renderNode(node: RichNode, images?: ImageRender): HTMLElement {
     return slot;
   }
   if (node.kind === 'control') return renderControl(node, images);
+  if (node.kind === 'artifact') {
+    const card = document.createElement('article');
+    card.className = 'rich-artifact';
+    card.dataset.richNodeId = node.id;
+    card.dataset.richArtifactMode = node.mode;
+    card.append(renderNode({ id: `${node.id}-title`, kind: 'text', style: 'heading', text: node.title }, images));
+    if (node.mode === 'static' && node.html) {
+      const frameHost = document.createElement('div');
+      const admitted = admitArtifactMedia(node.media, cleanAdmittedArtifactMedia(images?.admittedArtifactMedia));
+      card.dataset.richAdmitted = admitted ? 'true' : 'false';
+      if (admitted) mountStaticArtifact(frameHost, { html: node.html, media: admitted });
+      else {
+        const note = document.createElement('p');
+        note.textContent = t('Open original in ChatGPT');
+        frameHost.append(note);
+      }
+      card.append(frameHost);
+    }
+    appendFocus(card, node.id);
+    return card;
+  }
 
   const tag = node.layout === 'card' ? 'article' : node.layout === 'list' ? 'ul' : 'div';
   const group = document.createElement(tag);
@@ -594,6 +665,7 @@ function renderNode(node: RichNode, images?: ImageRender): HTMLElement {
       group.append(item);
     } else group.append(renderNode(child, images));
   }
+  if (node.layout === 'card' && containsControl(node)) appendFocus(group, node.id);
   return group;
 }
 
@@ -605,10 +677,13 @@ export function renderRichResponse(rich: RichResponse, fallback: string, media?:
   const box = document.createElement('div');
   box.className = 'msg rich-response';
   box.setAttribute('dir', 'auto');
+  box.dataset.richMessageId = clean.messageId;
+  box.dataset.richRevision = String(clean.revision);
+  if (media?.focusStatus) box.dataset.richStatus = media.focusStatus;
   const safeMedia = media ? validatedMedia(media.media) : null;
   const images = media && safeMedia
     ? { sessionId: media.sessionId, current: media.current, media: safeMedia, rich: clean,
-      imageCounts: countImages(clean.nodes) } : undefined;
+      admittedArtifactMedia: media.admittedArtifactMedia, imageCounts: countImages(clean.nodes) } : undefined;
   for (const node of clean.nodes) box.append(renderNode(node, images));
   appendManualOriginal(box, media);
   return box;

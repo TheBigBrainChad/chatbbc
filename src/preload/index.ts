@@ -13,6 +13,8 @@ import type { LocalProject } from '../shared/projects.js';
 import type { ProjectDirectoryListing, ProjectFileMutationResult, ProjectFilePreview, ProjectFileSaveResult, ProjectFilesChanged } from '../shared/project-files.js';
 import type { SkillSummary, SkillLibraryPage, SkillsDraftScope, SkillState } from '../shared/skills.js';
 import type { PluginSnapshot, PluginInstallRequest, PluginConfigPatch } from '../shared/plugins.js';
+import type { OmarchyThemeState } from '../main/omarchy-theme.js';
+import type { GeneratedAssetDownloadBatch } from '../shared/generated-assets.js';
 /**
  * The entire renderer-facing API.
  *
@@ -137,6 +139,8 @@ const api = {
   attachText: (text: string) => call<InputAttachment>('sessions:attachText', { text }),
   getUsage: () => call<UsageOverview>('usage:get'),
   getState: () => call<AppState>('state:get'),
+  appearanceReady: (generation: number) => call<boolean>('glass:appearanceReady', { generation }),
+  retryOmarchyTheme: () => call<OmarchyThemeState>('omarchy:retry'),
   saveSettings: (patch: SettingsPatch, base: SettingsPatch) => call<AppState>('settings:save', { patch, base }),
   addRoot: () => call<AppState>('roots:add'),
   /** A folder dropped on the window; only the preload can learn a dropped File's path. */
@@ -202,6 +206,22 @@ const api = {
   revealProjectFileEntry: (projectId: string, path = '') => call<boolean>('projectFiles:reveal', { projectId, path }),
   attachProjectFile: (projectId: string, path: string) => call<InputAttachment>('projectFiles:attach', { projectId, path }),
   getSessionImage: (id: string, assetId: string) => call<string | null>('sessions:image', { id, assetId }),
+  getSessionImageSets: (id: string, responseIds?: string[]) => call<{ sets: import('../shared/chronology.js').ImageSetView[]; truncated: boolean }>('sessions:imageSets', responseIds ? { id, responseIds } : { id }),
+  downloadGeneratedAssets: (sessionId: string, logicalMessageId: string, assetIds: string[]) =>
+    call<GeneratedAssetDownloadBatch>('sessions:downloadGeneratedAssets',
+      { sessionId, logicalMessageId, assetIds }),
+  saveGeneratedAssetPreviews: (sessionId: string, logicalMessageId: string, assetIds: string[]) =>
+    call<{ saved: number; failed: number; cancelled: boolean; firstError?: string }>('sessions:saveGeneratedAssetPreviews',
+      { sessionId, logicalMessageId, assetIds }),
+  generatedAssetDownloads: (sessionId: string) =>
+    call<GeneratedAssetDownloadBatch[]>('sessions:generatedAssetDownloads', { sessionId }),
+  onGeneratedAssetDownloadChanged: (
+    listener: (batch: GeneratedAssetDownloadBatch) => void
+  ): (() => void) => {
+    const wrapped = (_event: unknown, batch: GeneratedAssetDownloadBatch): void => listener(batch);
+    ipcRenderer.on('sessions:generatedAssetDownloadChanged', wrapped);
+    return () => ipcRenderer.removeListener('sessions:generatedAssetDownloadChanged', wrapped);
+  },
   getImageStorage: () => call<ImageStorageInfo>('sessions:imageStorage'),
   clearImageStorage: (mode: ImageStorageClearMode) => call<ImageStorageClearResult>('sessions:clearImageStorage', { mode }),
     getSession: (id: string, options?: { from?: number; before?: number; after?: number; limit?: number }) =>

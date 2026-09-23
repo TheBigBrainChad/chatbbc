@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { parseRichResponse, RICH_LIMITS } from '../src/shared/rich-response.js';
+import { collectChoices, parseRichResponse, RICH_LIMITS } from '../src/shared/rich-response.js';
 
 const good = {
   version: 1,
@@ -324,4 +324,40 @@ it('returns null for malformed root types and rejects cycles without throwing', 
   const root = { ...good } as Record<string, unknown>;
   root.nodes = [root];
   expect(parseRichResponse(root)).toBeNull();
+});
+
+const choice = (id: string, groupId: string, value: string, selected: boolean, disabled: boolean) => ({
+  id, kind: 'control', control: 'radio', label: 'Yes', groupId, value,
+  selected, disabled, children: []
+});
+
+it('keeps identical labels distinct by physical group and value', () => {
+  const tree = parseRichResponse(withNodes([
+    choice('c1', 'g-a', 'yes', true, false),
+    choice('c2', 'g-b', 'yes', false, true)
+  ]));
+  expect(collectChoices(tree!)).toEqual([
+    { control: 'radio', groupId: 'g-a', value: 'yes', label: 'Yes', selected: true, disabled: false },
+    { control: 'radio', groupId: 'g-b', value: 'yes', label: 'Yes', selected: false, disabled: true }
+  ]);
+});
+
+it('accepts one bounded static artifact and rejects remote markup inside it', () => {
+  const artifact = {
+    id: 'art1', kind: 'artifact', mode: 'static', title: 'Sketch',
+    html: '<p>Hello</p>', media: ['shot']
+  };
+  expect(parseRichResponse(withNodes([artifact]))).toEqual(withNodes([artifact]));
+  expect(parseRichResponse(withNodes([{ ...artifact, html: '<script>alert(1)</script>' }]))).toBeNull();
+  expect(parseRichResponse(withNodes([{ ...artifact, media: ['shot', 'shot'] }]))).toBeNull();
+  expect(parseRichResponse(withNodes([{ ...artifact, mode: 'semantic', html: '<p>x</p>' }]))).toBeNull();
+  expect(parseRichResponse(withNodes([{ ...artifact, mode: 'semantic', html: null, media: [] }]))).toEqual(
+    withNodes([{ ...artifact, mode: 'semantic', html: null, media: [] }])
+  );
+});
+
+it('keeps an external URL visible as artifact text', () => {
+  const html = '<p>see https://example.test</p>';
+  const node = { id: 'art1', kind: 'artifact', mode: 'static', title: 'Sketch', html, media: [] };
+  expect(parseRichResponse(withNodes([node]))).toEqual(withNodes([node]));
 });

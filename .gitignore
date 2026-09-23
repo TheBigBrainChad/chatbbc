@@ -48,3 +48,6 @@ proof-*.txt
 /outputs/
 /.codex-remote-attachments/
 /docs/audit-user-requests-20260905-06.md
+
+# Local Superpowers brainstorming companion sessions and visual mockups.
+/.superpowers/

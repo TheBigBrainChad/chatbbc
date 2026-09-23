@@ -122,6 +122,46 @@ There is no model-supplied agent credential or `agent_key`. Worker/prime identit
 the ChatGPT conversation using extension evidence; control calls fail closed when that identity
 cannot be proven.
 
+### `generated_assets`
+
+Lists and saves images that ChatGPT generated in this exact local session. It is a Core tool,
+visible only when a reading capability and Create are enabled; Read-only mode hides it.
+
+- `action: "list"` returns at most 64 opaque handles with suggested filename, MIME, dimensions and
+  whether a saved local preview exists. One handle is issued per canonical asset, so a response with
+  several generated images returns several handles. Provider asset ids and signed URLs are never
+  published.
+- `action: "save"` takes `handle`, `path` and `source` (`preview` or `original`) and creates a
+  new file at an approved path. It never replaces an existing file. `preview` reads the
+  already-saved local preview. `original` asks the companion for the provider asset.
+
+The human gallery's **Save preview** button is not a Core tool call. It opens a native Save As
+dialog for one recorded preview or a folder picker for several, converts the local copy to
+WebP and creates new files without replacing existing ones. It does not use an approved root
+or fetch a provider original. **Download original** uses Chrome Downloads instead. Sets over
+20 images require an explicit selection of at most 20; cancellations and partial failures
+remain visible without claiming those files were saved.
+
+A handle is a capability over one local session: a handle issued to session A is refused for
+session B, and it expires. Results are one of:
+
+| Outcome | Meaning |
+| --- | --- |
+| saved | The staged bytes were published to a new approved path without replacing an existing file. |
+| `asset_handle_refused` | The handle belongs to another session, or is unknown. |
+| `asset_handle_expired` | The session binding changed, or the handle aged out. |
+| `preview_unavailable` | No saved local preview exists for that asset. |
+| `original_unavailable` | The provider original could not be proven available; a preview is never substituted. |
+| `asset_oversize` | Compressed size, decoded pixels, chunk size or total transfer exceeded `GENERATED_ASSET_LIMITS`. |
+| `DESTINATION_CHANGED` | Another writer created or changed the destination during this operation; its bytes were left untouched. |
+| `destination_exists` | The destination already exists; choose a new name. |
+| `destination_unsupported` | The approved filesystem cannot safely publish a new file without replacement (for example, exFAT without hard links); no partial destination is created. Use a writable hard-link-capable root. |
+| `write_disabled` | Read-only mode or Create permission is off. |
+| `path_refused` | The path is outside the approved roots or resolves through a link. |
+
+`GENERATED_ASSET_LIMITS` bounds the list, compressed bytes (64 MiB), decoded pixels (40 million),
+chunk size (512 KiB), concurrent transfers (two) and transfer time (120 seconds).
+
 ## Desktop tools
 
 This section exists on Windows and macOS. Linux does not advertise or execute these schemas.

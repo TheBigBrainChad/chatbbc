@@ -2,6 +2,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
 import type { RichMediaState } from '../src/shared/session.js';
 import { openRichImageViewer, retireRichImageViewer } from '../src/renderer/rich-image.js';
+import { setLanguage } from '../src/renderer/i18n.js';
+import { applyGeneratedAssetDownloadBatch } from '../src/renderer/image-set.js';
 
 let dom: JSDOM;
 let trigger: HTMLButtonElement;
@@ -194,3 +196,495 @@ it('permits only one pending viewer, and retires an old A → B → A request af
   expect(document.querySelector('.rich-image-viewer')).toBeNull();
   expect(unavailable).not.toHaveBeenCalled();
 });
+
+it('groups images by canonical response across intervening metadata revisions', async () => {
+  const { imageSetsForTimeline } = await import('../src/renderer/image-set.js');
+  const image = (seq: number, messageId: string, asset: string, extra: Record<string, unknown> = {}) => ({
+    kind: 'native_image', seq, messageId, providerAssetId: asset, previewStatus: 'available' as const,
+    asset: { id: 'abcdef12.bin' }, ...extra
+  });
+  const sets = imageSetsForTimeline([
+    image(1, 'response-a', 'asset-a', { origin: 1, width: 10, height: 8 }),
+    { kind: 'progress', seq: 2, messageId: 'activity' },
+    image(4, 'response-a', 'asset-b', { origin: 4 }),
+    image(3, 'response-a', 'asset-a', { origin: 1, previewStatus: 'unavailable', previewError: 'quota' })
+  ]);
+  expect(sets).toHaveLength(1);
+  expect(sets[0]!.responseId).toBe('response-a');
+  expect(sets[0]!.origin).toBe(1);
+  expect(sets[0]!.images.map(item => item.providerAssetId)).toEqual(['asset-a', 'asset-b']);
+  expect(sets[0]!.images[0]).toMatchObject({ previewStatus: 'unavailable', previewError: 'quota', origin: 1, hasPreview: false, width: 10, height: 8 });
+  expect(sets[0]!.completeness).toBe('partial');
+});
+
+it('does not merge adjacent images from different responses', async () => {
+  const { imageSetsForTimeline } = await import('../src/renderer/image-set.js');
+  const image = (seq: number, messageId: string, asset: string) => ({
+    kind: 'native_image', seq, messageId, providerAssetId: asset, previewStatus: 'pending' as const
+  });
+  expect(imageSetsForTimeline([image(1, 'response-a', 'asset-a'), image(2, 'response-b', 'asset-b')])
+    .map(set => set.images.length)).toEqual([1, 1]);
+});
+
+it('keeps a removed preview in the set without treating it as available', async () => {
+  const { imageSetsForTimeline } = await import('../src/renderer/image-set.js');
+  const sets = imageSetsForTimeline([{
+    kind: 'native_image', seq: 9, origin: 2, messageId: 'response-a', providerAssetId: 'asset-a',
+    previewStatus: 'unavailable', previewError: 'removed'
+  }]);
+  expect(sets[0]).toMatchObject({ completeness: 'unavailable', origin: 2, images: [{ hasPreview: false, previewError: 'removed' }] });
+});
+
+it('moves inside one set without fetching every preview or starting a download', async () => {
+  const { openImageSetViewer, retireImageSetViewer } = await import('../src/renderer/image-set.js');
+  const gallery = document.createElement('div');
+  gallery.className = 'generated-image-gallery';
+  const row = (asset: string, preview: string, src?: string) => {
+    const node = document.createElement('div');
+    node.className = 'ev ev-native_image';
+    node.dataset.imageMessage = 'response-a';
+    node.dataset.imageAsset = asset;
+    node.dataset.imagePreview = preview;
+    node.dataset.imageStatus = 'available';
+    node.dataset.imageWidth = '320';
+    node.dataset.imageHeight = '180';
+    const open = document.createElement('button');
+    open.className = 'image-set-open';
+    node.append(open);
+    if (src) {
+      const img = document.createElement('img');
+      img.src = src;
+      node.append(img);
+    }
+    return node;
+  };
+  const localImage = 'data:image/webp;base64,UklGRgAAAAA=';
+  const first = row('asset-a', 'abcdef12.bin', localImage);
+  const second = row('asset-b', 'abcdef13.bin');
+  gallery.append(first, second);
+  document.body.append(gallery);
+  const workbench = document.createElement('button');
+  workbench.id = 'workPanelTab-files';
+  const opened = vi.fn();
+  workbench.addEventListener('click', opened);
+  document.body.append(workbench);
+  await openImageSetViewer({ row: first, sessionId, current: () => current });
+  const dialog = document.querySelector<HTMLDialogElement>('dialog.image-set-viewer')!;
+  expect(dialog.querySelector('.image-set-position')?.textContent).toBe('1 / 2');
+  expect(dialog.querySelectorAll('.image-set-thumb')).toHaveLength(2);
+  expect(dialog.querySelector('.image-set-thumb')?.getAttribute('aria-pressed')).toBe('true');
+  expect(dialog.querySelector('.image-set-stage img')?.getAttribute('src')).toBe(localImage);
+  expect(image).not.toHaveBeenCalled();
+  expect(dialog.style.getPropertyValue('--image-set-width')).toBe('320px');
+  dialog.querySelector<HTMLButtonElement>('.image-set-download')!.click();
+  expect(image).not.toHaveBeenCalled();
+  dialog.querySelector<HTMLButtonElement>('.image-set-next')!.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(image).toHaveBeenCalledExactlyOnceWith(sessionId, 'abcdef13.bin');
+  expect(dialog.querySelectorAll('.image-set-thumb')[1]?.getAttribute('aria-pressed')).toBe('true');
+  const stage = dialog.querySelector('.image-set-stage')!;
+  stage.dispatchEvent(new window.PointerEvent('pointerdown', { clientX: 0, clientY: 0, bubbles: true }));
+  stage.dispatchEvent(new window.PointerEvent('pointermove', { clientX: 80, clientY: 4, bubbles: true }));
+  stage.dispatchEvent(new window.PointerEvent('pointerup', { bubbles: true }));
+  expect(dialog.querySelector('.image-set-position')?.textContent).toBe('1 / 2');
+  expect(image).toHaveBeenCalledOnce();
+  dialog.querySelector<HTMLButtonElement>('.image-set-zoom-in')!.click();
+  expect(dialog.querySelector<HTMLImageElement>('img')?.style.transform).toContain('scale(1.5)');
+  dialog.querySelector<HTMLButtonElement>('.image-set-workbench')!.click();
+  expect(opened).toHaveBeenCalledOnce();
+  current = false;
+  dialog.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+  expect(document.querySelector('dialog.image-set-viewer')).toBeNull();
+  expect(image).toHaveBeenCalledOnce();
+  retireImageSetViewer();
+});
+
+it('shows the selected position while that preview read is still pending', async () => {
+  const { openImageSetViewer, retireImageSetViewer } = await import('../src/renderer/image-set.js');
+  let resolveImage: (value: unknown) => void = () => {};
+  image.mockImplementation(() => new Promise(resolve => { resolveImage = resolve; }));
+  const gallery = document.createElement('div');
+  gallery.className = 'generated-image-gallery';
+  const row = (asset: string, preview: string, src?: string) => {
+    const node = document.createElement('div');
+    node.className = 'ev ev-native_image';
+    node.dataset.imageMessage = 'response-a';
+    node.dataset.imageAsset = asset;
+    node.dataset.imagePreview = preview;
+    node.dataset.imageStatus = 'available';
+    node.dataset.imageWidth = '32';
+    node.dataset.imageHeight = '32';
+    if (src) {
+      const img = document.createElement('img');
+      img.src = src;
+      node.append(img);
+    }
+    gallery.append(node);
+    return node;
+  };
+  const first = row('asset-a', 'abcdef12.bin', localImage);
+  row('asset-b', 'abcdef13.bin');
+  document.body.append(gallery);
+  await openImageSetViewer({ row: first, sessionId, current: () => current });
+  const dialog = document.querySelector<HTMLDialogElement>('dialog.image-set-viewer')!;
+  dialog.querySelector<HTMLButtonElement>('.image-set-next')!.click();
+  expect(dialog.querySelector('.image-set-position')?.textContent).toBe('2 / 2');
+  expect(dialog.querySelector('.image-set-stage img')?.hasAttribute('src')).toBe(false);
+  resolveImage({ ok: true, data: localImage });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(dialog.querySelector('.image-set-stage img')?.getAttribute('src')).toBe(localImage);
+  expect(image).toHaveBeenCalledExactlyOnceWith(sessionId, 'abcdef13.bin');
+  retireImageSetViewer();
+});
+
+it('requests one exact original or bounded set and paints state receipts without reading provider URLs', async () => {
+  const { applyImageSetMembers } = await import('../src/renderer/image-set.js');
+  const download = vi.fn(async (_session: string, _message: string, assetIds: string[]) => ({ ok: true, data: {
+    id: '11111111-2222-4333-8444-555555555555',
+    sessionId,
+    logicalMessageId: 'response-a',
+    createdAt: 1,
+    items: assetIds.map((assetId, index) => ({
+      id: index === 0 ? '22222222-3333-4444-8555-666666666666' : '33333333-4444-4555-8666-777777777777',
+      assetId,
+      filename: `ChatBBC image 0${index + 1}.png`,
+      state: 'requested',
+      detail: null
+    }))
+  } }));
+  let changed: ((batch: any) => void) | null = null;
+  (window as any).api = {
+    getSessionImage: image,
+    downloadGeneratedAssets: download,
+    generatedAssetDownloads: async () => ({ ok: true, data: [] }),
+    onGeneratedAssetDownloadChanged: (listener: (batch: any) => void) => {
+      changed = listener;
+      return () => undefined;
+    }
+  };
+  const gallery = document.createElement('div');
+  gallery.className = 'generated-image-gallery';
+  document.body.append(gallery);
+  applyImageSetMembers(gallery, {
+    responseId: 'response-a',
+    origin: 1,
+    completeness: 'complete',
+    images: [
+      { providerAssetId: 'file_AuroraOriginal0001', origin: 1, previewStatus: 'pending', hasPreview: false },
+      { providerAssetId: 'file_AuroraOriginal0002', origin: 2, previewStatus: 'pending', hasPreview: false }
+    ]
+  }, { sessionId, current: () => current });
+  const one = gallery.querySelector<HTMLButtonElement>('.image-set-download')!;
+  one.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(download).toHaveBeenCalledWith(sessionId, 'response-a', ['file_AuroraOriginal0001']);
+  expect(one.textContent).toBe('Download requested');
+  const all = gallery.querySelector<HTMLButtonElement>('.image-set-download-all')!;
+  all.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(download).toHaveBeenLastCalledWith(sessionId, 'response-a',
+    ['file_AuroraOriginal0001', 'file_AuroraOriginal0002']);
+  changed!({
+    id: '11111111-2222-4333-8444-555555555555',
+    sessionId,
+    logicalMessageId: 'response-a',
+    createdAt: 1,
+    items: [
+      { id: '22222222-3333-4444-8555-666666666666', assetId: 'file_AuroraOriginal0001',
+        filename: 'ChatBBC image 01.png', state: 'complete', detail: null },
+      { id: '33333333-4444-4555-8666-777777777777', assetId: 'file_AuroraOriginal0002',
+        filename: 'ChatBBC image 02.png', state: 'unconfirmed', detail: null }
+    ]
+  });
+  expect(one.textContent).toBe('Saved to browser Downloads');
+  try {
+    setLanguage('es');
+    expect(one.textContent).toBe('Guardado en Descargas del navegador');
+    expect(all.textContent).toBe('Resultado de la descarga sin confirmar');
+  } finally {
+    setLanguage('en');
+  }
+  expect(all.textContent).toBe('Download outcome unconfirmed');
+  expect(JSON.stringify(download.mock.calls)).not.toMatch(/https?:|signedUrl/i);
+});
+
+it('keeps a completed retry visible when an older batch reports late progress', async () => {
+  const button = document.createElement('button');
+  button.className = 'image-set-download';
+  button.dataset.downloadSession = `${sessionId}-retry`;
+  button.dataset.downloadMessage = 'response-retry';
+  button.dataset.downloadAssets = 'file_AuroraOriginal0003';
+  document.body.append(button);
+  const batch = (id: string, createdAt: number, state: 'requested' | 'started' | 'complete') => ({
+    id, sessionId: `${sessionId}-retry`, logicalMessageId: 'response-retry', createdAt,
+    items: [{ id, assetId: 'file_AuroraOriginal0003', filename: 'Aurora.png', state, detail: null }]
+  });
+  const old = '11111111-2222-4333-8444-555555555555';
+  const current = '22222222-3333-4444-8555-666666666666';
+  applyGeneratedAssetDownloadBatch(batch(old, 1, 'requested'));
+  applyGeneratedAssetDownloadBatch(batch(current, 2, 'complete'));
+  expect(button.textContent).toBe('Saved to browser Downloads');
+  applyGeneratedAssetDownloadBatch(batch(old, 1, 'started'));
+  expect(button.textContent).toBe('Saved to browser Downloads');
+  applyGeneratedAssetDownloadBatch(batch(current, 2, 'started'));
+  expect(button.textContent).toBe('Saved to browser Downloads');
+});
+
+it('saves one available local preview and reports cancellation without claiming success', async () => {
+  const { applyImageSetMembers } = await import('../src/renderer/image-set.js');
+  const save = vi.fn().mockResolvedValueOnce({ ok: true, data: { saved: 1, failed: 0, cancelled: false } })
+    .mockResolvedValueOnce({ ok: true, data: { saved: 0, failed: 0, cancelled: true } });
+  (window as any).api = { getSessionImage: image, saveGeneratedAssetPreviews: save };
+  const gallery = document.createElement('div');
+  gallery.className = 'generated-image-gallery';
+  document.body.append(gallery);
+  applyImageSetMembers(gallery, {
+    responseId: 'response-save', origin: 1, completeness: 'partial',
+    images: [
+      { providerAssetId: 'file_AuroraOriginal1001', origin: 1, previewStatus: 'available',
+        hasPreview: true, previewAssetId: 'abcdef12.bin', previewMime: 'image/png' },
+      { providerAssetId: 'file_AuroraOriginal1002', origin: 2, previewStatus: 'unavailable', hasPreview: false }
+    ]
+  }, { sessionId, current: () => current });
+  const available = gallery.querySelector<HTMLButtonElement>('.image-set-save')!;
+  const missing = gallery.querySelectorAll<HTMLButtonElement>('.image-set-save')[1]!;
+  expect(available.disabled).toBe(false);
+  expect(missing.disabled).toBe(true);
+  expect(missing.textContent).toContain('unavailable');
+  available.click();
+  await Promise.resolve();
+  expect(save).toHaveBeenCalledExactlyOnceWith(sessionId, 'response-save', ['file_AuroraOriginal1001']);
+  expect(available.textContent).toBe('Preview saved');
+  available.click();
+  await Promise.resolve();
+  expect(available.textContent).toBe('Save cancelled');
+});
+
+it('saves selected canonical members and reports partial errors without erasing successes', async () => {
+  const { applyImageSetMembers } = await import('../src/renderer/image-set.js');
+  const save = vi.fn(async () => ({ ok: true, data: { saved: 1, failed: 1, cancelled: false, firstError: 'Preview unavailable' } }));
+  (window as any).api = { getSessionImage: image, saveGeneratedAssetPreviews: save };
+  const gallery = document.createElement('div');
+  gallery.className = 'generated-image-gallery';
+  document.body.append(gallery);
+  applyImageSetMembers(gallery, {
+    responseId: 'response-partial', origin: 1, completeness: 'partial',
+    images: [
+      { providerAssetId: 'file_AuroraOriginal2001', origin: 1, previewStatus: 'available',
+        hasPreview: true, previewAssetId: 'abcdef12.bin', previewMime: 'image/webp' },
+      { providerAssetId: 'file_AuroraOriginal2002', origin: 2, previewStatus: 'unavailable', hasPreview: false }
+    ]
+  }, { sessionId, current: () => current });
+  const all = gallery.querySelector<HTMLButtonElement>('.image-set-save-all')!;
+  all.click();
+  await Promise.resolve();
+  expect(save).toHaveBeenCalledExactlyOnceWith(sessionId, 'response-partial',
+    ['file_AuroraOriginal2001', 'file_AuroraOriginal2002']);
+  expect(all.textContent).toContain('1 saved');
+  expect(all.textContent).toContain('1 failed');
+  expect(all.getAttribute('title')).toBe('Preview unavailable');
+});
+
+it('requires an explicit selection above 20, caps it, and retains checked canonical assets across repaint', async () => {
+  const { applyImageSetMembers } = await import('../src/renderer/image-set.js');
+  const download = vi.fn(async () => ({ ok: false, error: 'No browser' }));
+  const save = vi.fn(async () => ({ ok: true, data: { saved: 2, failed: 0, cancelled: false } }));
+  (window as any).api = { getSessionImage: image, downloadGeneratedAssets: download, saveGeneratedAssetPreviews: save };
+  const gallery = document.createElement('div');
+  gallery.className = 'generated-image-gallery';
+  document.body.append(gallery);
+  const images = Array.from({ length: 21 }, (_, index) => ({
+    providerAssetId: `file_AuroraOriginal${String(index + 1).padStart(4, '0')}`, origin: index + 1,
+    previewStatus: 'available' as const, hasPreview: true, previewAssetId: 'abcdef12.bin',
+    previewMime: 'image/webp' as const
+  }));
+  const set = { responseId: 'response-long', origin: 1, completeness: 'complete' as const, images };
+  applyImageSetMembers(gallery, set, { sessionId, current: () => current });
+  const selection = () => [...gallery.querySelectorAll<HTMLInputElement>('.image-set-selection input[type="checkbox"]')];
+  expect(selection()).toHaveLength(21);
+  expect(gallery.querySelector<HTMLButtonElement>('.image-set-download-all')!.disabled).toBe(true);
+  selection()[1]!.click();
+  selection()[20]!.click();
+  applyImageSetMembers(gallery, set, { sessionId, current: () => current });
+  expect(selection().filter(input => input.checked).map(input => input.value)).toEqual([
+    'file_AuroraOriginal0002', 'file_AuroraOriginal0021'
+  ]);
+  try {
+    setLanguage('es');
+    expect(gallery.querySelector('.image-set-selection p')?.textContent).toBe('2 de 20 seleccionadas');
+    expect(gallery.querySelector('.image-set-save-all')?.textContent).toBe('Guardar vistas previas seleccionadas');
+    expect(gallery.querySelector('.image-set-download-all')?.textContent).toBe('Descargar originales seleccionados');
+  } finally {
+    setLanguage('en');
+  }
+  gallery.querySelector<HTMLButtonElement>('.image-set-download-all')!.click();
+  gallery.querySelector<HTMLButtonElement>('.image-set-save-all')!.click();
+  await Promise.resolve();
+  expect(download).toHaveBeenCalledExactlyOnceWith(sessionId, 'response-long',
+    ['file_AuroraOriginal0002', 'file_AuroraOriginal0021']);
+  expect(save).toHaveBeenCalledExactlyOnceWith(sessionId, 'response-long',
+    ['file_AuroraOriginal0002', 'file_AuroraOriginal0021']);
+  for (const input of selection().filter(input => !input.checked).slice(0, 18)) input.click();
+  const twentyFirst = selection().find(input => !input.checked)!;
+  twentyFirst.click();
+  expect(twentyFirst.checked).toBe(false);
+  expect(selection().filter(input => input.checked)).toHaveLength(20);
+});
+
+it('retains selected assets through timeline regrouping before canonical image hydration', async () => {
+  const { applyImageSetMembers } = await import('../src/renderer/image-set.js');
+  const { groupImageRows } = await import('../src/renderer/timeline-view.js');
+  const save = vi.fn(async () => ({ ok: true, data: { saved: 2, failed: 0, cancelled: false } }));
+  Object.assign(window, { api: { getSessionImage: image, saveGeneratedAssetPreviews: save } });
+  const gallery = document.createElement('div');
+  gallery.className = 'generated-image-gallery';
+  document.body.append(gallery);
+  const images = Array.from({ length: 21 }, (_, index) => ({
+    providerAssetId: `file_AuroraOriginal${String(index + 1).padStart(4, '0')}`, origin: index + 1,
+    previewStatus: 'available' as const, hasPreview: true, previewAssetId: 'abcdef12.bin',
+    previewMime: 'image/webp' as const
+  }));
+  const set = { responseId: 'response-regroup', origin: 1, completeness: 'complete' as const, images };
+  const owner = { sessionId, current: () => current };
+  applyImageSetMembers(gallery, set, owner);
+  gallery.querySelectorAll<HTMLInputElement>('.image-set-selection input')[1]!.click();
+  gallery.querySelectorAll<HTMLInputElement>('.image-set-selection input')[20]!.click();
+  expect(groupImageRows([...gallery.querySelectorAll<HTMLElement>(':scope > .ev-native_image')])[0]).toBe(gallery);
+  expect([...gallery.querySelectorAll<HTMLInputElement>('.image-set-selection input:checked')]
+    .map(input => input.value)).toEqual(['file_AuroraOriginal0002', 'file_AuroraOriginal0021']);
+  applyImageSetMembers(gallery, set, owner);
+  expect([...gallery.querySelectorAll<HTMLInputElement>('.image-set-selection input:checked')]
+    .map(input => input.value)).toEqual(['file_AuroraOriginal0002', 'file_AuroraOriginal0021']);
+  gallery.querySelector<HTMLButtonElement>('.image-set-save-all')!.click();
+  await Promise.resolve();
+  expect(save).toHaveBeenCalledExactlyOnceWith(sessionId, 'response-regroup',
+    ['file_AuroraOriginal0002', 'file_AuroraOriginal0021']);
+});
+
+it('keeps a set save pending and reports its partial result after canonical repaint', async () => {
+  const { applyImageSetMembers } = await import('../src/renderer/image-set.js');
+  const { groupImageRows } = await import('../src/renderer/timeline-view.js');
+  let resolveSave!: (value: unknown) => void;
+  const response = new Promise<unknown>(resolve => { resolveSave = resolve; });
+  const save = vi.fn(() => response);
+  Object.assign(window, { api: { getSessionImage: image, saveGeneratedAssetPreviews: save } });
+  const gallery = document.createElement('div');
+  gallery.className = 'generated-image-gallery';
+  document.body.append(gallery);
+  const set = { responseId: 'response-repaint', origin: 1, completeness: 'complete' as const,
+    images: [
+      { providerAssetId: 'file_AuroraOriginal3001', origin: 1, previewStatus: 'available' as const,
+        hasPreview: true, previewAssetId: 'abcdef12.bin', previewMime: 'image/webp' as const },
+      { providerAssetId: 'file_AuroraOriginal3002', origin: 2, previewStatus: 'available' as const,
+        hasPreview: true, previewAssetId: 'abcdef13.bin', previewMime: 'image/webp' as const }
+    ] };
+  const owner = { sessionId, current: () => current };
+  applyImageSetMembers(gallery, set, owner);
+  gallery.querySelector<HTMLButtonElement>('.image-set-save-all')!.click();
+  applyImageSetMembers(gallery, set, owner);
+  expect(gallery.querySelector('.image-set-save-all')?.textContent).toBe('Saving previews…');
+  expect(groupImageRows([...gallery.querySelectorAll<HTMLElement>(':scope > .ev-native_image')])[0]).toBe(gallery);
+  let action = gallery.querySelector<HTMLButtonElement>('.image-set-save-all')!;
+  expect(action.textContent).toBe('Saving previews…');
+  expect(action.disabled).toBe(true);
+  resolveSave({ ok: true, data: { saved: 1, failed: 1, cancelled: false, firstError: 'Preview unavailable' } });
+  await Promise.resolve();
+  await Promise.resolve();
+  action = gallery.querySelector<HTMLButtonElement>('.image-set-save-all')!;
+  expect(action.textContent).toBe('1 saved · 1 failed');
+  expect(action.title).toBe('Preview unavailable');
+  expect(groupImageRows([...gallery.querySelectorAll<HTMLElement>(':scope > .ev-native_image')])[0]).toBe(gallery);
+  expect(gallery.querySelector('.image-set-save-all')?.textContent).toBe('1 saved · 1 failed');
+  applyImageSetMembers(gallery, set, owner);
+  expect(gallery.querySelector('.image-set-save-all')?.textContent).toBe('1 saved · 1 failed');
+  expect(save).toHaveBeenCalledTimes(1);
+});
+
+it('reconciles removed preview placeholders and retranslates a later available Save action', async () => {
+  const { applyImageSetMembers } = await import('../src/renderer/image-set.js');
+  Object.assign(window, { api: { getSessionImage: image, saveGeneratedAssetPreviews: vi.fn() } });
+  const gallery = document.createElement('div');
+  gallery.className = 'generated-image-gallery';
+  document.body.append(gallery);
+  const base = { responseId: 'response-eviction', origin: 1, completeness: 'complete' as const };
+  const pending = { providerAssetId: 'file_AuroraOriginal4001', origin: 1,
+    previewStatus: 'pending' as const, hasPreview: false };
+  const owner = { sessionId, current: () => current };
+  applyImageSetMembers(gallery, { ...base, images: [pending] }, owner);
+  applyImageSetMembers(gallery, { ...base, images: [{
+    ...pending, previewStatus: 'available', hasPreview: true, previewAssetId: 'abcdef12.bin', previewMime: 'image/png'
+  }] }, owner);
+  try {
+    setLanguage('es');
+    expect(gallery.querySelector('.image-set-save')?.textContent).toBe('Guardar la vista previa');
+  } finally {
+    setLanguage('en');
+  }
+  const frame = gallery.querySelector<HTMLElement>('.generated-image-frame')!;
+  frame.append(document.createElement('img'));
+  applyImageSetMembers(gallery, { ...base, images: [{
+    ...pending, previewStatus: 'unavailable', previewError: 'removed'
+  }] }, owner);
+  expect(frame.classList.contains('is-unavailable')).toBe(true);
+  expect(frame.querySelector('img')).toBeNull();
+  expect(frame.textContent).toContain('Image removed from local storage');
+});
+
+it('does not let a stale snapshot repaint newer receipts after over 128 terminal batches', async () => {
+  const { applyImageSetMembers } = await import('../src/renderer/image-set.js');
+  let resolveSnapshot!: (value: unknown) => void;
+  (window as any).api = {
+    getSessionImage: image,
+    generatedAssetDownloads: () => new Promise(resolve => { resolveSnapshot = resolve; })
+  };
+  const gallery = document.createElement('div');
+  gallery.className = 'generated-image-gallery';
+  document.body.append(gallery);
+  applyImageSetMembers(gallery, {
+    responseId: 'response-overflow', origin: 1, completeness: 'complete',
+    images: [{ providerAssetId: 'file_AuroraOriginal9001', origin: 1, previewStatus: 'pending', hasPreview: false }]
+  }, { sessionId, current: () => current });
+  const button = gallery.querySelector<HTMLButtonElement>('.image-set-download')!;
+  const make = (n: number, assetId: string, state: 'failed' | 'complete') => ({
+    id: `batch-${n}`, sessionId, logicalMessageId: 'response-overflow', createdAt: n,
+    items: [{ id: `item-${n}`, assetId, filename: 'image.png', state, detail: null }]
+  });
+  for (let n = 1; n <= 130; n++) applyGeneratedAssetDownloadBatch(make(n, `file_AuroraOriginal${String(n).padStart(4, '0')}`, 'failed'));
+  applyGeneratedAssetDownloadBatch(make(131, 'file_AuroraOriginal9001', 'complete'));
+  resolveSnapshot({ ok: true, data: [make(1, 'file_AuroraOriginal9001', 'failed')] });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(button.textContent).toBe('Saved to browser Downloads');
+});
+
+it('accepts one gallery snapshot after an unrelated gallery receives a live receipt', async () => {
+  const { applyImageSetMembers } = await import('../src/renderer/image-set.js');
+  // This project targets ES2023; hold the resolver for this delayed IPC reply.
+  let resolveSnapshot!: (value: unknown) => void;
+  const promise = new Promise<unknown>(resolve => { resolveSnapshot = resolve; });
+  Object.assign(window, { api: {
+    getSessionImage: image,
+    generatedAssetDownloads: () => promise
+  } });
+  const gallery = document.createElement('div');
+  gallery.className = 'generated-image-gallery';
+  document.body.append(gallery);
+  applyImageSetMembers(gallery, {
+    responseId: 'response-snapshot', origin: 1, completeness: 'complete',
+    images: [{ providerAssetId: 'file_AuroraOriginal9101', origin: 1, previewStatus: 'pending', hasPreview: false }]
+  }, { sessionId, current: () => current });
+  const make = (id: string, message: string, assetId: string, createdAt: number) => ({
+    id, sessionId, logicalMessageId: message, createdAt,
+    items: [{ id, assetId, filename: 'image.png', state: 'complete' as const, detail: null }]
+  });
+  applyGeneratedAssetDownloadBatch(make('unrelated', 'response-other', 'file_AuroraOriginal9201', 5002));
+  resolveSnapshot({ ok: true, data: [make('snapshot', 'response-snapshot', 'file_AuroraOriginal9101', 5001)] });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(gallery.querySelector('.image-set-download')?.textContent).toBe('Saved to browser Downloads');
+});
+

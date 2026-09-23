@@ -2,14 +2,14 @@
    The right-side work panes: the sub-agent panel and plan, the file tree,
    preview, editor and PDF viewer, and the workspace terminal. Loaded fifth. */
 
-/* Right-side work column. Files, Sub-agents and Terminal are one geometry with three tenants,
+/* Right-side work column. The strip's tenants share one geometry,
    so the column is reserved by the panel that hosts them and never by a pane. */
 [data-panel='chat'].has-work-panel,
 [data-panel='chat'].has-agent-panel,
 [data-panel='chat'].has-file-panel { grid-template-columns: minmax(0, 1fr) var(--work-panel-width, minmax(340px, 42%)); }
 
 .work-panel { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--line); background: var(--page); }
-/* Three tabs share one row and shrink with an ellipsis, so the strip never scrolls sideways. */
+/* The strip shares one row and shrinks with an ellipsis, so it never scrolls sideways. */
 .work-panel-tabs { display: flex; flex: 0 0 auto; min-height: 38px; border-bottom: 1px solid var(--line); }
 .work-panel-tab { flex: 1; min-width: 0; padding: 8px 10px; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: transparent; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
 .work-panel-tab:first-child { border-left: 0; }
@@ -17,9 +17,20 @@
 .work-panel-tab.is-sel { background: var(--hover); color: var(--ink); }
 .work-panel-tab:disabled { opacity: .35; cursor: default; }
 .work-panel-body { flex: 1; min-width: 0; min-height: 0; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
-/* One cell, three tenants: whichever is showing fills it. The column owns the left edge now, so a
+/* One cell: whichever tenant is showing fills it. The column owns the left edge now, so a
    hosted pane drops the border it carried as a top-level column. */
-.work-panel-body > :is(.file-panel, .agent-panel, .workspace-terminal) { grid-area: 1 / 1; border-left: 0; border-top: 0; }
+.work-panel-body > :is(.file-panel, .agent-panel, .workspace-terminal, .output-inspector) { grid-area: 1 / 1; border-left: 0; border-top: 0; }
+/* shell.css overlays #contextWorkbench. This class only records that the studio is below the split. */
+.work-panel.is-overlay { --workbench-mode: overlay; }
+/* Focused output is mounted in the conversation column, not in this panel.
+   Overlay mode stays underneath that stage and must not take its focus. */
+.work-panel.is-overlay { z-index: 1; }
+#chatBody > .rich-focus-stage { position: relative; z-index: 4; }
+.output-inspector-detail[role='status'] { color: var(--ink); }
+.output-inspector { min-width: 0; min-height: 0; overflow: auto; background: var(--glass-high, var(--page)); color: var(--ink); }
+.output-inspector-title { margin: 0; padding: 12px 14px 0; font-size: calc(14px * var(--text-scale, 1)); }
+.output-inspector-meta, .output-inspector-detail { margin: 0; padding: 8px 14px; color: var(--ink-muted, var(--soft)); font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); }
+.output-inspector-actions { display: flex; gap: 8px; padding: 8px 14px 14px; }
 .agent-panel { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--page); }
 .agent-panel-header { display: flex; align-items: center; gap: 10px; padding: 16px 20px; border-bottom: 1px solid var(--line); }
 .agent-panel-header strong { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 550; }
@@ -64,7 +75,8 @@
   --syntax-search-selected: #8a7629;
 }
 .work-panel-resize { position: absolute; z-index: 8; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; touch-action: none; }
-.work-panel-resize:hover, .work-panel-resize:focus-visible, .is-resizing-work-panel .work-panel-resize { background: linear-gradient(var(--accent-edge), var(--accent-edge)) center / 1px 100% no-repeat; outline: none; }
+.work-panel-resize:hover, .work-panel-resize:focus-visible, .is-resizing-work-panel .work-panel-resize { background: linear-gradient(var(--accent-edge), var(--accent-edge)) center / 1px 100% no-repeat; }
+.work-panel-resize:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .is-resizing-work-panel, .is-resizing-work-panel * { cursor: col-resize !important; user-select: none !important; }
 .file-panel-refresh { margin-left: auto; width: 30px; height: 30px; padding: 6px; }
 .file-panel-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; min-height: 42px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
@@ -88,13 +100,14 @@
 .file-tree-size { flex: 0 0 auto; color: var(--faint); font-family: var(--ui-font-mono); font-size: calc(9.5px * var(--text-scale, 1)); font-variant-numeric: tabular-nums; }
 .file-tree-status { padding: 7px 12px 7px 26px; color: var(--faint); font-family: var(--ui-font-mono); font-size: calc(10px * var(--text-scale, 1)); line-height: 1.4; }
 .file-preview { position: relative; flex: 0 0 auto; z-index: 4; height: 52%; min-height: 140px; overflow: auto; border-top: 1px solid var(--line); background: var(--sunk); }
-.file-tree [role='treeitem']:focus-visible { outline: 1px solid var(--accent-edge); outline-offset: -1px; background: var(--accent-wash); }
+.file-tree [role='treeitem']:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; background: var(--accent-wash); }
 .file-panel-body.is-reading .file-tree, .file-panel-body.is-reading .file-preview-resize { display: none; }
 .file-panel-body.is-reading .file-preview { flex: 1; height: auto !important; min-height: 0; }
 .file-preview-toggle-tree[aria-pressed='true'] { background: var(--hover); }
 .file-panel .file-preview[hidden] { display: none; }
 .file-preview-resize { position: sticky; z-index: 3; top: 0; display: block; width: 100%; height: 3px; margin-bottom: -3px; cursor: row-resize; touch-action: none; background: transparent; }
-.file-preview-resize:hover, .file-preview-resize:focus-visible, .file-panel.is-resizing-file-preview .file-preview-resize { background: linear-gradient(var(--accent-edge), var(--accent-edge)) center / 100% 1px no-repeat; outline: none; }
+.file-preview-resize:hover, .file-preview-resize:focus-visible, .file-panel.is-resizing-file-preview .file-preview-resize { background: linear-gradient(var(--accent-edge), var(--accent-edge)) center / 100% 1px no-repeat; }
+.file-preview-resize:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
 .file-panel.is-resizing-file-preview, .file-panel.is-resizing-file-preview * { cursor: row-resize !important; user-select: none !important; }
 .file-preview-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 6px 10px 6px 14px; border-bottom: 1px solid var(--line); background: var(--sunk); }
 .file-preview-title { min-width: 0; flex: 1; display: flex; align-items: center; gap: 7px; }
@@ -194,7 +207,8 @@
 .workspace-terminal { grid-column: 2; grid-row: 5; position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; border-top: 1px solid var(--line); background: var(--page); }
 .workspace-terminal[hidden] { display: none; }
 .terminal-resize { position: absolute; left: 0; right: 0; top: -4px; height: 8px; z-index: 2; cursor: ns-resize; touch-action: none; }
-.terminal-resize:hover, .terminal-resize:focus-visible, .terminal-resize:active { background: linear-gradient(var(--accent-edge), var(--accent-edge)) center / 100% 1px no-repeat; outline: none; }
+.terminal-resize:hover, .terminal-resize:focus-visible, .terminal-resize:active { background: linear-gradient(var(--accent-edge), var(--accent-edge)) center / 100% 1px no-repeat; }
+.terminal-resize:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .terminal-bar { display: flex; align-items: center; gap: 5px; flex: 0 0 36px; padding: 4px 10px; }
 .terminal-tabs { display: flex; gap: 4px; min-width: 0; flex: 1; overflow-x: auto; }
 .terminal-tab { display: flex; align-items: center; border-radius: 0; }

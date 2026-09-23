@@ -4,5 +4,7 @@
  * hashes or image bytes as credentials: those must survive tool results and exact recordings.
  */
 export function redactCredentialText(text: string): string {
-  return text.replace(/\bsk-(?:or-v1-|proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b/g, '[redacted]');
+  return text
+    .replace(/\bsk-(?:or-v1-|proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b/g, '[redacted]')
+    .replace(/https:\/\/chatgpt\.com\/backend-api\/estuary\/content\?[^\s'")]+/g, 'https://chatgpt.com/backend-api/estuary/content?[redacted]');
 }

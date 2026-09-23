@@ -26,6 +26,10 @@
 
 **Stay in control of long tasks.** Send a correction while work runs. Goal follows unfinished work; Loop keeps working within your brief. Compact & Resume carries the session and worker history into a fresh chat.
 
+**Keep what ChatGPT makes.** A response with several generated images shows them as one set. Download an original through Chrome, or use **Save preview** to choose where the locally recorded WebP copy goes; a set over 20 images requires an explicit selection. Core `generated_assets` can create a new file in an approved folder from a preview or the exact page's image source. Full-resolution provider-original fidelity still needs signed-in verification; a saved preview is not the original.
+
+**Stay oriented.** The Adaptive Studio rail, chat navigator, conversation and contextual workbench keep the current transcript mounted while you visit files, agents, usage or settings. On Omarchy, Appearance can follow the live desktop palette. Supported Hyprland glass uses native transparency; other desktops retain a readable atmospheric surface.
+
 <p align="center"><strong>Uses your ChatGPT conversation rather than invoking Codex directly.</strong><br /><sub>ChatGPT Work and Codex share usage limits. Your account’s model availability, usage and context limits still apply. <a href="https://learn.chatgpt.com/docs/pricing">OpenAI usage details →</a></sub></p>
 
 ## Responsible use and provider rules
@@ -55,7 +59,7 @@ This notice states the project's intended use; it does not certify compliance or
 
 Windows 10/11, **macOS 13 Ventura or newer**, or a current desktop Linux. Chrome 116+ or current Edge, plus a ChatGPT account/workspace with Developer mode and custom MCP apps. [Check account availability](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt).
 
-- **Renamed to ChatBBC.** ChatBBC installs beside Chat On Steroids under its own app id, starts with an empty `chatbbc` user data folder and speaks bridge protocol 15. A leftover Chat On Steroids companion does not connect to it: the companion only accepts a reply stamped with its own app slug, so ChatBBC looks like an app that is not running. Load the ChatBBC companion instead. Protocol 15 is the separate gate for a companion whose app slug matches but whose protocol integer does not; that peer is refused with `incompatible_extension` rather than silently dropped. Recreate the three connectors in ChatGPT as **ChatBBC Core**, **ChatBBC Desktop** and **ChatBBC Plugins**, then refresh ChatGPT’s connector snapshot. Do not run both apps at once: they contend for the same bridge ports.
+- **Renamed to ChatBBC.** ChatBBC installs beside Chat On Steroids under its own app id, starts with an empty `chatbbc` user data folder and speaks bridge protocol 17. A leftover Chat On Steroids companion does not connect to it: the companion only accepts a reply stamped with its own app slug, so ChatBBC looks like an app that is not running. Load the ChatBBC companion instead. Protocol 17 is the separate gate for a companion whose app slug matches but whose protocol integer does not; that peer is refused with `incompatible_extension` rather than silently dropped. Recreate the three connectors in ChatGPT as **ChatBBC Core**, **ChatBBC Desktop** and **ChatBBC Plugins**, then refresh ChatGPT’s connector snapshot. Do not run both apps at once: they contend for the same bridge ports.
 - **Unsigned beta:** Windows is not publisher-signed; macOS is unsigned and unnotarized. Verify the package against the release checksums.
 - **Linux:** a Secret Service keyring is required. Prefer the DEB; when unprivileged user namespaces are disabled, the AppImage launcher can fall back to <code>--no-sandbox</code>.
 - **Permissions:** choose your approved folders and review capabilities before connecting. Fresh installs enable Core capabilities and two workers; Windows also enables Desktop permissions. Shell commands run with your normal user privileges.

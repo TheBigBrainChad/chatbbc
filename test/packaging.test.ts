@@ -344,7 +344,7 @@ describe('cross-platform packaging targets', () => {
   it('only reports renderer readiness after the initial state snapshot has completed', () => {
     const ipc = readFileSync(path.join(root, 'src', 'main', 'ipc.ts'), 'utf8');
     const handler = ipc.indexOf("handle('state:get', async () => {");
-    const state = ipc.indexOf('const state = await buildState();', handler);
+    const state = ipc.indexOf('const state = await currentState();', handler);
     const ready = ipc.indexOf("logInfo('renderer state ready');", state);
     const returned = ipc.indexOf('return state;', ready);
 
@@ -392,25 +392,34 @@ describe('cross-platform packaging targets', () => {
     const main = readFileSync(path.join(root, 'src', 'main', 'index.ts'), 'utf8');
     const ready = main.indexOf('void app.whenReady().then(async () => {');
     const loadConfig = main.indexOf('await loadConfig();', ready);
-    // The mode now resolves through the live desktop theme (spec §5), so the asserted
-    // contract is still "the persisted choice is applied here", not a raw config read.
-    const theme = main.indexOf('nativeTheme.themeSource = nativeChromeTheme().theme;', loadConfig);
-    const enableActivation = main.indexOf('windowActivation.enable();', theme);
+    // The live desktop theme resolves through one helper that owns the native chrome update
+    // (spec §5). The asserted contract is still "the persisted choice is applied before the
+    // first window request", not that the assignment is written inline in the bootstrap.
+    const refresh = main.indexOf('function refreshNativeChromeTheme(): void {');
+    const themeAssign = main.indexOf('nativeTheme.themeSource = chrome.theme;', refresh);
+    const refreshCall = main.indexOf('refreshNativeChromeTheme();', loadConfig);
+    const enableActivation = main.indexOf('windowActivation.enable();', refreshCall);
     const firstWindowRequest = main.indexOf('windowActivation.request();', enableActivation);
 
-    expect(ready).toBeGreaterThan(-1);
+    expect(refresh).toBeGreaterThan(-1);
+    expect(themeAssign).toBeGreaterThan(refresh);
     expect(loadConfig).toBeGreaterThan(ready);
-    expect(theme).toBeGreaterThan(loadConfig);
-    expect(enableActivation).toBeGreaterThan(theme);
+    expect(refreshCall).toBeGreaterThan(loadConfig);
+    expect(enableActivation).toBeGreaterThan(refreshCall);
     expect(firstWindowRequest).toBeGreaterThan(enableActivation);
 
     const ipc = readFileSync(path.join(root, 'src', 'main', 'ipc.ts'), 'utf8');
     const save = ipc.indexOf("handle('settings:save', async (payload) => {");
     const liveTheme = ipc.indexOf('nativeTheme.themeSource = chromeTheme;', save);
-    const background = ipc.indexOf('getWindow()?.setBackgroundColor(windowBackgroundForTheme(chromeTheme, effectiveAppearance(next.ui, liveTheme)));', liveTheme);
+    // The live palette update goes through the appearance bridge when one is registered, and
+    // falls back to the plain window background otherwise. Either way it happens after the
+    // theme mode is committed for this save.
+    const background = ipc.indexOf('const background = windowBackgroundForTheme(chromeTheme, effectiveAppearance(next.ui, liveTheme));', liveTheme);
+    const applied = ipc.indexOf('appearance.updateBackground(background);', background);
     expect(save).toBeGreaterThan(-1);
     expect(liveTheme).toBeGreaterThan(save);
     expect(background).toBeGreaterThan(liveTheme);
+    expect(applied).toBeGreaterThan(background);
   });
 
   it('uses Noble-compatible Linux packages and a FUSE-independent AppImage runtime', () => {

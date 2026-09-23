@@ -168,6 +168,18 @@
   border: 0; border-left: 2px solid var(--cat, var(--line)); background: transparent;
 }
 
+/* --------------------------------------------------------- message language
+
+   The family rules above own the identity: each family's rail, its accent and its glyph. What a
+   *drawn* row looks like is a second question, and Crystal answers it with three planes rather
+   than one grid of boxes — the answer is a reading surface, the user's message is a compact
+   accent card, and everything the app did stays on the activity rail. These rules come after the
+   cards, so a family that drops its card keeps its rail and stays identifiable. */
+
+/* The answer is the reading plane: borderless, and given a little more room to be read in. */
+.ev.cat-prose { padding: 13px 0; }
+.cat-prose:has(> .ev-body .msg) { border: 0; border-left: 2px solid var(--cat, var(--line)); background: transparent; }
+
 /* An identity reaching the chrome of the rows that already exist. Each fallback is the
    value the rule resolved to before this system, so an uncategorised row is unchanged. */
 .cat-tool .tool-ico { color: var(--cat, var(--faint)); }
@@ -228,7 +240,18 @@
 .said.is-user.has-reaction-slot.has-input-receipt { margin-bottom: 26px; }
 /* Delivery stays at the right edge; a reaction shares the footer to its left. */
 .has-reaction-slot.has-input-receipt > .message-reaction { inset-inline-end: 30px; }
-.user-message-text, .pending-message-text { max-width: 100%; padding: 16px 20px; border-radius: 0; background: var(--hover); }
+/* Crystal language: the user's own message is one compact accent glass card. The soft radius,
+   the accent edge and the tinted translucent fill are the same three tokens the shell uses for
+   every other floating surface, so the question reads as raised over the reading plane without
+   becoming a second, louder conversation. */
+.user-message-text, .pending-message-text {
+  max-width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--accent-edge);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--accent) 12%, var(--glass-medium));
+  backdrop-filter: blur(14px) saturate(120%);
+}
 
 .said b {
   display: none;
@@ -257,7 +280,7 @@
    Direction stays on text surfaces; the app shell and action rows do not mirror. */
 .msg:not(.rich), .pending-message-text { unicode-bidi: plaintext; text-align: start; }
 .msg.rich, textarea[dir='auto'], .queue-label[dir='auto'] { text-align: start; }
-.msg.rich :is(pre, code, kbd) { unicode-bidi: isolate; }
+.msg.rich :is(pre, code, kbd) { direction: ltr; unicode-bidi: isolate; }
 
 .msg.rich > :first-child {
   margin-top: 0;
@@ -361,6 +384,21 @@
 .rich-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: 12px; }
 .rich-grid > * { min-width: 0; margin-block-start: 0 !important; }
 .rich-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 14px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--card); }
+.rich-artifact { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
+.rich-artifact iframe { width: 100%; min-height: 12rem; border: 1px solid var(--line); background: var(--page); }
+.rich-focus-open, .rich-focus-close, .rich-focus-tab { font: inherit; }
+.rich-focus-stage {
+  position: relative; z-index: 4; display: grid; gap: 8px; max-height: min(70vh, 40rem); overflow: auto;
+  margin: 12px; padding: 12px; border: 1px solid var(--line); background: var(--page);
+  transition: opacity var(--motion-state, 140ms) ease;
+}
+.rich-focus-stage pre, .rich-focus-panel, .rich-focus-source, .rich-focus-preview { overflow: visible; max-height: none; }
+.rich-focus-source { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.rich-focus-tabs { display: flex; flex-wrap: wrap; gap: 8px; }
+.rich-focus-title, .rich-focus-status, .rich-focus-meta, .rich-focus-unavailable { margin: 0; }
+.rich-focus-open:focus-visible, .rich-focus-close:focus-visible, .rich-focus-tab:focus-visible {
+  outline: 2px solid var(--ink); outline-offset: 2px;
+}
 .rich-card > * { min-width: 0; margin-block-start: 0 !important; }
 .rich-list { padding-inline-start: 1.5em; }
 .rich-list > li { min-width: 0; }
@@ -385,7 +423,7 @@
 .rich-image-slot > span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .rich-image-slot > button { max-width: 100%; min-width: 0; padding: 7px 10px; border: 1px solid var(--edge); border-radius: var(--r-sm);
   background: var(--card); color: var(--ink); font: inherit; cursor: pointer; }
-.rich-image-slot > button:focus-visible, .rich-image-viewer button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.rich-image-slot > button:focus-visible, .rich-image-viewer button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 .rich-image-viewer { box-sizing: border-box; width: fit-content; max-width: min(96vw, 1700px); max-height: 96dvh; margin: auto; padding: 16px;
   overflow: auto; border: 1px solid var(--edge); border-radius: var(--r-md); background: var(--card); color: var(--ink); }
 .rich-image-viewer::backdrop { background: #0009; }
@@ -402,7 +440,7 @@
 .rich-control-state { font-size: .8em; font-family: var(--ui-font-mono); color: var(--soft); }
 .rich-control button, .rich-control input, .rich-control select { max-width: 100%; min-width: 0; font: inherit; color: var(--soft); background: var(--card); border: 1px solid var(--line); padding: 6px 10px; cursor: not-allowed; }
 .rich-control label { display: grid; gap: 6px; min-width: 0; }
-.rich-response :is([tabindex='0'], summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.rich-response :is([tabindex='0'], summary):focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 .rich-unavailable { border: 1px solid var(--line); background: var(--sunk); padding: 12px; }
 .rich-unavailable-label { margin: 0 0 8px; color: var(--soft); }
 .rich-source > summary { cursor: pointer; color: var(--accent); font-family: var(--ui-font-mono); font-size: .86em; }
@@ -657,7 +695,37 @@
 .user-image-slot { flex: 0 0 96px; width: 96px; height: 124px; display: grid; grid-template-rows: 96px 28px; justify-items: center; align-items: center; overflow: hidden; }
 .user-image-slot > .meta { margin: 0; padding: 6px; text-align: center; font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
 .user-image-slot > .retained-image-notice { padding: 2px 0; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(10px * var(--text-scale, 1)); line-height: 12px; text-align: center; }
-.generated-image-gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; max-width: 34rem; margin: 12px 0; }
+.generated-image-gallery { display: grid; gap: 12px; max-width: 34rem; margin: 12px 0; }
+.generated-image-gallery.is-single { display: block; max-width: 17rem; }
+.generated-image-gallery:not(.is-single) { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.generated-image-gallery:not(.is-single) > .ev.ev-native_image:first-of-type,
+.generated-image-gallery:not(.is-single) > .image-set-bar:first-child + .ev.ev-native_image { grid-column: 1 / -1; }
+.image-set-bar { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.image-set-bar > .meta { flex: 1 1 auto; margin: 0; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
+.generated-image-gallery :is(.image-set-open, .image-set-download, .image-set-save, .image-set-download-all, .image-set-save-all) {
+  display: inline-flex; align-items: center; justify-content: center; max-width: 100%; min-height: 30px; margin: 4px 5px 0 0;
+  padding: 5px 9px; border: 1px solid var(--edge); border-radius: var(--r-sm); background: var(--card);
+  color: var(--ink); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); cursor: pointer; }
+.generated-image-gallery :is(.image-set-open, .image-set-download, .image-set-save, .image-set-download-all, .image-set-save-all):disabled {
+  opacity: .55; cursor: default; }
+.generated-image-gallery :is(.image-set-open, .image-set-download, .image-set-save, .image-set-download-all, .image-set-save-all):not(:disabled):hover {
+  background: var(--hover); }
+.generated-image-gallery button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.image-set-selection { flex: 1 0 100%; min-width: 0; max-height: 13rem; overflow-y: auto; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 0; padding: 8px; border: 1px solid var(--line); background: var(--card); color: var(--ink); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
+.image-set-selection legend { padding: 0 4px; color: var(--ink); }
+.image-set-selection label { display: flex; align-items: center; gap: 5px; min-width: 0; cursor: pointer; }
+.image-set-selection label:has(input:disabled) { opacity: .55; cursor: default; }
+.image-set-selection label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.image-set-selection input { flex: none; accent-color: var(--accent); }
+.image-set-selection p { grid-column: 1 / -1; margin: 2px 0 0; color: var(--soft); }
+.image-set-viewer { max-width: min(42rem, calc(100vw - 32px)); border: 1px solid var(--line); background: var(--card); color: var(--ink); }
+.image-set-stage { overflow: hidden; max-height: 70vh; display: grid; place-items: center; touch-action: none; }
+.image-set-stage img { max-width: 100%; max-height: 70vh; transform-origin: center center; }
+.image-set-thumbs { display: flex; gap: 8px; overflow: auto; max-width: 100%; }
+.image-set-thumb { flex: 0 0 auto; min-width: 2rem; }
+.image-set-thumb img { display: block; width: 3rem; height: 3rem; object-fit: cover; }
+.image-set-thumb[aria-pressed="true"] { outline: 1px solid var(--ink); }
+.image-set-viewer button[aria-disabled="true"] { opacity: .55; }
 .generated-image-gallery > .ev.ev-native_image { min-width: 0; margin: 0; padding: 0; border: 0; background: transparent; }
 .generated-image-gallery .ev-body, .generated-image-gallery .said { min-width: 0; width: 100%; padding: 0; }
 .generated-image-frame { width: 100%; max-height: 17rem; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 0; background: var(--card); }
@@ -666,7 +734,7 @@
 .generated-image-frame .meta { margin: 0; padding: 12px; text-align: center; }
 .generated-image-frame.is-unavailable .meta { padding: 0; }
 
-@media (max-width: 480px) { .generated-image-gallery { gap: 8px; } .generated-image-frame.is-unavailable { padding: 10px 6px; } }
+@media (max-width: 480px) { .generated-image-gallery { gap: 8px; } .generated-image-frame.is-unavailable { padding: 10px 6px; } .image-set-selection { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 
 .agent-communication > summary { display: flex; gap: 8px; align-items: center; min-height: 24px; cursor: pointer; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(14px * var(--text-scale, 1)); }
@@ -674,7 +742,7 @@
 .agent-chat-open { margin: 10px 0 2px 24px; padding: 5px 0; gap: 7px; border-radius: 0; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(12px * var(--text-scale, 1)); font-weight: 500; }
 .agent-chat-open:hover:not(:disabled) { background: transparent; color: var(--ink); }
 .agent-chat-open:hover span { text-decoration: underline; text-underline-offset: 3px; }
-.agent-chat-open:focus-visible { outline: 2px solid var(--soft); outline-offset: 4px; }
+.agent-chat-open:focus-visible { outline: 2px solid var(--ink); outline-offset: 4px; }
 .agent-chat-open .ico { width: 13px; height: 13px; }
 
 /* ------------------------------------------------------------------- spine

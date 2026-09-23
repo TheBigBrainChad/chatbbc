@@ -1357,7 +1357,7 @@ input.num {
 .setting > input[type='checkbox']::after { content: ''; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; border-radius: 50%; background: var(--knob-off); }
 .setting > input[type='checkbox']:checked { background: var(--accent-fill, var(--ink)); }
 .setting > input[type='checkbox']:checked::after { left: 16px; background: var(--on-accent, var(--page)); }
-.setting > input[type='checkbox']:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.setting > input[type='checkbox']:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 
 .settings-section-title { margin: 34px 0 14px; font-family: var(--ui-font-mono); font-size: calc(14px * var(--text-scale, 1)); font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--ink); }
 
@@ -1420,3 +1420,33 @@ input.num {
 
 
 @media (max-width: 760px) { .setup-heading { grid-template-columns: minmax(0, 1fr); } }
+
+/* Secondary surfaces stay opaque until the compositor mode is actually translucent. */
+.app:is([data-screen='settings'], [data-screen='library']) :is(
+  [data-panel='workspace'],
+  [data-panel='usage'],
+  [data-panel='appearance'],
+  [data-panel='activity'],
+  [data-panel='setup'],
+  [data-panel='plugins']
+) :is(.card, .pane, .usage-section, .plugin-connection:not(.is-configured)) {
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+.app[data-screen='settings'] [data-panel='setup'] .step {
+  background: var(--card);
+}
+:root:is([data-glass-mode='hyprland-blur'], [data-glass-mode='transparent'])
+  .app:is([data-screen='settings'], [data-screen='library']) :is(
+    [data-panel='workspace'],
+    [data-panel='usage'],
+    [data-panel='appearance'],
+    [data-panel='activity'],
+    [data-panel='setup'],
+    [data-panel='plugins']
+  ) :is(.card, .pane, .usage-section, .step, .plugin-connection:not(.is-configured)) {
+  background: var(--glass-high);
+  border-color: var(--hairline);
+  box-shadow: 0 18px 48px var(--shadow);
+  backdrop-filter: blur(16px);
+}

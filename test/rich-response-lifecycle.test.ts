@@ -149,10 +149,13 @@ it('keeps a canonical image-card choice and wide diagram readable but non-action
     }
     // Structural and focus tests do not measure physical scrollWidth or Electron layout.
     expect(view.querySelectorAll('.rich-control[aria-disabled="true"]')).toHaveLength(3);
-    // The recorded Continue is visibly rendered as an inert disabled button;
-    // no live image source, enabled action, executable node or raw DIL is exposed.
+    // The recorded Continue is visibly rendered as an inert disabled button; every provider
+    // control stays disabled. The only enabled button is the local Focus control, which opens a
+    // read-only enlarged view of what is already on screen and mutates nothing.
     expect(view.querySelectorAll('button:disabled')).toHaveLength(1);
-    expect(view.querySelector('img[src], button:not(:disabled), script, text')).toBeNull();
+    const enabled = [...view.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+    expect(enabled.map(button => button.className)).toEqual(['rich-focus-open', 'rich-focus-open']);
+    expect(view.querySelector('img[src], .rich-control:not([aria-disabled="true"]), script, text')).toBeNull();
     expect(view.textContent).not.toContain('<text>untrusted source</text>');
     // Metadata-only pixels and a stored selection are not proof of current native input.
     expect(view.textContent).toContain('Image preview is loading');

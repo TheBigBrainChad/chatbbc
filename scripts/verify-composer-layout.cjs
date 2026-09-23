@@ -1,8 +1,14 @@
 // Run with the repository's Electron binary. Uses real Chromium layout and production CSS.
-const { app, BrowserWindow } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
+if (!process.versions.electron) {
+  const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
+  const result = require('node:child_process').spawnSync(require('electron'), [__filename], { env, encoding: 'utf8', windowsHide: true });
+  process.stdout.write(result.stdout || ''); process.stderr.write(result.stderr || '');
+  process.exit(result.status ?? 1);
+}
+const { app, BrowserWindow } = require('electron');
 
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ show: false, width: 1100, height: 800,
@@ -11,6 +17,10 @@ app.whenReady().then(async () => {
   // order, which is also cascade order, so this sees the same rules the renderer applies.
   const sheets = ['base', 'shell', 'transcript', 'composer', 'panels', 'pages', 'dialogs'];
   const css = sheets.map(name => fs.readFileSync(path.join(__dirname, '../src/renderer/styles', `${name}.css`), 'utf8')).join('\n');
+  assert.match(css, /field-sizing:\s*content/);
+  assert.match(css, /max-height:\s*220px/);
+  assert.match(css, /\.card\.is-session > #composer \{[^}]*var\(--glass-high\)/);
+  assert.match(css, /\.card\.is-session > \.composer-dock \{[^}]*var\(--glass-medium\)/);
   await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`<style>${css}</style>
     <section id="host" hidden><form id="composer" class="composer">
     <textarea id="chatInput" rows="1" dir="auto" placeholder="Ask anything…"></textarea>
@@ -46,5 +56,14 @@ app.whenReady().then(async () => {
   assert.ok(results.find(r => r.name === 'narrow draft').height > results.find(r => r.name === 'wide draft').height,
     'Width changes must recalculate wrapping without an input event');
   assert.equal(results.at(-1).height, results[0].height, 'Empty input has stable initial and cleared geometry');
+  const crystal = await win.webContents.executeJavaScript(`(() => {
+    const composer = getComputedStyle(document.getElementById('composer'));
+    const field = getComputedStyle(document.getElementById('chatInput'));
+    return { position: composer.position, shadow: composer.boxShadow, fieldSizing: field.fieldSizing, maxHeight: field.maxHeight };
+  })()`);
+  assert.equal(crystal.position, 'relative', 'the composer stays anchored');
+  assert.notEqual(crystal.shadow, 'none', 'the composer floats');
+  assert.equal(crystal.fieldSizing, 'content', 'CSS field sizing owns composer height');
+  assert.equal(crystal.maxHeight, '220px');
   win.destroy(); app.quit();
 }).catch(error => { console.error(error); app.exit(1); });

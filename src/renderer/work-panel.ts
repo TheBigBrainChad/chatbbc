@@ -1,20 +1,31 @@
 import { el } from './dom.js';
 import { t } from './i18n.js';
-import { widenWorkPanel } from './work-panel-resize.js';
+import { createOutputInspector, type OutputInspector } from './output-inspector.js';
+import { widenWorkPanel, workbenchMode } from './work-panel-resize.js';
 
-export type WorkTab = 'files' | 'agents' | 'terminal';
+export type WorkTab = 'files' | 'agents' | 'terminal' | 'inspector' | 'plan' | 'session';
+
+/** The object the workbench is showing. Origin and payload stay with that object. */
+export interface WorkbenchSelection {
+  tab: WorkTab;
+  ownerKey: string;
+  origin?: number;
+  payloadId?: string;
+}
 
 /**
  * A tool the work panel hosts. It keeps everything inside its own element and already knows how
  * to show and hide itself, which is where its lazy work lives: the first directory read, the
  * watcher refresh, a shell fit. `available` is the pane's own statement that it has something to
  * show — the same fact its header button publishes by hiding itself.
+ * `beforeReplace` refuses a project or session change that would drop what the tenant still holds.
  */
 export interface WorkPanelTenant {
   element: HTMLElement;
   show: () => void;
   hide: () => void;
   available?: () => boolean;
+  beforeReplace?: (selection: WorkbenchSelection) => boolean;
 }
 
 export interface WorkPanel {
@@ -24,48 +35,53 @@ export interface WorkPanel {
   register: (tab: WorkTab, tenant: WorkPanelTenant) => void;
   show: (tab: WorkTab) => void;
   toggle: (tab: WorkTab) => void;
+  select: (selection: WorkbenchSelection, trigger?: HTMLElement | null) => void;
+  close: () => void;
+  selection: () => WorkbenchSelection | null;
+  outputInspector: OutputInspector;
   /** Re-read the panes after anything that changes what they have to offer. */
   refresh: () => void;
 }
 
-const TABS = ['files', 'agents', 'terminal'] as const;
+const TABS = ['files', 'agents', 'terminal', 'inspector', 'plan', 'session'] as const;
 const LABEL: Readonly<Record<WorkTab, () => string>> = {
   files: () => t('Files'),
   agents: () => t('Sub-agents'),
-  terminal: () => t('Terminal')
+  terminal: () => t('Terminal'),
+  inspector: () => t('Inspector'),
+  plan: () => t('Plan'),
+  session: () => t('Session')
 };
 
 /**
- * One right-hand column with three tenants.
- *
- * Files, Sub-agents and Terminal used to be three surfaces: two mutually exclusive side panes and
- * a bottom drawer. They are one column with a tab strip now, and the strip is a projection of the
- * panes rather than a second copy of them. A pane's own `hidden` attribute stays the single
- * statement of which tool is showing, whichever path changed it — this strip, a pane's header
- * button, Escape, a project change — and a mutation observer per pane is what keeps the strip
- * honest about all of those, so no third place can disagree.
+ * One right-hand column. Files, Sub-agents, Terminal, the output inspector, plan, and session
+ * metadata are tenants of this column, not separate surfaces.
  *
  * Nothing is rebuilt on a switch, so an expanded folder, an unsaved draft and a live shell all
  * survive one. The width is not the strip's business either: `work-panel-resize.ts` stays the one
  * owner of `--work-panel-width`, and the terminal asks it for the column's maximum while selected.
+ * Below the wide breakpoint the same column is an overlay instead of a split.
  */
-export function createWorkPanel(options: { host: HTMLElement }): WorkPanel {
-  const { host } = options;
+export function createWorkPanel(options: {
+  host: HTMLElement;
+  onChange?: (presentation: { open: boolean; tab: WorkTab | null }) => void;
+}): WorkPanel {
+  const { host, onChange } = options;
   const panel = el('section', 'work-panel'); panel.id = 'workPanel'; panel.hidden = true;
   const strip = el('div', 'work-panel-tabs'); strip.setAttribute('role', 'tablist');
   const body = el('div', 'work-panel-body'); body.id = 'workPanelBody';
   const buttons = new Map<WorkTab, HTMLButtonElement>();
   const tenants = new Map<WorkTab, WorkPanelTenant>();
   let shown: WorkTab | null = null;
+  let chosen: WorkbenchSelection | null = null;
+  let trigger: HTMLElement | null = null;
   let release: (() => void) | null = null;
+  let settling = false;
 
   for (const tab of TABS) {
     const button = el('button', 'work-panel-tab', LABEL[tab]) as HTMLButtonElement;
     button.type = 'button'; button.dataset.workTab = tab;
     button.id = `workPanelTab-${tab}`;
-    // A declared tablist has to be drivable by keyboard, so each tab owns a tabpanel and the
-    // arrow keys move between them in the usual way. Roles without that would announce a widget
-    // the reader cannot use.
     button.setAttribute('role', 'tab');
     button.setAttribute('aria-selected', 'false');
     button.tabIndex = -1;
@@ -89,73 +105,130 @@ export function createWorkPanel(options: { host: HTMLElement }): WorkPanel {
   const visible = (): WorkTab | null =>
     TABS.find(tab => tenants.get(tab)?.element.hidden === false) ?? null;
 
+  function studioFrame(): HTMLElement {
+    return host.closest<HTMLElement>('.app') ?? host;
+  }
+
+  function studioWidth(): number {
+    const measured = studioFrame().getBoundingClientRect?.().width ?? 0;
+    if (measured > 0) return measured;
+    return host.ownerDocument.defaultView?.innerWidth ?? 0;
+  }
+
+  function applyLayout(): void {
+    const width = studioWidth();
+    panel.classList.toggle('is-overlay', width > 0 && workbenchMode(width) === 'overlay');
+  }
+
   function refresh(): void {
     const next = visible();
     if (next !== shown) {
       release?.(); release = null;
-      // A terminal in a chat-sized column is about fifty columns, which is no width to read
-      // build output at. It takes the column's maximum until the reader leaves the tab.
       if (next === 'terminal') release = widenWorkPanel(host, tenants.get('terminal')!.element);
       shown = next;
     }
+    if (next === null && !settling) chosen = null;
     panel.hidden = next === null;
     host.classList.toggle('has-work-panel', next !== null);
+    applyLayout();
+    onChange?.({ open: next !== null, tab: next });
     for (const [tab, button] of buttons) {
       const selected = tab === next;
+      const tenant = tenants.get(tab);
       button.classList.toggle('is-sel', selected);
       button.setAttribute('aria-selected', String(selected));
-      // Roving tabindex: the strip is one stop, and the arrow keys move within it.
       button.tabIndex = selected ? 0 : -1;
-      button.disabled = tenants.get(tab)?.available?.() === false;
-      // Each pane is a tabpanel labelled by its own tab. `aria-controls` is deliberately not used:
-      // a pane keeps the id it is referenced by elsewhere, and pointing at a different one would
-      // mean either clobbering that id or naming an element that does not exist.
-      const pane = tenants.get(tab)?.element;
+      button.disabled = !tenant || tenant.available?.() === false;
+      const pane = tenant?.element;
       if (pane) { pane.setAttribute('role', 'tabpanel'); pane.setAttribute('aria-labelledby', button.id); }
     }
   }
 
   function show(tab: WorkTab): void {
-    const tenant = tenants.get(tab);
-    if (!tenant || tenant.available?.() === false) return;
-    if (!tenant.element.hidden) { refresh(); return; }
-    for (const [other, value] of tenants) if (other !== tab && !value.element.hidden) value.hide();
-    tenant.show();
-    refresh();
+    const ownerKey = chosen?.tab === tab ? chosen.ownerKey : tab;
+    select({ tab, ownerKey }, trigger);
   }
 
   function toggle(tab: WorkTab): void {
     const tenant = tenants.get(tab);
     if (!tenant || tenant.available?.() === false) return;
-    // Pressing the tab you are already on puts the column away, like the header button does.
     if (tenant.element.hidden) show(tab);
     else { tenant.hide(); refresh(); }
   }
 
+  function select(selection: WorkbenchSelection, nextTrigger?: HTMLElement | null): void {
+    const tenant = tenants.get(selection.tab);
+    if (!tenant || tenant.available?.() === false) return;
+    const ownerChanges = chosen !== null && chosen.tab === selection.tab && chosen.ownerKey !== selection.ownerKey;
+    if (ownerChanges && tenant.beforeReplace?.(selection) === false) return;
+    if (nextTrigger) trigger = nextTrigger;
+    chosen = { ...selection };
+    if (tenant.element.hidden) {
+      settling = true;
+      try {
+        for (const [other, value] of tenants) if (other !== selection.tab && !value.element.hidden) value.hide();
+        tenant.show();
+      } finally { settling = false; }
+    }
+    refresh();
+  }
+
+  function focusStaysWithRichOutput(): boolean {
+    const active = host.ownerDocument.activeElement;
+    return Boolean(active?.closest('.rich-focus-stage'));
+  }
+
+  function close(): void {
+    const current = visible();
+    if (current) tenants.get(current)?.hide();
+    chosen = null;
+    refresh();
+    // The conversation stage owns focused-output focus. Closing this overlay must not take it.
+    if (!focusStaysWithRichOutput()) trigger?.focus();
+  }
+
   panel.append(strip, body);
   host.append(panel);
+  const view = host.ownerDocument.defaultView;
+  view?.addEventListener('resize', applyLayout);
+  const FrameObserver = view?.ResizeObserver;
+  if (FrameObserver) new FrameObserver(() => applyLayout()).observe(studioFrame());
+  panel.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || event.defaultPrevented || focusStaysWithRichOutput()) return;
+    event.preventDefault();
+    close();
+  });
   refresh();
+
+  function register(tab: WorkTab, tenant: WorkPanelTenant): void {
+    tenants.set(tab, tenant);
+    body.append(tenant.element);
+    const Observer = host.ownerDocument.defaultView?.MutationObserver;
+    if (Observer) new Observer(records => {
+      const revealed = records.map(record => record.target as HTMLElement).find(node => !node.hidden);
+      if (revealed) for (const value of tenants.values()) if (value.element !== revealed && !value.element.hidden) value.hide();
+      refresh();
+    }).observe(tenant.element, { attributes: true, attributeFilter: ['hidden'] });
+    refresh();
+  }
+
+  const outputInspector = createOutputInspector();
+  register('inspector', {
+    element: outputInspector.element,
+    show(): void { outputInspector.element.hidden = false; },
+    hide(): void { outputInspector.element.hidden = true; },
+    available: () => true
+  });
 
   return {
     host, panel, body,
-    register(tab, tenant): void {
-      tenants.set(tab, tenant);
-      // The pane's host is the chat panel; the work panel owns where it sits now. The pane keeps
-      // its OWN id (`#workspaceTerminal` and friends are referenced elsewhere), so the tab
-      // announces which component it controls by name rather than by owning its element's id.
-      body.append(tenant.element);
-      const Observer = host.ownerDocument.defaultView?.MutationObserver;
-      if (Observer) new Observer(records => {
-        // A pane can be shown by its own header button, not only by this strip. One column holds
-        // one tool, so whichever pane just appeared retires the rest.
-        const revealed = records.map(record => record.target as HTMLElement).find(node => !node.hidden);
-        if (revealed) for (const value of tenants.values()) if (value.element !== revealed && !value.element.hidden) value.hide();
-        refresh();
-      }).observe(tenant.element, { attributes: true, attributeFilter: ['hidden'] });
-      refresh();
-    },
+    register,
     show,
     toggle,
-    refresh
+    select,
+    close,
+    selection: () => chosen ? { ...chosen } : null,
+    refresh,
+    outputInspector
   };
 }

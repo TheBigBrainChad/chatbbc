@@ -1,4 +1,6 @@
 import type { RichMediaState } from '../shared/session.js';
+import { t, ui } from './i18n.js';
+import type { GeneratedAssetDownloadState } from '../shared/generated-assets.js';
 
 /** The existing sessions:image reader fully decodes bytes and checks recorded asset membership. */
 const MAX_PREVIEW_BYTES = 16 * 1024 * 1024;
@@ -68,6 +70,31 @@ export function localDataUrl(value: unknown, mimeType: string): value is string 
   if (typeof value !== 'string' || value.length > MAX_DATA_URL_LENGTH) return false;
   const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
   return !!match && match[1] === mimeType && match[2]!.length % 4 === 0;
+}
+
+/** A saved preview of any admitted image type. Callers must not pass a provider URL. */
+export function localImageDataUrl(value: unknown): value is string {
+  return [...IMAGE_MIMES].some(mime => localDataUrl(value, mime));
+}
+
+export function generatedDownloadLabel(states: readonly GeneratedAssetDownloadState[]): string {
+  if (states.includes('unconfirmed')) return t('Download outcome unconfirmed');
+  if (states.includes('failed')) return t('Download failed');
+  if (states.includes('started')) return t('Downloading original');
+  if (states.includes('requested')) return t('Download requested');
+  if (states.length > 0 && states.every(state => state === 'complete')) return t('Saved to browser Downloads');
+  return t('Download original');
+}
+
+/** Paints only the browser-owned transfer receipt; no provider URL reaches the renderer. */
+export function paintGeneratedDownloadState(
+  button: HTMLButtonElement,
+  states: readonly GeneratedAssetDownloadState[]
+): void {
+  ui(button, 'textContent', () => generatedDownloadLabel(states));
+  const pending = states.some(state => state === 'requested' || state === 'started');
+  button.disabled = pending;
+  button.setAttribute('aria-busy', pending ? 'true' : 'false');
 }
 
 /**

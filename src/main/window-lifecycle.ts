@@ -79,6 +79,18 @@ export function registerNativeWindowActivation(
   if (platform === 'darwin') source.on('activate', showWindow);
 }
 
+/** Renderer failure has no load event; restore the owning window's readable glass backing. */
+export function registerGlassRendererLoss(
+  source: { on(event: 'render-process-gone', listener: () => void): unknown },
+  owner: { isDestroyed(): boolean },
+  currentWindow: () => object | null,
+  restoreBacking: () => void
+): void {
+  source.on('render-process-gone', () => {
+    if (currentWindow() === owner && !owner.isDestroyed()) restoreBacking();
+  });
+}
+
 /** Login launch is distinct from tunnel auto-connect and ordinary app activation. */
 export function isBackgroundLaunch(argv: readonly string[]): boolean {
   return argv.includes('--background');

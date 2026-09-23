@@ -67,3 +67,18 @@
 .file-confirm-dialog-detail { margin: -4px 0 4px; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); line-height: 1.5; }
 .file-dialog-danger { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
 .file-dialog-danger:hover:not(:disabled) { border-color: var(--red); background: var(--red-wash); color: var(--red); }
+
+/* Native dialogs use the top layer, so the transparent window shell cannot clip them.
+   The opaque card is the fallback. High glass applies only while the compositor is translucent. */
+dialog {
+  color: var(--ink);
+  background: var(--card);
+  max-width: calc(100vw - 32px);
+  max-height: min(calc(100dvh - 32px), calc(100vh - 32px));
+}
+:root:is([data-glass-mode='hyprland-blur'], [data-glass-mode='transparent']) dialog {
+  background: var(--glass-high);
+  border-color: var(--hairline);
+  box-shadow: 0 18px 48px var(--shadow);
+  backdrop-filter: blur(16px);
+}

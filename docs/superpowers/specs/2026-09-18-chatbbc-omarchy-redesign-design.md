@@ -1,8 +1,10 @@
 # ChatBBC Omarchy redesign — design
 
 **Date:** 2026-09-18
-**Status:** approved in brainstorming; awaiting implementation plan
-**Scope:** presentation only. No product-behaviour change.
+**Status:** superseded on 2026-09-21 by
+[`2026-09-21-chatbbc-crystal-studio-redesign-design.md`](./2026-09-21-chatbbc-crystal-studio-redesign-design.md)
+**Historical scope:** presentation-only Omarchy alignment. The replacement design intentionally
+broadens the product and rich-output behavior.
 
 ## 1. Problem
 

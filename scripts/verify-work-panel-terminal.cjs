@@ -7,8 +7,15 @@
 // commands. Neither command set runs on the other OS, and weakening either would remove evidence.
 //
 // Same isolated backend, real IPC and real PTY as the drawer fixture. Run with:
-//   node_modules/.bin/electron scripts/verify-work-panel-terminal.cjs \
-//     --ozone-platform=x11 --disable-gpu --in-process-gpu
+//   node scripts/verify-work-panel-terminal.cjs
+// The node entry relaunches Electron. Linux adds the ozone flags this host needs.
+if (!process.versions.electron) {
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE;
+  const extra = process.platform === 'linux' ? ['--ozone-platform=x11', '--disable-gpu', '--in-process-gpu'] : [];
+  const { status } = require('node:child_process').spawnSync(require('electron'), [__filename, ...extra], { env, stdio: 'inherit', windowsHide: true });
+  process.exit(status ?? 1);
+}
 const { app, BrowserWindow } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -17,7 +24,6 @@ const root = path.resolve(__dirname, '..');
 const output = path.join(root, 'outputs/work-panel-terminal');
 
 app.setPath('userData', path.join(output, 'runtime'));
-if (!process.versions.electron) { console.error('This fixture must run under Electron.'); process.exit(1); }
 
 app.whenReady().then(async () => {
   const { createServer } = await import('vite');
@@ -94,9 +100,12 @@ app.whenReady().then(async () => {
     await win.loadURL(server.resolvedUrls.local[0] + 'fixture.html');
     await until('window.ready');
 
-    // 1. The strip carries the three tabs, and the terminal is a tenant of the work panel's body.
+    // 1. The strip carries the workbench tenants, and the terminal is a tenant of the work panel's body.
     assert.deepEqual(await js(`[...document.querySelectorAll('[data-work-tab]')].map(n=>n.dataset.workTab)`),
-      ['files', 'agents', 'terminal']);
+      ['files', 'agents', 'terminal', 'inspector', 'plan', 'session']);
+    assert.equal(await js('document.querySelector("[data-work-tab=inspector]").disabled'), false);
+    assert.equal(await js('document.querySelector("[data-work-tab=plan]").disabled'), true);
+    assert.equal(await js('document.querySelector("[data-work-tab=session]").disabled'), true);
     await js(`document.querySelector('[data-work-tab="terminal"]').click()`);
     await until('ids.length===1');
     assert.equal(await js('document.getElementById("workspaceTerminal").parentElement.id'), 'workPanelBody');

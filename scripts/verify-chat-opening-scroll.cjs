@@ -13,12 +13,20 @@ if (!process.versions.electron) {
 const { app, BrowserWindow } = require('electron');
 app.whenReady().then(async () => {
   const root = path.join(__dirname, '..');
-  const code = require('esbuild').buildSync({ entryPoints: [path.join(root, 'src/renderer/chat.ts')],
+  // The async API, because the `?url` asset plugin below cannot run in a synchronous build.
+  const code = (await require('esbuild').build({ entryPoints: [path.join(root, 'src/renderer/chat.ts')],
     bundle: true, write: false, platform: 'browser', format: 'iife', globalName: 'chat',
     // chat.ts reaches workspace-terminal.ts, which imports xterm's CSS. This bundler has no output
     // path for a stylesheet and the fixture reads the renderer's own sheets below, so the import is
     // emptied rather than resolved — without this the whole script dies before any assertion runs.
-    loader: { '.css': 'empty' } }).outputFiles[0].text;
+    loader: { '.css': 'empty' },
+    // The same bundle reaches the file panel's PDF viewer, which imports pdfjs's worker with
+    // `?url`. The fixture never opens a document, so the asset resolves to an empty string
+    // rather than an esbuild error about a worker this run does not use.
+    plugins: [{ name: 'fixture-url-assets', setup(build) {
+      build.onResolve({ filter: /\?url$/ }, args => ({ path: args.path, namespace: 'fixture-url' }));
+      build.onLoad({ filter: /.*/, namespace: 'fixture-url' }, () => ({ contents: 'export default "";', loader: 'js' }));
+    } }] })).outputFiles[0].text;
   // The renderer's stylesheet is split by responsibility: the modules are read in link
   // order, which is also cascade order, so this sees the same rules the renderer applies.
   const sheets = ['base', 'shell', 'transcript', 'composer', 'panels', 'pages', 'dialogs'];
@@ -30,6 +38,20 @@ app.whenReady().then(async () => {
     webPreferences: { sandbox: true, backgroundThrottling: false } });
   await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
   await win.webContents.executeJavaScript(`(() => {
+    // A data: URL has no storage origin, and the renderer legitimately reads saved pane
+    // widths, disclosure state and language preferences from localStorage. Give the fixture
+    // the same API a real page has, instead of letting one SecurityError abort the boot.
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: (() => {
+      const values = new Map();
+      return {
+        getItem: key => values.has(String(key)) ? values.get(String(key)) : null,
+        setItem: (key, value) => { values.set(String(key), String(value)); },
+        removeItem: key => { values.delete(String(key)); },
+        clear: () => values.clear(),
+        key: index => [...values.keys()][index] ?? null,
+        get length() { return values.size; }
+      };
+    })() });
     const ok = data => Promise.resolve({ok:true, data});
     let sessionChanged = null;
     const rows = (id, count) => Array.from({length:count}, (_, i) => ({seq:i+1, time:1+i,
@@ -93,7 +115,9 @@ app.whenReady().then(async () => {
   }
   assert.ok(results.readAfter > results.readBefore, 'Live refresh must perform a session read');
   assert.equal(results.inserted, true, 'Live refresh must render the inserted assistant row');
-  assert.equal(results.readerAfterRefresh, 700, 'Live refresh preserves deliberate reading');
+  // Prose line boxes are fractional, so a preserved reading position lands within a subpixel
+  // of where the reader put it — never a row away.
+  assert.ok(Math.abs(results.readerAfterRefresh - 700) < 1, 'Live refresh preserves deliberate reading: '+results.readerAfterRefresh);
   console.log('Chat opening passed: initial open, three A/B/A cycles, long first message and live reader position.');
   win.destroy(); app.exit(0);
 }).catch(error => { console.error(error); app.exit(1); });

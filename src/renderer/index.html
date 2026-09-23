@@ -80,7 +80,7 @@
       </defs>
     </svg>
 
-    <div class="app" data-screen="chat">
+    <div class="app" id="appShell" data-screen="chat" data-workbench-open="false" data-navigator-open="false">
       <div class="app-topbar">
         <button class="btn" id="sidebarToggle" type="button" aria-label="Toggle sidebar" aria-controls="sidebar" aria-expanded="true" title="Toggle sidebar (Ctrl+B)"><svg class="ico" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M9 4v16" /></svg></button>
         <details class="view-menu" id="viewMenu"><summary>View</summary><div class="view-menu-items">
@@ -91,23 +91,17 @@
           <button class="btn" id="zoomActualSize" type="button">Actual Size <span id="zoomReset">100%</span><kbd>Ctrl+0</kbd></button>
         </div></details>
       </div>
+      <div id="globalRail" role="toolbar" aria-label="Workspace" aria-orientation="vertical">
+        <button type="button" data-destination="chats" aria-current="page" tabindex="0">Chats</button>
+        <button type="button" data-destination="files" tabindex="-1">Files</button>
+        <button type="button" data-destination="agents" tabindex="-1">Agents</button>
+        <button type="button" data-destination="usage" tabindex="-1">Usage</button>
+        <button type="button" data-destination="settings" tabindex="-1">Settings<span class="badge" id="setupBadge" hidden></span></button>
+      </div>
+      <aside id="chatNavigator">
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-resize" id="sidebarResize" role="separator" tabindex="0" aria-label="Chat list width" aria-orientation="vertical" aria-controls="sidebar" title="Drag to resize · Double-click to reset"></div>
         <div class="sidebar-brand"><span class="mark"><svg class="ico" viewBox="0 0 24 24"><use href="#i-mark" /></svg></span><strong>ChatBBC</strong></div>
-        <!-- The five destinations, and the only settings nav there is: selecting one swaps the
-             body and hands this rail's list slot to the back row below rather than adding a
-             second nav. Setup is not a peer; it is reached from the Workspace page. -->
-        <nav id="tabs" aria-label="Settings navigation">
-          <button class="is-sel" data-tab="workspace" type="button">
-            <svg class="ico" viewBox="0 0 24 24"><use href="#i-home" /></svg>Workspace
-            <span class="badge" id="setupBadge" hidden></span>
-          </button>
-          <button data-tab="automation" type="button"><svg class="ico" viewBox="0 0 24 24"><use href="#i-chat" /></svg>Automation</button>
-          <button data-tab="appearance" type="button"><svg class="ico" viewBox="0 0 24 24"><use href="#i-sun" /></svg>Appearance</button>
-          <button data-tab="usage" type="button"><svg class="ico" viewBox="0 0 24 24"><use href="#i-pulse" /></svg>Usage</button>
-          <button data-tab="activity" type="button"><svg class="ico" viewBox="0 0 24 24"><use href="#i-clock" /></svg>Activity</button>
-        </nav>
-        <button class="btn" id="backToChat" type="button">← Back to chat</button>
         <section class="sidebar-sessions">
           <div class="sidebar-primary" id="sidebarPrimary">
             <button class="btn new-chat" id="newChat" type="button"><svg class="ico" viewBox="0 0 24 24"><use href="#i-pencil" /></svg>New chat</button>
@@ -136,7 +130,6 @@
         </section>
 
         <div class="sidebar-bottom">
-          <button class="btn" id="workspaceSettings" type="button"><svg class="ico" viewBox="0 0 24 24"><use href="#i-gear" /></svg>Settings</button>
           <div class="connection-anchor">
             <button
               class="sidebar-connection"
@@ -210,6 +203,8 @@
           </div>
         </div>
       </aside>
+      </aside>
+      <div id="conversationStage">
       <!-- ------------------------------------------------------------ header -->
       <header>
         <span id="chatTitle">New chat</span>
@@ -253,6 +248,13 @@
       </div>
 
       <main>
+        <nav id="settingsPages" class="settings-pages" aria-label="Settings" hidden>
+          <button type="button" data-settings-panel="workspace">Workspace</button>
+          <button type="button" data-settings-panel="automation">Automation</button>
+          <button type="button" data-settings-panel="appearance">Appearance</button>
+          <button type="button" data-settings-panel="activity">Activity</button>
+        </nav>
+
 
         <section class="panel appearance-panel scroll" data-panel="appearance" id="appearancePanel" aria-labelledby="appearanceTitle">
           <div class="appearance-content">
@@ -267,7 +269,7 @@
               <!-- Following the desktop is explicit and reversible: the manual colors below are
                    never overwritten, so turning it off restores exactly what the pickers show. -->
               <label class="setting"><span class="setting-text"><b>Follow this desktop</b><em>Use the live Omarchy theme's own colors and terminal font. Your saved colors are kept and return when this is off. Detected: <span id="appearanceDesktopName">none</span>.</em></span><input id="appearanceFollowDesktop" type="checkbox" /></label>
-              <div class="setting" id="appearanceRefreshRow" hidden><span class="setting-text"><b>Desktop theme</b><em>The desktop theme is read when ChatBBC starts or when settings are saved. Refresh to pick up a theme you changed just now.</em></span><button class="btn" id="appearanceRefreshDesktop" type="button">Refresh from desktop</button></div>
+              <div class="setting" id="appearanceRefreshRow"><span class="setting-text"><b>Desktop theme</b><em id="appearanceDesktopStatus" role="status">Theme changes sync automatically while ChatBBC is open.</em></span><button class="btn" id="appearanceRefreshDesktop" type="button" hidden>Retry desktop theme</button></div>
 
               <div class="setting"><label class="setting-text" for="appearance-accent"><b>Accent color</b></label><div class="appearance-color"><input id="appearance-accent" type="color" data-color="accent" aria-label="Accent color" /><input id="appearance-accent-hex" type="text" data-hex="accent" aria-label="Accent color HEX" pattern="#[0-9a-fA-F]{6}" maxlength="7" spellcheck="false" autocomplete="off" /></div></div>
               <div class="setting"><label class="setting-text" for="appearance-background"><b>Background color</b></label><div class="appearance-color"><input id="appearance-background" type="color" data-color="background" aria-label="Background color" /><input id="appearance-background-hex" type="text" data-hex="background" aria-label="Background color HEX" pattern="#[0-9a-fA-F]{6}" maxlength="7" spellcheck="false" autocomplete="off" /></div></div>
@@ -1093,6 +1095,8 @@
           </section>
         </section>
       </main>
+      </div>
+      <aside id="contextWorkbench"></aside>
 
       <!-- --------------------------------------------------------------- nav -->
 

@@ -400,7 +400,7 @@ export type SessionEvent =
   | (BaseEvent & {
       /** ChatGPT-native generated media, independent of assistant prose and local MCP calls. */
       kind: 'native_image';
-      /** Exact provider message UUID that owns this output. */
+      /** Exact provider message UUID that owns this output. Image sets group by this id, never by turn or adjacency. */
       messageId: string;
       /** Stable non-secret id from the typed sediment image pointer. */
       providerAssetId: string;

@@ -16,7 +16,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { filterSettingsSections } from '../src/renderer/dom.js';
 import { readRendererStyles } from './helpers.js';
 import { sessionWorkingAt } from '../src/shared/session-activity.js';
@@ -109,14 +109,12 @@ describe('the session card header', () => {
     expect(header.contains(connection)).toBe(false);
     expect(footer).not.toBeNull();
     expect([...footer.children].map((node) => (node as HTMLElement).id || (node as HTMLElement).className)).toEqual([
-      'workspaceSettings',
       'connection-anchor'
     ]);
     expect(document.getElementById('connectionPopover')!.closest('.connection-anchor')).not.toBeNull();
     expect(rule('.connection-popover')).toContain('position: fixed');
     expect(rule('.connection-popover')).toContain('max-height: min(580px, calc(100vh - 70px))');
     expect(rule('.connection-popover::-webkit-scrollbar-track')).toContain('margin-block: 10px');
-    expect(rule('#workspaceSettings')).toContain('height: 36px');
     expect(rule('.sidebar-connection')).toContain('width: 36px; height: 36px');
     expect(document.getElementById('connectionAdvanced')).not.toBeNull();
     expect(document.getElementById('connectionAdvancedGrid')).not.toBeNull();
@@ -496,15 +494,15 @@ describe('the settings sheet', () => {
 
 describe('the session timeline', () => {
   it('renders every event kind the recorder can write', async () => {
-    const [shared, chat] = await Promise.all([
+    const [shared, timeline] = await Promise.all([
       fs.readFile(path.join(process.cwd(), 'src', 'shared', 'session.ts'), 'utf8'),
-      fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'chat.ts'), 'utf8')
+      fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'timeline-view.ts'), 'utf8')
     ]);
     const union = shared.slice(shared.indexOf('export type SessionEvent ='), shared.indexOf('export type SessionEventKind'));
     const declared = [...new Set([...union.matchAll(/\bkind: '([a-z_]+)'/g)].map((match) => match[1]!))];
     expect(declared.length).toBeGreaterThan(5);
 
-    const body = chat.slice(chat.indexOf('function eventBody'));
+    const body = timeline.slice(timeline.indexOf('function eventBody'));
     const handled = new Set([...body.slice(0, body.indexOf('\n}')).matchAll(/case '([a-z_]+)':/g)].map((m) => m[1]!));
     expect(declared.filter((kind) => !handled.has(kind))).toEqual([]);
   });
@@ -513,6 +511,13 @@ describe('the session timeline', () => {
 describe('the window as a whole', () => {
   it('keeps workspace settings in a scrollable column', () => {
     expect(rule("[data-panel='workspace']")).toContain('overflow-y: auto');
+  });
+
+  it('keeps every glass mode readable and hit-testable', () => {
+    expect(rule(":root[data-glass-mode='atmospheric'] .app")).toContain('background: var(--canvas-atmosphere)');
+    expect(rule(":root[data-glass-mode='hyprland-blur'] .app")).toContain('background: var(--glass-low)');
+    expect(rule(":root[data-glass-mode='transparent'] .app")).toContain('background: var(--glass-low)');
+    expect(css).not.toMatch(/(?:html|body|\\.app)[^{]*\\{[^}]*pointer-events:\\s*none/);
   });
 
   /**
@@ -533,6 +538,7 @@ describe('the window as a whole', () => {
     // Wide authored tables/code may scroll locally; the surrounding app must not.
     const horizontal = [...css.matchAll(/([^{}]+)\{[^{}]*overflow-x:\s*(?:auto|scroll)[^{}]*\}/g)];
     expect(horizontal.map(match => match[1]!.trim())).toEqual([
+      '.settings-pages',
       '.msg.rich .markdown-table',
       '.rich-table, .rich-diagram',
       '.file-preview-markdown pre',
@@ -545,6 +551,56 @@ describe('the window as a whole', () => {
     expect(rule('.scroll')).toContain('overflow: hidden auto');
   });
 
+  it('gives keyboard focus a shape that is not only accent, blue, or glow', () => {
+    const covered = new Set<string>();
+    const seen = new Set<string>();
+    for (const match of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const body = match[2]!.replace(/\s+/g, ' ');
+      const geometric = /outline:\s*(?!none\b|0\b)[^;]*var\(--ink\)/.test(body);
+      for (const part of match[1]!.split(',').map(selector => selector.trim())) {
+        if (!/:focus-visible\b/.test(part)) continue;
+        seen.add(part);
+        if (geometric) covered.add(part);
+      }
+    }
+    expect([...seen].filter(selector => !covered.has(selector))).toEqual([]);
+  });
+
+  it('removes nonessential motion when reduced motion is requested', () => {
+    const reduced = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
+    expect(reduced.startsWith('@media (prefers-reduced-motion: reduce)')).toBe(true);
+    expect(reduced).toContain('animation: none !important');
+    expect(reduced).toContain('transition: none !important');
+    expect(reduced).toContain('scroll-behavior: auto !important');
+  });
+
+  it('keeps authored prose bidirectional and the shell on logical edges', () => {
+    expect(rule('.msg:not(.rich), .pending-message-text')).toContain('unicode-bidi: plaintext');
+    expect(rule(".msg.rich, textarea[dir='auto'], .queue-label[dir='auto']")).toContain('text-align: start');
+    expect(rule('.msg.rich :is(pre, code, kbd)')).toContain('unicode-bidi: isolate');
+    const rail = [...css.matchAll(/#globalRail\s*\{([^}]*)\}/g)].map(match => match[1]!);
+    const workbench = [...css.matchAll(/#contextWorkbench\s*\{([^}]*)\}/g)].map(match => match[1]!);
+    expect(rail.some(body => body.includes('border-inline-end'))).toBe(true);
+    expect(workbench.some(body => body.includes('border-inline-start'))).toBe(true);
+    expect(rail.some(body => /border-(?:left|right)\s*:/.test(body))).toBe(false);
+    expect(rail.some(body => body.includes('direction: ltr'))).toBe(true);
+    expect(rule('.msg.rich :is(pre, code, kbd)')).toContain('direction: ltr');
+    expect(rule('.sidebar-resize')).toContain('inset-inline-end: -4px');
+    expect(rule('.sidebar-resize')).not.toMatch(/\b(?:left|right)\s*:/);
+    expect(rule('.connection-popover')).toContain('inset-inline-start: 12px');
+    expect(rule('.connection-popover')).toContain('inset-inline-end: auto');
+    expect(rule('.connection-popover')).not.toMatch(/\b(?:left|right)\s*:/);
+    expect(rule('.connection-advanced > summary')).toContain('inset-inline-end: 8px');
+    expect(rule('.connection-advanced > summary')).not.toMatch(/\b(?:left|right)\s*:/);
+  });
+
+  it('keeps primary rail targets usable when text is enlarged', () => {
+    expect(rule('#globalRail [data-destination]')).toContain('min-width: 44px');
+    expect(rule('#globalRail [data-destination]')).toContain('min-height: 44px');
+    expect(rule('#globalRail [data-destination]')).toContain('calc(11px * var(--text-scale, 1))');
+    expect(document.body.innerHTML).not.toContain('aria-live="assertive"');
+  });
+
   it('keeps setup and settings vertically reachable when the window is short', () => {
     // The page itself stays fixed so header/nav remain put; long forms own the vertical scroll.
     expect(rule("[data-panel='setup'].is-active")).toContain('overflow: hidden auto');
@@ -553,5 +609,252 @@ describe('the window as a whole', () => {
     const settingsScroller = settings.closest('#chatBody.scroll');
     expect(settingsScroller, 'settings is not inside the bounded scrolling body').not.toBeNull();
     expect(rule('.scroll')).toContain('overflow: hidden auto');
+  });
+});
+
+describe('the adaptive studio shell', () => {
+  async function shellModule() {
+    return import('../src/renderer/app-shell.js');
+  }
+
+  async function storeModule() {
+    return import('../src/renderer/presentation-store.js');
+  }
+
+  function resize(width: number): void {
+    const view = document.defaultView!;
+    Object.defineProperty(view, 'innerWidth', { configurable: true, value: width });
+    view.dispatchEvent(new view.Event('resize'));
+  }
+
+  async function mountShell() {
+    const { createAppShell } = await shellModule();
+    const { createPresentationStore, initialPresentationState } = await storeModule();
+    const store = createPresentationStore(initialPresentationState());
+    let work = document.getElementById('workPanel');
+    if (!work) {
+      work = document.createElement('section');
+      work.id = 'workPanel';
+      document.querySelector('[data-panel="chat"]')!.append(work);
+    }
+    const shell = createAppShell({
+      document,
+      store,
+      roots: {
+        rail: document.getElementById('globalRail')!,
+        navigator: document.getElementById('chatNavigator')!,
+        stage: document.getElementById('conversationStage')!,
+        workbench: document.getElementById('contextWorkbench')!
+      }
+    });
+    return { shell, store };
+  }
+
+  it('declares collapse priority as workbench overlay, navigator drawer, then compact rail', () => {
+    const workbench = css.indexOf('@container studio (max-width: 1099px)');
+    const navigator = css.indexOf('@container studio (max-width: 779px)');
+    const rail = css.indexOf('@container studio (max-width: 559px)');
+    expect(workbench, 'workbench overlay container').toBeGreaterThan(-1);
+    expect(navigator, 'navigator drawer container').toBeGreaterThan(workbench);
+    expect(rail, 'compact rail container').toBeGreaterThan(navigator);
+    expect(css.indexOf('@media (max-width: 1099px)')).toBeGreaterThan(-1);
+    expect(css.indexOf('@media (max-width: 779px)')).toBeGreaterThan(css.indexOf('@media (max-width: 1099px)'));
+    expect(css.indexOf('@media (max-width: 559px)')).toBeGreaterThan(css.indexOf('@media (max-width: 779px)'));
+    expect(rule('.composer')).toContain('max-width: 860px');
+  });
+
+  it('mounts one chat-centric four-zone shell without duplicating feature roots', async () => {
+    const { shell } = await mountShell();
+    expect(document.querySelectorAll('#globalRail, #chatNavigator, #conversationStage, #contextWorkbench')).toHaveLength(4);
+    for (const id of ['sessionList', 'timeline', 'composer', 'workPanel'])
+      expect(document.querySelectorAll(`#${id}`), id).toHaveLength(1);
+    expect(shell.stage.contains(document.querySelector('#timeline'))).toBe(true);
+    expect(shell.stage.contains(document.querySelector('#composer'))).toBe(true);
+    expect(shell.navigator.contains(document.querySelector('#sessionList'))).toBe(true);
+    expect(shell.workbench.contains(document.querySelector('#workPanel'))).toBe(true);
+    expect(shell.rail.id).toBe('globalRail');
+    shell.dispose();
+  });
+
+  it('collapses the workbench, then the navigator, then the rail while the stage stays mounted', async () => {
+    const { shell } = await mountShell();
+    const app = document.querySelector<HTMLElement>('.app')!;
+    const stage = shell.stage;
+    const composer = document.getElementById('composer')!;
+    resize(1400);
+    expect(app.dataset.collapse).toBe('wide');
+    resize(1000);
+    expect(app.dataset.collapse).toBe('workbench');
+    resize(700);
+    expect(app.dataset.collapse).toBe('navigator');
+    resize(480);
+    expect(app.dataset.collapse).toBe('rail');
+    expect(document.getElementById('conversationStage')).toBe(stage);
+    expect(stage.contains(document.getElementById('timeline'))).toBe(true);
+    expect(stage.contains(composer)).toBe(true);
+    const composerWidth = composer.style.width;
+    shell.setWorkbenchOpen(true);
+    shell.setWorkbenchOpen(false);
+    expect(composer.style.width).toBe(composerWidth);
+    expect(document.getElementById('conversationStage')).toBe(stage);
+    shell.dispose();
+  });
+
+  it('Escape closes only the topmost drawer or overlay and returns focus to its trigger', async () => {
+    const { shell } = await mountShell();
+    const view = document.defaultView!;
+    const app = document.querySelector<HTMLElement>('.app')!;
+    const chats = document.querySelector<HTMLButtonElement>('[data-destination="chats"]')!;
+    const files = document.querySelector<HTMLButtonElement>('[data-destination="files"]')!;
+    const escape = () => document.dispatchEvent(new view.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+
+    resize(1400);
+    shell.setWorkbenchOpen(true);
+    expect(app.dataset.workbenchOpen).toBe('true');
+    escape();
+    expect(app.dataset.workbenchOpen).toBe('true');
+
+    resize(480);
+    chats.focus();
+    chats.click();
+    expect(app.dataset.navigatorOpen).toBe('true');
+    files.focus();
+    files.click();
+    expect(app.dataset.workbenchOpen).toBe('true');
+    escape();
+    expect(app.dataset.workbenchOpen).toBe('false');
+    expect(app.dataset.navigatorOpen).toBe('true');
+    expect(document.activeElement).toBe(files);
+    escape();
+    expect(app.dataset.navigatorOpen).toBe('false');
+    expect(app.dataset.workbenchOpen).toBe('false');
+    expect(document.activeElement).toBe(chats);
+    escape();
+    expect(app.dataset.navigatorOpen).toBe('false');
+    expect(document.activeElement).toBe(chats);
+    shell.dispose();
+  });
+
+  it('moves rail focus with the arrow keys and returns it to the agents trigger', async () => {
+    const { shell } = await mountShell();
+    const view = document.defaultView!;
+    const chats = document.querySelector<HTMLButtonElement>('[data-destination="chats"]')!;
+    const files = document.querySelector<HTMLButtonElement>('[data-destination="files"]')!;
+    const agents = document.querySelector<HTMLButtonElement>('[data-destination="agents"]')!;
+    const settings = document.querySelector<HTMLButtonElement>('[data-destination="settings"]')!;
+    const key = (target: HTMLElement, name: string) => target.dispatchEvent(new view.KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }));
+    chats.focus();
+    key(chats, 'ArrowDown');
+    expect(document.activeElement).toBe(files);
+    expect(files.tabIndex).toBe(0);
+    expect(chats.tabIndex).toBe(-1);
+    key(files, 'End');
+    expect(document.activeElement).toBe(settings);
+    key(settings, 'Home');
+    expect(document.activeElement).toBe(chats);
+
+    resize(480);
+    agents.focus();
+    agents.click();
+    expect(document.querySelector('.app')!.getAttribute('data-workbench-open')).toBe('true');
+    document.dispatchEvent(new view.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    expect(document.querySelector('.app')!.getAttribute('data-workbench-open')).toBe('false');
+    expect(document.activeElement).toBe(agents);
+    shell.dispose();
+  });
+
+  it('projects a destination without mutating the session or app ledger', async () => {
+    const { shell, store } = await mountShell();
+    shell.setDestination('files');
+    expect(store.getState().selectedSessionId).toBeNull();
+    expect(store.getState().app).toBeNull();
+    expect(store.getState().shell.workbench).toEqual({ open: true, tab: 'files' });
+    expect(document.querySelector('[data-destination="files"]')!.getAttribute('aria-current')).toBe('page');
+    shell.setDestination('agents');
+    expect(store.getState().shell.workbench).toEqual({ open: true, tab: 'agents' });
+    expect(store.getState().selectionGeneration).toBe(0);
+    shell.setDestination('usage');
+    expect(store.getState().shell.workbench).toEqual({ open: true, tab: 'agents' });
+    expect(document.querySelector('[data-destination="usage"]')!.getAttribute('aria-current')).toBe('page');
+    expect(document.querySelector('[data-destination="chats"]')!.hasAttribute('aria-current')).toBe(false);
+    shell.setDestination('settings');
+    expect(store.getState().appGeneration).toBe(0);
+    expect(shell.stage.contains(document.getElementById('timeline'))).toBe(true);
+    shell.dispose();
+  });
+
+  it('uses an explicit workbench width above 42vw as the docked track', () => {
+    const block = rule(".app[data-workbench-open='true'][data-collapse='wide']");
+    expect(block).toContain('--workbench-track: var(--workbench-width, 42vw)');
+    expect(block).not.toContain('min(');
+  });
+
+  it('opens #workPanel when Files is chosen', async () => {
+    const html = await fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'index.html'), 'utf8');
+    const dom = new JSDOM(html, { url: 'https://cos.local/', pretendToBeVisual: true });
+    const view = dom.window;
+    const project = { id: 'proj-1', name: 'Demo', path: '/tmp/demo', createdAt: 1 };
+    const page = { sessions: [], nextCursor: null, total: 0, activeId: null, blocked: [], pressure: [] };
+    const api = new Proxy({}, {
+      get(_target, prop) {
+        const name = String(prop);
+        return () => {
+          if (name.startsWith('on')) return () => {};
+          if (name === 'listSessions') return Promise.resolve({ ok: true, data: page });
+          if (name === 'listProjects') return Promise.resolve({ ok: true, data: [project] });
+          return Promise.resolve({ ok: true, data: null });
+        };
+      }
+    });
+    Object.defineProperty(view, 'api', { configurable: true, value: api });
+    class ResizeObserverStub { observe(): void {} unobserve(): void {} disconnect(): void {} }
+    view.ResizeObserver = ResizeObserverStub;
+    vi.stubGlobal('window', view);
+    vi.stubGlobal('document', view.document);
+    vi.stubGlobal('HTMLElement', view.HTMLElement);
+    vi.stubGlobal('SVGElement', view.SVGElement);
+    vi.stubGlobal('localStorage', view.localStorage);
+    vi.stubGlobal('MutationObserver', view.MutationObserver);
+    vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+    vi.stubGlobal('Node', view.Node);
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1; });
+    try {
+      const { initChat, chatVisible } = await import('../src/renderer/chat.js');
+      const { createAppShell } = await import('../src/renderer/app-shell.js');
+      const { presentationStore } = await import('../src/renderer/presentation-store.js');
+      initChat({ save: async () => {}, state: () => null });
+      chatVisible(true);
+      let projectButton: HTMLButtonElement | null = null;
+      const started = Date.now();
+      while (Date.now() - started < 2000) {
+        projectButton = view.document.querySelector<HTMLButtonElement>('[data-new-project]');
+        if (projectButton) break;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      expect(projectButton, 'a project must be selected before Files can show its pane').not.toBeNull();
+      projectButton!.click();
+      expect(view.document.getElementById('filePanelToggle')!.hidden).toBe(false);
+      const shell = createAppShell({
+        document: view.document,
+        store: presentationStore,
+        roots: {
+          rail: view.document.getElementById('globalRail')!,
+          navigator: view.document.getElementById('chatNavigator')!,
+          stage: view.document.getElementById('conversationStage')!,
+          workbench: view.document.getElementById('contextWorkbench')!
+        }
+      });
+      const panel = view.document.getElementById('workPanel')!;
+      expect(panel.hidden).toBe(true);
+      view.document.querySelector<HTMLButtonElement>('[data-destination="files"]')!.click();
+      expect(view.document.querySelector('.app')!.getAttribute('data-workbench-open')).toBe('true');
+      expect(panel.hidden, 'Files leaves #workPanel hidden').toBe(false);
+      shell.setWorkbenchOpen(false);
+      expect(panel.hidden).toBe(true);
+      shell.dispose();
+    } finally {
+      view.close();
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import sharp from 'sharp';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_GOAL_SYSTEM_PROMPT } from '../src/shared/goal.js';
 import { prependUserPrompt } from '../src/shared/user-prompt.js';
 import type { Handoff, RichMediaState, SessionEvent, SessionSummary } from '../src/shared/session.js';
@@ -19,6 +19,8 @@ vi.mock('../src/renderer/workspace-terminal.js', () => ({ createWorkspaceTermina
 }) }));
 vi.mock('../src/renderer/pet.js', () => ({ initPet: () => () => {} }));
 import { positionOf, projectTimeline } from '../src/shared/chronology.js';
+import { el } from '../src/renderer/dom.js';
+import type { DeliveryHost } from '../src/renderer/outbox-view.js';
 
 /**
  * The session timeline as the user reads it while a chat is running.
@@ -190,7 +192,8 @@ async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers
     resolvedBinary: null,
     bundledTunnelVersion: null,
     bridge: { running: true, port: 8765, paired: false, present: false, lastSeenAt: null, extensionVersion: null },
-    update: { current: '2.0.3', latest: null, stage: 'idle', error: null, checkedAt: null }
+    update: { current: '2.0.3', latest: null, stage: 'idle', error: null, checkedAt: null },
+    omarchy: { generation: 0, theme: null, diagnostic: null }
   };
   const ok = (data: any) => Promise.resolve({ ok: true, data });
   const live = { events: [...events], inputs: [] as InputEntry[], sent: [] as InputArgs[], automation: 'off', controlCalls: [] as Array<{ id: string; action: string }>, compacting: false, finishHeld: true,
@@ -371,16 +374,19 @@ it('reports startup New Chat, sidebar A→B→A, same-id Write Directly and New 
 it('reports Settings and hidden Chat as null, then freshly witnesses the selected session on return', async () => {
   const { w, live } = await boot([]);
   const id = summary([]).id;
+  // The rail's Chats destination is how the workspace is left for the timeline now; the legacy
+  // back-to-chat button it replaced is gone.
+  const backToChat = () => (w.document.querySelector('[data-destination="chats"]') as HTMLElement).click();
   w.document.getElementById('chatSettingsBtn')!.click();
   await settle();
   expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
-  w.document.getElementById('backToChat')!.click();
+  backToChat();
   await settle();
   expect(live.selectionReports.at(-1)?.sessionId).toBe(id);
   w.document.getElementById('sidebarPlugins')!.click();
   await settle();
   expect(live.selectionReports.at(-1)?.sessionId).toBeNull();
-  w.document.getElementById('backToChat')!.click();
+  backToChat();
   await settle();
   expect(live.selectionReports.at(-1)?.sessionId).toBe(id);
 });
@@ -705,6 +711,54 @@ it('keeps the prior transcript inert until the selected detail arrives and fence
   expect(timeline.hasAttribute('inert')).toBe(false);
   expect(timeline.hasAttribute('aria-busy')).toBe(false);
   expect(w.document.getElementById('timelineEmpty')!.hidden).toBe(true);
+});
+
+it('releases the queue and developer footer when the outbox returns before the session page', async () => {
+  const bEvents: SessionEvent[] = [
+    { seq: 1, time: T0, source: 'extension', kind: 'user_message', messageId: 'b-question', message: text('B QUESTION') }
+  ];
+  const first = summary([]);
+  const second = { ...summary(bEvents), id: '2026-09-02-test0002', title: 'Session B' };
+  const { w, live } = await boot([], true, [], [], { sessions: [first, second], developerMode: true });
+  const waiting: InputEntry = {
+    id: 'queued-for-b', sessionId: second.id, state: 'queued', owner: null, text: 'Waiting on B',
+    mode: 'auto', model: null, reasoningEffort: null, dueAt: T0, createdAt: T0, conversationId: 'chat-b'
+  };
+  live.inputs.push(waiting);
+  const api = (w as any).api;
+  const sessionReplies: Array<(value: unknown) => void> = [];
+  const inputReplies: Array<(value: unknown) => void> = [];
+  api.getSession = vi.fn((id: string, options?: { limit?: number }) => {
+    if (options?.limit === 1) {
+      const row = id === second.id ? second : first;
+      return Promise.resolve({ ok: true, data: { summary: row, events: [], total: 0, nextFrom: 0 } });
+    }
+    return new Promise(resolve => sessionReplies.push(resolve));
+  });
+  api.listInputs = vi.fn(() => new Promise(resolve => inputReplies.push(resolve)));
+
+  (w.document.querySelector(`#sessionList [data-id="${second.id}"]`) as HTMLElement).click();
+  expect(inputReplies).toHaveLength(1);
+  expect(sessionReplies).toHaveLength(1);
+  const queue = w.document.getElementById('inputQueue')!;
+  const foot = w.document.getElementById('chatFoot')!;
+  expect(queue.hasAttribute('inert')).toBe(true);
+  expect(foot.hidden).toBe(true);
+
+  // The outbox is a separate read. Returning it while the destination page is still pending
+  // must not be the last paint of the queue or the developer footer.
+  inputReplies[0]!({ ok: true, data: structuredClone(live.inputs) });
+  await settle();
+  expect(queue.hasAttribute('inert')).toBe(true);
+  expect(foot.hidden).toBe(true);
+
+  sessionReplies[0]!({ ok: true, data: { summary: second, events: bEvents, total: bEvents.length, nextFrom: 2 } });
+  await settle();
+  expect(w.document.getElementById('timeline')!.textContent).toContain('B QUESTION');
+  expect(w.document.getElementById('timeline')!.hasAttribute('inert')).toBe(false);
+  expect(queue.textContent).toContain('Waiting on B');
+  expect(queue.hasAttribute('inert')).toBe(false);
+  expect(foot.hidden).toBe(false);
 });
 
 it.each(['failed', 'empty', 'new-chat'] as const)('retires retained rows after a %s destination without a welcome flash', async outcome => {
@@ -1146,7 +1200,7 @@ it('removes a withdrawn newest chat after sidebar pagination while preserving th
   expect(w.document.querySelector('[data-id="retained-chat"]')).not.toBeNull();
 });
 
-it('reserves geometry and hydrates multiple native generated images independently in source order', async () => {
+it('reserves geometry for every native image and hydrates only the hero preview', async () => {
   const app = await boot([]);
   const { w } = app;
   const pending = new Map<string, (value: unknown) => void>();
@@ -1169,14 +1223,12 @@ it('reserves geometry and hydrates multiple native generated images independentl
   const frames = rows.map(row => row.querySelector<HTMLElement>('.generated-image-frame')!);
   expect(frames.map(frame => frame.style.aspectRatio)).toEqual(['1254 / 1254', '1024 / 768']);
   expect(frames.every(frame => frame.textContent === 'Image preview is loading')).toBe(true);
-
-  pending.get('orange.webp')?.({ ok: true, data: 'data:image/webp;base64,b3Jhbmdl' });
-  await settle();
-  expect(frames[1]!.querySelector('img')?.getAttribute('src')).toContain('b3Jhbmdl');
-  expect(frames[0]!.querySelector('img')).toBeNull();
+  expect(pending.has('orange.webp')).toBe(false);
   pending.get('blue.webp')?.({ ok: true, data: 'data:image/webp;base64,Ymx1ZQ==' });
   await settle();
   expect(frames[0]!.querySelector('img')?.getAttribute('src')).toContain('Ymx1ZQ==');
+  expect(frames[1]!.querySelector('img')).toBeNull();
+  expect(frames[1]!.textContent).toContain('Image preview is loading');
 });
 
 it('inserts a locally supplied valid WebP for an image-only final without fabricating an assistant text row', async () => {
@@ -1236,18 +1288,28 @@ it('keeps generated-image metadata visible when recording storage is full', asyn
   expect(row.querySelector('button')?.textContent).toBe('Free image storage');
 });
 
-it('does not group images across an intervening authored message or another turn', async () => {
+it('groups one response across metadata and keeps a different response separate', async () => {
   const app = await boot([]);
-  const image = (seq: number, turnId: string): SessionEvent => ({ seq, time: T0 + seq,
-    source: 'extension', kind: 'native_image', messageId: `image-${seq}`, providerAssetId: `file-${seq}`,
-    providerRole: 'tool', turnId, previewStatus: 'pending' });
-  await app.append([image(1, 'a'), image(2, 'a'),
-    { seq: 3, time: T0 + 3, source: 'extension', kind: 'assistant_message', messageId: 'text-3',
+  const image = (seq: number, messageId: string, asset: string): SessionEvent => ({ seq, time: T0 + seq,
+    source: 'extension', kind: 'native_image', messageId, providerAssetId: asset,
+    providerRole: 'tool', turnId: 'a', previewStatus: 'pending' });
+  await app.append([
+    image(1, 'response-a', 'file-1'),
+    { seq: 2, time: T0 + 2, source: 'extension', kind: 'progress', progressId: 'cap',
+      message: { text: 'Inspecting images', chars: 17, truncated: false } },
+    image(3, 'response-a', 'file-2'),
+    { seq: 4, time: T0 + 4, source: 'extension', kind: 'assistant_message', messageId: 'text-4',
       turnId: 'a', final: false, message: { text: 'Between images', chars: 14, truncated: false } },
-    image(4, 'a'), image(5, 'b')]);
+    image(5, 'response-b', 'file-3')
+  ]);
   const galleries = [...app.w.document.querySelectorAll('.generated-image-gallery')];
-  expect(galleries.map(gallery => gallery.querySelectorAll('.ev-native_image').length)).toEqual([2, 1, 1]);
-  expect(galleries[0]?.nextElementSibling?.textContent).toContain('Between images');
+  expect(galleries.map(gallery => gallery.querySelectorAll('.ev-native_image').length)).toEqual([2, 1]);
+  expect(galleries[0]?.textContent).not.toContain('Inspecting images');
+  expect(galleries[0]?.textContent).toContain('2 images');
+  expect(app.w.document.querySelector('#timeline')?.textContent).toContain('Between images');
+  expect(galleries[0]?.querySelector('.image-set-download-all')?.getAttribute('aria-disabled')).toBe('true');
+  expect(galleries[0]?.querySelector('.ev-native_image .image-set-download')?.getAttribute('aria-disabled')).toBe('true');
+  expect(galleries[1]?.querySelector('.image-set-bar')).toBeNull();
 });
 
 it('retains one exact-message gallery when only one image gains a proven turn', async () => {
@@ -3838,4 +3900,521 @@ it('keeps a cancelled automatic draft at its creation time as later messages arr
   await app.append([]);
   expect(timeline.textContent).not.toContain('Unused automatic instruction');
   expect(live.sent).toHaveLength(0);
+});
+
+/**
+ * The conversation stage is the transcript's owner identity.
+ *
+ * Every async page names the session and generation it was read for, and the stage adopts both
+ * before any read starts. That is what makes A → B → A safe: the reader may leave a chat and come
+ * back to it, and neither the page they left nor the earlier page of the chat they returned to
+ * may reach the rows. These tests drive the stage directly, because the fence has to hold for a
+ * page that arrives after the stage moved on — which is a state no real IPC read can be asked to
+ * reproduce on demand.
+ */
+describe('conversation stage', () => {
+  /** The outbox reads a paint actually makes: pending rows, the selection, and the activity fence. */
+  function outboxStub(): DeliveryHost {
+    return {
+      pendingComposerInputs: () => [],
+      selectedId: () => null,
+      selectionGeneration: () => 0,
+      pendingNewInput: () => null,
+      selectedProjectId: () => null,
+      startingInputs: () => new Map(),
+      transcriptOwns: () => false,
+      projectGroup: () => null,
+      hasLaterModelActivity: () => false
+    } as unknown as DeliveryHost;
+  }
+
+  function timelineFixture(): void {
+    dom = new JSDOM(
+      '<div id="chatBody"><div id="chatAgentFilter" hidden></div><div id="timeline"></div>' +
+      '<div id="inputQueue"></div><p id="timelineEmpty" hidden></p></div>',
+      { url: 'https://local.test/', pretendToBeVisual: true }
+    );
+    const w = dom.window;
+    Object.assign(globalThis, {
+      window: w, document: w.document, HTMLElement: w.HTMLElement, Element: w.Element, Node: w.Node
+    });
+    if (!(w.HTMLElement.prototype as any).scrollIntoView) (w.HTMLElement.prototype as any).scrollIntoView = () => {};
+  }
+
+  const answer = (seq: number, messageId: string, body: string): SessionEvent => ({
+    seq, time: T0 + seq, source: 'extension', kind: 'assistant_message', messageId,
+    message: text(body), final: true
+  });
+
+  async function stageFor(outbox: DeliveryHost) {
+    timelineFixture();
+    const { createConversationStage } = await import('../src/renderer/conversation-stage.js');
+    const { clearRichFocusStatus, richFocusStatus } = await import('../src/renderer/rich-focus-status.js');
+    clearRichFocusStatus();
+    return createConversationStage({
+      pane: () => document.getElementById('chatBody')!,
+      timeline: () => document.getElementById('timeline')!,
+      outbox,
+      origin: () => null,
+      developerMode: () => true,
+      renderMarkdown: source => el('p', 'msg', source),
+      renderMessage: (_html, fallback) => el('p', 'msg', fallback),
+      openOriginal: async () => false,
+      workerChat: () => null,
+      richFocusStatus
+    });
+  }
+
+  it('discards stale A and B pages in an A → B → A switch', async () => {
+    const stage = await stageFor(outboxStub());
+    stage.select('A', 1);
+    stage.select('B', 2);
+    stage.select('A', 3);
+    expect(stage.update({ sessionId: 'B', events: [answer(1, 'b-page', 'B PAGE')], total: 1, mode: 'open' }, 2)).toBe(false);
+    expect(stage.update({ sessionId: 'A', events: [answer(1, 'old-a', 'OLD A')], total: 1, mode: 'open' }, 1)).toBe(false);
+    expect(stage.update({ sessionId: 'A', events: [answer(1, 'new-a', 'NEW A')], total: 1, mode: 'open' }, 3)).toBe(true);
+    expect(stage.current()).toEqual({ sessionId: 'A', generation: 3 });
+    const timeline = document.getElementById('timeline')!;
+    expect(timeline.textContent).toContain('NEW A');
+    expect(timeline.textContent).not.toContain('OLD A');
+    expect(timeline.textContent).not.toContain('B PAGE');
+  });
+
+  it('refuses a page whose generation matches but whose session is not the one it adopted', async () => {
+    const stage = await stageFor(outboxStub());
+    stage.select('A', 7);
+    expect(stage.update({ sessionId: 'B', events: [answer(1, 'b', 'B PAGE')], total: 1, mode: 'open' }, 7)).toBe(false);
+    expect(document.getElementById('timeline')!.textContent).not.toContain('B PAGE');
+  });
+
+  it('keeps the previous transcript mounted, and does not paint, until the adopted page arrives', async () => {
+    const stage = await stageFor(outboxStub());
+    const timeline = document.getElementById('timeline')!;
+    stage.select('A', 1);
+    expect(stage.update({ sessionId: 'A', events: [answer(1, 'a-one', 'PAGE A')], total: 1, mode: 'open' }, 1)).toBe(true);
+    expect(stage.awaiting()).toBe(false);
+    stage.select('B', 2);
+    expect(stage.awaiting()).toBe(true);
+    expect(stage.paint()).toBeNull();
+    expect(timeline.textContent).toContain('PAGE A'); // the reader's chat stays mounted, inert
+    stage.select('A', 3);
+    expect(stage.awaiting()).toBe(true);
+    expect(stage.paint()).toBeNull();
+    expect(stage.update({ sessionId: 'A', events: [answer(2, 'a-two', 'PAGE A TWO')], total: 2, mode: 'open' }, 3)).toBe(true);
+    expect(stage.awaiting()).toBe(false);
+    expect(timeline.textContent).toContain('PAGE A TWO');
+  });
+
+  it('pages from an immutable origin, never from a revision sequence, and returns focus by origin', async () => {
+    const stage = await stageFor(outboxStub());
+    stage.select('A', 1);
+    // A revised answer keeps the position it was authored at: origin 2, revision seq 1000.
+    stage.update({
+      sessionId: 'A',
+      events: [
+        answer(1, 'first', 'FIRST'),
+        { ...answer(1000, 'revised', 'REVISED'), origin: 2 } as SessionEvent,
+        answer(3, 'third', 'THIRD')
+      ],
+      total: 3,
+      mode: 'open'
+    }, 1);
+    expect(stage.newerOrigin()).toBeNull(); // at the live tail
+    expect(stage.browsing()).toBe(false);
+    expect(stage.olderOrigin()).toBe(1);
+    expect(stage.focusOrigin(2)).toBe(true);
+    expect((document.activeElement as HTMLElement).dataset.timelineOrigin).toBe('2');
+    // An origin that is not on screen is not a reason to read history, or to retarget the row.
+    const before = document.activeElement;
+    expect(stage.focusOrigin(404)).toBe(false);
+    expect(document.activeElement).toBe(before);
+
+    stage.update({
+      sessionId: 'A',
+      events: [answer(1, 'older', 'OLDER PAGE')],
+      total: 4,
+      mode: 'prepend',
+      boundary: 1
+    }, 1);
+    expect(stage.browsing()).toBe(true);
+    expect(stage.olderOrigin()).toBe(1);
+    // Forward paging resumes from the newest resident origin, exactly where the reader is.
+    expect(stage.newerOrigin()).toBe(3);
+    const timeline = document.getElementById('timeline')!;
+    expect(timeline.textContent).toContain('OLDER PAGE');
+    expect(timeline.textContent).toContain('THIRD');
+  });
+
+  it('opens a focused artifact in the chat column and returns to the transcript row', async () => {
+    const stage = await stageFor(outboxStub());
+    stage.select('A', 1);
+    const { renderRichResponse } = await import('../src/renderer/rich-response.js');
+    const messageId = 'assistant:working:exchange:1789552000000';
+    const rich = {
+      version: 1 as const, status: 'available' as const, reason: null,
+      conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      messageId,
+      providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      revision: 3, accessibleText: 'Sketch',
+      nodes: [{
+        id: 'art1', kind: 'artifact' as const, mode: 'static' as const, title: 'Sketch',
+        html: '<p>Hello</p>', media: ['shot']
+      }]
+    };
+    const view = renderRichResponse(rich, 'source', {
+      sessionId: 'A', media: [], current: () => true, focusStatus: 'pending',
+      admittedArtifactMedia: new Map([['shot', 'data:image/png;base64,aaaa']])
+    });
+    const timeline = document.getElementById('timeline')!;
+    const pane = document.getElementById('chatBody')!;
+    const row = document.createElement('div');
+    row.dataset.timelineOrigin = '2';
+    row.append(view);
+    const message = document.createElement('div');
+    message.dataset.timelineKey = `message:assistant_message\u0000${messageId}`;
+    timeline.append(row, message);
+    view.querySelector<HTMLButtonElement>('.rich-focus-open')!.click();
+    const focused = document.querySelector<HTMLElement>('.rich-focus-stage')!;
+    expect(focused.hidden).toBe(false);
+    expect(pane.contains(focused)).toBe(true);
+    expect(timeline.contains(focused)).toBe(false);
+    expect(row.parentElement).toBe(timeline);
+    expect(row.contains(view)).toBe(true);
+    expect(focused.querySelector('[role="status"]')?.textContent).toBe('Pending');
+    expect(focused.dataset.shownRevision).toBe('3');
+    expect(document.activeElement).toBe(focused.querySelector('.rich-focus-close'));
+    focused.querySelector<HTMLButtonElement>('[data-rich-focus-tab="structure"]')!.click();
+    expect(focused.querySelector('pre')?.textContent).toContain('<p>Hello</p>');
+    focused.dispatchEvent(new document.defaultView!.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(focused.hidden).toBe(true);
+    expect(document.activeElement).toBe(row);
+
+    expect(stage.openRichFocus({
+      sessionId: 'A', logicalMessageId: messageId, nodeId: 'art1', revision: 9, origin: 2
+    })).toBe(true);
+    expect(focused.dataset.shownRevision).toBe('3');
+    row.remove();
+    stage.closeRichFocus();
+    expect(focused.hidden).toBe(true);
+    expect(document.activeElement).toBe(message);
+
+    const unavailable = renderRichResponse({
+      ...rich,
+      nodes: [{ id: 'art1', kind: 'artifact', mode: 'static', title: 'Sketch', html: '<p>Nope</p>', media: ['missing'] }]
+    }, 'source');
+    const again = document.createElement('div');
+    again.dataset.timelineOrigin = '5';
+    again.append(unavailable);
+    timeline.append(again);
+    unavailable.querySelector<HTMLButtonElement>('.rich-focus-open')!.click();
+    expect(focused.querySelector('iframe, img')).toBeNull();
+    expect(focused.textContent).toContain('Unavailable');
+    expect(again.contains(unavailable)).toBe(true);
+    const semantic = renderRichResponse({
+      ...rich,
+      nodes: [{ id: 'sem1', kind: 'artifact', mode: 'semantic', title: 'Outline', html: null, media: [] }]
+    }, 'source');
+    const semanticRow = document.createElement('div');
+    semanticRow.dataset.timelineOrigin = '6';
+    semanticRow.append(semantic);
+    timeline.append(semanticRow);
+    semantic.querySelector<HTMLButtonElement>('.rich-focus-open')!.click();
+    expect(focused.querySelector('.rich-focus-unavailable')).toBeNull();
+    expect(focused.querySelector('h3')?.textContent).toBe('Outline');
+    expect(semanticRow.contains(semantic)).toBe(true);
+    stage.select('B', 2);
+    expect(focused.hidden).toBe(true);
+    expect(document.activeElement).not.toBe(semanticRow);
+    expect(document.activeElement).not.toBe(again);
+    expect(timeline.contains(again)).toBe(true);
+  });
+
+  it('shows the newest resident revision when an older copy is still on screen', async () => {
+    const stage = await stageFor(outboxStub());
+    stage.select('A', 1);
+    const { renderRichResponse } = await import('../src/renderer/rich-response.js');
+    const messageId = 'assistant:working:exchange:1789552000000';
+    const base = {
+      version: 1 as const, status: 'available' as const, reason: null,
+      conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      messageId, providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      accessibleText: 'Outline',
+      nodes: [{ id: 'art1', kind: 'artifact' as const, mode: 'semantic' as const, title: 'Rev 3', html: null, media: [] as string[] }]
+    };
+    const timeline = document.getElementById('timeline')!;
+    const older = document.createElement('div');
+    older.dataset.timelineOrigin = '2';
+    older.append(renderRichResponse({ ...base, revision: 3 }, 'source'));
+    timeline.append(older);
+    expect(stage.openRichFocus({
+      sessionId: 'A', logicalMessageId: messageId, nodeId: 'art1', revision: 3, origin: 2
+    })).toBe(true);
+    const focused = document.querySelector<HTMLElement>('.rich-focus-stage')!;
+    expect(focused.dataset.shownRevision).toBe('3');
+    older.append(renderRichResponse({
+      ...base, revision: 4,
+      nodes: [{ id: 'art1', kind: 'artifact', mode: 'semantic', title: 'Rev 4', html: null, media: [] }]
+    }, 'source'));
+    const decoy = document.createElement('div');
+    decoy.dataset.timelineOrigin = '9';
+    decoy.append(renderRichResponse({
+      ...base, revision: 9,
+      nodes: [{ id: 'art1', kind: 'artifact', mode: 'semantic', title: 'Decoy', html: null, media: [] }]
+    }, 'source'));
+    timeline.append(decoy);
+    expect(stage.refreshRichFocus()).toBe('refreshed');
+    expect(focused.dataset.shownRevision).toBe('4');
+    expect(focused.querySelector('h2')?.textContent).toBe('Rev 4');
+    expect(timeline.contains(older)).toBe(true);
+    expect(older.querySelectorAll('.rich-response')).toHaveLength(2);
+  });
+
+  it('refreshes focused output when a timeline update brings the action result', async () => {
+    const stage = await stageFor(outboxStub());
+    const { projectRichActionResult } = await import('../src/renderer/rich-focus-status.js');
+    stage.select('A', 1);
+    const messageId = 'assistant:working:exchange:1789552000000';
+    const rich = {
+      version: 1 as const, status: 'available' as const, reason: null,
+      conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      messageId, providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      revision: 1, accessibleText: 'Outline',
+      nodes: [{ id: 'sem1', kind: 'artifact' as const, mode: 'semantic' as const, title: 'Outline', html: null, media: [] as string[] }]
+    };
+    const event = { ...answer(2, messageId, 'Outline'), rich };
+    const page = { sessionId: 'A', events: [event], total: 1, mode: 'open' as const };
+    projectRichActionResult('A', messageId, 'pending');
+    expect(stage.update(page, 1)).toBe(true);
+    const timeline = document.getElementById('timeline')!;
+    expect(timeline.querySelector('.rich-response')?.getAttribute('data-rich-status')).toBe('pending');
+    timeline.querySelector<HTMLButtonElement>('.rich-focus-open')!.click();
+    const focused = document.querySelector<HTMLElement>('.rich-focus-stage')!;
+    expect(focused.hidden).toBe(false);
+    expect(focused.querySelector('[role="status"]')?.textContent).toBe('Pending');
+    projectRichActionResult('A', messageId, 'observed');
+    expect(stage.update(page, 1)).toBe(true);
+    expect(focused.hidden).toBe(false);
+    expect(timeline.querySelector('.rich-response')?.getAttribute('data-rich-status')).toBe('confirmed');
+    expect(focused.querySelector('[role="status"]')?.textContent).toBe('Confirmed');
+    expect(timeline.contains(timeline.querySelector('.rich-artifact'))).toBe(true);
+  });
+
+  it('keeps an action result inside the session that owns it', async () => {
+    const stage = await stageFor(outboxStub());
+    const { projectRichActionResult, richFocusStatus, RICH_FOCUS_STATUS_LIMIT, retainRichFocusStatus } = await import('../src/renderer/rich-focus-status.js');
+    stage.select('A', 1);
+    const messageId = 'assistant:working:exchange:1789552000000';
+    const rich = {
+      version: 1 as const, status: 'available' as const, reason: null,
+      conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      messageId, providerMessageId: '3150f756-bf2d-45fa-ac0f-45010b2239fb',
+      revision: 1, accessibleText: 'Outline',
+      nodes: [{ id: 'sem1', kind: 'artifact' as const, mode: 'semantic' as const, title: 'Outline', html: null, media: [] as string[] }]
+    };
+    const event = { ...answer(2, messageId, 'Outline'), rich };
+    const page = { sessionId: 'A', events: [event], total: 1, mode: 'open' as const };
+    projectRichActionResult('A', messageId, 'observed');
+    projectRichActionResult('B', messageId, 'pending');
+    projectRichActionResult('A', 'assistant:other:exchange:1789552000001', 'changed');
+    expect(stage.update(page, 1)).toBe(true);
+    const timeline = document.getElementById('timeline')!;
+    expect(timeline.querySelector('.rich-response')?.getAttribute('data-rich-status')).toBe('confirmed');
+    expect(richFocusStatus('B', messageId)).toBe('pending');
+    expect(richFocusStatus('A', 'assistant:other:exchange:1789552000001')).toBeNull();
+    const nextId = 'assistant:delta:exchange:1789552000002';
+    const next = { ...answer(3, nextId, 'Next'), rich: { ...rich, messageId: nextId } };
+    projectRichActionResult('A', nextId, 'pending');
+    expect(stage.update({ sessionId: 'A', events: [next], total: 2, mode: 'delta' }, 1)).toBe(true);
+    expect(richFocusStatus('A', messageId)).toBe('confirmed');
+    expect(stage.paint()).not.toBeNull();
+    expect(timeline.querySelector(`[data-rich-message-id="${messageId}"]`)?.getAttribute('data-rich-status')).toBe('confirmed');
+    expect(timeline.querySelector(`[data-rich-message-id="${nextId}"]`)?.getAttribute('data-rich-status')).toBe('pending');
+    stage.select('B', 2);
+    stage.select('A', 3);
+    expect(stage.update(page, 3)).toBe(true);
+    expect(timeline.querySelector('.rich-response')?.getAttribute('data-rich-status')).toBeNull();
+    expect(richFocusStatus('A', messageId)).toBeNull();
+    expect(richFocusStatus('B', messageId)).toBeNull();
+    for (let index = 0; index < RICH_FOCUS_STATUS_LIMIT + 1; index += 1) {
+      projectRichActionResult('A', `assistant:bound:${index}`, 'pending');
+    }
+    expect(richFocusStatus('A', 'assistant:bound:0')).toBeNull();
+    expect(richFocusStatus('A', `assistant:bound:${RICH_FOCUS_STATUS_LIMIT}`)).toBe('pending');
+    retainRichFocusStatus('A', ['assistant:bound:1']);
+    expect(richFocusStatus('A', 'assistant:bound:1')).toBe('pending');
+    expect(richFocusStatus('A', `assistant:bound:${RICH_FOCUS_STATUS_LIMIT}`)).toBeNull();
+    const longId = 'm'.repeat(200);
+    expect(longId.length).toBe(200);
+    projectRichActionResult('A', longId, 'changed');
+    expect(richFocusStatus('A', longId)).toBe('changed');
+    const oversized = 'n'.repeat(257);
+    projectRichActionResult('A', oversized, 'pending');
+    expect(richFocusStatus('A', oversized)).toBeNull();
+    projectRichActionResult('B', messageId, 'pending');
+    stage.dispose();
+    expect(richFocusStatus('A', longId)).toBeNull();
+    expect(richFocusStatus('B', messageId)).toBeNull();
+  });
+
+  it('pages a split response into the resident window and restores it after A → B → A', async () => {
+    const stage = await stageFor(outboxStub());
+    const setA = {
+      responseId: 'response-a', origin: 1, completeness: 'partial' as const,
+      images: [
+        { providerAssetId: 'file-older', origin: 1, previewStatus: 'available' as const, hasPreview: true,
+          previewAssetId: 'abcdef12.bin', previewMime: 'image/webp' as const, width: 20, height: 10 },
+        { providerAssetId: 'file-newer', origin: 3, previewStatus: 'available' as const, hasPreview: true,
+          previewAssetId: 'fedcba98.bin', previewMime: 'image/webp' as const, width: 12, height: 8 }
+      ]
+    };
+    const setB = {
+      responseId: 'response-b', origin: 1, completeness: 'complete' as const,
+      images: [
+        { providerAssetId: 'file-b', origin: 1, previewStatus: 'pending' as const, hasPreview: false },
+        { providerAssetId: 'file-b-extra', origin: 2, previewStatus: 'pending' as const, hasPreview: false }
+      ]
+    };
+    let releaseB!: (value: unknown) => void;
+    const gateB = new Promise(resolve => { releaseB = resolve; });
+    const calls: Array<{ sessionId: string; responseIds: string[] }> = [];
+    const getImage = vi.fn(async (_sessionId: string, _assetId: string) => ({ ok: true, data: 'data:image/webp;base64,UklGRgAAAAA=' }));
+    (window as any).api = {
+      getSessionImage: getImage,
+      getSessionImageSets: (sessionId: string, responseIds: string[]) => {
+        calls.push({ sessionId, responseIds: [...responseIds] });
+        if (sessionId === 'B') return gateB;
+        return Promise.resolve({ ok: true, data: { truncated: false, sets: [setA] } });
+      }
+    };
+    const older: SessionEvent = { seq: 1, time: T0, source: 'extension', kind: 'native_image',
+      messageId: 'response-a', providerAssetId: 'file-older', providerRole: 'tool',
+      previewStatus: 'available', width: 20, height: 10,
+      asset: { id: 'abcdef12.bin', mimeType: 'image/webp', bytes: 12 } };
+    const newer: SessionEvent = { seq: 3, time: T0 + 3, source: 'extension', kind: 'native_image',
+      messageId: 'response-a', providerAssetId: 'file-newer', providerRole: 'tool',
+      previewStatus: 'available', width: 12, height: 8,
+      asset: { id: 'fedcba98.bin', mimeType: 'image/webp', bytes: 12 } };
+    const foreign: SessionEvent = { seq: 1, time: T0, source: 'extension', kind: 'native_image',
+      messageId: 'response-b', providerAssetId: 'file-b', providerRole: 'tool', previewStatus: 'pending' };
+
+    stage.select('A', 1);
+    expect(stage.update({ sessionId: 'A', events: [newer], total: 2, mode: 'open' }, 1)).toBe(true);
+    await settle();
+    const timeline = document.getElementById('timeline')!;
+    let gallery = timeline.querySelector('.generated-image-gallery')!;
+    expect([...gallery.querySelectorAll<HTMLElement>('.ev-native_image')].map(row => row.dataset.imageAsset)).toEqual(['file-older', 'file-newer']);
+    expect(gallery.querySelector<HTMLElement>('[data-image-asset="file-older"]')!.dataset.timelineKey).toBeUndefined();
+    expect(gallery.querySelector<HTMLElement>('[data-image-asset="file-newer"]')!.dataset.timelineKey).toBeTruthy();
+    expect(gallery.textContent).toContain('2 images');
+    expect(getImage.mock.calls.map(call => call[1])).toEqual(['abcdef12.bin']);
+
+    expect(stage.olderOrigin()).toBe(3);
+    expect(stage.update({ sessionId: 'A', events: [older], total: 2, mode: 'prepend', boundary: 3 }, 1)).toBe(true);
+    await settle();
+    expect(stage.browsing()).toBe(true);
+    gallery = timeline.querySelector('.generated-image-gallery')!;
+    const paged = [...gallery.querySelectorAll<HTMLElement>('.ev-native_image')];
+    expect(paged.map(row => row.dataset.imageAsset)).toEqual(['file-older', 'file-newer']);
+    expect(paged.every(row => Boolean(row.dataset.timelineKey))).toBe(true);
+    expect(getImage.mock.calls.every(call => call[1] === 'abcdef12.bin')).toBe(true);
+
+    stage.select('B', 2);
+    expect(stage.update({ sessionId: 'B', events: [foreign], total: 1, mode: 'open' }, 2)).toBe(true);
+    expect(timeline.querySelector('[data-image-asset="file-newer"]')).toBeNull();
+    expect(timeline.querySelector('[data-image-asset="file-b"]')).not.toBeNull();
+
+    stage.select('A', 3);
+    expect(stage.update({ sessionId: 'A', events: [older, newer], total: 2, mode: 'open' }, 3)).toBe(true);
+    await settle();
+    expect([...timeline.querySelectorAll<HTMLElement>('.ev-native_image')].map(row => row.dataset.imageAsset)).toEqual(['file-older', 'file-newer']);
+    releaseB({ ok: true, data: { truncated: false, sets: [setB] } });
+    await settle();
+    expect(timeline.querySelector('[data-image-asset="file-b"]')).toBeNull();
+    expect(timeline.querySelector('[data-image-asset="file-b-extra"]')).toBeNull();
+    expect([...timeline.querySelectorAll<HTMLElement>('.ev-native_image')].map(row => row.dataset.imageAsset)).toEqual(['file-older', 'file-newer']);
+    expect(calls.some(call => call.sessionId === 'B' && call.responseIds.includes('response-b'))).toBe(true);
+    expect(calls.filter(call => call.sessionId === 'A').every(call => call.responseIds.includes('response-a'))).toBe(true);
+  });
+
+  it('requests every visible response when the page needs more than one metadata batch', async () => {
+    const stage = await stageFor(outboxStub());
+    const calls: string[][] = [];
+    (window as any).api = {
+      getSessionImageSets: async (_sessionId: string, responseIds: string[]) => {
+        calls.push([...responseIds]);
+        return { ok: true, data: { truncated: false, sets: responseIds.map(id => ({
+          responseId: id, origin: 1, completeness: 'complete' as const,
+          images: id === 'response-64'
+            ? [
+              { providerAssetId: 'file-64', origin: 1, previewStatus: 'pending' as const, hasPreview: false },
+              { providerAssetId: 'file-64-extra', origin: 2, previewStatus: 'pending' as const, hasPreview: false }
+            ]
+            : [{ providerAssetId: `file-${id}`, origin: 1, previewStatus: 'pending' as const, hasPreview: false }]
+        })) } };
+      },
+      getSessionImage: async () => ({ ok: true, data: null })
+    };
+    const events: SessionEvent[] = Array.from({ length: 65 }, (_, index) => ({
+      seq: index + 1, time: T0 + index, source: 'extension', kind: 'native_image',
+      messageId: `response-${index}`, providerAssetId: `file-${index}`, providerRole: 'tool', previewStatus: 'pending'
+    }));
+    stage.select('A', 1);
+    expect(stage.update({ sessionId: 'A', events, total: 65, mode: 'open' }, 1)).toBe(true);
+    await settle();
+    expect(calls.map(batch => batch.length)).toEqual([64, 1]);
+    expect(calls[1]).toEqual(['response-64']);
+    const galleries = [...document.querySelectorAll<HTMLElement>('.generated-image-gallery')];
+    expect(galleries).toHaveLength(65);
+    expect(galleries[64]!.querySelectorAll('.ev-native_image')).toHaveLength(2);
+    expect(galleries[0]!.querySelectorAll('.ev-native_image')).toHaveLength(1);
+  });
+
+  it('keeps the reader on the same row when a missing image arrives above it', async () => {
+    const stage = await stageFor(outboxStub());
+    const pane = document.getElementById('chatBody')!;
+    const timeline = document.getElementById('timeline')!;
+    Object.defineProperty(pane, 'clientHeight', { configurable: true, value: 400 });
+    Object.defineProperty(pane, 'scrollHeight', { configurable: true, value: 2000 });
+    let release!: (value: unknown) => void;
+    const pending = new Promise(resolve => { release = resolve; });
+    (window as any).api = {
+      getSessionImageSets: () => pending,
+      getSessionImage: async () => ({ ok: true, data: null })
+    };
+    const proto = dom?.window.HTMLElement.prototype;
+    if (!proto) throw new Error('timeline fixture missing');
+    const original = proto.getBoundingClientRect;
+    proto.getBoundingClientRect = function () {
+      if (this === pane) return { top: 0, bottom: 400, height: 400, left: 0, right: 100, width: 100, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+      const blocks = [...timeline.querySelectorAll<HTMLElement>('.ev-native_image, [data-timeline-key]')]
+        .filter(node => node.matches('.ev-native_image') || !node.querySelector('.ev-native_image'));
+      const index = blocks.indexOf(this);
+      if (index < 0) return { top: 0, bottom: 0, height: 0, left: 0, right: 0, width: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+      const top = index * 100 - pane.scrollTop;
+      return { top, bottom: top + 100, height: 100, left: 0, right: 100, width: 100, x: 0, y: top, toJSON: () => ({}) } as DOMRect;
+    };
+    try {
+      const image: SessionEvent = { seq: 2, time: T0 + 2, source: 'extension', kind: 'native_image',
+        messageId: 'response-a', providerAssetId: 'file-newer', providerRole: 'tool', previewStatus: 'pending' };
+      stage.select('A', 1);
+      expect(stage.update({ sessionId: 'A', events: [image, answer(3, 'reading', 'Reading here')], total: 2, mode: 'open' }, 1)).toBe(true);
+      pane.scrollTop = 100;
+      const reading = [...timeline.querySelectorAll<HTMLElement>('[data-timeline-key]')].find(row => row.textContent?.includes('Reading here'))!;
+      expect(reading.getBoundingClientRect().top).toBe(0);
+      release({ ok: true, data: { truncated: false, sets: [{
+        responseId: 'response-a', origin: 1, completeness: 'partial',
+        images: [
+          { providerAssetId: 'file-older', origin: 1, previewStatus: 'pending', hasPreview: false },
+          { providerAssetId: 'file-newer', origin: 2, previewStatus: 'pending', hasPreview: false }
+        ]
+      }] } });
+      await settle();
+      expect(timeline.querySelectorAll('.generated-image-gallery .ev-native_image')).toHaveLength(2);
+      expect(pane.scrollTop).toBe(200);
+      expect(reading.isConnected).toBe(true);
+      expect(reading.getBoundingClientRect().top).toBe(0);
+    } finally {
+      proto.getBoundingClientRect = original;
+    }
+  });
 });

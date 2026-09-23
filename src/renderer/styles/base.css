@@ -26,6 +26,21 @@
 
 
 :root {
+  /* Crystal semantic surfaces. Legacy aliases remain below until the workspace cutover. */
+  --canvas: #f4f4f5;
+  --canvas-atmosphere: #e6e9ee;
+  --glass-low: #edeff18a;
+  --glass-medium: #e8ebefad;
+  --glass-high: #e3e7ecd1;
+  --glass-readable: #d9d9da;
+  --ink-muted: #5c5c5d;
+  --ink-on-accent: #ffffff;
+  --accent-readable: #486f9d;
+  --accent-glow: #486f9d57;
+  --hairline: #00000024;
+  --shadow: #0000002e;
+  --scrim: #0000008c;
+
   --page: #f4f4f5;
   --card: #fff;
   --ink: #0c0c0e;
@@ -103,6 +118,20 @@
  * colour used anywhere below is correct in both themes without a second rule.
  */
 :root[data-theme='dark'] {
+  --canvas: #181818;
+  --canvas-atmosphere: #242629;
+  --glass-low: #1e1f218a;
+  --glass-medium: #232527ad;
+  --glass-high: #272a2dd1;
+  --glass-readable: #353535;
+  --ink-muted: #9e9e9e;
+  --ink-on-accent: #000000;
+  --accent-readable: #b0cbed;
+  --accent-glow: #b0cbed57;
+  --hairline: #ffffff24;
+  --shadow: #0000006b;
+  --scrim: #0000008c;
+
   /* Neutral charcoal sampled from Codex; the sidebar supplies the subtle colour. */
   --page: #181818;
   --card: #262725;
@@ -162,7 +191,7 @@ body {
 }
 
 body {
-  background: var(--page);
+  background: transparent;
   color: var(--ink);
   font: calc(14px * var(--text-scale, 1))/1.5 var(--ui-font, var(--ui-font-prose));
   letter-spacing: -0.004em;
@@ -223,15 +252,26 @@ code {
 /* Explicit tracks for the titlebar, header, stacked notices and scrolling workspace.
    Only the workspace grows; showing a notice must not create an implicit content row. */
 .app {
+  --rail-width: 92px;
+  --workbench-track: 0px;
   height: 100%; display: grid;
-  grid-template-columns: min(var(--sidebar-width, var(--sidebar-default, 248px)), 50vw) minmax(0, 1fr);
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-columns: var(--rail-width) min(var(--sidebar-width, var(--sidebar-default, 248px)), 50vw) minmax(0, 1fr) var(--workbench-track);
+  grid-template-rows: auto minmax(0, 1fr);
   background: var(--page);
+  container-type: inline-size;
+  container-name: studio;
 }
-.app > header { grid-column: 2; grid-row: 2; }
-.app > .notices { grid-column: 2; grid-row: 3; min-width: 0; }
+#globalRail { grid-column: 1; grid-row: 2; min-width: 0; min-height: 0; }
+#chatNavigator { grid-column: 2; grid-row: 2; min-width: 0; min-height: 0; }
+#conversationStage {
+  grid-column: 3; grid-row: 2; min-width: 0; min-height: 0;
+  display: grid; grid-template-rows: auto auto minmax(0, 1fr);
+}
+#contextWorkbench { grid-column: 4; grid-row: 2; min-width: 0; min-height: 0; }
+#conversationStage > header { grid-row: 1; min-width: 0; }
+#conversationStage > .notices { grid-row: 2; min-width: 0; }
+#conversationStage > main { grid-row: 3; min-width: 0; min-height: 0; }
 .app[data-screen='settings'] #pluginRefreshReminder { display: none; }
-.app > main { grid-column: 2; grid-row: 4; min-width: 0; }
 /* One static wash behind the chat, reduced to 20% of its previous contrast. */
 :root[data-theme='dark'] .app[data-screen='chat'] {
   background: radial-gradient(ellipse at 12% 38%,
@@ -239,6 +279,22 @@ code {
     color-mix(in srgb, #1a1b1c 20%, var(--page)) 32%, var(--page) 78%);
 }
 :root[data-theme='dark'] .app[data-screen='chat'] .card.is-session { background: transparent; }
+/* The compositor answer changes only the backing material, never geometry or hit testing. */
+:root[data-glass-mode='atmospheric'] .app {
+  background: var(--canvas-atmosphere);
+}
+:root[data-glass-mode='hyprland-blur'] .app {
+  background: var(--glass-low);
+}
+:root[data-glass-mode='transparent'] .app {
+  background: var(--glass-low);
+}
+:root[data-glass-mode='atmospheric'][data-theme] .app[data-screen='chat'] {
+  background: var(--canvas-atmosphere);
+}
+:root:is([data-glass-mode='hyprland-blur'], [data-glass-mode='transparent'])[data-theme] .app[data-screen='chat'] {
+  background: var(--glass-low);
+}
 .app-topbar { position: relative; z-index: 130; grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; gap: 6px; height: env(titlebar-area-height, 28px); padding: 0 10px; padding-right: max(10px, calc(100vw - env(titlebar-area-width, 100vw))); background: var(--page); -webkit-app-region: drag; }
 
 .app-topbar > .btn, .view-menu { -webkit-app-region: no-drag; height: 100%; }
@@ -251,7 +307,9 @@ code {
 .view-menu-items .btn { display: flex; width: 100%; gap: 10px; padding: 9px 10px; border-radius: 0; }
 .view-menu-items kbd { margin-left: auto; color: var(--soft); font-family: var(--ui-font-mono); font-size: calc(11px * var(--text-scale, 1)); }
 .view-menu-items hr { border: 0; border-top: 1px solid var(--line); margin: 5px 0; }
-.app.is-sidebar-collapsed { grid-template-columns: 0 minmax(0, 1fr); }
+.app.is-sidebar-collapsed {
+  grid-template-columns: var(--rail-width, 92px) 0 minmax(0, 1fr) var(--workbench-track, 0px);
+}
 .app.is-sidebar-collapsed .sidebar { display: none; }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

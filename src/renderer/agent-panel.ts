@@ -2,6 +2,7 @@ import { ui, t } from './i18n.js';
 import type { SessionSummary, SessionEvent } from '../shared/session.js';
 import { el } from './dom.js';
 import { attachWorkPanelResize } from './work-panel-resize.js';
+import type { WorkbenchSelection } from './work-panel.js';
 
 /** A read-only second pane. Its selection never changes the main chat's composer. */
 export function createAgentPanel(options: {
@@ -84,6 +85,10 @@ export function createAgentPanel(options: {
     hide,
     show,
     available: () => parent !== null,
+    beforeReplace(_selection: WorkbenchSelection): boolean {
+      // Parent navigation stays allowed. update() hides the previous session and drops late results.
+      return true;
+    },
     open,
     update(id: string | null, next: SessionSummary[]): void {
       if (parent !== id) { hide(); parent = id; }

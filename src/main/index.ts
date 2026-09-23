@@ -16,6 +16,8 @@ import { unifiedExecManager } from './codex/manager.js';
 import { initSecretsPath } from './secrets.js';
 import { pluginManager } from './plugins/manager.js';
 import { setBrowserOpener, setBrowserWorkArea, shutdownBridge, startBridge } from './bridge.js';
+import { stopGeneratedAssetDownloads } from './generated-asset-downloads.js';
+import { stopOriginalTransfers } from './generated-assets.js';
 import { flushSessions, initSessionStore } from './session/store.js';
 import { initSkillsPath, skillsDirectory } from './skills.js';
 import { currentSkillState, mutateSkillState, restoreSkillState } from './skill-state.js';
@@ -67,7 +69,11 @@ import {
 import { runShutdownSequence } from './shutdown.js';
 import { applyStagedUpdate, startUpdateChecks } from './update.js';
 import { UI_BASE_ZOOM, windowLayoutForWorkArea, titleBarOverlayForTheme, windowBackgroundForTheme } from './window-layout.js';
-import { readOmarchyTheme } from './omarchy-theme.js';
+import {
+  currentOmarchyThemeState,
+  onOmarchyThemeChange,
+  startOmarchyThemeObservation
+} from './omarchy-theme.js';
 import { effectiveAppearance, effectiveTheme } from '../shared/appearance.js';
 import type { AppearanceSettings } from '../shared/appearance.js';
 import { openInPreferredBrowser } from './browser.js';
@@ -76,6 +82,7 @@ import {
   isBackgroundLaunch,
   createWindowActivationGate,
   ownsAppRuntime,
+  registerGlassRendererLoss,
   registerNativeWindowActivation,
   shouldBeginAppBootstrap,
   shouldQuitOnWindowAllClosed
@@ -84,17 +91,30 @@ import { trayGuidArgsForPlatform, trayImageSpec } from './tray-image.js';
 import { browserWindowIconPath } from './window-icon.js';
 import { editContextMenuTemplate } from './edit-context-menu.js';
 import { APP_TITLE } from './version.js';
+import {
+  createGlassBackingHandshake,
+  DEFAULT_GLASS_SUPPORT,
+  detectGlassSupport,
+  windowGlassOptions,
+  type GlassBackingHandshake,
+  type GlassSupport
+} from './window-glass.js';
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
 const RETIRED_WORKERS_STATE = 'retired-workers';
 
 let window: BrowserWindow | null = null;
+let glassSupport: GlassSupport = DEFAULT_GLASS_SUPPORT;
+let windowGlassBacking: GlassBackingHandshake | null = null;
 let tray: Tray | null = null;
 let quitting = false;
 let shutdownStarted = false;
 let shutdownComplete = false;
 const usageWarmup = new AbortController();
+let stopOmarchyObservation: (() => void) | null = null;
+let stopOmarchyChromeSync: (() => void) | null = null;
+let stopIpcThemePublication: (() => void) | null = null;
 
 // One instance only: two copies would fight over the tunnel and the config file.
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -114,8 +134,18 @@ if (!hasSingleInstanceLock) {
  * dialogs must not disagree with the page painted beside them.
  */
 function nativeChromeTheme(): { theme: 'light' | 'dark'; appearance: AppearanceSettings } {
-  const omarchy = readOmarchyTheme(), ui = getConfig().ui;
+  const omarchy = currentOmarchyThemeState().theme, ui = getConfig().ui;
   return { theme: effectiveTheme(ui, omarchy), appearance: effectiveAppearance(ui, omarchy) };
+}
+
+function refreshNativeChromeTheme(): void {
+  const chrome = nativeChromeTheme();
+  nativeTheme.themeSource = chrome.theme;
+  if (!window || window.isDestroyed()) return;
+  if (process.platform === 'win32') window.setTitleBarOverlay(titleBarOverlayForTheme(chrome.theme, chrome.appearance));
+  const background = windowBackgroundForTheme(chrome.theme, chrome.appearance);
+  if (windowGlassBacking) windowGlassBacking.updateBackground(background);
+  else window.setBackgroundColor(background);
 }
 
 function createWindow(): void {
@@ -133,8 +163,11 @@ function createWindow(): void {
       titleBarStyle: 'hidden' as const,
       titleBarOverlay: titleBarOverlayForTheme(chrome.theme, chrome.appearance)
     } : {}),
-    // Painted before the renderer loads, so a dark window never flashes white.
+    // Atmospheric/legacy windows retain this readable palette backing. Transparent-capable
+    // windows receive their constructor-only flags here, then the handshake below holds this
+    // same readable color until both Electron and the renderer finish the first complete paint.
     backgroundColor: windowBackgroundForTheme(chrome.theme, chrome.appearance),
+    ...windowGlassOptions(process.platform, process.env, glassSupport),
     title: APP_TITLE,
     webPreferences: {
       zoomFactor: UI_BASE_ZOOM,
@@ -147,6 +180,11 @@ function createWindow(): void {
       webSecurity: true
     }
   });
+  windowGlassBacking = createGlassBackingHandshake(
+    window,
+    glassSupport,
+    windowBackgroundForTheme(chrome.theme, chrome.appearance)
+  );
 
   if (process.platform === 'win32') window.removeMenu();
 
@@ -168,9 +206,20 @@ function createWindow(): void {
     }
   });
 
-  // A renderer that fails to load leaves a blank window with no other clue, so
-  // record it where the diagnostics panel can show it.
-  window.webContents.on('did-finish-load', () => logInfo('window loaded'));
+  // Reload/startup restores a readable native backing until this document finishes loading and
+  // its first complete appearance paint acknowledges the same navigation through IPC.
+  window.webContents.on('did-start-loading', () => {
+    const current = nativeChromeTheme();
+    windowGlassBacking?.loading(windowBackgroundForTheme(current.theme, current.appearance));
+  });
+  registerGlassRendererLoss(window.webContents, window, () => window, () => {
+    const current = nativeChromeTheme();
+    windowGlassBacking?.loading(windowBackgroundForTheme(current.theme, current.appearance));
+  });
+  window.webContents.on('did-finish-load', () => {
+    windowGlassBacking?.didFinishLoad();
+    logInfo('window loaded');
+  });
   window.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown' || input.key !== 'F11' || input.isAutoRepeat) return;
     event.preventDefault();
@@ -209,6 +258,7 @@ function createWindow(): void {
   // the rest of the process, so the renderer pushes and the tray's Open both aimed at a
   // corpse. Dropping it is what makes those paths take their existing null branch.
   window.on('closed', () => {
+    windowGlassBacking = null;
     window = null;
   });
 
@@ -343,15 +393,17 @@ void app.whenReady().then(async () => {
   await restoreChatModels();
   if (windowActivation.isDisabled()) return;
   await loadConfig();
+  glassSupport = await detectGlassSupport({ platform: process.platform, env: process.env });
+  if (glassSupport.diagnostic) logInfo(glassSupport.diagnostic);
   await pluginManager.initialize(userData);
   if (windowActivation.isDisabled()) return;
   try { applyLoginStartup(app, getConfig().ui.startAtLogin === true); }
   catch (error) { logWarn(`Windows login startup: ${error instanceof Error ? error.message : String(error)}`); }
-  // The renderer has its own explicit light/dark palette, so native chrome must follow the same
-  // user choice instead of Electron's default `system` theme. On macOS this controls the window
-  // frame, application menus and OS dialogs; on Linux/Windows it covers Electron-native UI.
-  // A followed desktop theme supplies that answer instead of the saved manual one.
-  nativeTheme.themeSource = nativeChromeTheme().theme;
+  // The main process owns one coalesced desktop-theme observer for the process lifetime.
+  // Renderer state publication subscribes to the same generation-safe snapshot in ipc.ts.
+  stopOmarchyChromeSync = onOmarchyThemeChange(refreshNativeChromeTheme);
+  stopOmarchyObservation = startOmarchyThemeObservation();
+  refreshNativeChromeTheme();
   const savedGoalObjectives = await readDurable<GoalObjectivesSnapshot>(GOAL_OBJECTIVES_STATE);
   if (windowActivation.isDisabled()) return;
   restoreGoalObjectives(savedGoalObjectives);
@@ -449,11 +501,17 @@ void app.whenReady().then(async () => {
   // The same quit the tray's Quit performs. It has to go through `quitting` for the window's
   // close-to-tray handler to let go: without it, quitting to install would hide the window and
   // leave the app running, which is exactly the trap the Install button exists to end.
-  registerIpc(
+  stopIpcThemePublication = registerIpc(
     () => window,
     () => {
       quitting = true;
       app.quit();
+    },
+    {
+      glassSupport: () => glassSupport,
+      glassGeneration: () => windowGlassBacking?.generation() ?? 0,
+      appearancePainted: generation => windowGlassBacking?.appearancePainted(generation) ?? false,
+      updateBackground: background => windowGlassBacking?.updateBackground(background)
     }
   );
   windowActivation.enable();
@@ -523,6 +581,12 @@ app.on('will-quit', (event) => {
   stopInputStartup();
   tray?.destroy();
   tray = null;
+  stopIpcThemePublication?.();
+  stopIpcThemePublication = null;
+  stopOmarchyChromeSync?.();
+  stopOmarchyChromeSync = null;
+  stopOmarchyObservation?.();
+  stopOmarchyObservation = null;
 
   void runShutdownSequence(
     [
@@ -530,7 +594,7 @@ app.on('will-quit', (event) => {
       // The budget has to clear the drains it contains, or it would silently defeat them:
       // the bridge force-closes wedged localhost sockets at 15s and the MCP endpoint forces
       // its own drain at 30s. This is the outer bound on both, not a competing one.
-      { name: 'admission/drain', budgetMs: 40_000, run: () => [shutdownConnection(), shutdownBridge()] },
+      { name: 'admission/drain', budgetMs: 40_000, run: () => [Promise.resolve(stopGeneratedAssetDownloads()), Promise.resolve(stopOriginalTransfers()), shutdownConnection(), shutdownBridge()] },
       // Phase 2: only after request handlers are done may their owned child processes go.
       {
         name: 'process cleanup',

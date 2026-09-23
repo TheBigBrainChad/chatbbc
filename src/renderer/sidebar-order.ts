@@ -2,8 +2,12 @@
 const STORAGE_KEY = 'chatbbc.sidebar-order';
 const MAX_IDS = 5000;
 type Entry = { id: string; scope: string };
+export interface SidebarOrder {
+  ordered<T extends { id: string }>(scope: string, rows: T[]): T[];
+  readonly interacting: boolean;
+}
 
-export function createSidebarOrder(list: HTMLElement, entries: () => Entry[], repaint: () => void) {
+export function createSidebarOrder(list: HTMLElement, entries: () => Entry[], repaint: () => void): SidebarOrder {
   const orders = new Map<string, string[]>();
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);

@@ -20,6 +20,19 @@ import { pendingBrowserPreferenceRequest, acknowledgeBrowserPreferences } from '
 import { sessionFinishHeld, releaseSessionFinish, getSessionFinishDraft, sessionFinishWaiting } from './session/finish.js';
 import { observeUsage } from './session/usage.js';
 import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, listInputs, fileSilenceInput, fileRecoveryInput, advanceRecoveryInput, hasQueuedAfterTurnInput, inputBeforeGoal, pendingQueuedPickups, deferSilenceInput, revokeSilenceInputs } from './session/input.js';
+import {
+  claimGeneratedAssetDownload,
+  observeGeneratedAssetDocuments,
+  pendingGeneratedAssetDownloadOffers,
+  reconcileGeneratedAssetDownloadCustody,
+  recordGeneratedAssetDownloadResult
+} from './generated-asset-downloads.js';
+import {
+  appendOriginalChunk,
+  finishOriginalTransfer,
+  originalTransferDocument,
+  pendingOriginalTransfers
+} from './generated-assets.js';
 /**
  * The local bridge between the Chrome extension and this app.
  *
@@ -2370,6 +2383,80 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return json(res, 200, { capture }, origin);
   }
 
+  if (route === '/generated-assets/claim' && req.method === 'POST') {
+    let body: unknown;
+    try { body = await readBody(req); }
+    catch { return json(res, 400, { error: 'invalid_generated_asset_claim' }, origin); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return json(res, 400, { error: 'invalid_generated_asset_claim' }, origin);
+    }
+    const claimed = await claimGeneratedAssetDownload(body as Parameters<typeof claimGeneratedAssetDownload>[0]);
+    return json(res, claimed ? 200 : 409, { claim: claimed }, origin);
+  }
+  if (route === '/generated-assets/result' && req.method === 'POST') {
+    let body: unknown;
+    try { body = await readBody(req); }
+    catch { return json(res, 400, { error: 'invalid_generated_asset_result' }, origin); }
+    const accepted = await recordGeneratedAssetDownloadResult(
+      body as Parameters<typeof recordGeneratedAssetDownloadResult>[0]);
+    return json(res, accepted ? 200 : 409, { ok: accepted }, origin);
+  }
+/** Exact document the companion must present for one original transfer; never re-elected. */
+function validOriginalSource(value: unknown): value is { tab: number; documentId: string; documentGeneration: number; spaEpoch: number } {
+  if (!value || typeof value !== 'object') return false;
+  const source = value as Record<string, unknown>;
+  return Number.isSafeInteger(source.tab) && (source.tab as number) >= 0 &&
+    typeof source.documentId === 'string' && /^[a-z0-9_-]{1,128}$/i.test(source.documentId) &&
+    Number.isSafeInteger(source.documentGeneration) && (source.documentGeneration as number) >= 1 &&
+    Number.isSafeInteger(source.spaEpoch) && (source.spaEpoch as number) >= 0;
+}
+
+function transferMatchesDocument(id: string, source: { tab: number; documentId: string; documentGeneration: number; spaEpoch: number }): boolean {
+  const transfer = originalTransferDocument(id);
+  return Boolean(transfer) && transfer!.tab === source.tab && transfer!.documentId === source.documentId &&
+    transfer!.documentGeneration === source.documentGeneration && transfer!.spaEpoch === source.spaEpoch;
+}
+
+if (route === '/generated-assets/original/chunk' && req.method === 'POST') {
+    let body: unknown;
+    try { body = await readBody(req); }
+    catch { return json(res, 400, { error: 'invalid_original_chunk' }, origin); }
+    const fields = body as { id?: unknown; offset?: unknown; chunk?: unknown; source?: unknown };
+    if (!fields || typeof fields.id !== 'string' || !Number.isSafeInteger(fields.offset) ||
+        typeof fields.chunk !== 'string' || !validOriginalSource(fields.source)) {
+      return json(res, 400, { error: 'invalid_original_chunk' }, origin);
+    }
+    try {
+      if (!transferMatchesDocument(fields.id, fields.source)) {
+        return json(res, 409, { error: 'original_document_refused' }, origin);
+      }
+      appendOriginalChunk(fields.id, fields.offset as number, Buffer.from(fields.chunk, 'base64'));
+      return json(res, 200, { ok: true }, origin);
+    } catch (error) {
+      const code = error instanceof Error && error.name === 'GeneratedAssetError' ? error.message : 'asset_chunk_refused';
+      return json(res, 409, { ok: false, error: code }, origin);
+    }
+  }
+  if (route === '/generated-assets/original/finish' && req.method === 'POST') {
+    let body: unknown;
+    try { body = await readBody(req); }
+    catch { return json(res, 400, { error: 'invalid_original_finish' }, origin); }
+    const fields = body as { id?: unknown; sha256?: unknown; source?: unknown };
+    if (!fields || typeof fields.id !== 'string' || typeof fields.sha256 !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(fields.sha256) || !validOriginalSource(fields.source)) {
+      return json(res, 400, { error: 'invalid_original_finish' }, origin);
+    }
+    if (!transferMatchesDocument(fields.id, fields.source)) {
+      return json(res, 409, { error: 'original_document_refused' }, origin);
+    }
+    try {
+      finishOriginalTransfer(fields.id, fields.sha256);
+      return json(res, 200, { ok: true }, origin);
+    } catch {
+      return json(res, 409, { ok: false }, origin);
+    }
+  }
+
   if (route === '/browser-control' && req.method === 'POST') {
     const body = await readBody(req) as Record<string, unknown>;
     if (!body || typeof body.browserId !== 'string' || !/^[a-f\d-]{36}$/i.test(body.browserId))
@@ -2442,7 +2529,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     let openConversations: string[] = [];
     let stalledConversations: string[] = [];
     if (req.method === 'POST') {
-      const body = await readBody(req) as { openConversations?: unknown; stalledConversations?: unknown };
+      const body = await readBody(req) as {
+        openConversations?: unknown;
+        stalledConversations?: unknown;
+        generatedAssetDownloadIds?: unknown;
+        generatedAssetDocuments?: unknown;
+        generatedAssetDocumentsTruncated?: unknown;
+      };
       if (!Array.isArray(body?.openConversations) || body.openConversations.length > 10_000 || body.openConversations.some(id => !conversationId(id))) {
         return json(res, 400, { error: 'invalid_open_conversations' }, origin);
       }
@@ -2452,6 +2545,21 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         return json(res, 400, { error: 'invalid_stalled_conversations' }, origin);
       }
       stalledConversations = (body.stalledConversations ?? []) as string[];
+      if (body.generatedAssetDownloadIds !== undefined &&
+          (!Array.isArray(body.generatedAssetDownloadIds) || body.generatedAssetDownloadIds.length > 100 ||
+            body.generatedAssetDownloadIds.some(id => typeof id !== 'string' || !/^[a-f0-9-]{36}$/i.test(id)))) {
+        return json(res, 400, { error: 'invalid_generated_asset_download_ids' }, origin);
+      }
+      if (Array.isArray(body.generatedAssetDownloadIds)) {
+        reconcileGeneratedAssetDownloadCustody(body.generatedAssetDownloadIds as string[]);
+      }
+      if (body.generatedAssetDocumentsTruncated === true) observeGeneratedAssetDocuments([], false);
+      else if (body.generatedAssetDocuments !== undefined &&
+          (!Array.isArray(body.generatedAssetDocuments) || body.generatedAssetDocuments.length > 64)) {
+        return json(res, 400, { error: 'invalid_generated_asset_documents' }, origin);
+      } else if (Array.isArray(body.generatedAssetDocuments)) {
+        observeGeneratedAssetDocuments(body.generatedAssetDocuments as Parameters<typeof observeGeneratedAssetDocuments>[0]);
+      }
     }
     const openSet = new Set(openConversations);
     const tabPolicy = await browserTabPolicy(openSet);
@@ -2487,6 +2595,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         stopTurns: await pendingStopCommands(),
         modelCatalogRequest: pendingChatModelRequest(),
         pluginRefreshRequests: getConfig().ui.autoRefreshPlugins === true ? pluginRefreshPublications().map(({ surface, schemaId, connectorName }) => ({ surface, schemaId, connectorName })) : [],
+        generatedAssetDownloads: pendingGeneratedAssetDownloadOffers(),
+        generatedAssetOriginals: pendingOriginalTransfers(),
         browserPreferenceRequest: pendingBrowserPreferenceRequest(),
         inputOpeningIds: inputRows.filter(row => !['sent', 'failed', 'cancelled'].includes(row.state)).map(row => row.id),
         inputs: [...(await pendingBrowserInputs()).filter(input => !input.conversationId || runningToolCalls(input.conversationId) === 0),

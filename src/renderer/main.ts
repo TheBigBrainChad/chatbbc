@@ -7,6 +7,9 @@ import { initBrowserPreferences } from './browser-preferences.js';
 import { initConnectionAdvanced } from './connection-popover.js';
 import { initSetupGuide } from './setup-guide.js';
 import { initAppearance } from './appearance.js';
+import { presentationStore } from './presentation-store.js';
+import { createAppShell } from './app-shell.js';
+import { createDestinationRouter } from './destination-router.js';
 import { initPet } from './pet.js';
 import type { AppearanceSettings } from '../shared/appearance.js';
 /**
@@ -53,7 +56,10 @@ initSetupGuide();
 // Escape the translucent sidebar's backdrop-filter containing block.
 document.body.append($('connectionPopover'));
 const connectionAdvanced = initConnectionAdvanced();
-const appearance = initAppearance(patch => { void save(patch); }, () => { void refresh(); });
+const appearance = initAppearance(
+  patch => { void save(patch); },
+  () => { void run(api.retryOmarchyTheme()); }
+);
 
 /** Same shape the platform uses; mirrored here only to grey out step 2 until it is valid. */
 const TUNNEL_ID_PATTERN = /^tunnel_[0-9a-f]{32}$/;
@@ -98,7 +104,30 @@ const GROUPS: Group[] = [
   }
 ];
 
-let state: AppState | null = null;
+function presentedApp(): AppState | null {
+  return presentationStore.getState().app;
+}
+let acceptedGlassGeneration = -1;
+let pendingGlassGeneration: number | null = null;
+
+/** Release native backing only for the generation this document actually painted. */
+function acknowledgeAppearancePaint(generation: number | undefined): void {
+  if (!Number.isInteger(generation) || generation === undefined || generation < 0) return;
+  if (generation <= acceptedGlassGeneration || acceptedGlassGeneration >= 0) return;
+  if (pendingGlassGeneration !== null && generation < pendingGlassGeneration) return;
+  if (pendingGlassGeneration === generation) return;
+  const paintedGeneration = generation;
+  pendingGlassGeneration = paintedGeneration;
+  window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+    if (pendingGlassGeneration !== paintedGeneration) return;
+    void api.appearanceReady(paintedGeneration).then(result => {
+      if (pendingGlassGeneration === paintedGeneration) pendingGlassGeneration = null;
+      if (result.ok) acceptedGlassGeneration = paintedGeneration;
+    }, () => {
+      if (pendingGlassGeneration === paintedGeneration) pendingGlassGeneration = null;
+    });
+  }));
+}
 /** Guards against saving while we are writing values into the controls. */
 let applying = false;
 
@@ -126,14 +155,13 @@ let showAllSteps: boolean | null = null;
 let setupProfileBusy = false;
 let setupKeySave: Promise<boolean> = Promise.resolve(true);
 
-// ------------------------------------------------------------------- tabs
+// ---------------------------------------------------------- destinations
 
 /**
- * Which panel draws each destination.
+ * Which full-page panel draws each existing destination callback.
  *
- * Every destination is its own panel except `automation`, which is the chat panel's settings
- * view: the automation controls belong beside the chat they govern, so that destination shows
- * the chat card with its settings view open rather than a separate page.
+ * Automation remains the chat panel's settings view. The global rail owns workspace
+ * destinations; these names are internal page paths, not a second navigation model.
  */
 const DESTINATION_PANEL: Readonly<Record<string, string>> = {
   automation: 'chat',
@@ -142,25 +170,25 @@ const DESTINATION_PANEL: Readonly<Record<string, string>> = {
   activity: 'activity',
   setup: 'setup'
 };
-
-/**
- * Settings is not a second screen: the one sidebar rail shows this nav in place of the session
- * list, and `← Back to chat` is the way out. `is-settings` is the whole of that state, so the
- * list and the nav are never both on screen and no second nav exists.
- */
+const SETTINGS_PANELS = new Set(['workspace', 'automation', 'appearance', 'activity']);
 function showTab(name: string): void {
   const settings = name !== 'chat' && name !== 'plugins';
   const panel = DESTINATION_PANEL[name] ?? name;
   document.querySelector<HTMLElement>('.app')!.dataset.screen = name === 'plugins' ? 'library' : settings ? 'settings' : 'chat';
-  document.querySelector<HTMLElement>('.sidebar')!.classList.toggle('is-settings', settings);
-  $('workspaceSettings').hidden = false;
-  $('workspaceSettings').classList.toggle('is-sel', settings);
+
   if (name === 'usage') void refreshUsage();
   if (name === 'automation') openChatView('settings');
   else if (name === 'chat') openChatView('timeline');
 
-  for (const tab of document.querySelectorAll<HTMLElement>('nav button')) {
-    tab.classList.toggle('is-sel', tab.dataset.tab === name);
+  const settingsPages = $('settingsPages');
+  const settingsOwned = SETTINGS_PANELS.has(name) || name === 'setup';
+  settingsPages.hidden = !settingsOwned;
+  settingsPages.closest('main')?.classList.toggle('has-settings-pages', settingsOwned);
+  for (const control of settingsPages.querySelectorAll<HTMLElement>('[data-settings-panel]')) {
+    const current = control.dataset.settingsPanel === name;
+    control.classList.toggle('is-sel', current);
+    if (current) control.setAttribute('aria-current', 'page');
+    else control.removeAttribute('aria-current');
   }
   for (const item of document.querySelectorAll<HTMLElement>('[data-sidebar-page]')) item.classList.toggle('is-sel', item.dataset.sidebarPage === name);
   for (const node of document.querySelectorAll<HTMLElement>('.panel')) {
@@ -204,14 +232,17 @@ function positionConnectionPopover(): void {
 
 window.addEventListener('resize', () => positionConnectionPopover());
 
-$('backToChat').addEventListener('click', () => showTab('chat'));
-$('workspaceSettings').addEventListener('click', () => showTab('workspace'));
 $('sidebarConnection').addEventListener('click', () => {
   setConnectionPopover(Boolean($('connectionPopover').hidden));
 });
 $('chatSettingsBtn').addEventListener('click', () => showTab('automation'));
-$('sessionList').addEventListener('click', event => {
-  if ((event.target as HTMLElement).closest('[data-id], [data-new-project]')) showTab('chat');
+for (const control of $('settingsPages').querySelectorAll<HTMLButtonElement>('[data-settings-panel]')) {
+  control.addEventListener('click', () => {
+    if (control.dataset.settingsPanel) showTab(control.dataset.settingsPanel);
+  });
+}
+$('chatNavigator').addEventListener('click', event => {
+  if ((event.target as HTMLElement).closest('[data-id], [data-new-project], [data-project-id]')) showTab('chat');
 }, { capture: true });
 $('newChat').addEventListener('click', () => showTab('chat'));
 $('sidebarPlugins').addEventListener('click', () => showTab('plugins'));
@@ -235,10 +266,6 @@ $('zoomActualSize').addEventListener('click', () => void zoom(1));
 document.addEventListener('keydown', (event) => {
   if (!(event.ctrlKey || event.metaKey) || !['+', '=', '-', '0'].includes(event.key)) return;
   event.preventDefault(); void zoom(event.key === '0' ? 1 : zoomFactor + (event.key === '-' ? -.1 : .1));
-});
-$('tabs').addEventListener('click', (event) => {
-  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-tab]');
-  if (button?.dataset.tab) showTab(button.dataset.tab);
 });
 
 // ------------------------------------------------------------ permissions
@@ -356,6 +383,7 @@ function capInput(cap: Capability): HTMLInputElement {
 
 /** Refreshes counts, the tri-state switches, and what read-only mode has locked. */
 function paintGroups(): void {
+  const state = presentedApp();
   if (!state) return;
   const { readOnly } = state.config;
   const desktopSupported = state.platform?.desktopAutomation ?? true;
@@ -464,6 +492,7 @@ let settingsSaveQueue: Promise<void> = Promise.resolve();
 let requestedSettings: SettingsPatch | null = null;
 
 function save(over: { readOnly?: boolean; theme?: 'light' | 'dark'; appearance?: AppearanceSettings } = {}): Promise<void> {
+  const state = presentedApp();
   if (applying || !state) return Promise.resolve();
 
   const previous: AppState['config'] = requestedSettings
@@ -658,6 +687,7 @@ function captureRootRenameInput(input: HTMLInputElement, rename: RootRenameState
 
 function cancelRootRename(): void {
   rootRename = null;
+  const state = presentedApp();
   if (state) paintRoots(state.config.roots);
 }
 
@@ -684,7 +714,7 @@ async function commitRootRename(input: HTMLInputElement, rename: RootRenameState
 
   // Failure is retryable user input, not a reason to throw the draft away.
   rename.committing = false;
-  paintRoots(state?.config.roots ?? []);
+  paintRoots(presentedApp()?.config.roots ?? []);
 }
 
 function rootRow(root: AppState['config']['roots'][number]): HTMLElement {
@@ -738,7 +768,7 @@ function rootRow(root: AppState['config']['roots'][number]): HTMLElement {
       focused: true,
       committing: false
     };
-    paintRoots(state?.config.roots ?? []);
+    paintRoots(presentedApp()?.config.roots ?? []);
   });
 
   const remove = document.createElement('button');
@@ -935,6 +965,7 @@ function paintSetupProfiles(next: AppState): void {
 }
 
 async function changeSetupProfile(action: 'add' | 'select' | 'remove', id?: string): Promise<void> {
+  const state = presentedApp();
   if (!state || setupProfileBusy) return;
   const nameInput = $<HTMLInputElement>('setupProfileName');
   const name = nameInput.value.trim();
@@ -957,7 +988,8 @@ async function changeSetupProfile(action: 'add' | 'select' | 'remove', id?: stri
     apply(next);
   } finally {
     setupProfileBusy = false;
-    if (state) paintSetupProfiles(state);
+    const latest = presentedApp();
+    if (latest) paintSetupProfiles(latest);
   }
 }
 $('setupProfileAdd').addEventListener('click', () => {
@@ -968,6 +1000,7 @@ $('setupProfileCancel').addEventListener('click', () => $<HTMLDialogElement>('se
 $('setupProfileForm').addEventListener('submit', event => { event.preventDefault(); void changeSetupProfile('add'); });
 
 function paintSetupFields(): void {
+  const state = presentedApp();
   for (const id of ['tunnelId', 'apiKey']) {
     const input = $<HTMLInputElement>(id);
     const stored = id === 'apiKey' && state?.hasApiKey === true;
@@ -978,10 +1011,13 @@ function paintSetupFields(): void {
 
 function apply(next: AppState): void {
   // An older key/status response must not restore a profile retired by a newer switch.
-  if ((next.config.tunnel.profileEpoch ?? 0) < (state?.config.tunnel.profileEpoch ?? 0)) return;
+  const previousState = presentationStore.getState().app;
+  const acceptedEpoch = previousState?.config.tunnel.profileEpoch ?? 0;
+  if ((next.config.tunnel.profileEpoch ?? 0) < acceptedEpoch) return;
+  const generation = presentationStore.getState().appGeneration + 1;
+  presentationStore.dispatch({ type: 'appStateReceived', generation, state: next });
+  if (presentationStore.getState().app !== next) return;
   applyPluginsState(next);
-  const previousState = state;
-  state = next;
   applying = true;
   const { config, status } = next;
 
@@ -995,7 +1031,8 @@ function apply(next: AppState): void {
 
   // ---- theme
   const appearanceUi = requestedSettings?.ui ?? config.ui;
-  appearance.apply(appearanceUi, next.omarchy);
+  appearance.apply(appearanceUi, next.omarchy, next.glass);
+  acknowledgeAppearancePaint(next.glassGeneration);
 
   const headerConnect = $<HTMLButtonElement>('headerConnect');
   const wasVisible = !headerConnect.hidden;
@@ -1400,6 +1437,7 @@ function facts(next: AppState): HTMLElement[] {
  * "verified 8s ago" keeps counting between reports instead of freezing.
  */
 function paintClock(): void {
+  const state = presentedApp();
   if (!state) return;
   const { status, bridge } = state;
   const running = isRunning(status.state);
@@ -1641,6 +1679,7 @@ async function dropFolders(event: DragEvent): Promise<void> {
 }
 
 async function toggleConnection(): Promise<void> {
+  const state = presentedApp();
   if (!state || state.status.state === 'disconnecting') return;
   // Mirrors the button label exactly, so a click always does what it says.
   const next = await run(isRunning(state.status.state) ? api.disconnect() : api.connect());
@@ -1701,6 +1740,7 @@ $('closeChecks').addEventListener('click', () => {
 });
 
 $('readOnlyBtn').addEventListener('click', () => {
+  const state = presentedApp();
   if (!state) return;
   const current = requestedSettings?.readOnly ?? state.config.readOnly;
   void save({ readOnly: !current });
@@ -1739,6 +1779,7 @@ window.addEventListener('drop', (event) => event.preventDefault());
 
 $('wizExpand').addEventListener('click', () => {
   showAllSteps = $('wizard').classList.contains('is-tidy');
+  const state = presentedApp();
   if (state) apply(state);
 });
 // Setup is no longer a destination of its own, so this card is the way in to the wizard.
@@ -1760,6 +1801,7 @@ function installUpdate(): void {
 $('updateInstall').addEventListener('click', installUpdate);
 $('installUpdate').addEventListener('click', installUpdate);
 $('headerConnect').addEventListener('click', async () => {
+  const state = presentedApp();
   if (!state) return;
   if (missingStep(state)) { showTab('setup'); return; }
   if (isRunning(state.status.state)) {
@@ -1798,13 +1840,13 @@ $('apiKey').addEventListener('blur', () => {
   const input = $<HTMLInputElement>('apiKey');
   const submitted = input.value;
   if (submitted === '') return;
-  const owner = state?.config.tunnel.profileId;
+  const owner = presentedApp()?.config.tunnel.profileId;
   setupKeySave = (async () => {
     const next = await run(api.setApiKey(submitted, owner));
     if (next) {
     // Do not erase a newer value typed while safeStorage/IPC was still resolving the previous
     // blur. On failure keep the submitted value too, so the user can retry instead of losing it.
-      if (state?.config.tunnel.profileId === owner) {
+      if (presentedApp()?.config.tunnel.profileId === owner) {
         if (input.value === submitted) input.value = '';
         apply(next);
       }
@@ -1815,7 +1857,7 @@ $('apiKey').addEventListener('blur', () => {
 });
 
 $('removeApiKey').addEventListener('click', async () => {
-  const next = await run(api.setApiKey('', state?.config.tunnel.profileId));
+  const next = await run(api.setApiKey('', presentedApp()?.config.tunnel.profileId));
   if (next) {
     apply(next);
     toast('API key removed');
@@ -1850,6 +1892,7 @@ document.addEventListener('keydown', (event) => {
 $('bridgeDownload').addEventListener('click', () => void run(api.downloadExtension()));
 $('updateExtension').addEventListener('click', () => {
   showAllSteps = true;
+  const state = presentedApp();
   if (state) apply(state);
   showTab('setup');
   step('browser').hidden = false;
@@ -1870,11 +1913,28 @@ initSidebarResize();
 initUsage();
 initPlugins(apply);
 initBrowserPreferences();
-initChat({ save: () => save(), state: () => state });
+initChat({ save: () => save(), state: () => presentationStore.getState().app });
+
+const appShell = createAppShell({
+  store: presentationStore,
+  roots: {
+    rail: $('globalRail'),
+    navigator: $('chatNavigator'),
+    stage: $('conversationStage'),
+    workbench: $('contextWorkbench')
+  }
+});
+const destinationRouter = createDestinationRouter({
+  shell: appShell,
+  store: presentationStore,
+  showPage: page => showTab(page)
+});
+appShell.setDestinationHandler(destination => destinationRouter.show(destination));
 
 void (async () => {
   await refresh();
   // A first run has nothing set up, so open on the wizard rather than an empty Home.
+  const state = presentedApp();
   showTab(state && missingStep(state)?.step === 'folder' ? 'setup' : 'chat');
   const entries = await run(api.getLog());
   for (const entry of entries ?? []) addLogLine(entry);

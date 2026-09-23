@@ -5,6 +5,7 @@ import { el, icon, toast } from './dom.js';
 import { t, ui } from './i18n.js';
 import { onAppearanceChanged } from './appearance.js';
 import { attachWorkPanelResize } from './work-panel-resize.js';
+import type { WorkbenchSelection } from './work-panel.js';
 import type { LocalProject } from '../shared/projects.js';
 
 type Tab = { id: string; projectId: string; title: string; node: HTMLElement; term: Terminal; fit: FitAddon; ready: boolean; exited: boolean; queued: number; writes: Promise<void> };
@@ -153,6 +154,9 @@ export function createWorkspaceTerminal(options: { host?: HTMLElement } = {}) {
     element: panel,
     show(): void { setOpen(true); if (!tabs.size && project) void create(); },
     hide(): void { setOpen(false); },
+    beforeReplace(_selection: WorkbenchSelection): boolean {
+      return true;
+    },
     update(value: LocalProject | null): void { project = value; paint(); }
   };
 }

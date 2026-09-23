@@ -581,6 +581,108 @@ var CLF_DOM = (() => {
   }
 
   const richFailure = new WeakMap();
+
+  function captureOwnedArtifact(element, id, onImage = null) {
+    const allowed = new Set(['div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'pre', 'code', 'strong', 'em', 'b', 'i', 'br', 'hr', 'section', 'article', 'header', 'footer', 'figure', 'figcaption', 'blockquote', 'img']);
+    const styleProps = new Set(['color', 'background', 'background-color', 'font', 'font-size', 'font-weight', 'font-family', 'font-style', 'text-align', 'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'border', 'border-color', 'display', 'width', 'height', 'max-width', 'gap', 'line-height', 'white-space', 'overflow-wrap']);
+    const cssValueAllowed = value => {
+      if (/[\\<>{}]|\/\*|\*\//.test(value)) return false;
+      if (/url\s*\(|image-set\s*\(|-webkit-image-set\s*\(|expression\s*\(|@import|javascript:|https?:|\/\//i.test(value)) return false;
+      const withoutColor = value.replace(/rgba?\(\s*(?:\d{1,3}\s*,\s*){2}\d{1,3}(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)/gi, ' ');
+      return !/[()]/.test(withoutColor);
+    };
+    const startedAt = Date.now();
+    const expired = () => Date.now() - startedAt > 2000;
+    if (expired()) return { rejected: 'deadline' };
+    const doc = element.ownerDocument;
+    const host = doc.createElement('div');
+    let nodes = 0, textLength = 0, cssLength = 0;
+    const media = [];
+    const seen = new Set();
+    const styleOf = value => {
+      if (!cssValueAllowed(value)) return null;
+      const kept = [];
+      for (const part of value.split(';')) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+        const split = trimmed.indexOf(':');
+        if (split <= 0) return null;
+        const prop = trimmed.slice(0, split).trim().toLowerCase();
+        const raw = trimmed.slice(split + 1).trim();
+        if (!styleProps.has(prop) || !cssValueAllowed(raw)) return null;
+        kept.push(`${prop}: ${raw}`);
+      }
+      const style = kept.join('; ');
+      cssLength += style.length;
+      return cssLength <= 65536 ? style : null;
+    };
+    const walk = (source, parent, depth) => {
+      if (expired()) return 'deadline';
+      const rawChildren = source.childNodes;
+      if (rawChildren.length > 1024 - nodes) return 'oversized';
+      for (let index = 0; index < rawChildren.length; index++) {
+        if (expired()) return 'deadline';
+        const child = rawChildren[index];
+        if (child.nodeType === 3) {
+          const value = child.nodeValue || '';
+          textLength += value.length;
+          if (textLength > 65536) return 'oversized';
+          parent.append(doc.createTextNode(value));
+          continue;
+        }
+        if (child.nodeType !== 1) return 'unsupported';
+        if (depth >= 24) return 'oversized';
+        const tag = child.tagName.toLowerCase();
+        if (!allowed.has(tag)) return 'unsupported';
+        if (++nodes > 1024) return 'oversized';
+        for (const attr of [...child.attributes]) {
+          const name = attr.name.toLowerCase();
+          if (name === 'src' && tag === 'img') continue;
+          if (name.startsWith('on') || name === 'href' || name === 'src' || name === 'srcset' || name === 'action' || name === 'formaction') return 'unsupported';
+          if (name !== 'style' && !(tag === 'img' && (name === 'alt' || name === 'data-media-id'))) return 'unsupported';
+        }
+        const next = doc.createElement(tag);
+        if (tag === 'img') {
+          const supplied = child.getAttribute('data-media-id') || '';
+          const hasSrc = child.hasAttribute('src');
+          let mediaId = supplied;
+          if (hasSrc || !supplied) {
+            if (child.hasAttribute('srcset') || typeof onImage !== 'function') return 'unsupported';
+            const nodeId = `${id}-${media.length}`;
+            mediaId = `media-${nodeId}`;
+            onImage(child, nodeId);
+          }
+          if (!/^[\w:-]{1,80}$/.test(mediaId) || seen.has(mediaId)) return 'unsupported';
+          if (media.length >= 4) return 'oversized';
+          seen.add(mediaId);
+          media.push(mediaId);
+          next.setAttribute('alt', child.getAttribute('alt') || '');
+          next.setAttribute('data-media-id', mediaId);
+        }
+        const style = child.getAttribute('style');
+        if (style !== null) {
+          const clean = styleOf(style);
+          if (clean === null) return 'unsupported';
+          if (clean) next.setAttribute('style', clean);
+        }
+        parent.append(next);
+        if (tag !== 'br' && tag !== 'hr' && tag !== 'img') {
+          const reason = walk(child, next, depth + 1);
+          if (reason) return reason;
+        }
+      }
+      return null;
+    };
+    const reason = walk(element, host, 0);
+    if (reason) return { rejected: reason };
+    if (expired()) return { rejected: 'deadline' };
+    const html = host.innerHTML;
+    const bytes = typeof TextEncoder === 'function' ? new TextEncoder().encode(html).byteLength : html.length * 4;
+    if (bytes > 131072) return { rejected: 'oversized' };
+    const label = (element.getAttribute('aria-label') || '').trim().slice(0, 200);
+    return { node: { id, kind: 'artifact', mode: 'static', title: label || 'Artifact', html, media } };
+  }
+
   /** Read inert rendered semantics, never model-authored component source, URLs or callbacks. */
   function captureRichRoot(root, onImage = null) {
     return safe(() => {
@@ -611,6 +713,15 @@ var CLF_DOM = (() => {
           return element.getAttribute('aria-hidden') === 'true' || !element.textContent?.trim() && !element.getAttribute('aria-label') ? [] : null;
         }
         const id = `n-${path.join('-')}`;
+        if (element.hasAttribute('data-clf-owned-artifact')) {
+          const artifact = captureOwnedArtifact(element, id, onImage);
+          if (!artifact || artifact.rejected) {
+            if (artifact && (artifact.rejected === 'oversized' || artifact.rejected === 'deadline')) return overLimit();
+            richFailure.set(root, 'unsupported');
+            return null;
+          }
+          return [artifact.node];
+        }
         if (name === 'img') {
           if (++media > 64) return overLimit();
           const alt = element.getAttribute('alt') || '';
@@ -867,6 +978,36 @@ var CLF_DOM = (() => {
           richImageSources.get(sourceHandle) !== sourceState || sourceState.retired ||
           !richImageSourceStable(sourceHandle)) return null;
       return Object.freeze({ root, image, messageId: owner.messageId, assetId: owner.assetId });
+    }, null);
+  }
+
+  /**
+   * Returns the exact selected signed source only for an already identified native generated IMG.
+   * Identity comes from the Fiber-stamped physical node supplied by the isolated recorder; URL
+   * similarity never finds a node. The value stays inside the extension and is consumed only by
+   * chrome.downloads.
+   */
+  function generatedAssetSource(image, assetId, stillCurrent) {
+    return safe(() => {
+      if (!image?.isConnected || image.ownerDocument !== document || image.tagName !== 'IMG' ||
+          !image.matches('[class~="group/imagegen-image"] img') ||
+          typeof assetId !== 'string' || !/^file_[A-Za-z0-9_-]{8,100}$/.test(assetId) ||
+          typeof stillCurrent !== 'function' || stillCurrent() !== true) return null;
+      const stamp = image.getAttribute('data-clf-fiber-image');
+      if (typeof stamp !== 'string' || stamp.length > 360 ||
+          !stamp.endsWith(`:${encodeURIComponent(assetId)}`)) return null;
+      const source = image.currentSrc || image.src;
+      if (typeof source !== 'string' || source.length > 8192 || image.currentSrc !== image.src) return null;
+      const url = new URL(source, location.href);
+      if (url.origin !== location.origin || url.protocol !== 'https:' ||
+          url.pathname !== '/backend-api/estuary/content' || url.hash ||
+          url.searchParams.getAll('id').length !== 1 ||
+          url.searchParams.get('id') !== assetId) return null;
+      if (stillCurrent() !== true || !image.isConnected ||
+          !image.matches('[class~="group/imagegen-image"] img') ||
+          image.getAttribute('data-clf-fiber-image') !== stamp ||
+          (image.currentSrc || image.src) !== source) return null;
+      return source;
     }, null);
   }
 
@@ -3060,6 +3201,7 @@ var CLF_DOM = (() => {
     richCaptureReason,
     resolveRichImage,
     resolveRichNativeImage,
+    generatedAssetSource,
     beginRichImageSource,
     beginPendingRichImageSource,
     richImageSourceWitness,

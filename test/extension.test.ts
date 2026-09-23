@@ -44,6 +44,373 @@ describe('extension release metadata', () => {
     expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 17;');
   });
 
+  it('grants the companion download custody without exposing a main-process URL path', async () => {
+    const manifest = JSON.parse(
+      await fs.readFile(path.join(process.cwd(), 'extension', 'manifest.json'), 'utf8')
+    ) as { permissions: string[] };
+    expect(manifest.permissions).toContain('downloads');
+    expect(backgroundSource).toContain('chrome.downloads.download');
+    expect(backgroundSource).toContain("call('/generated-assets/claim'");
+    expect(backgroundSource).toContain("call('/generated-assets/result'");
+    expect(backgroundSource).toContain('generatedAssetDownloads');
+    expect(backgroundSource).not.toMatch(/generatedAssetDownloads[^\n]*(?:signedUrl|sourceUrl|https?:)/);
+  });
+
+  it('claims an exact document, persists Chrome download custody before started, and never persists the signed URL', async () => {
+    const code = backgroundSource.slice(
+      backgroundSource.indexOf('function validGeneratedAssetOffer('),
+      backgroundSource.indexOf('\nasync function maintainOnce(')
+    );
+    const order: string[] = [];
+    const persisted: unknown[] = [];
+    const downloads = vi.fn(async () => { order.push('download'); return 73; });
+    const call = vi.fn(async (route: string, init: { body?: string }) => {
+      if (route === '/generated-assets/claim') {
+        order.push('claim');
+        const body = JSON.parse(init.body || '{}');
+        return { ok: true, data: { claim: {
+          id: body.id,
+          conversationId: body.conversationId,
+          logicalMessageId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+          assetId: 'file_AuroraOriginal0001',
+          filename: 'ChatBBC image 01.png',
+          claimToken: 'a'.repeat(32)
+        } } };
+      }
+      order.push(`result:${JSON.parse(init.body || '{}').state}`);
+      return { ok: true, data: { ok: true } };
+    });
+    const generatedAssetDownloads: Record<string, unknown> = {};
+    const context = vm.createContext({
+      chrome: { downloads: { download: downloads } },
+      URL,
+      cleanConversationId: (value: unknown) => typeof value === 'string' ? value : null,
+      conversationForTab: (tab: { url: string }) => new URL(tab.url).pathname.split('/').at(-1),
+      tabConversations: { '42': '11111111-2222-4333-8444-555555555555' },
+      tabDocuments: { '42': 'doc-42' },
+      tabEpochs: { '42': 7 },
+      registeredDocuments: { '42': { documentId: 'doc-42', epoch: 3 } },
+      ownsDocument: (source: any) => source.tab === 42 && source.documentId === 'doc-42' && source.navigationEpoch === 7,
+      tabReply: async () => ({ ok: true,
+        logicalMessageId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+        assetId: 'file_AuroraOriginal0001',
+        url: 'https://chatgpt.com/backend-api/estuary/content?id=file_AuroraOriginal0001&sig=secret' }),
+      call,
+      generatedAssetDownloads,
+      MAX_GENERATED_ASSET_DOWNLOADS: 100,
+      persistLive: async () => {
+        order.push('persist');
+        persisted.push(structuredClone(generatedAssetDownloads));
+      }
+    });
+    const processDownloads = vm.runInContext(`${code}\nprocessGeneratedAssetDownloads`, context);
+    await processDownloads([{
+      id: '22222222-3333-4444-8555-666666666666',
+      conversationId: '11111111-2222-4333-8444-555555555555',
+      logicalMessageId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      assetId: 'file_AuroraOriginal0001',
+      filename: 'ChatBBC image 01.png',
+      document: { tab: 42, documentId: 'doc-42', documentGeneration: 3, spaEpoch: 7 }
+    }], [{
+      id: 42,
+      active: true,
+      url: 'https://chatgpt.com/c/11111111-2222-4333-8444-555555555555'
+    }]);
+    expect(downloads).toHaveBeenCalledWith({
+      url: 'https://chatgpt.com/backend-api/estuary/content?id=file_AuroraOriginal0001&sig=secret',
+      filename: 'ChatBBC image 01.png',
+      conflictAction: 'uniquify',
+      saveAs: false
+    });
+    expect(order.indexOf('persist')).toBeGreaterThan(order.indexOf('download'));
+    expect(order.indexOf('result:started')).toBeGreaterThan(order.indexOf('persist'));
+    expect(JSON.stringify(persisted)).not.toContain('sig=secret');
+    expect(persisted[0]).toEqual(expect.objectContaining({
+      '22222222-3333-4444-8555-666666666666': expect.objectContaining({
+        browserDownloadId: 73,
+        state: 'started'
+      })
+    }));
+  });
+
+  it('keeps restored started custody exclusive and reports a Chrome start refusal without replaying it', async () => {
+    const code = backgroundSource.slice(
+      backgroundSource.indexOf('function validGeneratedAssetOffer('),
+      backgroundSource.indexOf('\nasync function maintainOnce(')
+    );
+    const offer = {
+      id: '22222222-3333-4444-8555-666666666666',
+      conversationId: '11111111-2222-4333-8444-555555555555',
+      logicalMessageId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      assetId: 'file_AuroraOriginal0001',
+      filename: 'ChatBBC image 01.png',
+      document: { tab: 42, documentId: 'doc-42', documentGeneration: 3, spaEpoch: 7 }
+    };
+    const calls: Array<{ route: string; body: any }> = [];
+    const downloads = vi.fn(async () => { throw new Error('start refused'); });
+    const generatedAssetDownloads: Record<string, any> = {
+      [offer.id]: { ...offer, claimToken: 'a'.repeat(32), browserDownloadId: 73, state: 'started' }
+    };
+    const context = vm.createContext({
+      chrome: { downloads: { download: downloads } },
+      URL,
+      cleanConversationId: (value: unknown) => typeof value === 'string' ? value : null,
+      conversationForTab: (tab: { url: string }) => new URL(tab.url).pathname.split('/').at(-1),
+      tabConversations: { '42': offer.conversationId },
+      tabDocuments: { '42': 'doc-42' },
+      tabEpochs: { '42': 7 },
+      registeredDocuments: { '42': { documentId: 'doc-42', epoch: 3 } },
+      ownsDocument: () => true,
+      tabReply: async () => ({ ok: true, logicalMessageId: offer.logicalMessageId,
+        assetId: offer.assetId,
+        url: `https://chatgpt.com/backend-api/estuary/content?id=${offer.assetId}&sig=secret` }),
+      call: async (route: string, init: { body?: string }) => {
+        const body = JSON.parse(init.body || '{}');
+        calls.push({ route, body });
+        if (route === '/generated-assets/claim') return { ok: true, data: { claim: {
+          ...offer, claimToken: 'a'.repeat(32)
+        } } };
+        return { ok: true, data: { ok: true } };
+      },
+      generatedAssetDownloads,
+      generatedAssetResults: [],
+      MAX_GENERATED_ASSET_DOWNLOADS: 100,
+      persistLive: async () => undefined
+    });
+    const processDownloads = vm.runInContext(`${code}\nprocessGeneratedAssetDownloads`, context);
+    const tabs = [{ id: 42, active: true, url: `https://chatgpt.com/c/${offer.conversationId}` }];
+    await processDownloads([offer], tabs);
+    expect(downloads).not.toHaveBeenCalled();
+    expect(calls).toEqual([]);
+    delete generatedAssetDownloads[offer.id];
+    await processDownloads([offer], tabs);
+    expect(downloads).toHaveBeenCalledTimes(1);
+    expect(calls.at(-1)).toMatchObject({
+      route: '/generated-assets/result',
+      body: { id: offer.id, state: 'failed' }
+    });
+    expect(generatedAssetDownloads).toEqual({});
+  });
+
+  it('reports unconfirmed and drops memory custody when Chrome accepted a download that could not be saved', async () => {
+    const code = backgroundSource.slice(
+      backgroundSource.indexOf('function validGeneratedAssetOffer('),
+      backgroundSource.indexOf('\nasync function maintainOnce(')
+    );
+    const offer = {
+      id: '22222222-3333-4444-8555-666666666666',
+      conversationId: '11111111-2222-4333-8444-555555555555',
+      logicalMessageId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      assetId: 'file_AuroraOriginal0001',
+      filename: 'ChatBBC image 01.png',
+      document: { tab: 42, documentId: 'doc-42', documentGeneration: 3, spaEpoch: 7 }
+    };
+    const calls: Array<{ route: string; body: any }> = [];
+    const generatedAssetDownloads: Record<string, any> = {};
+    const generatedAssetResults: Array<Record<string, unknown>> = [];
+    const context = vm.createContext({
+      chrome: { downloads: { download: async () => 73 } },
+      URL,
+      cleanConversationId: (value: unknown) => typeof value === 'string' ? value : null,
+      conversationForTab: (tab: { url: string }) => new URL(tab.url).pathname.split('/').at(-1),
+      tabConversations: { '42': offer.conversationId },
+      tabDocuments: { '42': 'doc-42' },
+      tabEpochs: { '42': 7 },
+      registeredDocuments: { '42': { documentId: 'doc-42', epoch: 3 } },
+      ownsDocument: () => true,
+      tabReply: async () => ({ ok: true, logicalMessageId: offer.logicalMessageId, assetId: offer.assetId,
+        url: `https://chatgpt.com/backend-api/estuary/content?id=${offer.assetId}&sig=secret` }),
+      call: async (route: string, init: { body?: string }) => {
+        const body = JSON.parse(init.body || '{}');
+        calls.push({ route, body });
+        if (route === '/generated-assets/claim') return { ok: true, data: { claim: { ...offer, claimToken: 'a'.repeat(32) } } };
+        return { ok: false, data: { ok: false } };
+      },
+      generatedAssetDownloads,
+      generatedAssetResults,
+      validGeneratedAssetResult: () => true,
+      MAX_GENERATED_ASSET_DOWNLOADS: 100,
+      persistLive: async () => { throw new Error('session storage full'); }
+    });
+    const processDownloads = vm.runInContext(`${code}\nprocessGeneratedAssetDownloads`, context);
+    await processDownloads([offer], [{
+      id: 42, active: true, url: `https://chatgpt.com/c/${offer.conversationId}`
+    }]);
+    // The durable write failed, so the terminal fact is retained for a later pass instead of
+    // being retired unacknowledged.
+    expect(generatedAssetResults).toHaveLength(1);
+    expect(generatedAssetResults[0]).toMatchObject({ id: offer.id, state: 'unconfirmed' });
+    expect(calls.some(entry => entry.route === '/generated-assets/result' && entry.body.state === 'unconfirmed')).toBe(true);
+    expect(JSON.stringify(calls)).not.toContain('sig=secret');
+  });
+
+  it('posts original chunks from the exact document without persisting the signed URL', async () => {
+    const code = backgroundSource.slice(
+      backgroundSource.indexOf('async function processGeneratedAssetOriginals('),
+      backgroundSource.indexOf('\nasync function maintainOnce(')
+    );
+    const calls: Array<{ route: string; body: any }> = [];
+    const context = vm.createContext({
+      URL,
+      btoa: (value: string) => Buffer.from(value, 'binary').toString('base64'),
+      crypto: { subtle: { digest: async () => new Uint8Array(32).buffer } },
+      fetch: async () => ({
+        ok: true,
+        body: { getReader: () => {
+          let sent = false;
+          return { read: async () => sent ? { done: true } : (sent = true, { done: false, value: new Uint8Array([1, 2, 3]) }) };
+        } }
+      }),
+      cleanConversationId: (value: unknown) => typeof value === 'string' ? value : null,
+      conversationForTab: () => '11111111-2222-4333-8444-555555555555',
+      tabConversations: { '42': '11111111-2222-4333-8444-555555555555' },
+      tabDocuments: { '42': 'doc-42' },
+      tabEpochs: { '42': 7 },
+      registeredDocuments: { '42': { documentId: 'doc-42', epoch: 3 } },
+      ownsDocument: () => true,
+      tabReply: async () => ({ ok: true, assetId: 'file_AuroraOriginal0001',
+        url: 'https://chatgpt.com/backend-api/estuary/content?id=file_AuroraOriginal0001&sig=secret' }),
+      call: async (route: string, init: { body?: string }) => {
+        calls.push({ route, body: JSON.parse(init.body || '{}') });
+        return { ok: true, data: { ok: true } };
+      }
+    });
+    const processOriginals = vm.runInContext(`${code}\nprocessGeneratedAssetOriginals`, context);
+    await processOriginals([{
+      id: '22222222-3333-4444-8555-666666666666',
+      conversationId: '11111111-2222-4333-8444-555555555555',
+      logicalMessageId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      assetId: 'file_AuroraOriginal0001',
+      offset: 0,
+      document: { tab: 42, documentId: 'doc-42', documentGeneration: 3, spaEpoch: 7 }
+    }], [{ id: 42, url: 'https://chatgpt.com/c/11111111-2222-4333-8444-555555555555' }]);
+    expect(calls.map(entry => entry.route)).toEqual([
+      '/generated-assets/original/chunk',
+      '/generated-assets/original/finish'
+    ]);
+    expect(calls[0]!.body).toMatchObject({ offset: 0,
+      source: { tab: 42, documentId: 'doc-42', documentGeneration: 3, spaEpoch: 7 } });
+    expect(JSON.stringify(calls)).not.toContain('sig=secret');
+  });
+
+  it('retires a browser download only after main acknowledges its terminal result', async () => {
+    const code = backgroundSource.slice(
+      backgroundSource.indexOf('async function publishGeneratedAssetDownloadResult('),
+      backgroundSource.indexOf('\nasync function flushGeneratedAssetResults(')
+    );
+    const id = '22222222-3333-4444-8555-666666666666';
+    const generatedAssetDownloads: Record<string, any> = { [id]: { id, claimToken: 'a'.repeat(32), state: 'complete' } };
+    const generatedAssetResults: Array<Record<string, unknown>> = [];
+    const persisted = { writes: 0 };
+    let acknowledged = false;
+    const context = vm.createContext({
+      generatedAssetDownloads,
+      generatedAssetResults,
+      MAX_GENERATED_ASSET_DOWNLOADS: 100,
+      persistLive: async () => { persisted.writes += 1; },
+      call: async () => (acknowledged ? { ok: true, data: { ok: true } } : { ok: false, data: { ok: false } })
+    });
+    const publish = vm.runInContext(`${code}\npublishGeneratedAssetDownloadResult`, context);
+    const outbox = () => vm.runInContext('generatedAssetResults', context);
+    const row = generatedAssetDownloads[id];
+    // An unacknowledged result must not retire the row or empty the outbox.
+    expect(await publish(row)).toBe(false);
+    expect(generatedAssetDownloads[id]).toBeDefined();
+    expect(outbox()).toHaveLength(1);
+    acknowledged = true;
+    expect(await publish(row)).toBe(true);
+    expect(generatedAssetDownloads[id]).toBeUndefined();
+    expect(outbox()).toEqual([]);
+    expect(persisted.writes).toBeGreaterThan(0);
+  });
+
+  it('reports durable terminal receipt custody after a browser restart clears session storage', async () => {
+    const id = '22222222-3333-4444-8555-666666666666';
+    const lost = '33333333-4444-4555-8666-777777777777';
+    const receipt = { id, claimToken: 'a'.repeat(32), state: 'complete' };
+    const loadSource = backgroundSource.slice(
+      backgroundSource.indexOf('async function loadOnce()'),
+      backgroundSource.indexOf('\nasync function persist()')
+    );
+    const custodySource = backgroundSource.slice(
+      backgroundSource.indexOf('function generatedAssetDownloadCustodyIds('),
+      backgroundSource.indexOf('\nasync function publishGeneratedAssetDownloadResult(')
+    );
+    const context = vm.createContext({
+      chrome: { storage: {
+        local: { get: async () => ({ generatedAssetResults: [receipt] }) },
+        session: { get: async () => ({ generatedAssetDownloads: {} }) }
+      } },
+      validGeneratedAssetResult: (row: unknown) => Boolean(row && typeof row === 'object' &&
+        'id' in row && row.id === id && 'claimToken' in row && row.claimToken === receipt.claimToken &&
+        'state' in row && row.state === 'complete'),
+      cleanConversationId: () => null,
+      commandMarkerId: () => false,
+      MAX_GENERATED_ASSET_DOWNLOADS: 100,
+      loaded: false,
+      delivery: {},
+      generatedAssetDownloads: { [lost]: { id: lost, claimToken: 'b'.repeat(32), state: 'started' } },
+      generatedAssetResults: []
+    });
+    const inspect = vm.runInContext(`${loadSource}\n${custodySource}\n(async () => {
+      await loadOnce();
+      return { ids: generatedAssetDownloadCustodyIds(), receipts: generatedAssetResults };
+    })()`, context);
+    const restored = await inspect;
+    expect(restored.ids).toEqual([id]);
+    expect(restored.ids).not.toContain(lost);
+    expect(restored.receipts).toEqual([receipt]);
+  });
+
+  it('withholds an incomplete custody roster instead of falsely losing active downloads', () => {
+    const code = backgroundSource.slice(
+      backgroundSource.indexOf('function generatedAssetDownloadCustodyIds('),
+      backgroundSource.indexOf('\nasync function publishGeneratedAssetDownloadResult(')
+    );
+    const liveId = '33333333-4444-4555-8666-777777777777';
+    const context = vm.createContext({
+      generatedAssetResults: Array.from({ length: 100 }, (_, index) => ({
+        id: `${String(index).padStart(8, '0')}-3333-4444-8555-666666666666`
+      })),
+      generatedAssetDownloads: { [liveId]: { id: liveId, state: 'started' } },
+      MAX_GENERATED_ASSET_DOWNLOADS: 100
+    });
+    expect(vm.runInContext(`${code}\ngeneratedAssetDownloadCustodyIds()`, context)).toBeNull();
+  });
+
+  it('settles restored Chrome download changes once, including cancellation, and ignores unknown receipts', async () => {
+    expect(backgroundSource).toContain('async function settleGeneratedAssetDownloadChange(');
+    const code = backgroundSource.slice(
+      backgroundSource.indexOf('async function settleGeneratedAssetDownloadChange('),
+      backgroundSource.indexOf('\nasync function processGeneratedAssetDownloads(')
+    );
+    const row = {
+      id: '22222222-3333-4444-8555-666666666666',
+      claimToken: 'a'.repeat(32),
+      browserDownloadId: 73,
+      state: 'started',
+      detail: null
+    };
+    const generatedAssetDownloads: Record<string, any> = { [row.id]: row };
+    const order: string[] = [];
+    const context = vm.createContext({
+      generatedAssetDownloads,
+      persistLive: async () => { order.push('persist'); },
+      publishGeneratedAssetDownloadResult: async (value: any) => { order.push(`publish:${value.state}`); }
+    });
+    const settle = vm.runInContext(`${code}\nsettleGeneratedAssetDownloadChange`, context);
+    expect(await settle({ id: 999, state: { current: 'complete' } })).toBe(false);
+    expect(await settle({ id: 73, state: { current: 'complete' } })).toBe(true);
+    expect(row.state).toBe('complete');
+    expect(order).toEqual(['persist', 'publish:complete']);
+    row.state = 'started';
+    order.length = 0;
+    expect(await settle({ id: 73, error: { current: 'USER_CANCELED' } })).toBe(true);
+    expect(row).toMatchObject({ state: 'failed', detail: 'USER_CANCELED' });
+    expect(order).toEqual(['persist', 'publish:failed']);
+    expect(await settle({ id: 73, state: { current: 'complete' } })).toBe(false);
+  });
+
   /**
    * The Fiber helper is the one piece of this extension that runs in ChatGPT's own
    * JavaScript context, and it only does so because the manifest says `"world": "MAIN"`.

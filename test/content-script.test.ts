@@ -706,6 +706,138 @@ describe('exact native rich response observation (no action authority)', () => {
     expect(JSON.stringify(rich)).not.toMatch(/CSS_SECRET|HIDDEN_SECRET|INERT_SECRET|ARIA_SECRET/);
   });
 
+  it('keeps unproved choice controls unidentified by label, order, or the selected row', async () => {
+    live = await harness();
+    const { root, surface } = rootFixture(live.document);
+    const controlsOf = (nodes: Array<Record<string, any>>) => {
+      const found: Array<Record<string, any>> = [];
+      const visit = (entries: Array<Record<string, any>>) => {
+        for (const entry of entries) {
+          if (entry.kind === 'control') found.push(entry);
+          if (Array.isArray(entry.children)) visit(entry.children);
+        }
+      };
+      visit(nodes);
+      return found;
+    };
+    const first = controlsOf((live.window as any).CLF_DOM.captureRichRoot(root));
+    expect(first.map(node => node.label)).toEqual(['Forest', 'Coast', 'Continue']);
+    for (const node of first) {
+      expect(node.groupId).toBeNull();
+      expect(node.value).toBeNull();
+      expect(node).not.toHaveProperty('selector');
+    }
+    expect(first.find(node => node.label === 'Continue')).toMatchObject({ selected: false, disabled: true });
+    const grid = surface.querySelector('[data-d-component="grid"]')!;
+    grid.append(grid.querySelector('button')!);
+    const reordered = controlsOf((live.window as any).CLF_DOM.captureRichRoot(root));
+    expect(reordered.map(node => node.label)).toEqual(['Coast', 'Continue', 'Forest']);
+    expect(reordered.every(node => node.groupId === null && node.value === null)).toBe(true);
+    expect(JSON.stringify(reordered)).not.toMatch(/selector|querySelector|xpath/i);
+  });
+
+  it('captures an owned static artifact without urls, forms, scripts, or handlers', async () => {
+    live = await harness();
+    const { root, surface } = rootFixture(live.document);
+    const artifact = live.document.createElement('section');
+    artifact.setAttribute('data-clf-owned-artifact', '');
+    artifact.setAttribute('aria-label', 'Sketch');
+    artifact.innerHTML = '<p style="color: red">Hello</p><img data-media-id="shot" alt="cat">';
+    surface.append(artifact);
+    const controlsOf = (nodes: Array<Record<string, any>>) => {
+      const found: Array<Record<string, any>> = [];
+      const visit = (entries: Array<Record<string, any>>) => {
+        for (const entry of entries ?? []) {
+          if (entry.kind === 'artifact') found.push(entry);
+          if (Array.isArray(entry.children)) visit(entry.children);
+        }
+      };
+      visit(nodes);
+      return found;
+    };
+    const safe = controlsOf((live.window as any).CLF_DOM.captureRichRoot(root));
+    expect(safe).toHaveLength(1);
+    const captured = safe[0];
+    expect(captured).toMatchObject({ mode: 'static', title: 'Sketch', media: ['shot'] });
+    expect(captured?.html ?? '').toContain('Hello');
+    expect(captured?.html ?? '').toContain('color: red');
+    expect(captured?.html ?? '').not.toMatch(/script|onclick|https:|<form|@import|href=|\ssrc=/i);
+    await replyFiber([], [descriptor()]);
+    await live.hook.flush();
+    const rich = emitted(live.sent, 'assistant_message').at(-1)?.event.rich;
+    expect(rich?.accessibleText).toContain('Sketch');
+    expect(JSON.stringify(rich?.nodes)).not.toMatch(/script|onclick|https:|<form|@import|href=|\ssrc=/i);
+    artifact.innerHTML = '<p>Hello</p><script>alert(1)</script>';
+    expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+    expect((live.window as any).CLF_DOM.richCaptureReason(root)).toBe('unsupported');
+    artifact.innerHTML = '<p>Hello</p><img src="https://remote/x" alt="remote">';
+    expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+    expect((live.window as any).CLF_DOM.richCaptureReason(root)).toBe('unsupported');
+    artifact.innerHTML = '<p style="background:u/**/rl(data:,x)">x</p>';
+    expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+    artifact.innerHTML = '<form action="/x"><button>go</button></form>';
+    expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+  });
+
+  it('acquires an owned artifact image, stops at the two-second deadline, and admits depth 24', async () => {
+    live = await harness();
+    const { root, surface } = rootFixture(live.document);
+    const artifact = live.document.createElement('section');
+    artifact.setAttribute('data-clf-owned-artifact', '');
+    artifact.setAttribute('aria-label', 'Sketch');
+    surface.append(artifact);
+    const nest = (depth: number) => `${'<div>'.repeat(depth)}Text${'</div>'.repeat(depth)}`;
+    artifact.innerHTML = nest(24);
+    expect((live.window as any).CLF_DOM.captureRichRoot(root)).not.toBeNull();
+    artifact.innerHTML = nest(25);
+    expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+    expect((live.window as any).CLF_DOM.richCaptureReason(root)).toBe('oversized');
+    artifact.innerHTML = '<img src="https://images.example/cat.png" alt="cat">';
+    const seen: Array<{ alt: string | null; nodeId: string }> = [];
+    const nodes = (live.window as any).CLF_DOM.captureRichRoot(root, (element: Element, nodeId: string) => {
+      seen.push({ alt: element.getAttribute('alt'), nodeId });
+    });
+    const found: Array<Record<string, any>> = [];
+    const visit = (entries: Array<Record<string, any>>) => {
+      for (const entry of entries ?? []) {
+        if (entry.kind === 'artifact') found.push(entry);
+        if (Array.isArray(entry.children)) visit(entry.children);
+      }
+    };
+    visit(nodes);
+    const acquired = seen.filter(row => row.alt === 'cat');
+    expect(acquired).toHaveLength(1);
+    expect(found).toHaveLength(1);
+    const mediaId = found[0]?.media?.[0];
+    expect(mediaId).toMatch(/^media-n-[\d-]+-0$/);
+    expect(found[0]?.html ?? '').toContain(`data-media-id="${mediaId}"`);
+    expect(found[0]?.html ?? '').not.toMatch(/https:|\ssrc=/i);
+    expect(`media-${acquired[0]?.nodeId}`).toBe(mediaId);
+    await replyFiber([], [descriptor()]);
+    await live.hook.flush();
+    found.length = 0;
+    visit(emitted(live.sent, 'assistant_message').at(-1)?.event.rich?.nodes);
+    expect(found).toHaveLength(1);
+    expect(found[0]?.media?.[0]).toBe(mediaId);
+    expect(found[0]?.html ?? '').not.toMatch(/https:|\ssrc=/i);
+    artifact.innerHTML = '<p style="background: image-set(url(http://remote/x) 1x)">x</p>';
+    expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+    artifact.innerHTML = '<p>Hello</p>';
+    const clock = live.window.Date;
+    const realNow = clock.now.bind(clock);
+    let reads = 0;
+    clock.now = () => {
+      reads += 1;
+      return reads < 3 ? realNow() : realNow() + 5_000;
+    };
+    try {
+      expect((live.window as any).CLF_DOM.captureRichRoot(root)).toBeNull();
+      expect((live.window as any).CLF_DOM.richCaptureReason(root)).toBe('oversized');
+    } finally {
+      clock.now = realNow;
+    }
+  });
+
   it('rejects more than 1024 hostile sibling nodes before iterating their NodeList', async () => {
     live = await harness();
     const { root, surface } = rootFixture(live.document);
@@ -1793,16 +1925,30 @@ describe('exact native rich response observation (no action authority)', () => {
     });
     const { surface } = pixelFixture();
     surface.querySelectorAll('img')[1]!.remove();
-    await replyFiber([], [descriptor()], null, true, null, false, 120);
     const captureIds = () => [...new Set(emitted(live!.sent, 'rich_media')
       .map(row => row.pixelSeal?.captureId).filter(Boolean))];
-    await vi.waitFor(() => expect(captureIds()).toHaveLength(1));
+    // A pending receipt has a capture ID before the asynchronous digest has
+    // produced available pixels. Both receipts must exist before overflowing
+    // the queue, or the test may evict pending while available is still encoding.
+    await replyFiber([], [descriptor()], null, true, null, false, 0, false, async () => {
+      await live!.hook.flush();
+      return emitted(live!.sent, 'rich_media').some(row => row.event.status === 'available');
+    });
+    expect(captureIds()).toHaveLength(1);
     expect(issued).toBe(1);
+    const originalCaptureId = captureIds()[0];
+    // Install the reply listener before overflow schedules its own fresh scan.
+    // A timed listener installed after flush can miss that scan altogether.
+    const recaptured = replyFiber([], [descriptor()], null, true, null, false, 0, true, async () => {
+      await live!.hook.flush();
+      return emitted(live!.sent, 'rich_media').some(row =>
+        row.event.status === 'available' && row.pixelSeal?.captureId !== originalCaptureId);
+    });
     for (let index = 0; index < 405; index++) live.hook.emit({ kind: 'chat_error', text: `outage-${index}` });
     await live.hook.flush();
-    await replyFiber([], [descriptor()], null, true, null, false, 200);
-    await vi.waitFor(() => expect(issued).toBeGreaterThanOrEqual(2), { timeout: 3000 });
-    await vi.waitFor(() => expect(captureIds().length).toBeGreaterThanOrEqual(2), { timeout: 3000 });
+    await recaptured;
+    expect(issued).toBeGreaterThanOrEqual(2);
+    expect(captureIds().length).toBeGreaterThanOrEqual(2);
     expect(JSON.stringify(live.sent.filter(row => row.type === 'events'))).not.toContain('NEVER_TRANSMIT');
   });
 
@@ -3364,7 +3510,8 @@ async function replyFiber(
   harnessed: Harness | null = null,
   observeOnly = false,
   keepListenerMs = 0,
-  listenOnly = false
+  listenOnly = false,
+  keepListeningUntil: (() => boolean | Promise<boolean>) | null = null
 ): Promise<void> {
   const active = harnessed ?? live!;
   const window = active.window as any;
@@ -3426,7 +3573,8 @@ async function replyFiber(
     if (listenOnly) {
       // The source observer itself must request the new page-model frame.
       // A concurrent explicit refresh would replace its stamp during toBlob.
-      await new Promise(resolve => globalThis.setTimeout(resolve, keepListenerMs));
+      if (!keepListeningUntil)
+        await new Promise(resolve => globalThis.setTimeout(resolve, keepListenerMs));
     } else if (observeOnly) {
       active.hook.observe();
       await new Promise(resolve => globalThis.setTimeout(resolve, 100));
@@ -3434,7 +3582,10 @@ async function replyFiber(
     // A successful prefetch may elect a *separate* scan only after the canonical
     // scan returns. Keep this real reply listener for that bounded follow-up in
     // the few tests that expressly verify delayed rich hydration.
-    if (!listenOnly && keepListenerMs > 0) await new Promise(resolve => globalThis.setTimeout(resolve, keepListenerMs));
+    if (keepListeningUntil) {
+      await vi.waitFor(async () => expect(await keepListeningUntil()).toBe(true), { timeout: 3000 });
+    } else if (!listenOnly && keepListenerMs > 0)
+      await new Promise(resolve => globalThis.setTimeout(resolve, keepListenerMs));
   } finally {
     window.removeEventListener('message', onAsk);
     window.setTimeout = instant;
@@ -9373,6 +9524,147 @@ describe('a stop button that goes missing while the turn is still running', () =
     await replyFiber([], [{ turnId: 'turn-generated-gallery', conversationId, messages: [], activities: [], images }]);
     await settle(); await live.hook.flush();
     expect(emitted(live.sent, 'native_image')).toHaveLength(6);
+  });
+
+  it('records two assets from one message in one scan and does not turn nine clones into nine records', async () => {
+    live = await harness();
+    const section = assistantTurn(live.document, 'turn-simultaneous-images', []);
+    section.setAttribute('data-clf-fiber-turn', '0');
+    const messageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const blue = 'file_000000005f2c823085a542762d1de785';
+    const orange = 'file_00000000dc58821198efef946a9ade33';
+    const drawn: string[] = [];
+    const held: Array<(blob: { type: string; size: number; arrayBuffer: () => Promise<ArrayBuffer> } | null) => void> = [];
+    Object.defineProperty(live.window.HTMLCanvasElement.prototype, 'getContext', {
+      configurable: true,
+      value: () => ({
+        drawImage: (node: HTMLImageElement) => { drawn.push(new URL(node.src).searchParams.get('id') ?? ''); }
+      })
+    });
+    Object.defineProperty(live.window.HTMLCanvasElement.prototype, 'toBlob', {
+      configurable: true,
+      value: (callback: (blob: { type: string; size: number; arrayBuffer: () => Promise<ArrayBuffer> } | null) => void) => { held.push(callback); }
+    });
+    const addClones = (assetId: string, count: number, main: boolean) => {
+      for (let index = 0; index < count; index++) {
+        const group = live!.document.createElement('div');
+        group.className = 'group/imagegen-image';
+        const image = live!.document.createElement('img');
+        image.src = `https://chatgpt.com/backend-api/estuary/content?id=${assetId}&sig=private-${index}`;
+        Object.defineProperty(image, 'currentSrc', { configurable: true, get: () => image.src });
+        image.setAttribute('data-clf-fiber-image', `0:${encodeURIComponent(messageId)}:${encodeURIComponent(assetId)}`);
+        Object.defineProperties(image, {
+          complete: { configurable: true, value: true },
+          naturalWidth: { configurable: true, value: 1254 },
+          naturalHeight: { configurable: true, value: 1254 }
+        });
+        image.getBoundingClientRect = () => ({ width: main && index === 0 ? 480 : 48, height: main && index === 0 ? 480 : 48 } as DOMRect);
+        group.append(image);
+        section.append(group);
+      }
+    };
+    addClones(blue, 6, true);
+    addClones(orange, 3, false);
+    const images = [blue, orange].map((assetId, partOrder) => ({
+      messageId, assetId, providerRole: 'tool', providerChannel: 'final', providerStatus: 'finished_successfully',
+      width: 1254, height: 1254, order: 0, partOrder
+    }));
+    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+    await replyFiber([], [{ turnId: 'turn-simultaneous-images', conversationId, messages: [], activities: [], images }]);
+    await settle();
+    await live.hook.flush();
+
+    const pending = emitted(live.sent, 'native_image').map(entry => entry.event);
+    expect(pending.map(event => event.providerAssetId)).toEqual([blue, orange]);
+    expect(pending.every(event => event.previewStatus === 'pending')).toBe(true);
+    expect(held).toHaveLength(2);
+    expect(drawn).toEqual([blue, orange]);
+    expect(section.querySelectorAll('[data-clf-fiber-image]')).toHaveLength(9);
+    expect(emitted(live.sent, 'native_image')).toHaveLength(2);
+    for (const assetId of [blue, orange]) {
+      expect(await live.runtimeMessage({
+        type: 'clf-generated-asset-source', conversationId, logicalMessageId: messageId, assetId
+      })).toMatchObject({ ok: true, logicalMessageId: messageId, assetId });
+    }
+
+    const bytes = new TextEncoder().encode('simultaneous-webp');
+    held[0]!({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
+    await settle();
+    await live.hook.flush();
+    expect(emitted(live.sent, 'native_image').filter(row => row.event.previewStatus === 'available')
+      .map(row => row.event.providerAssetId)).toEqual([blue]);
+    expect(held).toHaveLength(2);
+
+    held[1]!({ type: 'image/webp', size: bytes.length, arrayBuffer: async () => bytes.buffer });
+    await settle();
+    await live.hook.flush();
+    const recorded = emitted(live.sent, 'native_image').map(entry => entry.event);
+    expect(recorded.filter(event => event.previewStatus === 'available').map(event => event.providerAssetId)).toEqual([blue, orange]);
+    expect(recorded).toHaveLength(4);
+    expect(JSON.stringify(recorded)).not.toContain('sig=');
+  });
+
+
+  it('hands one exact signed generated-image source only to the extension download request', async () => {
+    live = await harness();
+    const section = assistantTurn(live.document, 'turn-generated-download', []);
+    section.setAttribute('data-clf-fiber-turn', '0');
+    const messageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const assetId = 'file_000000005f2c823085a542762d1de785';
+    const group = live.document.createElement('div');
+    group.className = 'group/imagegen-image';
+    const image = live.document.createElement('img');
+    image.src = `https://chatgpt.com/backend-api/estuary/content?id=${assetId}&sig=download-only`;
+    Object.defineProperty(image, 'currentSrc', { configurable: true, get: () => image.src });
+    image.setAttribute('data-clf-fiber-image',
+      `0:${encodeURIComponent(messageId)}:${encodeURIComponent(assetId)}`);
+    group.append(image);
+    section.append(group);
+    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    await replyFiber([], [{
+      turnId: 'turn-generated-download',
+      conversationId,
+      messages: [],
+      activities: [],
+      images: [{
+        messageId,
+        assetId,
+        providerRole: 'tool',
+        providerChannel: 'final',
+        providerStatus: 'finished_successfully',
+        width: 1254,
+        height: 1254,
+        order: 0,
+        partOrder: 0
+      }]
+    }]);
+    await settle();
+    expect(await live.runtimeMessage({
+      type: 'clf-generated-asset-source',
+      conversationId,
+      logicalMessageId: messageId,
+      assetId
+    })).toEqual({
+      ok: true,
+      logicalMessageId: messageId,
+      assetId,
+      url: `https://chatgpt.com/backend-api/estuary/content?id=${assetId}&sig=download-only`
+    });
+    expect(await live.runtimeMessage({
+      type: 'clf-generated-asset-source',
+      conversationId,
+      logicalMessageId: messageId,
+      assetId: 'file_00000000dc58821198efef946a9ade33'
+    })).toEqual({ ok: false, error: 'asset_source_unavailable' });
+    live.dom.reconfigure({ url: 'https://chatgpt.com/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff' });
+    live.hook.observe();
+    expect(await live.runtimeMessage({
+      type: 'clf-generated-asset-source',
+      conversationId,
+      logicalMessageId: messageId,
+      assetId
+    })).toEqual({ ok: false, error: 'asset_source_unavailable' });
   });
 
   const generatedFixture = (assets: string[]) => {

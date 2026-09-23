@@ -678,6 +678,8 @@ it('retains an unsaved editor draft through a project A-B-A round trip', async (
   const panel = createFilePanel({ host, toggle, onAttach: () => undefined });
   panel.update(projectA); toggle.click(); await tick();
   const input = await editFile(); typeEdit(input, 'my unsaved changes');
+  expect(panel.beforeReplace({ tab: 'files', ownerKey: 'project:other' })).toBe(false);
+  expect(panel.beforeReplace({ tab: 'files', ownerKey: projectA.id })).toBe(true);
   panel.update(projectB); await tick();
   panel.update(projectA); await tick(); await tick();
   expect(host.querySelector<HTMLTextAreaElement>('.test-code-input')?.value).toBe('my unsaved changes');
