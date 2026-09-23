@@ -30,11 +30,8 @@ commitment.
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: **2026-09-23** on branch `feature/crystal-studio`. Foundation and Workspace
-slices are committed; Rich Outputs (§12) and Cutover's source/package checks have been exercised.
-The development app followed a live Omarchy dark/light switch and returned to its original
-theme. Signed-in provider acceptance, native compositor blur and installed-app validation remain
-outstanding. App/package/extension declarations are **2.1.19**; main and extension declare
+Source alignment: **2026-09-23**, including merged PR #10 and the 2.1.20 release candidate.
+App/package/extension declarations are **2.1.20**; main and extension declare
 bridge protocol **17** (`package.json`,
 `src/main/version.ts`, `extension/manifest.json`, `extension/background.js`). Protocol 16
 introduced bounded rich observations; 17 adds pre-observation recording generations and
