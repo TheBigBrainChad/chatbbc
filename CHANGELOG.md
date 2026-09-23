@@ -9,6 +9,38 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## [2.1.20] — Crystal Studio
+
+### Added
+
+- **Adaptive Studio shell.** The rail, chat navigator, conversation stage, and contextual
+  workbench keep the current transcript mounted while visiting files, agents, usage, or
+  settings. Appearance can follow a live Omarchy theme. Supported Hyprland glass uses native
+  transparency; other desktops keep a readable atmospheric surface.
+- **Response-owned image galleries.** Adjacent generated images from one response stay one
+  set. Download originals through Chrome, or use Save preview to write the recorded WebP
+  copy to a file or folder you choose. A set over 20 images requires an explicit selection
+  of at most 20. Existing files are never replaced.
+- **Core `generated_assets`.** The executor can list recorded generated images and create a
+  new file in an approved folder from a preview or the exact page's image source.
+
+### Changed
+
+- **Save preview follows the selected chat.** The human save path checks the current
+  main-frame selection and canonical image membership before and after the file dialog.
+  Gallery selection and an in-progress Save result survive timeline regrouping.
+- **Generated-original downloads keep one document and receipt.** Terminal receipts remain
+  exact after extension status reconstruction. Signed image URLs are redacted from recorded
+  text. Unresolved downloads are abandoned at shutdown.
+
+### Notes
+
+- Bridge protocol stays **17**. Reload the companion shipped with this app.
+- Native choice and Continue stay inert. Production `begin`/`elect`/`arm` are not armed.
+- Signed-in companion pairing, provider-generated pixels, native choice/Continue
+  postconditions, provider-original fidelity, native compositor blur, and installed-app GUI
+  acceptance were not verified for this tag. Unproved families stay explicitly unsupported.
+
 ## [2.1.19] — bounded rich capture
 
 ### Added
