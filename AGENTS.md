@@ -30,8 +30,8 @@ commitment.
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: **2026-09-23**, including merged PR #10 and the 2.1.20 release candidate.
-App/package/extension declarations are **2.1.20**; main and extension declare
+Source alignment: **2026-09-23**, including the 2.1.21 genui presentation correction.
+App/package/extension declarations are **2.1.21**; main and extension declare
 bridge protocol **17** (`package.json`,
 `src/main/version.ts`, `extension/manifest.json`, `extension/background.js`). Protocol 16
 introduced bounded rich observations; 17 adds pre-observation recording generations and
@@ -1245,6 +1245,16 @@ preview can hydrate inline from the existing local session-image reader, includi
 pending and ambiguous previews stay placeholders. A saved local preview is **not** the original
 ChatGPT asset; inline display and its local viewer do not fetch or regenerate the original.
 Unknown media ownership never creates a guessed `native_image` tuple or downloads a signed URL.
+Canonical assistant text can contain `\uE200genui\uE202…\uE201` content references for
+host-native widgets such as `app_block` and `charts_widget_v2`. The renderer consumes
+references outside Markdown code and shows an inert unavailable card with the exact
+reference behind a closed source disclosure. A single isolatable reference retains adjacent
+prose even when expanded Markdown exceeds the paint budget; ambiguous or densely repeated
+references fall back to one bounded source disclosure. Multiline references must not expose
+later payload blocks. Assistant revisions retain each disclosure's open/focus state.
+It neither evaluates the model-authored HTML nor claims choice/Continue input reached
+ChatGPT. Unknown widget families use the same fallback. Recording bytes and exact native
+rich capture remain separate authorities.
 
 ### Human original downloads and agent retrieval are separate ledgers
 

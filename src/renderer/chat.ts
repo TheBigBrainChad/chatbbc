@@ -16,6 +16,7 @@ import { withoutMessageReaction } from '../shared/message-reaction.js';
 import { goalErrorMessage } from '../shared/goal-errors.js';
 import type { GoalModel } from '../shared/goal-reasoning.js';
 import { renderGoalReasoning } from './goal-reasoning.js';
+import { renderUnavailableRichResponse } from './rich-response.js';
 import { retireRichImageViewer } from './rich-image.js';
 import { imageSetsForTimeline, retireImageSetViewer } from './image-set.js';
 import { createConversationStage, type ConversationStage } from './conversation-stage.js';
@@ -965,6 +966,13 @@ function safeRenderedHref(value: string): string | null {
 
 const PROVIDER_CITATION = /^\uE200(?:cite|filecite)\uE202[^\uE200\uE201]*\uE201/;
 const PROVIDER_URL = /^\uE200url\uE202([^\uE200-\uE202]*)\uE202([^\uE200-\uE202]*)\uE201/;
+const PROVIDER_GENUI = /^\uE200genui(?:\uE202[^\uE201]*(?:\uE201|$)|$)/;
+const MAX_INLINE_GENUI_CARDS = 32;
+function inlineWidgetCard(source: string, index: number): HTMLElement {
+  const card = renderUnavailableRichResponse(source);
+  card.querySelector<HTMLDetailsElement>('details.rich-source')!.dataset.richNodeId = `genui-source-${index}`;
+  return card;
+}
 /** Native citation labels and URLs may arrive before the DOM paints the rest of a canonical
  * revision. Use only exact source ranges with matching preceding prose, never substitute
  * the whole captured HTML or guess a destination from an opaque provider reference id. */
@@ -1049,12 +1057,33 @@ export function renderedMarkdown(source: string, capture?: StoredText): HTMLElem
   // never evidence that it contains the current message revision.
   const text = withoutMessageReaction(source).slice(0, MAX_RENDERED_HTML_CHARS);
   const citations = text.includes('\uE200') ? citationLabels(text, capture) : new Map<string, string>();
+  const widgetCards = new Map<string, string>();
+  let widgetNonce: string | undefined;
+  let tooManyWidgets = false;
+  let crossBlockWidget = false;
   // An inline tokenizer leaves literal citation examples inside code spans/fences intact.
   const parser = new Marked({ gfm: true, extensions: [{
     name: 'providerReference', level: 'inline',
     start: value => value.indexOf('\uE200'),
-    tokenizer(value) { const match = value.match(PROVIDER_URL) ?? value.match(PROVIDER_CITATION); return match ? { type: 'providerReference', raw: match[0] } : undefined; },
+    tokenizer(value) { const match = value.match(PROVIDER_URL) ?? value.match(PROVIDER_CITATION) ?? value.match(PROVIDER_GENUI); return match ? { type: 'providerReference', raw: match[0] } : undefined; },
     renderer(token) {
+      if (token.raw.match(PROVIDER_GENUI)) {
+        // Component source stays canonical, but never runs in the transcript.
+        // The nonce prevents authored HTML from impersonating this placeholder.
+        // Marked ends a paragraph at a blank line. If the closing delimiter lives
+        // in a later block, do not let that block print the rest of the JSON.
+        if (!token.raw.endsWith('\uE201') &&
+            text.indexOf('\uE201', text.indexOf(token.raw) + token.raw.length) !== -1)
+          crossBlockWidget = true;
+        if (widgetCards.size === MAX_INLINE_GENUI_CARDS) {
+          tooManyWidgets = true;
+          return '';
+        }
+        widgetNonce ??= crypto.randomUUID();
+        const key = `${widgetNonce}:${widgetCards.size}`;
+        widgetCards.set(key, token.raw);
+        return `<span data-chatbbc-genui="${key}"></span>`;
+      }
       const url = token.raw.match(PROVIDER_URL);
       if (url) {
         // Unlike opaque citation IDs, a native url token already carries its exact
@@ -1067,15 +1096,32 @@ export function renderedMarkdown(source: string, capture?: StoredText): HTMLElem
     }
   }] });
   const html = parser.parse(text, { async: false });
-  return renderedMessage({ text: html, chars: html.length, truncated: html.length > MAX_RENDERED_HTML_CHARS }, text);
+  // Markdown may split a multiline reference or expand ordinary prose beyond the
+  // HTML paint limit. One unambiguous reference can be isolated without trusting
+  // its JSON or replacing Markdown code examples; other shapes fail closed.
+  if (crossBlockWidget || tooManyWidgets || (html.length > MAX_RENDERED_HTML_CHARS && widgetCards.size)) {
+    const start = text.indexOf('\uE200genui');
+    if (widgetCards.size !== 1 || tooManyWidgets || start < 0 ||
+        text.indexOf('\uE200genui', start + 1) !== -1)
+      return renderUnavailableRichResponse(text);
+    const close = text.indexOf('\uE201', start);
+    const end = close < 0 ? text.length : close + 1;
+    const box = el('div', 'msg');
+    if (start) box.append(renderedMarkdown(text.slice(0, start)));
+    box.append(inlineWidgetCard(text.slice(start, end), 0));
+    if (end < text.length) box.append(renderedMarkdown(text.slice(end)));
+    return box;
+  }
+  return renderedMessage({ text: html, chars: html.length, truncated: html.length > MAX_RENDERED_HTML_CHARS }, text, widgetCards);
 }
 
-export function renderedMessage(html: StoredText | null | undefined, fallback: string): HTMLElement {
+export function renderedMessage(html: StoredText | null | undefined, fallback: string, widgetCards?: Map<string, string>): HTMLElement {
   const box = el('div', 'msg');
   // Same reason as textBlock, for the markdown path — and it is the fallback rather than the
   // authority: an element below that carried its own direction keeps it.
   box.setAttribute('dir', 'auto');
   const safeFallback = fallback.slice(0, MAX_RENDERED_HTML_CHARS);
+  let widgetOrdinal = 0;
   // A capture the store had to cut is markup that stops mid-element — very often inside a
   // code block, whose wrapper chrome is far larger than the code in it — so it presents part
   // of the message and ends as an unclosed box. It is not a presentation of this message and
@@ -1097,6 +1143,11 @@ export function renderedMessage(html: StoredText | null | undefined, fallback: s
       if (node.nodeType !== 1) continue;
       const element = node as Element;
       const tagName = element.tagName.toUpperCase();
+      const widgetSource = tagName === 'SPAN' ? widgetCards?.get(element.getAttribute('data-chatbbc-genui') ?? '') : undefined;
+      if (widgetSource !== undefined) {
+        element.replaceWith(inlineWidgetCard(widgetSource, widgetOrdinal++));
+        continue;
+      }
       if (DROP_RENDERED_TAGS.has(tagName)) {
         element.remove();
         continue;

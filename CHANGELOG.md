@@ -9,6 +9,25 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## [2.1.21] — inline widget references
+
+### Fixed
+
+- **Host-native `genui` references no longer print their JSON or HTML as answer prose.**
+  ChatBBC keeps surrounding Markdown and the canonical source, but presents an inert
+  unavailable-content card with a closed source disclosure. Existing recorded answers
+  are corrected when displayed; no history rewrite is needed.
+- **Unknown and incomplete widget references fail closed.** Literal references in code
+  examples remain literal. Multiline references stay together, dense widget payloads
+  remain bounded, and HTML expansion keeps surrounding prose while collapsing source.
+
+### Notes
+
+- Native picker, chart and other widget interactions still belong to ChatGPT; this
+  release does not submit choices, execute model-authored HTML or add a widget bridge.
+- Bridge protocol remains **17**. App and companion versions are **2.1.21**; reload
+  the companion shipped with this app.
+
 ## [2.1.20] — Crystal Studio
 
 ### Added

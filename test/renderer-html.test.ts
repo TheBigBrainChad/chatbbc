@@ -89,6 +89,32 @@ describe('captured ChatGPT rendered HTML', () => {
     expect(unsafe.textContent).toContain('<img src=x onerror=alert(1)>');
     expect(renderedMarkdown('`' + marker + '`').querySelector('code')?.textContent).toBe(marker);
   });
+  it('presents a recorded app block as an inert card at its position without losing surrounding prose', () => {
+    const marker = '\uE200genui\uE202' + JSON.stringify({ app_block: {
+      title: 'Interactive Choice Test',
+      content: '<button onclick="alert(1)">Forest</button><script>globalThis.pwned = true</script>'
+    } }) + '\uE201';
+    const view = renderedMarkdown('Before **the picker**. ' + marker + ' After the picker.');
+    expect(view.querySelector('strong')?.textContent).toBe('the picker');
+    const card = view.querySelector('.rich-unavailable')!;
+    expect(card.textContent).toContain('Rich content unavailable');
+    expect(card.querySelector('details')?.open).toBe(false);
+    expect(card.querySelector('details pre')?.textContent).toBe(marker);
+    expect(view.textContent!.indexOf('Before')).toBeLessThan(view.textContent!.indexOf('Rich content unavailable'));
+    expect(view.textContent!.indexOf('After the picker')).toBeGreaterThan(view.textContent!.indexOf('Rich content unavailable'));
+    expect(view.querySelector('button, script, iframe, [onclick]')).toBeNull();
+  });
+  it('contains unknown and streaming genui source without consuming literal code examples', () => {
+    const unknown = '\uE200genui\uE202{"future_widget":{"content":"secret"}}\uE201';
+    const partial = '\uE200genui\uE202{"app_block":{"content":"<div';
+    const view = renderedMarkdown('One ' + unknown + '\n\nTwo ' + partial);
+    expect(view.querySelectorAll('.rich-unavailable')).toHaveLength(2);
+    expect([...view.querySelectorAll('.rich-source pre')].map(node => node.textContent)).toEqual([unknown, partial]);
+    expect(view.querySelectorAll('details[open]')).toHaveLength(0);
+    const literal = renderedMarkdown('`' + unknown + '`\n\n```text\n' + unknown + '\n```');
+    expect(literal.querySelector('.rich-unavailable')).toBeNull();
+    expect([...literal.querySelectorAll('code')].every(node => node.textContent?.trim() === unknown)).toBe(true);
+  });
   it('matches provider Unicode ranges after emoji and normalizes native list hard breaks', () => {
     const marker = '\uE200filecite\uE202turn0file0\uE201';
     const prefix = '1. **Plan 😅**  \n   Read it. ';
@@ -120,6 +146,39 @@ describe('captured ChatGPT rendered HTML', () => {
     expect(rendered.querySelector('pre code')?.textContent).toContain('const rain = true;');
     expect(rendered.textContent).toContain('COS-0606-FINAL-A');
     expect(rendered.querySelector('script')).toBeNull();
+  });
+  it('keeps component source collapsed when Markdown expansion exceeds the HTML paint budget', () => {
+    const marker = '\uE200genui\uE202{"app_block":{"content":"<button>Choice</button>"}}\uE201';
+    const source = 'Intro ' + marker + ' &'.repeat(55_000) + ' Later prose.';
+    const view = renderedMarkdown(source);
+    const visible = view.cloneNode(true) as HTMLElement;
+    visible.querySelectorAll('details').forEach(node => node.remove());
+    expect(visible.textContent).toContain('Intro ');
+    expect(visible.textContent).toContain('Later prose.');
+    const disclosure = view.querySelector('.rich-source:not([open]) pre')!;
+    expect(disclosure.textContent).toContain(marker);
+    expect(view.querySelector('button, iframe')).toBeNull();
+  });
+  it('keeps a multiline widget reference together rather than leaking its later JSON block', () => {
+    const marker = '\uE200genui\uE202{\n\n  "app_block": {"content": "<button>Choice</button>"}\n}\uE201';
+    const view = renderedMarkdown('Intro. ' + marker + ' After.');
+    const disclosure = view.querySelector('.rich-source:not([open]) pre');
+    expect(disclosure?.textContent).toContain(marker);
+    const visible = view.cloneNode(true) as HTMLElement;
+    visible.querySelectorAll('details').forEach(node => node.remove());
+    expect(visible.textContent).not.toContain('"app_block"');
+    expect(visible.textContent).not.toContain('<button>Choice</button>');
+    expect(visible.textContent).toContain('Intro.');
+    expect(visible.textContent).toContain('After.');
+    const literal = renderedMarkdown('```text\n' + marker + '\n```');
+    expect(literal.querySelector('.rich-unavailable')).toBeNull();
+    expect(literal.querySelector('code')?.textContent?.trim()).toBe(marker);
+  });
+  it('bounds unavailable-card creation for a dense response of widget references', () => {
+    const marker = '\uE200genui\uE202{}\uE201';
+    const view = renderedMarkdown(marker.repeat(128));
+    expect(view.querySelectorAll('.rich-unavailable').length + Number(view.matches('.rich-unavailable'))).toBe(1);
+    expect(view.querySelector('.rich-source:not([open]) pre')?.textContent).toBe(marker.repeat(128));
   });
   it('keeps semantic Markdown structure while stripping executable attributes and unsafe links', () => {
     const rendered = renderedMessage(

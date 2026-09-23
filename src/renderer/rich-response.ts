@@ -291,7 +291,7 @@ function imageLabel(media: RichMediaState | undefined): string {
 }
 
 /** Canonical source is retained, but component syntax is never executed to recreate a UI. */
-function renderUnavailableRichResponse(source: string, accessibleText = '', context?: RichImageContext): HTMLElement {
+export function renderUnavailableRichResponse(source: string, accessibleText = '', context?: RichImageContext): HTMLElement {
   const box = document.createElement('div');
   box.className = 'msg rich-response rich-unavailable';
   box.setAttribute('dir', 'auto');

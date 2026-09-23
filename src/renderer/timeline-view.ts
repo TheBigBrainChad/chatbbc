@@ -786,9 +786,11 @@ export function createTimelineView(options: TimelineViewOptions): TimelineView {
         const focused = active && cached.row.contains(active) ? active.closest<HTMLElement>('[data-rich-node-id]') : null;
         const focusId = focused?.dataset.richNodeId;
         const focusTag = active?.tagName;
-        const oldDisclosure = cached.row.querySelector<HTMLDetailsElement>('details.rich-source');
-        const newDisclosure = row.querySelector<HTMLDetailsElement>('details.rich-source');
-        if (oldDisclosure?.open && newDisclosure) newDisclosure.open = true;
+        const openDisclosures = new Set([...cached.row.querySelectorAll<HTMLDetailsElement>('details.rich-source[open]')]
+          .map(disclosure => disclosure.dataset.richNodeId).filter(Boolean));
+        for (const disclosure of row.querySelectorAll<HTMLDetailsElement>('details.rich-source')) {
+          if (openDisclosures.has(disclosure.dataset.richNodeId)) disclosure.open = true;
+        }
         retireRichImageViewerWithin(cached.row);
         cached.row.replaceChildren(...row.childNodes);
         cached.row.hidden = row.hidden;

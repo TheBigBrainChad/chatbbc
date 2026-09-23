@@ -2362,6 +2362,26 @@ it('retains explicit unavailable-source disclosure and keyboard focus across a r
   expect(updated.querySelector('pre')?.textContent).toBe('<grid>canonical source</grid>');
 });
 
+it('keeps the second inline widget source open and focused across an assistant revision', async () => {
+  const first = '\uE200genui\uE202{"app_block":{"content":"one"}}\uE201';
+  const second = '\uE200genui\uE202{"charts_widget_v2":{"content":{}}}\uE201';
+  const event: Extract<SessionEvent, { kind: 'assistant_message' }> = {
+    kind: 'assistant_message', seq: 1, origin: 1, time: T0, source: 'extension',
+    messageId: 'widget-sources', message: text('Before ' + first + ' between ' + second), final: false
+  };
+  const { w, append } = await boot([event]);
+  const row = w.document.querySelector<HTMLElement>('.ev-assistant_message')!;
+  const sources = row.querySelectorAll<HTMLDetailsElement>('details.rich-source');
+  expect(sources).toHaveLength(2);
+  sources[1]!.open = true;
+  sources[1]!.querySelector('summary')!.focus();
+  await append([{ ...event, seq: 2, message: text(event.message.text + ' after.'), final: true }]);
+  const updated = row.querySelectorAll<HTMLDetailsElement>('details.rich-source');
+  expect(updated[0]!.open).toBe(false);
+  expect(updated[1]!.open).toBe(true);
+  expect(w.document.activeElement).toBe(updated[1]!.querySelector('summary'));
+});
+
 it('keeps an unfolded tool row as the same open node while the chat keeps appending', async () => {
   const { w, append } = await boot([
     { seq: 1, time: T0, source: 'app', kind: 'session_start', conversationId: 'chat-a', title: 'Loop under test' },
