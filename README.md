@@ -26,7 +26,9 @@
 
 **Stay in control of long tasks.** Send a correction while work runs. Goal follows unfinished work; Loop keeps working within your brief. Compact & Resume carries the session and worker history into a fresh chat.
 
-**Keep what ChatGPT makes.** A response with several generated images shows them as one set, and you can download any image or the whole set to your browser's Downloads folder. The same images are available to the agent as Core `generated_assets` handles, so it can save a preview or, when the page still proves the original, the original itself into an approved folder.
+**Keep what ChatGPT makes.** A response with several generated images shows them as one set. Download an original through Chrome, or use **Save preview** to choose where the locally recorded WebP copy goes; a set over 20 images requires an explicit selection. Core `generated_assets` can create a new file in an approved folder from a preview or the exact page's image source. Full-resolution provider-original fidelity still needs signed-in verification; a saved preview is not the original.
+
+**Stay oriented.** The Adaptive Studio rail, chat navigator, conversation and contextual workbench keep the current transcript mounted while you visit files, agents, usage or settings. On Omarchy, Appearance can follow the live desktop palette. Supported Hyprland glass uses native transparency; other desktops retain a readable atmospheric surface.
 
 <p align="center"><strong>Uses your ChatGPT conversation rather than invoking Codex directly.</strong><br /><sub>ChatGPT Work and Codex share usage limits. Your account’s model availability, usage and context limits still apply. <a href="https://learn.chatgpt.com/docs/pricing">OpenAI usage details →</a></sub></p>
 

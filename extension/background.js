@@ -2813,6 +2813,15 @@ function validGeneratedAssetOffer(row) {
     Number.isSafeInteger(document.spaEpoch) && document.spaEpoch >= 0);
 }
 
+/** Durable terminal receipts must be visible to status before main reconciles custody. */
+function generatedAssetDownloadCustodyIds() {
+  const ids = new Set(generatedAssetResults.map(row => row.id));
+  for (const id of Object.keys(generatedAssetDownloads)) ids.add(id);
+  // An incomplete roster is not proof of lost custody. Omit the field entirely until
+  // acknowledged terminal receipts make room; main then performs an exact reconciliation.
+  return ids.size <= MAX_GENERATED_ASSET_DOWNLOADS ? [...ids] : null;
+}
+
 async function publishGeneratedAssetDownloadResult(row) {
   if (['complete', 'failed', 'unconfirmed'].includes(row.state)) {
     // Persist the terminal fact before sending it. Without this barrier a lost HTTP response
@@ -3149,10 +3158,11 @@ async function maintainOnce() {
       documentGeneration: owner.epoch, spaEpoch: source.navigationEpoch }];
   });
   const generatedAssetDocumentsTruncated = generatedAssetDocumentRows.length > 64;
+  const downloadCustodyIds = generatedAssetDownloadCustodyIds();
   const reply = await call('/status', { method: 'POST', body: JSON.stringify({
     openConversations,
     stalledConversations,
-    generatedAssetDownloadIds: Object.keys(generatedAssetDownloads),
+    ...(downloadCustodyIds === null ? {} : { generatedAssetDownloadIds: downloadCustodyIds }),
     generatedAssetDocuments: generatedAssetDocumentsTruncated ? [] : generatedAssetDocumentRows,
     generatedAssetDocumentsTruncated
   }) });

@@ -79,6 +79,7 @@ app.whenReady().then(async () => {
   await server.listen();
 
   const glass = await server.ssrLoadModule('/src/main/window-glass.ts');
+  const lifecycle = await server.ssrLoadModule('/src/main/window-lifecycle.ts');
   const preload = path.join(output, 'preload.cjs');
   const bridgeFile = path.join(output, 'bridge.cjs');
   const esbuild = require('esbuild');
@@ -209,6 +210,8 @@ app.whenReady().then(async () => {
     win.webContents.on('did-finish-load', () => {
       if (activeWindow === win) activeHandshake.didFinishLoad();
     });
+    lifecycle.registerGlassRendererLoss(win.webContents, win, () => activeWindow,
+      () => activeHandshake.loading('#181818'));
 
     try {
       trace(`${name}: loading`);
@@ -263,6 +266,15 @@ app.whenReady().then(async () => {
       assert.deepEqual(reloadPainted.target, painted.target, `${name}: reload must preserve target layout`);
       assert.equal(backing.at(-1), support.transparent ? '#00000000' : '#181818');
 
+      const beforeCrashCount = backing.length;
+      const gone = once(win.webContents, 'render-process-gone');
+      win.webContents.forcefullyCrashRenderer();
+      await gone;
+      if (support.transparent) assert.ok(backing.slice(beforeCrashCount).includes('#181818'),
+        `${name}: renderer loss must immediately restore readable native backing`);
+      assert.equal(backing.at(-1), '#181818',
+        `${name}: a crashed renderer must not leave the native backing transparent`);
+
       results.push({
         name,
         constructor: { transparent: projected.transparent === true, backgroundColor: projected.backgroundColor ?? '#181818' },
@@ -290,7 +302,7 @@ app.whenReady().then(async () => {
       compositorLimit: 'The isolated fixture proves Electron transparency, backing, paint, hit testing and layout. A hidden fixture cannot prove that the live compositor applied a ChatBBC-scoped blur rule.'
     };
     fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(report, null, 2));
-    console.log(`Crystal glass Electron checks passed: 2 modes, readable first paint/reload, hit testing, zero layout delta. ${output}`);
+    console.log(`Crystal glass Electron checks passed: 2 modes, readable first paint/reload/renderer loss, hit testing, zero layout delta. ${output}`);
     console.log(`Compositor limit: ${report.compositorLimit}`);
   } finally {
     clearTimeout(deadline);

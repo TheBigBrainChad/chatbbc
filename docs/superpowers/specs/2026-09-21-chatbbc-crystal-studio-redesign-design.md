@@ -1,7 +1,7 @@
 # ChatBBC Crystal Studio redesign — design
 
 **Date:** 2026-09-21
-**Status:** in implementation. Foundation and Workspace are on the branch; Rich Outputs is implemented and source/Electron-verified. Not yet implemented at the release level: Cutover deletion inventory, packaging acceptance and signed-in provider acceptance (see `docs/worklog-2026-09-21-crystal-studio.md`).
+**Status:** in implementation. Foundation and Workspace are committed. Rich Outputs and Cutover have source, Electron and Linux package evidence; a live development-app Omarchy dark/light switch was observed and restored. Signed-in provider choice/download/save, native compositor blur and installed-app acceptance remain unverified (see `docs/worklog-2026-09-21-crystal-studio.md`).
 **Supersedes:** [`2026-09-18-chatbbc-omarchy-redesign-design.md`](./2026-09-18-chatbbc-omarchy-redesign-design.md)
 
 ## 1. Purpose

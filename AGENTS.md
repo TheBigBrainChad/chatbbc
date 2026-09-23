@@ -30,11 +30,12 @@ commitment.
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: **2026-09-22** on branch `feature/crystal-studio`. Foundation and Workspace
-slices are committed; Rich Outputs (§12 generated images and the new "Human original downloads and
-agent retrieval" contract) is implemented and source/Electron-verified. Cutover deletion, packaging
-acceptance and signed-in provider acceptance are outstanding. App/package/extension
-declarations are **2.1.19**; main and extension declare bridge protocol **17** (`package.json`,
+Source alignment: **2026-09-23** on branch `feature/crystal-studio`. Foundation and Workspace
+slices are committed; Rich Outputs (§12) and Cutover's source/package checks have been exercised.
+The development app followed a live Omarchy dark/light switch and returned to its original
+theme. Signed-in provider acceptance, native compositor blur and installed-app validation remain
+outstanding. App/package/extension declarations are **2.1.19**; main and extension declare
+bridge protocol **17** (`package.json`,
 `src/main/version.ts`, `extension/manifest.json`, `extension/background.js`). Protocol 16
 introduced bounded rich observations; 17 adds pre-observation recording generations and
 positional journal admission. Linux x64 packaging, packaged native runtime and a disposable
@@ -236,7 +237,7 @@ Paths in this section are repository-relative. Most mechanisms have `main`, `sha
 
 | Area | Files and responsibility |
 | --- | --- |
-| App shell | `src/main/index.ts`, `window-lifecycle.ts`, `window-layout.ts`, `window-icon.ts`, `tray-image.ts`, `shutdown.ts`: bootstrap, activation, geometry, tray and bounded exit. |
+| App shell | `src/main/{index,window-lifecycle,window-layout,window-glass,omarchy-theme,window-icon,tray-image,shutdown}.ts`: bootstrap, activation, geometry, live desktop-theme observation, glass backing, tray and bounded exit. |
 | Config/security | `src/main/config.ts`, `platform.ts`, `secrets.ts`, `sandbox.ts`, `redaction.ts`; `src/shared/types.ts`, `capabilities.ts`: permission and host projection, secrets, approved paths. |
 | Publication | `src/main/connection.ts`, `mcp/server.ts`, `mcp/surfaces.ts`, `tunnel/{index,health,locate}.ts`, `diagnostics.ts`: endpoint/tunnel generation and truthful status. |
 | Tool dispatch | `src/main/mcp/{tools,kernel,inbound,call-context,tool-declarations}.ts`, `tools-core.ts`, `tools-desktop.ts`, `tools-plugins.ts`: declarations, exact caller, live guards and evidence. |
@@ -257,7 +258,7 @@ Paths in this section are repository-relative. Most mechanisms have `main`, `sha
 | Extension | `extension/{manifest.json,chatgpt-dom.js,content.js,fiber.js,background.js,usage.js,overlay.css,popup.html,popup.css,popup.js}`: injection worlds, native observations/actions, journal and UI. |
 | Models/usage | `src/main/chat-models.ts`, `session/usage.ts`; `src/shared/{chat-models,usage}.ts`; `src/renderer/{chat-models,context-meter,usage}.ts`: account observations vs local estimates. |
 | External plugins | `src/main/plugins/{catalog,installer,manager,exposure,oauth}.ts`, `plugins-ipc.ts`, `plugin-refresh.ts`, `src/shared/{plugins,plugin-refresh}.ts`, `src/renderer/plugins.ts`. |
-| Renderer boundary | `src/main/ipc.ts`, `edit-context-menu.ts`, `src/preload/index.ts`; `src/renderer/{main,chat,dom,tool-result,timeline-scroll,sidebar-resize,browser-preferences,connection-popover,i18n,rich-response,rich-image}.ts`, `locales/{es,zh-CN}.json`, `index.html`, `styles.css`. |
+| Renderer boundary | `src/main/ipc.ts`, `edit-context-menu.ts`, `src/preload/index.ts`; `src/renderer/{main,chat,presentation-store,app-shell,chat-navigator,conversation-stage,composer-controller,destination-router,output-inspector,work-panel,timeline-scroll,sidebar-resize,browser-preferences,connection-popover,i18n,rich-response,rich-image}.ts`, `locales/{es,zh-CN,zh-TW}.json`, `index.html`, `styles/*`: one shell, transient display state, exact selection and bounded presentation. |
 | Rich capture/actions | `src/main/{rich-actions,rich-retry-admission}.ts`, `src/shared/rich-response.ts`: bounded semantic trees, PAGE media, inert native controls, read-only status and retry eligibility. Production `begin`/`elect`/`arm` remain non-arming until a purpose-specific trusted gesture and exact native postcondition exist. |
 | Appearance | `src/shared/appearance.ts`, `src/main/appearance-schema.ts`, `src/renderer/appearance.ts`: bounded saved colors/typography, field-wise Settings merge, immediate semantic CSS projection. `window-layout.ts` shares native caption/backing colors. |
 | Native Desktop | `src/main/computer/{index,helper,browser-chords,windows-api,windows-capture,windows-apps,windows-keys}.ts`, `src/shared/windows-computer.ts`, `mcp/tools-desktop-{windows,macos}.ts`, `native/macos-desktop-helper/*`, `native/macos-desktop-addon/*`. |
@@ -344,6 +345,17 @@ webviews off. CSP, permission denial, navigation/window restrictions and fixed p
 remain intact. OS consent for Desktop is independent from the app's settings.
 The macOS window permits native fullscreen through its green titlebar control; Windows/Linux
 retain their existing maximize behavior.
+
+`omarchy-theme.ts` observes Omarchy's materialized current theme with bounded reads and
+directory watches. A valid change increments one generation; invalid or missing material
+retains the last valid palette and publishes a diagnostic. Saved `followDesktop` decides
+whether that live palette, mode and font override the manual Appearance fields; it grants
+no filesystem access to tools. `window-glass.ts` positively checks Hyprland blur support
+before constructing a transparent window; unsupported environments use atmospheric CSS.
+The native backing remains readable until load and the matching renderer appearance paint.
+Reload and renderer-process loss restore it and retire stale paint acknowledgements. A
+Wayland compositor connection loss exits Electron rather than leaving a live transparent
+window; the isolated Electron fixture proves backing and geometry, not compositor blur.
 
 `durable.ts` serializes per filename, atomically replaces JSON and retries failed generations;
 lazy snapshots materialize at the write boundary. Independent files may flush concurrently.
@@ -1248,17 +1260,40 @@ conversation, so an ambiguous or truncated report yields no offer rather than a 
 and calls `chrome.downloads.download`; the signed URL never leaves the extension. Chrome's own
 receipt id is persisted before `started`, so an accepted download is never started twice.
 Terminal results enter a durable outbox and are retired only after main acknowledges them.
-An unresolved batch is reported `unconfirmed`, never silently completed; shutdown marks every
-unresolved item unconfirmed and closes download and original-transfer admission.
+An unresolved claimed download becomes `unconfirmed` after 15 minutes without exact browser
+custody or a receipt; a live custody report extends that same deadline. An exact late receipt
+can revise only this silence-expired view, not an explicit unknown result or lost browser custody.
+This is sampled by existing owner reads/status, not another timer. Up to 64 additional
+terminal batches retain late-receipt custody after the 64 active-batch limit; ordinary
+terminal history is trimmed first. Renderer projection prefers the newer batch for an asset.
+Shutdown marks every unresolved item unconfirmed and closes download and original-transfer admission.
+
+The human **Save preview** action is separate from Chrome's original download and Core's
+approved-root save. Main freezes canonical image membership and current selected-session
+generation before opening a native Save As dialog (one image) or folder picker (several).
+It decodes the recorded local preview and creates WebP bytes at the human-chosen destination
+through a staged, flushed, no-replace hard link. A PNG/JPEG historical preview is converted
+to WebP rather than mislabeled; an existing destination is never replaced. The UI reports
+cancelled, partial and failed results without claiming the original was saved. Sets above
+20 images require an explicit selection of at most 20 before either batch action; the
+selection stays attached to canonical asset IDs across repaint. The renderer keeps at most
+128 recent download batches and does not let stale snapshots regress newer receipts. After
+MV3/browser restart, a complete status custody roster includes durable terminal result IDs;
+an overflow omits that roster rather than falsely declaring its omitted claims lost.
 
 The agent path is a different ledger and permission. Core's `generated_assets` lists one opaque
-handle per canonical asset — including every asset of a multi-image response — and saves a preview
-or original to an approved path through the existing sandbox with an atomic temp-file publish and a
-destination-revision check. A handle from another session is refused. An unavailable original is
-never substituted with a preview. `GENERATED_ASSET_LIMITS` bounds the list, compressed bytes,
-decoded pixels, chunk size, concurrent transfers and transfer time. Original bytes are requested
-from the companion in offset-checked chunks and accepted only against the frozen document and a
-final SHA-256. Saved previews are local files; they are not the provider original.
+handle per canonical asset — including every asset of a multi-image response — and creates a
+new file at an approved path when Create is enabled. Bytes are staged and flushed beside the
+destination, then published with a no-replace hard link; an existing file is refused even if
+unchanged, and a concurrent creation wins without losing its bytes. Publication rechecks
+the current root, Create permission and the original session binding after preparation.
+A handle from another session is refused. A filesystem without hard-link support refuses
+publication explicitly rather than exposing partial bytes or replacing another writer.
+An unavailable original is never substituted with a preview. `GENERATED_ASSET_LIMITS` bounds
+the list, compressed bytes, decoded pixels, chunk size, concurrent transfers and transfer time.
+Original bytes are requested from the companion in offset-checked chunks and accepted only
+against the frozen document and a final SHA-256. Saved previews are local files; they are not
+the provider original.
 
 Recorded choice, radio, checkbox, input and Continue elements currently paint as **inert**
 descriptions with disabled action surfaces. A historical selected state means selected *when
@@ -2298,9 +2333,15 @@ regeneration are documented in `docs/pet/PRODUCTION.md`; pet unit/DOM tests,
 `scripts/verify-pet-performance.cjs` (idle and parked CPU against measured rAF counts)
 and `scripts/verify-pet-electron.cjs` cover this owner without provider conversations.
 
-`renderer/main.ts` owns the shell/setup/settings; `chat.ts` owns sessions, composer and timeline.
-Projects, workers, plans, model choice, usage and plugins have focused modules (§4). The renderer
-calls a fixed `preload/index.ts` allowlist into validated `ipc.ts`/`plugins-ipc.ts` handlers.
+`renderer/main.ts` owns setup/settings and mounts one Adaptive Studio shell.
+`presentation-store.ts` holds transient selection, draft, app generation and workbench
+projection; durable session/input facts remain in main. `app-shell.ts` owns the global rail,
+chat navigator, conversation stage and contextual workbench geometry; `destination-router.ts`
+changes their visibility without remounting the transcript. `chat.ts` coordinates session
+selection and timeline; `chat-navigator.ts`, `conversation-stage.ts`,
+`composer-controller.ts`, `work-panel.ts` and `output-inspector.ts` project their existing
+feature owners. The renderer calls a fixed `preload/index.ts` allowlist into validated
+`ipc.ts`/`plugins-ipc.ts` handlers.
 No arbitrary IPC invocation, Node access, filesystem path opening or renderer-side secret store.
 `ui-selection.ts` retains only a process-memory, current-main-frame display-selection witness:
 full navigation, deleted/missing sessions, a changed renderer incarnation and failed/foreign
@@ -2413,9 +2454,10 @@ names render as plain chips; unresolved file citations do not gain invented loca
 Tool result rendering preserves structured text/image/resource distinctions within bounds.
 App-owned external/local links cross their validated main-process route.
 
-English, Spanish and Simplified Chinese are explicit UI translations (`i18n.ts`, `locales/{es,zh-CN}.json`),
-with the selected locale in `cos.ui.language`. Changing language repaints owned labels while
-retaining drafts/selections; never translate authored messages, provider text or file paths.
+English, Spanish, Simplified Chinese and Traditional Chinese are explicit UI translations
+(`i18n.ts`, `locales/{es,zh-CN,zh-TW}.json`), with the selected locale in `cos.ui.language`.
+Changing language repaints owned labels while retaining drafts/selections; never translate
+authored messages, provider text or file paths.
 Bindings live only in a WeakMap keyed by their DOM node. Language changes walk the current
 document, including hidden panels and bound text nodes. Never retain or periodically dereference
 an index of every past label: WeakRef sweeps keep detached trees alive during allocation-heavy
@@ -2443,8 +2485,10 @@ apply immediately; Reset appearance restores both palettes and typography withou
 theme, language or setup profile. Text size scales the existing typography hierarchy, including
 code, independently of window zoom. System font retains the locale-specific fallback stack.
 Readable foregrounds, secondary text, borders, status colors and accent labels derive from the
-chosen surfaces; sidebar text derives from its own color. Translucency is an in-window tinted
-gradient/blur, not transparency through the native window to other applications.
+chosen surfaces; sidebar text derives from its own color. Unsupported compositors use an
+in-window tinted gradient/blur; only a positively supported Hyprland glass window uses
+native transparency through the window. The selected glass mode does not grant browser
+or filesystem authority.
 The connection status popover shares the sidebar's palette, accent and foreground tokens,
 background gradient and blur. The same translucency preference controls both surfaces.
 Goal/Loop selection, Save task, selected dropdown options and Usage activity levels use the
@@ -2860,8 +2904,12 @@ shared-tree change may already have addressed them.
   download states, the opaque Core handles and the chunked original transfer are covered by
   source tests and Electron fixtures. No signed-in page has produced a real ChatGPT
   generated image for `Download original` or for `generated_assets` `save`, so
-  `chrome.downloads` completion, the companion's real signed-URL fetch and the atomic
-  original publish have never been exercised against the provider.
+  `chrome.downloads` completion, the companion's real signed-URL fetch and the no-replace
+  original publish have never been exercised against the provider. The selected DOM image URL
+  is not yet live proof of original-resolution pixels.
+  Human Save preview has unit and renderer-fixture coverage for canonical selection, local
+  WebP bytes and no-replace publication; neither an installed-app native file dialog nor
+  signed-in generated pixels has been exercised.
 - **Corresponding-source GVDB archive:** `docs/licenses/native/pinned/gvdb-53daeeb4.tar.gz`
   (24,716 bytes; SHA-256 `069a00aa1fc893f18423602f4e095583be5a220429f6e8a58d70511490b4b019`)
   is tracked in this tree.

@@ -1,5 +1,5 @@
 import type { RichMediaState } from '../shared/session.js';
-import { t } from './i18n.js';
+import { t, ui } from './i18n.js';
 import type { GeneratedAssetDownloadState } from '../shared/generated-assets.js';
 
 /** The existing sessions:image reader fully decodes bytes and checks recorded asset membership. */
@@ -91,7 +91,7 @@ export function paintGeneratedDownloadState(
   button: HTMLButtonElement,
   states: readonly GeneratedAssetDownloadState[]
 ): void {
-  button.textContent = generatedDownloadLabel(states);
+  ui(button, 'textContent', () => generatedDownloadLabel(states));
   const pending = states.some(state => state === 'requested' || state === 'started');
   button.disabled = pending;
   button.setAttribute('aria-busy', pending ? 'true' : 'false');

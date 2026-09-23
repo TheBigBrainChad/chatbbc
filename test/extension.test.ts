@@ -324,6 +324,60 @@ describe('extension release metadata', () => {
     expect(persisted.writes).toBeGreaterThan(0);
   });
 
+  it('reports durable terminal receipt custody after a browser restart clears session storage', async () => {
+    const id = '22222222-3333-4444-8555-666666666666';
+    const lost = '33333333-4444-4555-8666-777777777777';
+    const receipt = { id, claimToken: 'a'.repeat(32), state: 'complete' };
+    const loadSource = backgroundSource.slice(
+      backgroundSource.indexOf('async function loadOnce()'),
+      backgroundSource.indexOf('\nasync function persist()')
+    );
+    const custodySource = backgroundSource.slice(
+      backgroundSource.indexOf('function generatedAssetDownloadCustodyIds('),
+      backgroundSource.indexOf('\nasync function publishGeneratedAssetDownloadResult(')
+    );
+    const context = vm.createContext({
+      chrome: { storage: {
+        local: { get: async () => ({ generatedAssetResults: [receipt] }) },
+        session: { get: async () => ({ generatedAssetDownloads: {} }) }
+      } },
+      validGeneratedAssetResult: (row: unknown) => Boolean(row && typeof row === 'object' &&
+        'id' in row && row.id === id && 'claimToken' in row && row.claimToken === receipt.claimToken &&
+        'state' in row && row.state === 'complete'),
+      cleanConversationId: () => null,
+      commandMarkerId: () => false,
+      MAX_GENERATED_ASSET_DOWNLOADS: 100,
+      loaded: false,
+      delivery: {},
+      generatedAssetDownloads: { [lost]: { id: lost, claimToken: 'b'.repeat(32), state: 'started' } },
+      generatedAssetResults: []
+    });
+    const inspect = vm.runInContext(`${loadSource}\n${custodySource}\n(async () => {
+      await loadOnce();
+      return { ids: generatedAssetDownloadCustodyIds(), receipts: generatedAssetResults };
+    })()`, context);
+    const restored = await inspect;
+    expect(restored.ids).toEqual([id]);
+    expect(restored.ids).not.toContain(lost);
+    expect(restored.receipts).toEqual([receipt]);
+  });
+
+  it('withholds an incomplete custody roster instead of falsely losing active downloads', () => {
+    const code = backgroundSource.slice(
+      backgroundSource.indexOf('function generatedAssetDownloadCustodyIds('),
+      backgroundSource.indexOf('\nasync function publishGeneratedAssetDownloadResult(')
+    );
+    const liveId = '33333333-4444-4555-8666-777777777777';
+    const context = vm.createContext({
+      generatedAssetResults: Array.from({ length: 100 }, (_, index) => ({
+        id: `${String(index).padStart(8, '0')}-3333-4444-8555-666666666666`
+      })),
+      generatedAssetDownloads: { [liveId]: { id: liveId, state: 'started' } },
+      MAX_GENERATED_ASSET_DOWNLOADS: 100
+    });
+    expect(vm.runInContext(`${code}\ngeneratedAssetDownloadCustodyIds()`, context)).toBeNull();
+  });
+
   it('settles restored Chrome download changes once, including cancellation, and ignores unknown receipts', async () => {
     expect(backgroundSource).toContain('async function settleGeneratedAssetDownloadChange(');
     const code = backgroundSource.slice(

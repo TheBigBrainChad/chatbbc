@@ -8,6 +8,7 @@ import {
   paintGeneratedDownloadState
 } from './rich-image.js';
 import {
+  MAX_GENERATED_ASSET_DOWNLOADS,
   type GeneratedAssetDownloadBatch,
   type GeneratedAssetDownloadState
 } from '../shared/generated-assets.js';
@@ -36,10 +37,28 @@ type SetViewer = {
 };
 let active: SetViewer | null = null;
 let downloadSubscriptionInstalled = false;
-const downloadStates = new Map<string, GeneratedAssetDownloadState>();
+const downloadStates = new Map<string, GeneratedAssetDownloadBatch>();
+const MAX_RETAINED_DOWNLOAD_BATCHES = 128;
+let oldestEvictedDownloadAt = -Infinity;
 
-function downloadKey(sessionId: string, messageId: string, assetId: string): string {
-  return `${sessionId}\u0000${messageId}\u0000${assetId}`;
+type GallerySaveState = {
+  sessionId: string;
+  messageId: string;
+  current: () => boolean;
+  token: symbol;
+  status: 'saving' | 'complete' | 'failed';
+  saved?: number;
+  failed?: number;
+  cancelled?: boolean;
+  firstError?: string;
+  error?: string;
+  repaint?: () => void;
+};
+// The gallery DOM owns its transient Save-dialog presentation, including through bar replacement.
+const gallerySaveStates = new WeakMap<HTMLElement, GallerySaveState>();
+
+function terminalDownload(state: GeneratedAssetDownloadState): boolean {
+  return state === 'complete' || state === 'failed' || state === 'unconfirmed';
 }
 
 function downloadButtons(sessionId: string, messageId: string, assetId?: string): HTMLButtonElement[] {
@@ -52,9 +71,20 @@ function downloadButtons(sessionId: string, messageId: string, assetId?: string)
 function statesFor(button: HTMLButtonElement): GeneratedAssetDownloadState[] {
   const sessionId = button.dataset.downloadSession ?? '';
   const messageId = button.dataset.downloadMessage ?? '';
-  return (button.dataset.downloadAssets?.split('\u0001').filter(Boolean) ?? [])
-    .map(assetId => downloadStates.get(downloadKey(sessionId, messageId, assetId)))
-    .filter((state): state is GeneratedAssetDownloadState => state !== undefined);
+  return (button.dataset.downloadAssets?.split('\u0001').filter(Boolean) ?? []).flatMap(assetId => {
+    let newest: GeneratedAssetDownloadBatch | undefined;
+    let state: GeneratedAssetDownloadState | undefined;
+    for (const batch of downloadStates.values()) {
+      if (batch.sessionId !== sessionId || batch.logicalMessageId !== messageId ||
+          batch.createdAt < (newest?.createdAt ?? -Infinity)) continue;
+      const item = batch.items.find(item => item.assetId === assetId);
+      if (item && (!newest || batch.createdAt > newest.createdAt)) {
+        newest = batch;
+        state = item.state;
+      }
+    }
+    return state ? [state] : [];
+  });
 }
 
 function paintDownloadButton(button: HTMLButtonElement): void {
@@ -62,16 +92,40 @@ function paintDownloadButton(button: HTMLButtonElement): void {
   const states = statesFor(button);
   if (states.length === assets.length && states.length > 0) paintGeneratedDownloadState(button, states);
   else {
-    button.textContent = button.classList.contains('image-set-download-all')
-      ? t('Download all originals') : t('Download original');
-    button.disabled = false;
+    ui(button, 'textContent', () => button.dataset.downloadSelection === 'true' ? t('Download selected originals')
+      : button.classList.contains('image-set-download-all') ? t('Download all originals') : t('Download original'));
+    button.disabled = assets.length === 0;
     button.setAttribute('aria-busy', 'false');
   }
 }
 
 export function applyGeneratedAssetDownloadBatch(batch: GeneratedAssetDownloadBatch): void {
-  if (!batch || batch.sessionId.length < 1) return;
-  for (const item of batch.items) downloadStates.set(downloadKey(batch.sessionId, batch.logicalMessageId, item.assetId), item.state);
+  if (!batch || !batch.sessionId || !Array.isArray(batch.items)) return;
+  const previous = downloadStates.get(batch.id);
+  if (!previous && batch.createdAt <= oldestEvictedDownloadAt) return;
+  if (previous) {
+    if (previous.createdAt !== batch.createdAt || previous.sessionId !== batch.sessionId ||
+        previous.logicalMessageId !== batch.logicalMessageId) return;
+    const prior = new Map(previous.items.map(item => [item.id, item]));
+    batch = { ...batch, items: batch.items.map(item => {
+      const earlier = prior.get(item.id);
+      if (!earlier || earlier.assetId !== item.assetId) return item;
+      if (terminalDownload(earlier.state) && earlier.state !== item.state ||
+          (earlier.state === 'started' || earlier.state === 'unconfirmed') && item.state === 'requested') return earlier;
+      return item;
+    }) };
+  }
+  downloadStates.set(batch.id, batch);
+  while (downloadStates.size > MAX_RETAINED_DOWNLOAD_BATCHES) {
+    let oldest: GeneratedAssetDownloadBatch | undefined;
+    for (const candidate of downloadStates.values()) {
+      if (!candidate.items.every(item => terminalDownload(item.state))) continue;
+      if (!oldest || candidate.createdAt < oldest.createdAt) oldest = candidate;
+    }
+    if (!oldest) break; // Main admits no more than 64 nonterminal batches.
+    downloadStates.delete(oldest.id);
+    oldestEvictedDownloadAt = Math.max(oldestEvictedDownloadAt, oldest.createdAt);
+  }
   for (const button of downloadButtons(batch.sessionId, batch.logicalMessageId)) paintDownloadButton(button);
 }
 
@@ -88,7 +142,7 @@ function bindDownload(
   assetIds: string[]
 ): void {
   node.type = 'button';
-  node.disabled = false;
+  node.disabled = assetIds.length === 0;
   node.removeAttribute('aria-disabled');
   node.setAttribute('aria-busy', 'false');
   node.dataset.downloadSession = owner.sessionId;
@@ -105,14 +159,146 @@ function bindDownload(
   node.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    if (!owner.current() || node.disabled || typeof window.api?.downloadGeneratedAssets !== 'function') return;
-    void window.api.downloadGeneratedAssets(owner.sessionId, messageId, assetIds).then(reply => {
+    const selected = node.dataset.downloadAssets?.split('\u0001').filter(Boolean) ?? [];
+    if (!owner.current() || node.disabled || selected.length < 1 ||
+        selected.length > MAX_GENERATED_ASSET_DOWNLOADS || typeof window.api?.downloadGeneratedAssets !== 'function') return;
+    void window.api.downloadGeneratedAssets(owner.sessionId, messageId, selected).then(reply => {
       if (owner.current() && reply.ok) applyGeneratedAssetDownloadBatch(reply.data);
-      else if (owner.current()) paintGeneratedDownloadState(node, ['failed']);
+      else if (owner.current() && node.isConnected) paintGeneratedDownloadState(node, ['failed']);
     }).catch(() => {
-      if (owner.current()) paintGeneratedDownloadState(node, ['failed']);
+      if (owner.current() && node.isConnected) paintGeneratedDownloadState(node, ['failed']);
     });
   });
+}
+
+function previewAvailable(row: HTMLElement): boolean {
+  const mime = row.dataset.imageMime;
+  return row.dataset.imageStatus === 'available' && !!row.dataset.imagePreview &&
+    (mime === 'image/webp' || mime === 'image/png' || mime === 'image/jpeg');
+}
+
+function paintGallerySaveStatus(node: HTMLButtonElement, state: GallerySaveState): void {
+  node.setAttribute('aria-live', 'polite');
+  node.setAttribute('aria-busy', state.status === 'saving' ? 'true' : 'false');
+  if (state.status === 'saving') {
+    node.disabled = true;
+    node.removeAttribute('title');
+    ui(node, 'textContent', () => t('Saving previews…'));
+    return;
+  }
+  if (state.firstError || state.error) node.title = state.firstError ?? state.error ?? '';
+  else node.removeAttribute('title');
+  if (state.status === 'failed') ui(node, 'textContent', () => t('Preview save failed'));
+  else if (state.saved && state.failed) {
+    ui(node, 'textContent', () => t('{0} saved · {1} failed', [state.saved, state.failed]));
+  } else if (state.failed) ui(node, 'textContent', () => t('{0} previews failed', [state.failed]));
+  else if (state.cancelled) ui(node, 'textContent', () => t('Save cancelled'));
+  else ui(node, 'textContent', () => t('{0} previews saved', [state.saved ?? 0]));
+}
+
+function bindSave(
+  node: HTMLButtonElement,
+  owner: { sessionId: string; current: () => boolean },
+  messageId: string,
+  rows: () => HTMLElement[],
+  gallery?: HTMLElement
+): () => void {
+  node.type = 'button';
+  node.setAttribute('aria-live', 'polite');
+  const multi = node.classList.contains('image-set-save-all');
+  const update = (): void => {
+    const selected = rows();
+    node.disabled = !owner.current() || typeof window.api?.saveGeneratedAssetPreviews !== 'function' ||
+      !selected.length || selected.length > MAX_GENERATED_ASSET_DOWNLOADS ||
+      !selected.some(previewAvailable);
+    const state = gallery && gallerySaveStates.get(gallery);
+    if (state && state.sessionId === owner.sessionId && state.messageId === messageId && state.current()) {
+      state.repaint = update;
+      paintGallerySaveStatus(node, state);
+      return;
+    }
+    node.setAttribute('aria-busy', 'false');
+    node.removeAttribute('title');
+    ui(node, 'textContent', () => {
+      if (!selected.length) return t('Select images to save');
+      if (!selected.some(previewAvailable)) return t('Image preview unavailable');
+      if (!multi) return t('Save preview');
+      return node.dataset.saveSelection === 'true' ? t('Save selected previews') : t('Save all previews');
+    });
+  };
+  update();
+  node.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (node.disabled || !owner.current()) return;
+    const selected = rows();
+    const assetIds = selected.map(row => row.dataset.imageAsset ?? '');
+    if (!assetIds.length || assetIds.length > MAX_GENERATED_ASSET_DOWNLOADS || assetIds.some(id => !id)) return;
+    const token = Symbol();
+    if (gallery) {
+      const state: GallerySaveState = {
+        sessionId: owner.sessionId, messageId, current: owner.current, token, status: 'saving', repaint: update
+      };
+      gallerySaveStates.set(gallery, state);
+      paintGallerySaveStatus(node, state);
+    } else {
+      node.disabled = true;
+      ui(node, 'textContent', () => t('Saving previews…'));
+      node.setAttribute('aria-busy', 'true');
+      node.removeAttribute('title');
+    }
+    void window.api.saveGeneratedAssetPreviews(owner.sessionId, messageId, assetIds).then(reply => {
+      if (!owner.current() || (!gallery && !node.isConnected)) return;
+      if (gallery) {
+        const state = gallerySaveStates.get(gallery);
+        if (!state || state.token !== token) return;
+        if (!reply.ok) {
+          state.status = 'failed';
+          state.error = reply.error;
+        } else {
+          state.status = 'complete';
+          state.saved = reply.data.saved;
+          state.failed = reply.data.failed;
+          state.cancelled = reply.data.cancelled;
+          state.firstError = reply.data.firstError;
+        }
+        if (state.repaint) state.repaint();
+        else {
+          const live = gallery.querySelector<HTMLButtonElement>('.image-set-save-all');
+          if (live) paintGallerySaveStatus(live, state);
+        }
+        return;
+      }
+      update();
+      if (!reply.ok) {
+        ui(node, 'textContent', () => t('Preview save failed'));
+        node.title = reply.error;
+        return;
+      }
+      const { saved, failed, cancelled, firstError } = reply.data;
+      if (firstError) node.title = firstError;
+      if (saved && failed) ui(node, 'textContent', () => t('{0} saved · {1} failed', [saved, failed]));
+      else if (failed) ui(node, 'textContent', () => t('{0} previews failed', [failed]));
+      else if (cancelled) ui(node, 'textContent', () => t('Save cancelled'));
+      else ui(node, 'textContent', () => t('Preview saved'));
+    }).catch(() => {
+      if (!owner.current() || (!gallery && !node.isConnected)) return;
+      if (gallery) {
+        const state = gallerySaveStates.get(gallery);
+        if (!state || state.token !== token) return;
+        state.status = 'failed';
+        if (state.repaint) state.repaint();
+        else {
+          const live = gallery.querySelector<HTMLButtonElement>('.image-set-save-all');
+          if (live) paintGallerySaveStatus(live, state);
+        }
+      } else {
+        update();
+        ui(node, 'textContent', () => t('Preview save failed'));
+      }
+    });
+  });
+  return update;
 }
 
 function closeViewer(viewer: SetViewer, restoreFocus: boolean): void {
@@ -169,8 +355,11 @@ function button(className: string, label: () => string): HTMLButtonElement {
 export function paintImageSetBar(
   gallery: HTMLElement,
   count: number,
-  owner?: { sessionId: string; current: () => boolean }
+  owner?: { sessionId: string; current: () => boolean },
+  priorSelection?: ReadonlySet<string>
 ): void {
+  const previouslyChecked = priorSelection ?? new Set([...gallery.querySelectorAll<HTMLInputElement>('.image-set-selection input:checked')]
+    .map(input => input.value));
   gallery.querySelector('.image-set-bar')?.remove();
   gallery.classList.toggle('is-single', count < 2);
   gallery.dataset.imageCount = String(count);
@@ -184,12 +373,78 @@ export function paintImageSetBar(
   const saveAll = button('image-set-save-all', () => t('Save all previews'));
   const rows = [...gallery.querySelectorAll<HTMLElement>(':scope > .ev-native_image')];
   const messageId = rows[0]?.dataset.imageMessage ?? '';
-  const assetIds = rows.map(row => row.dataset.imageAsset ?? '').filter(Boolean);
-  if (owner && messageId && assetIds.length === count) bindDownload(downloadAll, owner, messageId, assetIds);
-  else keepImageActionInert(downloadAll);
-  keepImageActionInert(saveAll);
-  bar.append(countLabel, downloadAll, saveAll);
-  gallery.append(bar);
+  const assetIds = rows.map(row => row.dataset.imageAsset ?? '');
+  if (messageId && assetIds.every(Boolean) && assetIds.length === count) {
+    let chosen = count > MAX_GENERATED_ASSET_DOWNLOADS ? [] as HTMLElement[] : rows;
+    if (count > MAX_GENERATED_ASSET_DOWNLOADS) {
+      downloadAll.dataset.downloadSelection = 'true';
+      saveAll.dataset.saveSelection = 'true';
+      const selection = document.createElement('fieldset');
+      selection.className = 'image-set-selection';
+      const legend = document.createElement('legend');
+      ui(legend, 'textContent', () => t('Select up to 20 images'));
+      const status = document.createElement('p');
+      status.setAttribute('aria-live', 'polite');
+      const inputs = rows.map((row, index) => {
+        const label = document.createElement('label');
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.value = row.dataset.imageAsset ?? '';
+        input.checked = previouslyChecked.has(input.value);
+        const text = ui(document.createElement('span'), 'textContent', () => t('Image {0}', [index + 1]));
+        label.append(input, text);
+        selection.append(label);
+        return input;
+      });
+      let paintSave: (() => void) | undefined;
+      const refresh = (): void => {
+        chosen = rows.filter((_, index) => inputs[index]!.checked);
+        const atLimit = chosen.length >= MAX_GENERATED_ASSET_DOWNLOADS;
+        inputs.forEach(input => { input.disabled = atLimit && !input.checked; });
+        ui(status, 'textContent', () => t('{0} of 20 selected', [chosen.length]));
+        downloadAll.dataset.downloadAssets = chosen.map(row => row.dataset.imageAsset).join('\u0001');
+        if (owner) paintDownloadButton(downloadAll);
+        else downloadAll.disabled = true;
+        paintSave?.();
+      };
+      inputs.forEach(input => input.addEventListener('change', refresh));
+      selection.prepend(legend, status);
+      bar.append(selection);
+      if (owner) {
+        bindDownload(downloadAll, owner, messageId, []);
+        paintSave = bindSave(saveAll, owner, messageId, () => chosen, gallery);
+      } else {
+        keepImageActionInert(downloadAll);
+        keepImageActionInert(saveAll);
+        ui(downloadAll, 'textContent', () => t('Download selected originals'));
+        ui(saveAll, 'textContent', () => t('Save selected previews'));
+        saveAll.disabled = true;
+      }
+      refresh();
+    } else {
+      if (owner) {
+        bindDownload(downloadAll, owner, messageId, assetIds);
+        bindSave(saveAll, owner, messageId, () => rows, gallery);
+      } else {
+        keepImageActionInert(downloadAll);
+        keepImageActionInert(saveAll);
+      }
+    }
+  } else {
+    keepImageActionInert(downloadAll);
+    keepImageActionInert(saveAll);
+  }
+  bar.prepend(countLabel);
+  bar.append(downloadAll, saveAll);
+  if (count > MAX_GENERATED_ASSET_DOWNLOADS) gallery.prepend(bar);
+  else gallery.append(bar);
+  const state = gallerySaveStates.get(gallery);
+  if (state && (!state.current() || state.messageId !== messageId ||
+      (owner && state.sessionId !== owner.sessionId))) gallerySaveStates.delete(gallery);
+  else if (state) {
+    if (!owner) state.repaint = undefined;
+    paintGallerySaveStatus(saveAll, state);
+  }
 }
 
 
@@ -240,7 +495,8 @@ function placeholderImageRow(image: ImageSetImage, responseId: string, owner: { 
   const download = button('image-set-download', () => t('Download original'));
   const save = button('image-set-save', () => t('Save preview'));
   bindDownload(download, owner, responseId, [image.providerAssetId]);
-  keepImageActionInert(save);
+  save.dataset.saveBound = 'true';
+  bindSave(save, owner, responseId, () => [row]);
   said.append(title, frame, open, download, save);
   const body = document.createElement('div');
   body.className = 'ev-body';
@@ -256,18 +512,66 @@ export function applyImageSetMembers(gallery: HTMLElement, set: ImageSetView, ow
     const asset = row.dataset.imageAsset;
     if (asset && !resident.has(asset)) resident.set(asset, row);
   }
+  const previouslyChecked = new Set([...gallery.querySelectorAll<HTMLInputElement>('.image-set-selection input:checked')]
+    .map(input => input.value));
   const members = set.images.map(image => resident.get(image.providerAssetId) ?? placeholderImageRow(image, set.responseId, owner));
   reconcileChildren(gallery, members);
-  for (const row of members) {
-    const assetId = row.dataset.imageAsset;
+  for (const [index, row] of members.entries()) {
+    const image = set.images[index]!;
+    const previousPreview = row.dataset.imagePreview;
+    row.dataset.imageMessage = set.responseId;
+    row.dataset.imageStatus = image.previewStatus;
+    row.dataset.imageError = image.previewError ?? '';
+    row.dataset.imagePreview = image.previewAssetId ?? '';
+    row.dataset.imageMime = image.previewMime ?? '';
+    row.dataset.imageAsset = image.providerAssetId;
+    const frame = row.querySelector<HTMLElement>('.generated-image-frame');
+    if (previousPreview && previousPreview !== row.dataset.imagePreview) {
+      frame?.querySelector('img')?.remove();
+      delete row.dataset.imageHydrated;
+    }
+    const failedLocalRead = image.previewStatus === 'available' &&
+      previousPreview === row.dataset.imagePreview && row.dataset.imageHydrated === 'true' &&
+      frame?.classList.contains('is-unavailable');
+    if (frame && !failedLocalRead) {
+      const unavailable = image.previewStatus === 'unavailable';
+      frame.classList.toggle('is-unavailable', unavailable);
+      if (unavailable) frame.querySelector('img')?.remove();
+      if (!frame.querySelector('img')) {
+        let note = frame.querySelector<HTMLElement>('.meta');
+        if (!note) {
+          note = document.createElement('p');
+          note.className = 'meta';
+          frame.prepend(note);
+        }
+        ui(note, 'textContent', () => availabilityText(row.dataset.imageStatus ?? 'pending', row.dataset.imageError ?? ''));
+      }
+      const storage = frame.querySelector('button');
+      if (unavailable && !storage) frame.append(imageStorageButton());
+      else if (!unavailable) storage?.remove();
+    }
+    const assetId = image.providerAssetId;
     const download = row.querySelector<HTMLButtonElement>('.image-set-download');
-    if (assetId && download && !download.dataset.downloadSession) {
+    if (download && !download.dataset.downloadSession) {
       const replacement = download.cloneNode(true) as HTMLButtonElement;
       download.replaceWith(replacement);
       bindDownload(replacement, owner, set.responseId, [assetId]);
     }
+    const save = row.querySelector<HTMLButtonElement>('.image-set-save');
+    if (save && save.dataset.saveBound !== 'true') {
+      const replacement = save.cloneNode(true) as HTMLButtonElement;
+      save.replaceWith(replacement);
+      replacement.dataset.saveBound = 'true';
+      bindSave(replacement, owner, set.responseId, () => [row]);
+    } else if (save && !previewAvailable(row) && save.getAttribute('aria-busy') !== 'true') {
+      save.disabled = true;
+      ui(save, 'textContent', () => t('Image preview unavailable'));
+    } else if (save && previewAvailable(row) && save.getAttribute('aria-busy') !== 'true' && save.disabled) {
+      save.disabled = false;
+      ui(save, 'textContent', () => t('Save preview'));
+    }
   }
-  paintImageSetBar(gallery, members.length, owner);
+  paintImageSetBar(gallery, members.length, owner, previouslyChecked);
 }
 
 /** Load only the first image in each gallery. Thumbnails keep their reserved slot. */
@@ -430,9 +734,8 @@ export async function openImageSetViewer(owner: ImageSetViewerOwner): Promise<vo
   const details = button('image-set-metadata-toggle', () => t('Metadata'));
   const workbench = button('image-set-workbench', () => t('Open workbench'));
   let download = button('image-set-download', () => t('Download original'));
-  const save = button('image-set-save', () => t('Save preview'));
+  let save = button('image-set-save', () => t('Save preview'));
   const close = button('image-set-close', () => t('Close'));
-  keepImageActionInert(save);
   stage.append(picture);
   dialog.append(position, stage, thumbs, metadata, previous, next, zoomIn, zoomOut, details, workbench, download, save, close);
   viewer.dialog = dialog;
@@ -471,6 +774,15 @@ export async function openImageSetViewer(owner: ImageSetViewerOwner): Promise<vo
       : status === 'unavailable' ? t('Image preview unavailable')
       : t('ChatGPT generated image');
     metadata.textContent = `${width} × ${height} · ${availability}`;
+    const selectedAsset = row.dataset.imageAsset ?? '';
+    const replacement = download.cloneNode(true) as HTMLButtonElement;
+    download.replaceWith(replacement);
+    download = replacement;
+    if (selectedAsset) bindDownload(download, owner, row.dataset.imageMessage ?? '', [selectedAsset]);
+    const saveReplacement = save.cloneNode(true) as HTMLButtonElement;
+    save.replaceWith(saveReplacement);
+    save = saveReplacement;
+    bindSave(save, owner, row.dataset.imageMessage ?? '', () => [row]);
     const resident = row.querySelector('img')?.getAttribute('src');
     const previewId = row.dataset.imagePreview ?? '';
     if (resident && localImageDataUrl(resident)) picture.src = resident;
@@ -486,11 +798,6 @@ export async function openImageSetViewer(owner: ImageSetViewerOwner): Promise<vo
       if (localImageDataUrl(data)) picture.src = data;
       else picture.removeAttribute('src');
     } else picture.removeAttribute('src');
-    const selectedAsset = row.dataset.imageAsset ?? '';
-    const replacement = download.cloneNode(true) as HTMLButtonElement;
-    download.replaceWith(replacement);
-    download = replacement;
-    if (selectedAsset) bindDownload(download, owner, row.dataset.imageMessage ?? '', [selectedAsset]);
     applyTransform();
   };
   const move = (step: number): void => {

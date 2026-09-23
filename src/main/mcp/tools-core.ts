@@ -1007,13 +1007,11 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
 
   // ------------------------------------------------- generated assets (read + write)
 
-  // One tool covers reading and writing, so it is exposed only when both halves are allowed:
-  // read-only mode (or a missing create/edit permission) hides it rather than offering a
-  // `save` that would always refuse. `list` inside a hidden tool is not worth an exposed name
-  // that cannot do its other half.
-  if ((exposedCaps.read || exposedCaps.browse || exposedCaps.metadata) && (exposedCaps.create || exposedCaps.edit)) {
+  // One tool covers reading and creating files. An edit-only permission cannot safely
+  // publish a generated asset without risking a concurrent writer's existing file.
+  if ((exposedCaps.read || exposedCaps.browse || exposedCaps.metadata) && exposedCaps.create) {
     reg.register('generated_assets', toolDeclaration('generated_assets', () => ({
-      description: 'List or save images ChatGPT generated in this exact session. list returns one opaque handle per image, including every image of a multi-image response. save writes one preview or original to an approved path. A handle from another session is refused. An unavailable original is never replaced with a preview.',
+      description: 'List or save images ChatGPT generated in this exact session. list returns one opaque handle per image, including every image of a multi-image response; filename suggests an original name, while previewFilename is a WebP suggestion only when a local preview exists. save creates a new file at an approved path and never replaces one. Use a .webp path when source is preview: those bytes are a locally recorded preview, never the original. A handle from another session is refused; an unavailable original is never replaced with a preview.',
       inputSchema: z.object({
         action: z.enum(['list', 'save']),
         handle: z.string().regex(/^[A-Za-z0-9_-]{32}$/).optional(),
@@ -1039,7 +1037,6 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           roots: reg.ctx.roots,
           readOnly: config.readOnly,
           canCreate: config.capabilities.create === true && !config.readOnly,
-          canEdit: config.capabilities.edit === true && !config.readOnly,
           ...(input.source === 'original' ? { readOriginal: () => readOriginalForHandle(caller.sessionId!, input.handle!) } : {})
         });
         return { content: [{ type: 'text' as const, text: JSON.stringify(saved) }] };

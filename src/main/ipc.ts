@@ -42,6 +42,7 @@ import {
   subscribeGeneratedAssetDownloads
 } from './generated-asset-downloads.js';
 import { MAX_GENERATED_ASSET_DOWNLOADS } from '../shared/generated-assets.js';
+import { prepareGeneratedAssetPreviewSave, saveGeneratedAssetPreviews } from './generated-assets.js';
 /**
  * IPC surface.
  *
@@ -485,6 +486,54 @@ export function registerIpc(
         : { ok: false as const, error: 'That chat is no longer selected' };
     } catch (error) {
       return { ok: false as const, error: error instanceof Error ? error.message : 'Download request failed' };
+    }
+  });
+  ipcMain.handle('sessions:saveGeneratedAssetPreviews', async (event, payload: unknown) => {
+    const parsed = generatedAssetDownloadRequest.safeParse(payload);
+    if (!parsed.success) return { ok: false as const, error: 'Invalid input' };
+    const selected = (): number | null => {
+      const window = getWindow();
+      if (!window || window.isDestroyed() || window.webContents.isDestroyed() ||
+          !event?.sender || event.sender !== window.webContents || !event.senderFrame ||
+          event.senderFrame !== window.webContents.mainFrame) return null;
+      const witness = currentUiSelectionFor(event.sender);
+      return witness?.sessionId === parsed.data.sessionId ? witness.generation : null;
+    };
+    const generation = selected();
+    const stillSelected = (): boolean => generation !== null && selected() === generation;
+    if (!stillSelected()) return { ok: false as const, error: 'That chat is no longer selected' };
+    try {
+      const { sessionId, logicalMessageId, assetIds } = parsed.data;
+      const selection = await prepareGeneratedAssetPreviewSave(
+        sessionId, logicalMessageId, assetIds, stillSelected
+      );
+      const window = getWindow();
+      if (!window || !stillSelected()) return { ok: false as const, error: 'That chat is no longer selected' };
+      if (selection.images.length === 1) {
+        const choice = await dialog.showSaveDialog(window, {
+          title: 'Save recorded image preview',
+          defaultPath: selection.images[0]!.filename,
+          filters: [{ name: 'WebP preview', extensions: ['webp'] }]
+        });
+        if (choice.canceled || !choice.filePath) {
+          return { ok: true as const, data: { saved: 0, failed: 0, cancelled: true } };
+        }
+        return { ok: true as const, data: await saveGeneratedAssetPreviews(
+          selection, { kind: 'file', path: choice.filePath }, stillSelected
+        ) };
+      }
+      const choice = await dialog.showOpenDialog(window, {
+        title: 'Choose a folder for recorded image previews',
+        properties: ['openDirectory']
+      });
+      if (choice.canceled || !choice.filePaths[0]) {
+        return { ok: true as const, data: { saved: 0, failed: 0, cancelled: true } };
+      }
+      return { ok: true as const, data: await saveGeneratedAssetPreviews(
+        selection, { kind: 'directory', path: choice.filePaths[0] }, stillSelected
+      ) };
+    } catch (error) {
+      return { ok: false as const, error: error instanceof Error ? error.message : 'Preview save failed' };
     }
   });
   ipcMain.handle('sessions:generatedAssetDownloads', async (event, payload: unknown) => {

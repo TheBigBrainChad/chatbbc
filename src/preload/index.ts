@@ -210,6 +210,9 @@ const api = {
   downloadGeneratedAssets: (sessionId: string, logicalMessageId: string, assetIds: string[]) =>
     call<GeneratedAssetDownloadBatch>('sessions:downloadGeneratedAssets',
       { sessionId, logicalMessageId, assetIds }),
+  saveGeneratedAssetPreviews: (sessionId: string, logicalMessageId: string, assetIds: string[]) =>
+    call<{ saved: number; failed: number; cancelled: boolean; firstError?: string }>('sessions:saveGeneratedAssetPreviews',
+      { sessionId, logicalMessageId, assetIds }),
   generatedAssetDownloads: (sessionId: string) =>
     call<GeneratedAssetDownloadBatch[]>('sessions:generatedAssetDownloads', { sessionId }),
   onGeneratedAssetDownloadChanged: (

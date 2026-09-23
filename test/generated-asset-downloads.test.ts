@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { defaultConfig, initConfigPath, updateConfig } from '../src/main/config.js';
 import {
   claimGeneratedAssetDownload,
+  generatedAssetDownloadsForSession,
   pendingGeneratedAssetDownloadOffers,
   recordGeneratedAssetDownloadResult,
   observeGeneratedAssetDocuments,
@@ -252,6 +253,99 @@ describe('generated original download custody', () => {
     expect(await recordGeneratedAssetDownloadResult({ ...receipt, state: 'failed' })).toBe(false);
   });
 
+  it('releases a silent claimed download without replaying its browser action', async () => {
+    const { session, conversationId } = await fixture();
+    const request = { sessionId: session.id, logicalMessageId: responseId, assetIds: [firstAsset] };
+    const first = await requestGeneratedAssetDownloads(request);
+    showDocument(conversationId);
+    const claim = await claimGeneratedAssetDownload({ id: first.items[0]!.id, ...source(conversationId) });
+    expect(claim).toBeTruthy();
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 15 * 60_000 + 1);
+    const second = await requestGeneratedAssetDownloads(request);
+    expect(second.id).not.toBe(first.id);
+    expect(pendingGeneratedAssetDownloadOffers().map(offer => offer.id)).not.toContain(first.items[0]!.id);
+    let lateState = '';
+    const unsubscribe = subscribeGeneratedAssetDownloads(batch => {
+      if (batch.id === first.id) lateState = batch.items[0]?.state ?? '';
+    });
+    expect(await recordGeneratedAssetDownloadResult({
+      id: first.items[0]!.id, claimToken: claim!.claimToken, state: 'complete'
+    })).toBe(true);
+    unsubscribe();
+    expect(lateState).toBe('complete');
+    expect(await recordGeneratedAssetDownloadResult({
+      id: first.items[0]!.id, claimToken: 'A'.repeat(32), state: 'failed'
+    })).toBe(false);
+  });
+
+  it('reconciles delayed browser start and completion receipts after a silent claim expires', async () => {
+    const { session, conversationId } = await fixture();
+    const batch = await requestGeneratedAssetDownloads({
+      sessionId: session.id, logicalMessageId: responseId, assetIds: [firstAsset]
+    });
+    showDocument(conversationId);
+    const claim = await claimGeneratedAssetDownload({ id: batch.items[0]!.id, ...source(conversationId) });
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 15 * 60_000 + 1);
+    const states: string[] = [];
+    const unsubscribe = subscribeGeneratedAssetDownloads(value => {
+      if (value.id === batch.id) states.push(value.items[0]!.state);
+    });
+    await requestGeneratedAssetDownloads({
+      sessionId: session.id, logicalMessageId: responseId, assetIds: [firstAsset]
+    });
+    expect(states).toContain('unconfirmed');
+    const receipt = { id: batch.items[0]!.id, claimToken: claim!.claimToken };
+    expect(await recordGeneratedAssetDownloadResult({ ...receipt, state: 'started' })).toBe(true);
+    expect(await recordGeneratedAssetDownloadResult({ ...receipt, state: 'complete' })).toBe(true);
+    unsubscribe();
+    expect(states.slice(-2)).toEqual(['started', 'complete']);
+  });
+
+  it('retains a claimed download while the browser still reports custody', async () => {
+    const { session, conversationId } = await fixture();
+    const request = { sessionId: session.id, logicalMessageId: responseId, assetIds: [firstAsset] };
+    const first = await requestGeneratedAssetDownloads(request);
+    showDocument(conversationId);
+    expect(await claimGeneratedAssetDownload({ id: first.items[0]!.id, ...source(conversationId) })).toBeTruthy();
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 14 * 60_000);
+    expect(reconcileGeneratedAssetDownloadCustody([first.items[0]!.id])).toBe(0);
+    vi.spyOn(Date, 'now').mockReturnValue(now + 16 * 60_000);
+    expect((await requestGeneratedAssetDownloads(request)).id).toBe(first.id);
+  });
+
+  it('accepts a late exact browser custody report before retiring its claim', async () => {
+    const { session, conversationId } = await fixture();
+    const request = { sessionId: session.id, logicalMessageId: responseId, assetIds: [firstAsset] };
+    const first = await requestGeneratedAssetDownloads(request);
+    showDocument(conversationId);
+    expect(await claimGeneratedAssetDownload({ id: first.items[0]!.id, ...source(conversationId) })).toBeTruthy();
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 16 * 60_000);
+    expect(reconcileGeneratedAssetDownloadCustody([first.items[0]!.id])).toBe(0);
+    expect((await requestGeneratedAssetDownloads(request)).id).toBe(first.id);
+  });
+
+  it('accepts a durable terminal receipt reported in status after browser restart, but not missing custody', async () => {
+    const { session, conversationId } = await fixture();
+    showDocument(conversationId);
+    const kept = await requestGeneratedAssetDownloads({
+      sessionId: session.id, logicalMessageId: responseId, assetIds: [firstAsset]
+    });
+    const lost = await requestGeneratedAssetDownloads({
+      sessionId: session.id, logicalMessageId: responseId, assetIds: [secondAsset]
+    });
+    const keptClaim = await claimGeneratedAssetDownload({ id: kept.items[0]!.id, ...source(conversationId) });
+    await claimGeneratedAssetDownload({ id: lost.items[0]!.id, ...source(conversationId) });
+    expect(reconcileGeneratedAssetDownloadCustody([kept.items[0]!.id])).toBe(1);
+    expect(await recordGeneratedAssetDownloadResult({
+      id: kept.items[0]!.id, claimToken: keptClaim!.claimToken, state: 'complete'
+    })).toBe(true);
+    expect(generatedAssetDownloadsForSession(session.id).find(row => row.id === kept.id)?.items[0]?.state).toBe('complete');
+    expect(generatedAssetDownloadsForSession(session.id).find(row => row.id === lost.id)?.items[0]?.state).toBe('unconfirmed');
+  });
+
   it('refuses another batch when 64 downloads are still unresolved', async () => {
     const { session } = await fixture();
     for (let index = 0; index < 64; index += 1) {
@@ -265,6 +359,31 @@ describe('generated original download custody', () => {
     await expect(requestGeneratedAssetDownloads({
       sessionId: session.id, logicalMessageId: responseId, assetIds: [secondAsset]
     })).rejects.toThrow('download_capacity');
+  });
+
+  it('keeps silent-expired claims reconcilable when a new request reclaims active capacity', async () => {
+    const { session, conversationId } = await fixture();
+    showDocument(conversationId);
+    let oldest: { id: string; claimToken: string } | null = null;
+    for (let index = 0; index < 64; index += 1) {
+      const messageId = `assistant:image-set:claimed-${index}`;
+      await upsertNativeImageEvent(session.id, {
+        time: index + 10, source: 'extension', kind: 'native_image', messageId,
+        providerAssetId: firstAsset, providerRole: 'tool', previewStatus: 'pending'
+      });
+      const batch = await requestGeneratedAssetDownloads({
+        sessionId: session.id, logicalMessageId: messageId, assetIds: [firstAsset]
+      });
+      const claim = await claimGeneratedAssetDownload({ id: batch.items[0]!.id, ...source(conversationId) });
+      expect(claim).not.toBeNull();
+      if (index === 0) oldest = { id: batch.items[0]!.id, claimToken: claim!.claimToken };
+    }
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 15 * 60_000 + 1);
+    await requestGeneratedAssetDownloads({
+      sessionId: session.id, logicalMessageId: responseId, assetIds: [secondAsset]
+    });
+    expect(await recordGeneratedAssetDownloadResult({ ...oldest!, state: 'complete' })).toBe(true);
   });
 
   it('marks an unresolved download unconfirmed and refuses new admission after shutdown', async () => {

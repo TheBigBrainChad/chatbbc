@@ -11,6 +11,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import sharp from 'sharp';
 import type { RichActionRecord } from '../src/main/rich-actions.js';
 import { retryOmarchyThemeObservation, startOmarchyThemeObservation } from '../src/main/omarchy-theme.js';
 
@@ -24,7 +25,10 @@ vi.mock('electron', () => ({
   },
   BrowserWindow: class {},
   clipboard: { readText: () => '', writeText: () => undefined },
-  dialog: { showOpenDialog: vi.fn(async () => ({ canceled: true, filePaths: [] as string[] })) },
+  dialog: {
+    showOpenDialog: vi.fn(async () => ({ canceled: true, filePaths: [] as string[] })),
+    showSaveDialog: vi.fn(async () => ({ canceled: true, filePath: '' }))
+  },
   shell: { openExternal: vi.fn(async () => undefined), openPath: vi.fn(async () => '') },
   nativeTheme: { themeSource: 'system' },
   safeStorage: {
@@ -42,7 +46,7 @@ vi.mock('../src/main/browser.js', () => ({ openInPreferredBrowser: vi.fn(async (
 
 const { defaultConfig, getConfig, initConfigPath, saveConfig, updateConfig } = await import('../src/main/config.js');
 const { initSecretsPath, resetSecretsCacheForTests } = await import('../src/main/secrets.js');
-const { appendEvent, createSession, initSessionStore, rebindSession, resetSessionStoreForTests, upsertMessageEvent, upsertRichMedia, upsertRichMessage } = await import('../src/main/session/store.js');
+const { appendEvent, createSession, initSessionStore, rebindSession, resetSessionStoreForTests, upsertMessageEvent, upsertNativeImageEvent, upsertRichMedia, upsertRichMessage, writeAsset } = await import('../src/main/session/store.js');
 const { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } = await import('../src/main/durable.js');
 const { pendingCommands, resetBridgeForTests, setBrowserOpener, startBridge, stopBridge } = await import(
   '../src/main/bridge.js'
@@ -1224,6 +1228,7 @@ beforeEach(async () => {
   nativeTheme.themeSource = 'system';
   vi.mocked(safeStorage.isAsyncEncryptionAvailable).mockResolvedValue(true);
   vi.mocked(shell.openPath).mockReset().mockResolvedValue('');
+  vi.mocked(dialog.showSaveDialog).mockReset().mockResolvedValue({ canceled: true, filePath: '' });
   vi.mocked(shell.openExternal).mockReset().mockResolvedValue(undefined);
   vi.mocked(app.getVersion).mockReset().mockReturnValue('0.0.0');
   resetSwarm();
@@ -1241,10 +1246,100 @@ beforeEach(async () => {
   }));
 });
 
+describe('human-selected generated preview save IPC', () => {
+  const messageId = 'assistant:image-set:human-preview';
+  const assetId = 'file_ManualPreview0001';
+  async function page() {
+    const session = await createSession({ title: 'human preview', conversationId: randomUUID() });
+    const png = await sharp({ create: { width: 8, height: 6, channels: 3, background: '#224488' } }).png().toBuffer();
+    const asset = await writeAsset(session.id, png, 'image/png');
+    await upsertNativeImageEvent(session.id, {
+      time: 1, source: 'extension', kind: 'native_image', messageId,
+      providerAssetId: assetId, providerRole: 'tool', previewStatus: 'available',
+      previewWidth: 8, previewHeight: 6, asset
+    });
+    const { event, webContents } = selectionWindow();
+    expect(await handlers.get('sessions:uiSelection')!(event, {
+      sessionId: session.id, rendererGeneration: 1
+    })).toMatchObject({ ok: true });
+    return { session, event, webContents };
+  }
+  const savePreview = (event: unknown, sessionId: string, ids = [assetId]): Promise<unknown> =>
+    handlers.get('sessions:saveGeneratedAssetPreviews')!(event, {
+      sessionId, logicalMessageId: messageId, assetIds: ids
+    });
+
+  it('saves one local preview as WebP through Save As without granting a root', async () => {
+    const { session, event } = await page();
+    const filePath = path.join(dir, `${randomUUID()}.webp`);
+    vi.mocked(dialog.showSaveDialog).mockResolvedValueOnce({ canceled: false, filePath });
+    expect(await savePreview(event, session.id)).toEqual({
+      ok: true, data: { saved: 1, failed: 0, cancelled: false }
+    });
+    expect((await sharp(await fs.readFile(filePath)).metadata()).format).toBe('webp');
+    await fs.rm(filePath);
+  });
+
+  it('saves a canonical image set to a chosen folder without replacing either local preview', async () => {
+    const { session, event } = await page();
+    const png = await sharp({ create: { width: 6, height: 8, channels: 3, background: '#881122' } }).png().toBuffer();
+    const asset = await writeAsset(session.id, png, 'image/png');
+    const secondId = 'file_ManualPreview0002';
+    await upsertNativeImageEvent(session.id, {
+      time: 2, source: 'extension', kind: 'native_image', messageId,
+      providerAssetId: secondId, providerRole: 'tool', previewStatus: 'available',
+      previewWidth: 6, previewHeight: 8, asset
+    });
+    const folder = await fs.mkdtemp(path.join(dir, 'gallery-'));
+    vi.mocked(dialog.showOpenDialog).mockResolvedValueOnce({ canceled: false, filePaths: [folder] });
+    expect(await savePreview(event, session.id, [assetId, secondId])).toEqual({
+      ok: true, data: { saved: 2, failed: 0, cancelled: false }
+    });
+    expect((await sharp(await fs.readFile(path.join(folder, 'ChatBBC image 01.webp'))).metadata()).format).toBe('webp');
+    expect((await sharp(await fs.readFile(path.join(folder, 'ChatBBC image 02.webp'))).metadata()).format).toBe('webp');
+    expect(dialog.showSaveDialog).not.toHaveBeenCalled();
+  });
+
+  it('cancels without writing and refuses foreign senders or noncanonical members', async () => {
+    const { session, event, webContents } = await page();
+    expect(await savePreview(event, session.id)).toEqual({
+      ok: true, data: { saved: 0, failed: 0, cancelled: true }
+    });
+    expect(await savePreview({ sender: {}, senderFrame: webContents.mainFrame }, session.id))
+      .toMatchObject({ ok: false });
+    expect(await savePreview(event, session.id, ['file_UnownedPreview0001']))
+      .toMatchObject({ ok: false });
+  });
+
+  it('refuses a stale A→B→A selection after the dialog resolves without writing', async () => {
+    const { session, event } = await page();
+    const other = await createSession({ title: 'different preview owner', conversationId: randomUUID() });
+    const filePath = path.join(dir, `${randomUUID()}.webp`);
+    let release!: (choice: { canceled: boolean; filePath: string }) => void;
+    let entered!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    vi.mocked(dialog.showSaveDialog).mockImplementationOnce(async () => {
+      entered();
+      return new Promise(resolve => { release = resolve; });
+    });
+    const pending = savePreview(event, session.id);
+    await reached;
+    expect(await handlers.get('sessions:uiSelection')!(event, {
+      sessionId: other.id, rendererGeneration: 2
+    })).toMatchObject({ ok: true });
+    expect(await handlers.get('sessions:uiSelection')!(event, {
+      sessionId: session.id, rendererGeneration: 3
+    })).toMatchObject({ ok: true });
+    release({ canceled: false, filePath });
+    expect(await pending).toMatchObject({ ok: true, data: { saved: 0, failed: 1, cancelled: false } });
+    await expect(fs.stat(filePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
 it('keeps origin history navigation separate from live revision cursors over IPC', async () => {
   const session = await createSession({ title: 'History cursors' });
   const message = { kind: 'assistant_message' as const, source: 'extension' as const, time: 10,
     messageId: 'review', message: { text: 'Detailed review', truncated: false, chars: 15 }, final: true };
+
   const first = await upsertMessageEvent(session.id, message);
   await appendEvent(session.id, { kind: 'note', source: 'app', time: 20, message: { text: 'Later work', truncated: false, chars: 10 } });
   const revision = await upsertMessageEvent(session.id, { ...message, renderedHtml: { text: '<p>Detailed review</p>', truncated: false, chars: 22 } });

@@ -1925,16 +1925,30 @@ describe('exact native rich response observation (no action authority)', () => {
     });
     const { surface } = pixelFixture();
     surface.querySelectorAll('img')[1]!.remove();
-    await replyFiber([], [descriptor()], null, true, null, false, 120);
     const captureIds = () => [...new Set(emitted(live!.sent, 'rich_media')
       .map(row => row.pixelSeal?.captureId).filter(Boolean))];
-    await vi.waitFor(() => expect(captureIds()).toHaveLength(1));
+    // A pending receipt has a capture ID before the asynchronous digest has
+    // produced available pixels. Both receipts must exist before overflowing
+    // the queue, or the test may evict pending while available is still encoding.
+    await replyFiber([], [descriptor()], null, true, null, false, 0, false, async () => {
+      await live!.hook.flush();
+      return emitted(live!.sent, 'rich_media').some(row => row.event.status === 'available');
+    });
+    expect(captureIds()).toHaveLength(1);
     expect(issued).toBe(1);
+    const originalCaptureId = captureIds()[0];
+    // Install the reply listener before overflow schedules its own fresh scan.
+    // A timed listener installed after flush can miss that scan altogether.
+    const recaptured = replyFiber([], [descriptor()], null, true, null, false, 0, true, async () => {
+      await live!.hook.flush();
+      return emitted(live!.sent, 'rich_media').some(row =>
+        row.event.status === 'available' && row.pixelSeal?.captureId !== originalCaptureId);
+    });
     for (let index = 0; index < 405; index++) live.hook.emit({ kind: 'chat_error', text: `outage-${index}` });
     await live.hook.flush();
-    await replyFiber([], [descriptor()], null, true, null, false, 200);
-    await vi.waitFor(() => expect(issued).toBeGreaterThanOrEqual(2), { timeout: 3000 });
-    await vi.waitFor(() => expect(captureIds().length).toBeGreaterThanOrEqual(2), { timeout: 3000 });
+    await recaptured;
+    expect(issued).toBeGreaterThanOrEqual(2);
+    expect(captureIds().length).toBeGreaterThanOrEqual(2);
     expect(JSON.stringify(live.sent.filter(row => row.type === 'events'))).not.toContain('NEVER_TRANSMIT');
   });
 
@@ -3496,7 +3510,8 @@ async function replyFiber(
   harnessed: Harness | null = null,
   observeOnly = false,
   keepListenerMs = 0,
-  listenOnly = false
+  listenOnly = false,
+  keepListeningUntil: (() => boolean | Promise<boolean>) | null = null
 ): Promise<void> {
   const active = harnessed ?? live!;
   const window = active.window as any;
@@ -3558,7 +3573,8 @@ async function replyFiber(
     if (listenOnly) {
       // The source observer itself must request the new page-model frame.
       // A concurrent explicit refresh would replace its stamp during toBlob.
-      await new Promise(resolve => globalThis.setTimeout(resolve, keepListenerMs));
+      if (!keepListeningUntil)
+        await new Promise(resolve => globalThis.setTimeout(resolve, keepListenerMs));
     } else if (observeOnly) {
       active.hook.observe();
       await new Promise(resolve => globalThis.setTimeout(resolve, 100));
@@ -3566,7 +3582,10 @@ async function replyFiber(
     // A successful prefetch may elect a *separate* scan only after the canonical
     // scan returns. Keep this real reply listener for that bounded follow-up in
     // the few tests that expressly verify delayed rich hydration.
-    if (!listenOnly && keepListenerMs > 0) await new Promise(resolve => globalThis.setTimeout(resolve, keepListenerMs));
+    if (keepListeningUntil) {
+      await vi.waitFor(async () => expect(await keepListeningUntil()).toBe(true), { timeout: 3000 });
+    } else if (!listenOnly && keepListenerMs > 0)
+      await new Promise(resolve => globalThis.setTimeout(resolve, keepListenerMs));
   } finally {
     window.removeEventListener('message', onAsk);
     window.setTimeout = instant;

@@ -1424,8 +1424,11 @@ export function groupImageRows(rows: HTMLElement[]): HTMLElement[] {
     for (const member of members) placed.add(member);
     const gallery = members.map(member => member.closest<HTMLElement>('.generated-image-gallery'))
       .find((node): node is HTMLElement => !!node) ?? el('div', 'generated-image-gallery');
+    const selection = gallery.querySelector('.image-set-selection')
+      ? new Set([...gallery.querySelectorAll<HTMLInputElement>('.image-set-selection input:checked')].map(input => input.value))
+      : undefined;
     reconcileChildren(gallery, members);
-    paintImageSetBar(gallery, members.length);
+    paintImageSetBar(gallery, members.length, undefined, selection);
     result.push(gallery);
   }
   return result;

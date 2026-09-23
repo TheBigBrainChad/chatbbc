@@ -15,7 +15,9 @@ import {
 
 const MAX_BATCHES = 64;
 const MAX_LIVE_DOCUMENTS = 64;
+const MAX_RECONCILABLE_BATCHES = 64;
 const MAX_DETAIL = 240;
+const CLAIM_SILENCE_MS = 15 * 60_000;
 const SESSION_ID = /^[a-z0-9_-]{1,128}$/i;
 const COMMAND_ID = /^[a-f0-9-]{36}$/i;
 const PROVIDER_ASSET_ID = /^file_[A-Za-z0-9_-]{8,100}$/;
@@ -28,6 +30,8 @@ type InternalItem = GeneratedAssetDownloadBatch['items'][number] & {
   bindingRevision: number;
   logicalMessageId: string;
   claimToken: string | null;
+  silenceDeadline: number | null;
+  silenceExpired: boolean;
   document: GeneratedAssetDownloadDocument | null;
 };
 
@@ -39,6 +43,7 @@ type InternalBatch = Omit<GeneratedAssetDownloadBatch, 'items'> & {
 const batches = new Map<string, InternalBatch>();
 const items = new Map<string, InternalItem>();
 const subscribers = new Set<(batch: GeneratedAssetDownloadBatch) => void>();
+let lastBatchCreatedAt = 0;
 let requestQueue = Promise.resolve();
 let admissionClosed = false;
 
@@ -82,6 +87,24 @@ function terminal(state: GeneratedAssetDownloadState): boolean {
   return state === 'complete' || state === 'failed' || state === 'unconfirmed';
 }
 
+function expireSilentClaims(now = Date.now()): number {
+  let changed: Set<InternalBatch> | undefined;
+  let count = 0;
+  for (const item of items.values()) {
+    if (item.claimToken === null || terminal(item.state) ||
+        item.silenceDeadline === null || now < item.silenceDeadline) continue;
+    item.state = 'unconfirmed';
+    item.silenceExpired = true;
+    item.silenceDeadline = null;
+    item.detail = 'Browser download custody was not confirmed within 15 minutes.';
+    const batch = batches.get(item.batchId);
+    if (batch) (changed ??= new Set()).add(batch);
+    count++;
+  }
+  if (changed) for (const batch of changed) publish(batch);
+  return count;
+}
+
 function nonterminalBatches(): number {
   let count = 0;
   for (const batch of batches.values()) {
@@ -91,12 +114,17 @@ function nonterminalBatches(): number {
 }
 
 function trimBatches(): void {
-  if (batches.size <= MAX_BATCHES) return;
-  for (const [id, batch] of batches) {
-    if (!batch.items.every(item => terminal(item.state))) continue;
-    batches.delete(id);
-    for (const item of batch.items) items.delete(item.id);
-    if (batches.size <= MAX_BATCHES) return;
+  if (batches.size <= MAX_BATCHES + MAX_RECONCILABLE_BATCHES) return;
+  // Reclaim ordinary terminal history first. A silence-expired claim has released active
+  // capacity, but its exact browser receipt may still arrive and must keep its claim token.
+  for (const preserveExpired of [true, false]) {
+    for (const [id, batch] of batches) {
+      if (!batch.items.every(item => terminal(item.state)) ||
+          (preserveExpired && batch.items.some(item => item.silenceExpired))) continue;
+      batches.delete(id);
+      for (const item of batch.items) items.delete(item.id);
+      if (batches.size <= MAX_BATCHES + MAX_RECONCILABLE_BATCHES) return;
+    }
   }
 }
 
@@ -122,6 +150,7 @@ export async function requestGeneratedAssetDownloads(
     if (admissionClosed) throw new Error('download_shutdown');
     const assetIds = validateRequest(input);
     const target = await canonicalTarget(input, assetIds);
+    expireSilentClaims();
     const fingerprint = JSON.stringify([input.sessionId, target.conversationId, target.bindingRevision,
       input.logicalMessageId, assetIds]);
     for (const batch of batches.values()) {
@@ -137,7 +166,7 @@ export async function requestGeneratedAssetDownloads(
       id: batchId,
       sessionId: input.sessionId,
       logicalMessageId: input.logicalMessageId,
-      createdAt: Date.now(),
+      createdAt: (lastBatchCreatedAt = Math.max(Date.now(), lastBatchCreatedAt + 1)),
       fingerprint,
       items: assetIds.map((assetId, index) => ({
         id: randomUUID(),
@@ -151,6 +180,8 @@ export async function requestGeneratedAssetDownloads(
         state: 'requested' as const,
         detail: null,
         claimToken: null,
+        silenceDeadline: null,
+        silenceExpired: false,
         document: liveDocuments.get(target.conversationId) ?? null
       }))
     };
@@ -207,6 +238,7 @@ export function observeGeneratedAssetDocuments(
 }
 
 export function pendingGeneratedAssetDownloadOffers(): GeneratedAssetDownloadOffer[] {
+  expireSilentClaims();
   const offers: GeneratedAssetDownloadOffer[] = [];
   if (!documentsComplete) return offers;
   for (const item of items.values()) {
@@ -226,6 +258,7 @@ export function pendingGeneratedAssetDownloadOffers(): GeneratedAssetDownloadOff
 }
 
 export function generatedAssetDownloadsForSession(sessionId: string): GeneratedAssetDownloadBatch[] {
+  expireSilentClaims();
   if (!SESSION_ID.test(sessionId)) return [];
   return [...batches.values()].filter(batch => batch.sessionId === sessionId).map(publicBatch);
 }
@@ -239,12 +272,18 @@ export function liveDocumentFor(conversationId: string): GeneratedAssetDownloadD
 export function reconcileGeneratedAssetDownloadCustody(liveIds: readonly string[]): number {
   if (!Array.isArray(liveIds) || liveIds.length > 100 ||
       liveIds.some(id => typeof id !== 'string' || !COMMAND_ID.test(id))) return 0;
+  const now = Date.now();
+  let count = 0;
   const live = new Set(liveIds);
   const changed = new Set<InternalBatch>();
-  let count = 0;
   for (const item of items.values()) {
-    if (item.claimToken === null || terminal(item.state) || live.has(item.id)) continue;
+    if (item.claimToken === null || terminal(item.state)) continue;
+    if (live.has(item.id)) {
+      item.silenceDeadline = now + CLAIM_SILENCE_MS;
+      continue;
+    }
     item.state = 'unconfirmed';
+    item.silenceDeadline = null;
     item.detail = 'Browser receipt custody was lost before completion could be confirmed.';
     const batch = batches.get(item.batchId);
     if (batch) changed.add(batch);
@@ -287,6 +326,8 @@ export async function claimGeneratedAssetDownload(
         !session || session.conversationId !== item.conversationId ||
         session.bindingRevision !== item.bindingRevision) return null;
     item.claimToken = randomBytes(24).toString('base64url');
+    item.silenceExpired = false;
+    item.silenceDeadline = Date.now() + CLAIM_SILENCE_MS;
     const document = item.document;
     const batch = batches.get(item.batchId);
     if (batch) publish(batch);
@@ -304,23 +345,33 @@ export async function claimGeneratedAssetDownload(
   return run;
 }
 
-const transitions: Record<GeneratedAssetDownloadState, ReadonlySet<GeneratedAssetDownloadState>> = {
-  requested: new Set(['started', 'failed', 'unconfirmed']),
-  started: new Set(['complete', 'failed', 'unconfirmed']),
-  complete: new Set(),
-  failed: new Set(),
-  unconfirmed: new Set()
+const transitions: Record<GeneratedAssetDownloadState, Partial<Record<GeneratedAssetDownloadState, true>>> = {
+  requested: { started: true, complete: true, failed: true, unconfirmed: true },
+  started: { complete: true, failed: true, unconfirmed: true },
+  complete: {},
+  failed: {},
+  unconfirmed: { started: true, complete: true, failed: true }
 };
 
 export async function recordGeneratedAssetDownloadResult(input: GeneratedAssetDownloadResult): Promise<boolean> {
   if (!input || typeof input !== 'object' || !COMMAND_ID.test(input.id) ||
       typeof input.claimToken !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(input.claimToken) ||
       !['started', 'complete', 'failed', 'unconfirmed'].includes(input.state)) return false;
+  // A matching browser receipt is stronger evidence than a silence clock. A prior status
+  // read may already have shown unconfirmed; it can be corrected without replaying input.
+  if (admissionClosed) return false;
   const item = items.get(input.id);
   if (!item || item.claimToken !== input.claimToken || !item.document) return false;
-  if (item.state === input.state) return true;
-  if (!transitions[item.state].has(input.state)) return false;
+  if (item.state === input.state) {
+    if (!terminal(item.state)) item.silenceDeadline = Date.now() + CLAIM_SILENCE_MS;
+    if (input.state === 'unconfirmed') item.silenceExpired = false;
+    return true;
+  }
+  if (item.state === 'unconfirmed' && !item.silenceExpired) return false;
+  if (!transitions[item.state][input.state]) return false;
   item.state = input.state;
+  item.silenceExpired = false;
+  item.silenceDeadline = terminal(input.state) ? null : Date.now() + CLAIM_SILENCE_MS;
   item.detail = typeof input.detail === 'string' && input.detail.trim()
     ? input.detail.trim().replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, MAX_DETAIL)
     : null;
@@ -342,6 +393,7 @@ export function stopGeneratedAssetDownloads(): number {
   let count = 0;
   for (const item of items.values()) {
     if (terminal(item.state)) continue;
+    item.silenceDeadline = null;
     item.state = 'unconfirmed';
     item.detail = 'The app shut down before the browser download receipt was confirmed.';
     const batch = batches.get(item.batchId);
@@ -359,5 +411,6 @@ export function resetGeneratedAssetDownloadsForTests(): void {
   liveDocuments.clear();
   documentsComplete = false;
   admissionClosed = false;
+  lastBatchCreatedAt = 0;
   requestQueue = Promise.resolve();
 }

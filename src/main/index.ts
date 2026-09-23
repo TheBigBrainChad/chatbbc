@@ -82,6 +82,7 @@ import {
   isBackgroundLaunch,
   createWindowActivationGate,
   ownsAppRuntime,
+  registerGlassRendererLoss,
   registerNativeWindowActivation,
   shouldBeginAppBootstrap,
   shouldQuitOnWindowAllClosed
@@ -208,6 +209,10 @@ function createWindow(): void {
   // Reload/startup restores a readable native backing until this document finishes loading and
   // its first complete appearance paint acknowledges the same navigation through IPC.
   window.webContents.on('did-start-loading', () => {
+    const current = nativeChromeTheme();
+    windowGlassBacking?.loading(windowBackgroundForTheme(current.theme, current.appearance));
+  });
+  registerGlassRendererLoss(window.webContents, window, () => window, () => {
     const current = nativeChromeTheme();
     windowGlassBacking?.loading(windowBackgroundForTheme(current.theme, current.appearance));
   });

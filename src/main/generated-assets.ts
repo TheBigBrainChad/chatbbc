@@ -8,6 +8,7 @@ import { wakeBrowserWork } from './browser-wake.js';
 import { GENERATED_ASSET_LIMITS, type GeneratedAssetDownloadDocument } from '../shared/generated-assets.js';
 import { liveDocumentFor } from './generated-asset-downloads.js';
 import type { Root } from '../shared/types.js';
+import { getConfig } from './config.js';
 
 const HANDLE = /^[A-Za-z0-9_-]{32}$/;
 const HANDLE_TTL_MS = 15 * 60_000;
@@ -22,7 +23,9 @@ export class GeneratedAssetError extends Error {
 
 export interface GeneratedAssetListing {
   handle: string;
+  /** Original provenance/default only. A local preview uses previewFilename. */
   filename: string;
+  previewFilename?: string;
   mime: 'image/png' | 'image/jpeg' | 'image/webp' | null;
   width: number | null;
   height: number | null;
@@ -54,7 +57,6 @@ export interface SaveGeneratedAssetRequest {
   roots: readonly Root[];
   readOnly: boolean;
   canCreate: boolean;
-  canEdit: boolean;
   stillCurrent?: () => boolean;
   afterPreflight?: () => Promise<void>;
   readOriginal?: (record: HandleRecord) => Promise<Buffer>;
@@ -69,8 +71,8 @@ export interface SaveGeneratedAssetResult {
   source: 'original' | 'preview';
 }
 
-function filename(index: number): string {
-  return `ChatBBC image ${String(index + 1).padStart(2, '0')}.png`;
+function filename(index: number, extension: 'png' | 'webp' = 'png'): string {
+  return `ChatBBC image ${String(index + 1).padStart(2, '0')}.${extension}`;
 }
 
 function expireHandles(now = Date.now()): void {
@@ -117,6 +119,7 @@ export async function listGeneratedAssets(sessionId: string): Promise<GeneratedA
       rows.push({
         handle,
         filename: record.filename,
+        ...(image.hasPreview ? { previewFilename: filename(index - 1, 'webp') } : {}),
         mime: record.mime,
         width: record.width,
         height: record.height,
@@ -126,6 +129,150 @@ export async function listGeneratedAssets(sessionId: string): Promise<GeneratedA
     }
   }
   return rows;
+}
+
+export interface GeneratedAssetPreviewSelection {
+  sessionId: string;
+  logicalMessageId: string;
+  conversationId: string | null;
+  bindingRevision: number;
+  images: Array<{ assetId: string; previewAssetId: string | null; previewMime: string | null; filename: string }>;
+}
+
+/** Freeze canonical membership before opening a human-owned destination picker. */
+export async function prepareGeneratedAssetPreviewSave(
+  sessionId: string, logicalMessageId: string, assetIds: readonly string[],
+  stillCurrent?: () => boolean
+): Promise<GeneratedAssetPreviewSelection> {
+  if (!Array.isArray(assetIds) || assetIds.length < 1 || assetIds.length > 20 ||
+      new Set(assetIds).size !== assetIds.length ||
+      assetIds.some(id => !/^file_[A-Za-z0-9_-]{8,100}$/.test(id))) {
+    throw new GeneratedAssetError('download_batch_invalid');
+  }
+  if (stillCurrent && !stillCurrent()) throw new GeneratedAssetError('download_selection_changed');
+  const session = await getSession(sessionId);
+  if (!session) throw new GeneratedAssetError('download_session_unavailable');
+  const listed = await sessionImageSets(sessionId, [logicalMessageId]);
+  const set = listed.sets.find(row => row.responseId === logicalMessageId);
+  if (!set || assetIds.some(id => !set.images.some(image => image.providerAssetId === id))) {
+    throw new GeneratedAssetError('download_asset_unavailable');
+  }
+  const again = await getSession(sessionId);
+  if (!again || again.conversationId !== session.conversationId ||
+      again.bindingRevision !== session.bindingRevision ||
+      (stillCurrent && !stillCurrent())) throw new GeneratedAssetError('download_selection_changed');
+  return {
+    sessionId, logicalMessageId, conversationId: session.conversationId,
+    bindingRevision: session.bindingRevision ?? 0,
+    images: assetIds.map(assetId => {
+      const index = set.images.findIndex(image => image.providerAssetId === assetId);
+      const image = set.images[index]!;
+      return {
+        assetId, previewAssetId: image.previewAssetId ?? null,
+        previewMime: image.previewMime ?? null,
+        filename: filename(index, 'webp')
+      };
+    })
+  };
+}
+
+export interface GeneratedAssetPreviewSaveResult {
+  saved: number;
+  failed: number;
+  cancelled: boolean;
+  firstError?: string;
+}
+
+/**
+ * Human-chosen filesystem destination; intentionally separate from the agent's approved
+ * roots and opaque-handle save path. No caller-supplied provider URL can reach this path.
+ */
+export async function saveGeneratedAssetPreviews(
+  selection: GeneratedAssetPreviewSelection,
+  destination: { kind: 'file' | 'directory'; path: string },
+  stillCurrent?: () => boolean
+): Promise<GeneratedAssetPreviewSaveResult> {
+  const result: GeneratedAssetPreviewSaveResult = { saved: 0, failed: 0, cancelled: false };
+  const fail = (error: unknown): void => {
+    result.failed++;
+    result.firstError ??= error instanceof Error ? error.message : 'Could not save preview';
+  };
+  if ((selection.images.length === 1) !== (destination.kind === 'file')) {
+    throw new GeneratedAssetError('download_batch_invalid');
+  }
+  let directory: string;
+  try {
+    if (destination.kind === 'file' && path.extname(destination.path).toLowerCase() !== '.webp') {
+      throw new GeneratedAssetError('destination_extension', 'Choose a .webp destination.');
+    }
+    directory = await fs.realpath(destination.kind === 'file' ? path.dirname(destination.path) : destination.path);
+    if (!(await fs.stat(directory)).isDirectory()) throw new GeneratedAssetError('destination_invalid');
+  } catch (error) {
+    result.failed = selection.images.length;
+    result.firstError = error instanceof Error ? error.message : 'Invalid destination';
+    return result;
+  }
+  for (const [index, image] of selection.images.entries()) {
+    try {
+      const session = await getSession(selection.sessionId);
+      if (!session || session.conversationId !== selection.conversationId ||
+          (session.bindingRevision ?? 0) !== selection.bindingRevision ||
+          (stillCurrent && !stillCurrent())) throw new GeneratedAssetError('download_selection_changed');
+      const current = await sessionImageSets(selection.sessionId, [selection.logicalMessageId]);
+      const member = current.sets.find(set => set.responseId === selection.logicalMessageId)?.images
+        .find(row => row.providerAssetId === image.assetId);
+      if (!member || !image.previewAssetId || member.previewAssetId !== image.previewAssetId ||
+          member.previewMime !== image.previewMime) throw new GeneratedAssetError('preview_unavailable');
+      const bytes = await readAsset(selection.sessionId, image.previewAssetId, GENERATED_ASSET_LIMITS.maxCompressedBytes);
+      if (!bytes) throw new GeneratedAssetError('preview_unavailable');
+      const decoded = await decodeImage(bytes);
+      if (`image/${decoded.format}` !== image.previewMime) throw new GeneratedAssetError('preview_invalid');
+      const webp = await sharp(bytes, { limitInputPixels: GENERATED_ASSET_LIMITS.maxDecodedPixels, animated: false })
+        .webp().toBuffer();
+      if (webp.length > GENERATED_ASSET_LIMITS.maxCompressedBytes) throw new GeneratedAssetError('asset_oversize');
+      const target = path.join(directory, destination.kind === 'file' ? path.basename(destination.path) : image.filename);
+      const temporary = path.join(directory, `.chatbbc-${randomUUID()}.tmp`);
+      try {
+        const file = await fs.open(temporary, 'wx', 0o600);
+        try {
+          await file.writeFile(webp);
+          await file.sync();
+        } finally {
+          await file.close();
+        }
+        const latest = await getSession(selection.sessionId);
+        if (!latest || latest.conversationId !== selection.conversationId ||
+            (latest.bindingRevision ?? 0) !== selection.bindingRevision ||
+            (stillCurrent && !stillCurrent())) throw new GeneratedAssetError('download_selection_changed');
+        const latestSet = await sessionImageSets(selection.sessionId, [selection.logicalMessageId]);
+        if (latestSet.sets.find(set => set.responseId === selection.logicalMessageId)?.images
+          .find(row => row.providerAssetId === image.assetId)?.previewAssetId !== image.previewAssetId ||
+            (stillCurrent && !stillCurrent())) throw new GeneratedAssetError('preview_unavailable');
+        try {
+          await fs.link(temporary, target);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+            throw new GeneratedAssetError('destination_exists', 'A destination already exists; previews never replace files.');
+          }
+          if (['EOPNOTSUPP', 'ENOTSUP', 'EPERM', 'EINVAL'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+            throw new GeneratedAssetError('destination_unsupported',
+              'This destination does not support atomic no-replace saves (hard links).');
+          }
+          throw error;
+        }
+      } finally {
+        await fs.rm(temporary, { force: true }).catch(() => undefined);
+      }
+      result.saved++;
+    } catch (error) {
+      fail(error);
+      if (error instanceof GeneratedAssetError && error.code === 'download_selection_changed') {
+        result.failed += selection.images.length - index - 1;
+        break;
+      }
+    }
+  }
+  return result;
 }
 
 async function destinationRevision(real: string): Promise<string> {
@@ -139,25 +286,49 @@ async function destinationRevision(real: string): Promise<string> {
   }
 }
 
-async function publishBytes(real: string, bytes: Buffer, before: string): Promise<void> {
+async function publishBytes(
+  real: string, bytes: Buffer, root: Root, record: HandleRecord,
+  conversationId: string | null, stillCurrent?: () => boolean
+): Promise<void> {
   const temporary = path.join(path.dirname(real), `.chatbbc-${randomUUID()}.tmp`);
-  const handle = await fs.open(temporary, 'wx', 0o600);
   try {
-    await handle.writeFile(bytes);
-    await handle.sync();
+    const handle = await fs.open(temporary, 'wx', 0o600);
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    // Linking the staged inode is the atomic, no-replace publication boundary. A second
+    // writer creating the destination after our path checks wins; rename would erase it.
+    const session = await getSession(record.sessionId);
+    if (!session || session.bindingRevision !== record.bindingRevision ||
+        session.conversationId !== conversationId || (stillCurrent && !stillCurrent())) {
+      throw new GeneratedAssetError('asset_handle_expired');
+    }
+    try {
+      const live = getConfig();
+      if (live.readOnly || !live.capabilities.create) throw new GeneratedAssetError('write_disabled');
+      if (!live.roots.some(approved => approved.name === root.name && approved.path === root.path)) {
+        throw new GeneratedAssetError('path_refused');
+      }
+      await fs.link(temporary, real);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new GeneratedAssetError('DESTINATION_CHANGED');
+      }
+      if (['EOPNOTSUPP', 'ENOTSUP', 'EPERM', 'EINVAL'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+        throw new GeneratedAssetError('destination_unsupported',
+          'Cannot guarantee atomic no-replace publication at this destination; choose a writable filesystem with hard-link support.');
+      }
+      throw error;
+    }
   } finally {
-    await handle.close();
-  }
-  try {
-    if (await destinationRevision(real) !== before) throw new GeneratedAssetError('DESTINATION_CHANGED');
-    await fs.rename(temporary, real);
-  } catch (error) {
     await fs.rm(temporary, { force: true }).catch(() => undefined);
-    throw error;
   }
 }
 
-async function decodeImage(bytes: Buffer): Promise<{ width: number; height: number }> {
+async function decodeImage(bytes: Buffer): Promise<{ width: number; height: number; format: string | undefined }> {
   if (bytes.length > GENERATED_ASSET_LIMITS.maxCompressedBytes) throw new GeneratedAssetError('asset_oversize');
   const image = sharp(bytes, { limitInputPixels: GENERATED_ASSET_LIMITS.maxDecodedPixels, animated: false });
   const info = await image.metadata();
@@ -165,20 +336,19 @@ async function decodeImage(bytes: Buffer): Promise<{ width: number; height: numb
     throw new GeneratedAssetError('asset_oversize');
   }
   await image.stats();
-  return { width: info.width, height: info.height };
+  return { width: info.width, height: info.height, format: info.format };
 }
 
 export async function saveGeneratedAsset(input: SaveGeneratedAssetRequest): Promise<SaveGeneratedAssetResult> {
   expireHandles();
-  if (input.readOnly || (input.source === 'preview' && !input.canCreate && !input.canEdit)) {
-    throw new GeneratedAssetError('write_disabled');
-  }
+  if (input.readOnly || !input.canCreate) throw new GeneratedAssetError('write_disabled');
   const record = handles.get(input.handle);
   if (!record || !HANDLE.test(input.handle) || record.sessionId !== input.sessionId) {
     throw new GeneratedAssetError('asset_handle_refused');
   }
   const session = await getSession(input.sessionId);
   if (!session || session.bindingRevision !== record.bindingRevision) throw new GeneratedAssetError('asset_handle_expired');
+  const conversationId = session.conversationId;
   if (input.stillCurrent && !input.stillCurrent()) throw new GeneratedAssetError('download_selection_changed');
   let resolved;
   try {
@@ -188,12 +358,14 @@ export async function saveGeneratedAsset(input: SaveGeneratedAssetRequest): Prom
     throw error;
   }
   const before = await destinationRevision(resolved.real);
-  if (before === 'missing' && !input.canCreate) throw new GeneratedAssetError('write_disabled');
-  if (before !== 'missing' && !input.canEdit) throw new GeneratedAssetError('write_disabled');
   if (input.afterPreflight) await input.afterPreflight();
+  if (before !== 'missing') {
+    if (await destinationRevision(resolved.real) !== before) throw new GeneratedAssetError('DESTINATION_CHANGED');
+    throw new GeneratedAssetError('destination_exists', 'Choose a new destination; generated asset saves never replace a file.');
+  }
   if (input.stillCurrent && !input.stillCurrent()) throw new GeneratedAssetError('download_selection_changed');
   const again = await getSession(input.sessionId);
-  if (!again || again.bindingRevision !== record.bindingRevision || again.conversationId !== session.conversationId) {
+  if (!again || again.bindingRevision !== record.bindingRevision || again.conversationId !== conversationId) {
     throw new GeneratedAssetError('asset_handle_expired');
   }
   let bytes: Buffer;
@@ -214,9 +386,15 @@ export async function saveGeneratedAsset(input: SaveGeneratedAssetRequest): Prom
     if (!bytes || bytes.length > GENERATED_ASSET_LIMITS.maxCompressedBytes) throw new GeneratedAssetError('asset_oversize');
   }
   const decoded = await decodeImage(bytes);
-  const currentPath = await resolvePath(input.roots, input.path, { allowMissing: true });
+  let currentPath;
+  try {
+    currentPath = await resolvePath(getConfig().roots, input.path, { allowMissing: true });
+  } catch (error) {
+    if (error instanceof SandboxError) throw new GeneratedAssetError('path_refused', error.message);
+    throw error;
+  }
   if (currentPath.real !== resolved.real) throw new GeneratedAssetError('path_refused');
-  await publishBytes(currentPath.real, bytes, before);
+  await publishBytes(currentPath.real, bytes, currentPath.root, record, conversationId, input.stillCurrent);
   return {
     path: currentPath.virtual,
     bytes: bytes.length,
@@ -291,6 +469,7 @@ export async function readOriginalForHandle(sessionId: string, handle: string): 
   if (!record || record.sessionId !== sessionId) throw new GeneratedAssetError('asset_handle_refused');
   const session = await getSession(sessionId);
   if (!session?.conversationId) throw new GeneratedAssetError('download_session_unavailable');
+  if (session.bindingRevision !== record.bindingRevision) throw new GeneratedAssetError('asset_handle_expired');
   // Shutdown may have begun while this read was awaiting. Recheck before admitting, so an
   // already-admitted save cannot escape the ordered teardown.
   if (originalAdmissionClosed) throw new GeneratedAssetError('transfer_shutdown');

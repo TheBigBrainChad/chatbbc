@@ -18,6 +18,20 @@ Want screen and keyboard control? Enable **Desktop** permissions and connect its
 
 **After an update:** reload the companion extension and refresh the ChatBBC apps in ChatGPT when prompted. These are two separate steps.
 
+## Appearance and workspace
+
+The Adaptive Studio rail selects Chats, Files, Agents, Usage or Settings. The chat navigator,
+conversation and contextual workbench keep the current transcript mounted when you change
+destinations; Files and Agents open beside it when space permits. Narrow windows use drawers.
+
+On Omarchy, **Settings → Appearance → Follow this desktop** uses the materialized current
+desktop palette, light/dark mode and font. Theme changes normally update without restarting
+the app. If that theme cannot be read, ChatBBC keeps the last valid palette (or its built-in
+palette on first launch) and shows a diagnostic with a manual retry. Turning Follow off
+uses your saved ChatBBC colors again. Supported Hyprland blur permits native window glass;
+otherwise ChatBBC uses its readable atmospheric surface. Neither appearance setting grants
+local file or browser permission, and transparency does not prove compositor blur was applied.
+
 ## Upgrading from Chat On Steroids
 
 ChatBBC is a hard identity cut from Chat On Steroids, not an in-place update.
@@ -50,13 +64,16 @@ ChatBBC Core, ChatBBC Desktop and ChatBBC Plugins are separate connectors. Confi
 
 | Connector | What it adds |
 | --- | --- |
-| **ChatBBC Core** | Local files, patches, terminals, generated-file downloads, session history, plans and workers. Available on all supported platforms. |
+| **ChatBBC Core** | Local files, patches, terminals, generated-image listing and approved-path saves, plans and workers. Available on supported platforms. |
 | **ChatBBC Desktop** | Screen inspection, mouse, keyboard and clipboard. Windows and macOS; macOS requires explicit enablement and OS permissions. |
 | **ChatBBC Plugins** | External MCP tools such as Blender, Playwright and Memory, plus custom local or remote servers. [Plugin guide](plugins.md). |
 
 You choose the approved folders and capabilities. File tools enforce those roots; shell commands run with your normal user privileges. Desktop access applies to the desktop, and external plugins have their own permissions. **Read-only mode** disables writes, command execution and desktop control.
 
-History is stored locally, with recording on and 30-day retention by default. Credentials use the operating system's secure storage. Review permissions before connecting: fresh installs enable Core capabilities and two workers; Windows also starts with Desktop permissions enabled.
+History is stored locally, with recording on and no age-based expiry by default; explicit deletion
+and image-storage cleanup remain available. Credentials use the operating system's secure storage.
+Review permissions before connecting: fresh installs enable Core capabilities and two workers;
+Windows also starts with Desktop permissions enabled.
 
 [Security policy](../SECURITY.md) · [Tool reference](tool-surface.md) · [Architecture](../AGENTS.md)
 

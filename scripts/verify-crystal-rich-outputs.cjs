@@ -15,7 +15,8 @@ function sourceContracts() {
   assert.match(read('src/main/mcp/surfaces.ts'), /generated_assets/);
   for (const locale of ['src/renderer/locales/es.json', 'src/renderer/locales/zh-CN.json', 'src/renderer/locales/zh-TW.json']) {
     const catalog = JSON.parse(read(locale));
-    for (const key of ['Download original', 'Download all originals', 'Saved to browser Downloads']) {
+    for (const key of ['Download original', 'Download all originals', 'Download selected originals',
+      'Saved to browser Downloads', 'Save preview', 'Save all previews', 'Save selected previews']) {
       assert.equal(typeof catalog[key], 'string', `${locale} missing ${key}`);
     }
   }
@@ -55,6 +56,13 @@ app.whenReady().then(async () => {
             import { applyImageSetMembers } from '/src/renderer/image-set.ts';
             import { mountStaticArtifact } from '/src/renderer/static-artifact.ts';
             import { renderRichResponse } from '/src/renderer/rich-response.ts';
+            let savedSelection = null;
+            window.api = {
+              saveGeneratedAssetPreviews: async (session, message, assetIds) => {
+                savedSelection = [session, message, assetIds];
+                return { ok: true, data: { saved: 1, failed: 1, cancelled: false, firstError: 'Preview unavailable' } };
+              }
+            };
             const gallery = document.createElement('div');
             gallery.className = 'generated-image-gallery';
             document.body.append(gallery);
@@ -63,11 +71,16 @@ app.whenReady().then(async () => {
               origin: 1,
               completeness: 'partial',
               images: [
-                { providerAssetId: 'file_AuroraOriginal0001', origin: 1, previewStatus: 'pending', hasPreview: false },
-                { providerAssetId: 'file_AuroraOriginal0002', origin: 2, previewStatus: 'pending', hasPreview: false }
+                { providerAssetId: 'file_AuroraOriginal0001', origin: 1, previewStatus: 'available', hasPreview: true,
+                  previewAssetId: 'abcdef12.bin', previewMime: 'image/webp' },
+                { providerAssetId: 'file_AuroraOriginal0002', origin: 2, previewStatus: 'unavailable', hasPreview: false }
               ]
             }, { sessionId: 'session-rich', current: () => true });
             const all = gallery.querySelector('.image-set-download-all');
+            const saveAll = gallery.querySelector('.image-set-save-all');
+            const saveEnabled = saveAll && !saveAll.disabled;
+            saveAll?.click();
+            await Promise.resolve();
             const artifact = document.createElement('div');
             document.body.append(artifact);
             const mounted = mountStaticArtifact(artifact, { html: '<p>Safe</p><script>window.hacked=true<\\/script>' });
@@ -88,6 +101,9 @@ app.whenReady().then(async () => {
               downloadCount: gallery.querySelectorAll('.image-set-download').length,
               downloadAll: all?.dataset.downloadAssets ?? '',
               single: gallery.classList.contains('is-single'),
+              saveEnabled,
+              savedSelection,
+              saveOutcome: saveAll?.textContent ?? '',
               artifactRejected: mounted.rejected,
               sandbox: safeFrame?.getAttribute('sandbox') ?? null,
               srcdocHasScript: safeFrame?.srcdoc.includes('<script') === true,
@@ -115,6 +131,10 @@ app.whenReady().then(async () => {
   assert.ok(result, 'the rich-output fixture never became ready');
   assert.equal(result.downloadCount, 2);
   assert.equal(result.downloadAll, 'file_AuroraOriginal0001\u0001file_AuroraOriginal0002');
+  assert.equal(result.saveEnabled, true);
+  assert.deepEqual(result.savedSelection, ['session-rich', 'response-multi',
+    ['file_AuroraOriginal0001', 'file_AuroraOriginal0002']]);
+  assert.equal(result.saveOutcome, '1 saved · 1 failed');
   assert.equal(result.single, false);
   assert.equal(result.artifactRejected, 'rejected');
   assert.equal(result.safeAccepted, true);
