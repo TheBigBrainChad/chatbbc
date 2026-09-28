@@ -5,7 +5,7 @@ const fs=require('node:fs'),path=require('node:path'),assert=require('node:asser
 const root=path.resolve(__dirname,'..'),output=path.join(root,'outputs/tur-tur-pet/electron',process.argv.includes('--fresh')?'final-check':'');
 const manual=process.argv.includes('--manual'),restart=process.argv.includes('--restart');
 fs.mkdirSync(output,{recursive:true});
-app.setName('COS Pet Acceptance');app.setPath('userData',path.join(output,'runtime'));app.setAppPath(root);
+app.setName('ChatBBC Pet Acceptance');app.setPath('userData',path.join(output,'runtime'));app.setAppPath(root);
 process.env.CLF_BRIDGE_PORTS='0';
 const configFile=path.join(app.getPath('userData'),'config.json');
 if(!fs.existsSync(configFile)){
@@ -32,7 +32,7 @@ async function run(win){
   const js=code=>win.webContents.executeJavaScript(code);
   const wait=async (code,timeout=6000)=>{const until=Date.now()+timeout;while(Date.now()<until){if(await js(code))return;await delay(25);}throw new Error('Timed out: '+code);};
   await wait('!!document.getElementById("petLauncher")');
-  win.setTitle('Chat On Steroids — Pet Acceptance');win.unmaximize();win.setSize(1100,850);win.show();await delay(500);
+  win.setTitle('ChatBBC — Pet Acceptance');win.unmaximize();win.setSize(1100,850);win.show();await delay(500);
   await js(`document.getElementById('newChat')?.click();`);await delay(400);
   const capture=async name=>{fs.writeFileSync(path.join(output,name+'.png'),(await win.webContents.capturePage()).toPNG());};
   const record=async name=>{

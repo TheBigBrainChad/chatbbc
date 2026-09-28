@@ -36,7 +36,7 @@ export type SurfaceId = (typeof SURFACE_IDS)[number];
  * name and the setup cards, and those three drifting apart is how a user ends up with
  * a connector whose name does not match the thing the instructions told them to type.
  */
-export const CONNECTOR_BRAND = 'Chat On Steroids';
+export const CONNECTOR_BRAND = 'ChatBBC';
 
 export interface SurfaceDefinition {
   id: SurfaceId;
@@ -95,7 +95,7 @@ export interface SurfaceDefinition {
  */
 const CORE: SurfaceDefinition = {
   id: 'core',
-  serverName: 'chat-on-steroids-core',
+  serverName: 'chatbbc-core',
   connectorName: `${CONNECTOR_BRAND} Core`,
   description:
     'Read and edit code and text files on this computer, and run commands in a real terminal. ' +
@@ -121,7 +121,7 @@ const CORE: SurfaceDefinition = {
  */
 const DESKTOP: SurfaceDefinition = {
   id: 'desktop',
-  serverName: 'chat-on-steroids-desktop',
+  serverName: 'chatbbc-desktop',
   connectorName: `${CONNECTOR_BRAND} Desktop`,
   description:
     'Control browser tabs in the background and this computer desktop, including its clipboard. ' +
@@ -136,9 +136,9 @@ const DESKTOP: SurfaceDefinition = {
 };
 
 const PLUGINS: SurfaceDefinition = {
-  id: 'plugins', serverName: 'chat-on-steroids-plugins',
+  id: 'plugins', serverName: 'chatbbc-plugins',
   connectorName: `${CONNECTOR_BRAND} Plugins`,
-  description: 'Tools from external MCP integrations installed and enabled in Chat On Steroids Settings, including Blender and other connected applications and services.',
+  description: 'Tools from external MCP integrations installed and enabled in ChatBBC Settings, including Blender and other connected applications and services.',
   cardSummary: 'One shared connector for your enabled external MCP plugins.',
   required: false,
   // Dynamic declarations are owned and bounded by the plugin manager.

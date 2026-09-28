@@ -25,7 +25,7 @@ fs.writeFileSync(path.join(userData, 'config.json'), JSON.stringify({
   multiAgent: { enabled: false, allowUnattributedCalls: false, recoverAgentTabs: false },
   goal: { enabled: false }
 }));
-app.setName('CoS Pet Toggle Probe');
+app.setName('ChatBBC Pet Toggle Probe');
 app.setPath('userData', userData);
 app.setAppPath(root);
 process.env.CLF_BRIDGE_PORTS = '0';

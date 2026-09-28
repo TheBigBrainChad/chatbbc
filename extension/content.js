@@ -1233,7 +1233,7 @@
     const takeUtf8 = (value, budget) => {
       if (typeof value !== 'string') return value;
       if (utf8Bytes(value) <= budget) return value;
-      const marker = '\n\n[Chat On Steroids: browser observation truncated to fit transport.]';
+      const marker = '\n\n[ChatBBC: browser observation truncated to fit transport.]';
       const markerBytes = utf8Bytes(marker);
       let low = 0;
       let high = value.length;
@@ -3152,7 +3152,7 @@
    */
   const FIBER_ASK = 'clf-fiber-ask';
   const FIBER_REPLY = 'clf-fiber-reply';
-  // 3: adds an exact turn-wide TobisComputer call count so folded api_tool metadata calls
+  // 3: adds an exact turn-wide local connector call count so folded api_tool metadata calls
   // are not mistaken for local MCP calls. Older descriptors are refused rather than mixed.
   // 4: adds a turn-level array naming each local connector request.
   // 5: adds the Fiber conversation id plus canonical rendered assistant messages.
@@ -5708,14 +5708,13 @@
    * `app_name` comes from the protected-resource metadata this app serves, not from what
    * the user typed into ChatGPT, so these are this app naming itself.
    *
-   * Exact names, never a prefix: `Chat On Steroids Backup` would be somebody else's
+   * Exact names, never a prefix: `ChatBBC Backup` would be somebody else's
    * connector, and a prefix test would have this app vouch for its traffic.
    */
   const OUR_CONNECTORS = [
-    'Chat On Steroids Core',
-    'Chat On Steroids Desktop',
-    'Chat On Steroids Plugins',
-    'TobisComputer'
+    'ChatBBC Core',
+    'ChatBBC Desktop',
+    'ChatBBC Plugins'
   ];
 
   function ourConnectorApp(name) {
@@ -6640,7 +6639,7 @@
       return {
         mode: 'off',
         label: t('content_compact', 'Compact'),
-        hint: t('content_browser_disconnected', 'Browser connection is disconnected in Chat On Steroids.'),
+        hint: t('content_browser_disconnected', 'Browser connection is disconnected in ChatBBC.'),
         action: 'none'
       };
     }
@@ -6648,7 +6647,7 @@
       return {
         mode: 'off',
         label: t('content_compact', 'Compact'),
-        hint: t('content_app_not_running', 'Chat On Steroids is not running on this PC.'),
+        hint: t('content_app_not_running', 'ChatBBC is not running on this PC.'),
         action: 'none'
       };
     }
@@ -7272,7 +7271,7 @@
       'data-clf-tip',
       t(
         'content_chat_blocked_tip',
-        'This chat is blocked in the Chat On Steroids app: its tool calls are refused and Goal, Loop and auto-compaction are off. To release it, open the app’s Chat tab, hover this chat in the sessions list and press its block symbol.'
+        'This chat is blocked in the ChatBBC app: its tool calls are refused and Goal, Loop and auto-compaction are off. To release it, open the app’s Chat tab, hover this chat in the sessions list and press its block symbol.'
       )
     );
     blocked.hidden = true;
@@ -7365,7 +7364,7 @@
     root.className = 'clf-menu';
     root.dataset.clfMenu = '1';
     root.setAttribute('role', 'dialog');
-    root.setAttribute('aria-label', t('content_settings_aria', 'Chat On Steroids settings'));
+    root.setAttribute('aria-label', t('content_settings_aria', 'ChatBBC settings'));
     root.hidden = true;
     (document.body || document.documentElement).append(root);
     return root;
@@ -8116,7 +8115,7 @@
     // Never disabled any more: it opens a sheet, and a sheet that explains why compaction is
     // unavailable is exactly what somebody clicking a dead button wanted to be told.
     control.button.disabled = false;
-    control.button.setAttribute('aria-label', t('content_settings_aria', 'Chat On Steroids settings'));
+    control.button.setAttribute('aria-label', t('content_settings_aria', 'ChatBBC settings'));
     control.button.setAttribute('aria-haspopup', 'dialog');
     if (!control.button.hasAttribute('aria-expanded')) control.button.setAttribute('aria-expanded', 'false');
     // The meter only while the button is a button. During a run the control is saying what
@@ -10388,7 +10387,7 @@
     if (data.error) return String(data.error).slice(0, 160);
     if (reply.error === 'app_not_found') return t(
       'content_app_not_running',
-      'Chat On Steroids is not running on this PC.'
+      'ChatBBC is not running on this PC.'
     );
     return reply.error ? String(reply.error).slice(0, 160) : '';
   }
@@ -11239,7 +11238,7 @@
     const stop = CLF_DOM.stopButton();
     if (!event.isTrusted || !stop || !(event.target instanceof Node) || !stop.contains(event.target) || stopRequestedAt) return;
     // A click is intent. It neither confirms provider cancellation nor makes a
-    // programmatic CoS/recovery click a human action. Keep observing the turn.
+    // programmatic local/recovery click a human action. Keep observing the turn.
     stopRequestedAt = Date.now();
   };
   listen(document, 'click', noteStopClick, true);

@@ -1,10 +1,6 @@
 /*
- * Styling for the parts of the page this extension changes.
- *
- * Two rules keep it out of ChatGPT's way: nothing here is a bare element selector, and
- * no colour is hard-coded to a theme. Text inherits `currentColor`, accents are drawn
- * with `color-mix` against the surrounding colour, so light and dark both look right
- * without the extension having to know which one is on.
+ * Only extension-owned controls receive a palette. Transcript annotations
+ * inherit the host page's colors; the extension never paints ChatGPT's body.
  */
 
 .clf-metric {
@@ -434,15 +430,15 @@
  * the page changes theme under us.
  */
 .clf-tip {
-  --clf-pop-bg: #353535;
-  --clf-pop-ink: #fff;
-  --clf-tip-bg: #1b1b1b;
+  --clf-pop-bg: #292929;
+  --clf-pop-ink: #f4f4f4;
+  --clf-tip-bg: #242424;
 }
 
 [data-clf-theme='light'] .clf-tip {
-  --clf-pop-bg: #fff;
-  --clf-pop-ink: #0d0d0d;
-  --clf-tip-bg: #0d0d0d;
+  --clf-pop-bg: #ffffff;
+  --clf-pop-ink: #181818;
+  --clf-tip-bg: #242424;
 }
 
 /*
@@ -1084,17 +1080,17 @@
  * whose two settings disagree.
  */
 .clf-menu {
-  --clf-menu-bg: #2f2f2f;
-  --clf-menu-ink: #ececec;
-  --clf-menu-line: rgb(255 255 255 / 11%);
-  --clf-menu-hover: rgb(255 255 255 / 7%);
+  --clf-menu-bg: #242424;
+  --clf-menu-ink: #f4f4f4;
+  --clf-menu-line: #454545;
+  --clf-menu-hover: #353535;
 }
 
 [data-clf-theme='light'] .clf-menu {
-  --clf-menu-bg: #fff;
-  --clf-menu-ink: #0d0d0d;
-  --clf-menu-line: rgb(0 0 0 / 10%);
-  --clf-menu-hover: rgb(0 0 0 / 5%);
+  --clf-menu-bg: #ffffff;
+  --clf-menu-ink: #181818;
+  --clf-menu-line: #d5d5d5;
+  --clf-menu-hover: #f2f2f2;
 }
 
 .clf-menu {

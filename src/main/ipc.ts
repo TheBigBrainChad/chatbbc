@@ -18,7 +18,9 @@ import { GOAL_MARKER_INSTRUCTION } from '../shared/goal-templates.js';
 import { validateInputImages } from './session/input-images.js';
 import { stageInputAttachment, stageInputAttachments, type AttachmentSource } from './session/input-attachments.js';
 import { recordDeliveredInput, recordedInputImage } from './session/input-history.js';
-import { UI_BASE_ZOOM, titleBarOverlayForTheme, windowBackgroundForTheme } from './window-layout.js';
+import { UI_BASE_ZOOM } from './window-layout.js';
+import { applyNativeAppearance } from './appearance.js';
+import { getOmarchyTheme, onOmarchyThemeChange } from './omarchy-theme.js';
 import { usageOverview } from './session/usage.js';
 import { inputArgs, listInputs, editQueuedInput, reorderQueuedInputs, setInputAutomation, configureInputDelivery, pausedBrowserHelpers, cancelFinishInputs } from './session/input.js';
 import { draftOpeningMessage, onGoalChange, nativeGoalFailure } from './goal.js';
@@ -42,7 +44,7 @@ import { pluginRefreshPublications } from './plugin-refresh.js';
  * key but can never read it back.
  */
 
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron';
 import { z } from 'zod';
 import {
   CAPABILITIES,
@@ -420,6 +422,7 @@ async function buildState(): Promise<AppState> {
   const config = getConfig();
   return {
     config,
+    omarchyTheme: getOmarchyTheme(),
     status: getStatus(),
     connectorSchemas: Object.fromEntries(
       pluginRefreshPublications().map(({ surface, schemaId }) => [surface, schemaId])
@@ -520,16 +523,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       if (previous.ui.finishTool && !published.ui.finishTool) await cancelFinishInputs(false);
       else if ((previous.goal.impulseMinutes ?? 0) > 0 && !published.goal.impulseMinutes) await cancelFinishInputs(true);
     }, publishBridgePortChange);
-    // Renderer palette changes are immediate, so keep OS/Electron-owned chrome in lock-step too.
-    // Without this, selecting Dark on macOS left the title bar, menus and file picker in the
-    // system theme until restart (and startup still defaulted to system before index.ts applies it).
-    nativeTheme.themeSource = next.ui.theme;
-    if (process.platform === 'win32') getWindow()?.setTitleBarOverlay(titleBarOverlayForTheme(next.ui.theme, next.ui.appearance));
-    // BrowserWindow's native backing color is fixed at construction unless updated explicitly.
-    // Keep it in lock-step too: the default macOS application menu exposes Reload, and after a
-    // live theme switch an old opposite background otherwise flashes behind the renderer while it
-    // paints again. This is also the color Electron shows during any later renderer reload/failure.
-    getWindow()?.setBackgroundColor(windowBackgroundForTheme(next.ui.theme, next.ui.appearance));
+    // Manual Settings changes and live theme changes share one resolved native projection.
+    applyNativeAppearance(getWindow());
     refreshPetOverlayAppearance();
     if (
       before.goal.enabled !== next.goal.enabled ||
@@ -638,7 +633,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     return setPetOverlayVisible(visible);
   });
   handle('pets:import', async () => {
-    const options: Electron.OpenDialogOptions = { title: 'Import CoS Pet folder', properties: ['openDirectory'] };
+    const options: Electron.OpenDialogOptions = { title: 'Import ChatBBC Pet folder', properties: ['openDirectory'] };
     const owner = getWindow();
     const selected = owner && !owner.isDestroyed()
       ? await dialog.showOpenDialog(owner, options)
@@ -765,7 +760,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   handle('roots:rename', async (payload) => {
     const { name, newName } = renameRoot.parse(payload);
     if (RESERVED_ROOT_NAMES.has(newName)) {
-      throw new SandboxError(`/${newName} is reserved by Chat On Steroids and cannot be used as a folder name`);
+      throw new SandboxError(`/${newName} is reserved by ChatBBC and cannot be used as a folder name`);
     }
     await updateConfig((config) => {
       if (!config.roots.some((root) => root.name === name)) throw new Error(`/${name} is not an approved folder`);
@@ -1382,6 +1377,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   };
   onStatusChange(pushState);
   onBridgeChange(pushState);
+  onOmarchyThemeChange(pushState);
   registerPluginIpc(handle, getWindow, pushState);
   // Draft stages belong to session controls; state:changed only refreshes settings.
   onGoalChange(() => push('session:changed'));

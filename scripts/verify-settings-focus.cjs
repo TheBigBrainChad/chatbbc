@@ -9,7 +9,7 @@ const output = path.join(root, 'outputs/settings-focus');
 app.setPath('userData', path.join(output, 'runtime'));
 app.whenReady().then(async () => {
   fs.mkdirSync(output, { recursive: true });
-  const win = new BrowserWindow({ show: false, width: 1000, height: 900,
+  const win = new BrowserWindow({ show: true, width: 1000, height: 900,
     webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     const html = fs.readFileSync(path.join(root, 'out/renderer/index.html'), 'utf8')
@@ -31,6 +31,13 @@ app.whenReady().then(async () => {
       window.geometry = () => [...document.querySelectorAll('#fixture .pane, #fixture .setting, #fixture select')].map(e => ({id:e.id,rect:e.getBoundingClientRect().toJSON()}));
     })()`);
     await js('document.fonts.ready');
+    // Wait for Wayland's initial configure event before comparing viewport geometry.
+    await js(`new Promise(resolve => {
+      let quiet;
+      const settle = () => { clearTimeout(quiet); quiet = setTimeout(() => { removeEventListener('resize', settle); resolve(); }, 400); };
+      addEventListener('resize', settle);
+      settle();
+    })`);
     for (const theme of ['dark', 'light']) for (const zoom of [1, 1.17, 1.5]) for (const id of ['uiLanguage', 'goalBackend']) {
       win.webContents.setZoomFactor(zoom);
       await js(`document.documentElement.dataset.theme='${theme}'; document.activeElement.blur(); new Promise(r=>setTimeout(r,250))`);

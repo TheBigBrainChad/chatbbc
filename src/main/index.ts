@@ -6,8 +6,9 @@ import { requestSessionFinishGoal, setFinishNotifier } from './session/finish.js
  */
 
 import path from 'node:path';
-import { app, Notification, BrowserWindow, Menu, Tray, nativeImage, nativeTheme, screen, session } from 'electron';
+import { app, Notification, BrowserWindow, Menu, Tray, nativeImage, screen, session } from 'electron';
 import { getConfig, initConfigPath, loadConfig } from './config.js';
+import { APP_TITLE } from './version.js';
 import { connect, disconnect, getStatus, onStatusChange, shutdownConnection } from './connection.js';
 import { registerIpc } from './ipc.js';
 import { getChatModels, restoreChatModels, startChatModelDiscovery } from './chat-models.js';
@@ -21,7 +22,7 @@ import { flushSessions, initSessionStore } from './session/store.js';
 import { initSkillsPath } from './skills.js';
 import { initUvRuntime } from './plugins/uv-runtime.js';
 import { initPetLibrary } from './pet-library.js';
-import { shutdownPetOverlay, startPetOverlay } from './pet-overlay.js';
+import { refreshPetOverlayAppearance, shutdownPetOverlay, startPetOverlay } from './pet-overlay.js';
 import { usageOverview } from './session/usage.js';
 import {
   flushRecorder,
@@ -70,6 +71,8 @@ import {
 import { runShutdownSequence } from './shutdown.js';
 import { applyStagedUpdate, startUpdateChecks } from './update.js';
 import { UI_BASE_ZOOM, windowLayoutForWorkArea, titleBarOverlayForTheme, windowBackgroundForTheme } from './window-layout.js';
+import { applyNativeAppearance, resolvedAppearance } from './appearance.js';
+import { onOmarchyThemeChange, refreshOmarchyTheme, startOmarchyTheme, stopOmarchyTheme } from './omarchy-theme.js';
 import { openInPreferredBrowser } from './browser.js';
 import {
   applyLoginStartup,
@@ -93,6 +96,7 @@ let tray: Tray | null = null;
 let quitting = false;
 let shutdownStarted = false;
 let shutdownComplete = false;
+let stopAppearanceUpdates: (() => void) | null = null;
 const usageWarmup = new AbortController();
 
 // One instance only: two copies would fight over the tunnel and the config file.
@@ -108,6 +112,7 @@ if (!hasSingleInstanceLock) {
 const BENIGN_RENDERER_ERRORS = new Set(['ResizeObserver loop completed with undelivered notifications.']);
 
 function createWindow(): void {
+  const appearance = resolvedAppearance();
   const layout = windowLayoutForWorkArea(screen.getPrimaryDisplay().workArea);
   const icon = browserWindowIconPath(process.platform, app.isPackaged, process.resourcesPath);
   window = new BrowserWindow({
@@ -119,15 +124,15 @@ function createWindow(): void {
     autoHideMenuBar: true,
     ...(process.platform === 'win32' ? {
       titleBarStyle: 'hidden' as const,
-      titleBarOverlay: titleBarOverlayForTheme(getConfig().ui.theme, getConfig().ui.appearance)
+      titleBarOverlay: titleBarOverlayForTheme(appearance.theme, appearance.settings)
     } : {}),
     // macOS: the app's own top bar is the title bar, with the traffic lights inside it, instead
     // of a native title row above a second row that only held the sidebar and View buttons.
     // The overlay publishes the traffic-light area as env(titlebar-area-x) to the page.
     ...(process.platform === 'darwin' ? { titleBarStyle: 'hidden' as const, titleBarOverlay: true } : {}),
     // Painted before the renderer loads, so a dark window never flashes white.
-    backgroundColor: windowBackgroundForTheme(getConfig().ui.theme, getConfig().ui.appearance),
-    title: 'Chat On Steroids',
+    backgroundColor: windowBackgroundForTheme(appearance.theme, appearance.settings),
+    title: APP_TITLE,
     webPreferences: {
       zoomFactor: UI_BASE_ZOOM,
       preload: path.join(__dirname, '../preload/index.js'),
@@ -159,6 +164,7 @@ function createWindow(): void {
       showWindow();
     }
   });
+  window.on('focus', () => { if (!quitting) void refreshOmarchyTheme(); });
 
   // A renderer that fails to load leaves a blank window with no other clue, so
   // record it where the diagnostics panel can show it.
@@ -296,7 +302,7 @@ function refreshTray(): void {
   const running = connected || offline;
   const label = connected ? 'Connected' : offline ? 'No internet' : 'Not connected';
   tray.setImage(trayIcon(running));
-  tray.setToolTip(`Chat On Steroids — ${label.toLowerCase()}`);
+  tray.setToolTip(`${APP_TITLE} — ${label.toLowerCase()}`);
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label, enabled: false },
@@ -344,14 +350,19 @@ void app.whenReady().then(async () => {
   await restoreChatModels();
   if (windowActivation.isDisabled()) return;
   await loadConfig();
+  if (windowActivation.isDisabled()) return;
+  await startOmarchyTheme();
+  if (windowActivation.isDisabled()) { stopOmarchyTheme(); return; }
+  applyNativeAppearance(null);
+  stopAppearanceUpdates = onOmarchyThemeChange(() => {
+    applyNativeAppearance(window);
+    refreshPetOverlayAppearance();
+  });
   await pluginManager.initialize(userData);
   if (windowActivation.isDisabled()) return;
   try { applyLoginStartup(app, getConfig().ui.startAtLogin === true); }
   catch (error) { logWarn(`Windows login startup: ${error instanceof Error ? error.message : String(error)}`); }
-  // The renderer has its own explicit light/dark palette, so native chrome must follow the same
-  // user choice instead of Electron's default `system` theme. On macOS this controls the window
-  // frame, application menus and OS dialogs; on Linux/Windows it covers Electron-native UI.
-  nativeTheme.themeSource = getConfig().ui.theme;
+  // Native chrome and renderer use the same process-owned resolved projection.
   const savedGoalObjectives = await readDurable<GoalObjectivesSnapshot>(GOAL_OBJECTIVES_STATE);
   if (windowActivation.isDisabled()) return;
   restoreGoalObjectives(savedGoalObjectives);
@@ -506,6 +517,9 @@ app.on('before-quit', () => {
   // that sequence drains must not recreate or reveal a window after the tray has disappeared.
   windowActivation.disable();
   usageWarmup.abort();
+  stopAppearanceUpdates?.();
+  stopAppearanceUpdates = null;
+  stopOmarchyTheme();
 });
 
 app.on('window-all-closed', () => {

@@ -6,7 +6,7 @@
     "message": "the app did not answer"
   },
   "content_app_not_running": {
-    "message": "Chat On Steroids is not running on this PC."
+    "message": "ChatBBC is not running on this PC."
   },
   "content_auto_compaction": {
     "message": "Auto-compaction"
@@ -84,7 +84,7 @@
     "message": "the page that was opened for it was showing a different conversation"
   },
   "content_browser_disconnected": {
-    "message": "Browser connection is disconnected in Chat On Steroids."
+    "message": "Browser connection is disconnected in ChatBBC."
   },
   "content_cancel": {
     "message": "Cancel"
@@ -93,7 +93,7 @@
     "message": "Chat blocked"
   },
   "content_chat_blocked_tip": {
-    "message": "This chat is blocked in the Chat On Steroids app: its tool calls are refused and Goal, Loop and auto-compaction are off. To release it, open the app’s Chat tab, hover this chat in the sessions list and press its block symbol."
+    "message": "This chat is blocked in the ChatBBC app: its tool calls are refused and Goal, Loop and auto-compaction are off. To release it, open the app’s Chat tab, hover this chat in the sessions list and press its block symbol."
   },
   "content_chat_still_opening": {
     "message": "this chat is still opening — try again"
@@ -588,7 +588,7 @@
     "message": "Saving…"
   },
   "content_settings_aria": {
-    "message": "Chat On Steroids settings"
+    "message": "ChatBBC settings"
   },
   "content_stage_handoff_attention": {
     "message": "The handoff response needs attention"
@@ -738,13 +738,13 @@
     "message": "Writing…"
   },
   "extension_action_title": {
-    "message": "Chat On Steroids"
+    "message": "ChatBBC"
   },
   "extension_description": {
-    "message": "Connects ChatGPT to Chat On Steroids and controls browser tabs in the background with DOM, screenshots and developer tools."
+    "message": "Connects ChatGPT conversations to the ChatBBC desktop app."
   },
   "extension_name": {
-    "message": "Chat On Steroids companion"
+    "message": "ChatBBC Companion"
   },
   "popup_advanced": {
     "message": "Advanced"
@@ -954,7 +954,7 @@
     "message": "Session capture"
   },
   "popup_secure_storage_unavailable": {
-    "message": "Secure credential storage is unavailable. Open Chat On Steroids for setup instructions."
+    "message": "Secure credential storage is unavailable. Open ChatBBC for setup instructions."
   },
   "popup_sent_to_app": {
     "message": "Sent to app"
@@ -1041,7 +1041,7 @@
     "message": "Try again"
   },
   "popup_version_mismatch_help": {
-    "message": "App v$1 (protocol $2); companion v$3 (protocol $4). Open your browser's Extensions page, enable Developer mode, then Update / Reload this companion. If the mismatch remains, use Open extension folder in Chat On Steroids and load that folder. Reload ChatGPT tabs when their active work is finished."
+    "message": "App v$1 (protocol $2); companion v$3 (protocol $4). Open your browser's Extensions page, enable Developer mode, then Update / Reload this companion. If the mismatch remains, use Open extension folder in ChatBBC and load that folder. Reload ChatGPT tabs when their active work is finished."
   },
   "popup_yes": {
     "message": "yes"

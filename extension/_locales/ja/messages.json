@@ -6,7 +6,7 @@
     "message": "アプリが応答しませんでした"
   },
   "content_app_not_running": {
-    "message": "この PC で Chat On Steroids が実行されていません。"
+    "message": "この PC で ChatBBC が実行されていません。"
   },
   "content_auto_compaction": {
     "message": "自動圧縮"
@@ -84,7 +84,7 @@
     "message": "開いたページには別の会話が表示されていました"
   },
   "content_browser_disconnected": {
-    "message": "Chat On Steroids のブラウザー接続が切れています。"
+    "message": "ChatBBC のブラウザー接続が切れています。"
   },
   "content_cancel": {
     "message": "キャンセル"
@@ -93,7 +93,7 @@
     "message": "チャットはブロックされています"
   },
   "content_chat_blocked_tip": {
-    "message": "このチャットは Chat On Steroids アプリでブロックされています。ツール呼び出しは拒否され、ゴール、ループ、自動圧縮も無効です。解除するにはアプリのチャットタブを開き、セッション一覧でこのチャットにカーソルを合わせてブロック解除アイコンを押してください。"
+    "message": "このチャットは ChatBBC アプリでブロックされています。ツール呼び出しは拒否され、ゴール、ループ、自動圧縮も無効です。解除するにはアプリのチャットタブを開き、セッション一覧でこのチャットにカーソルを合わせてブロック解除アイコンを押してください。"
   },
   "content_chat_still_opening": {
     "message": "このチャットはまだ開いています。もう一度お試しください"
@@ -588,7 +588,7 @@
     "message": "保存中…"
   },
   "content_settings_aria": {
-    "message": "Chat On Steroids の設定"
+    "message": "ChatBBC の設定"
   },
   "content_stage_handoff_attention": {
     "message": "引き継ぎの応答を確認する必要があります"
@@ -738,13 +738,13 @@
     "message": "作成中…"
   },
   "extension_action_title": {
-    "message": "Chat On Steroids"
+    "message": "ChatBBC"
   },
   "extension_description": {
-    "message": "ChatGPT を Chat On Steroids に接続し、DOM、スクリーンショット、開発者ツールを使ってバックグラウンドでブラウザータブを操作します。"
+    "message": "ChatGPT の会話を ChatBBC デスクトップアプリに接続します。"
   },
   "extension_name": {
-    "message": "Chat On Steroids 連携拡張機能"
+    "message": "ChatBBC Companion"
   },
   "popup_advanced": {
     "message": "詳細"
@@ -954,7 +954,7 @@
     "message": "セッションの取得"
   },
   "popup_secure_storage_unavailable": {
-    "message": "安全な認証情報ストレージを利用できません。設定手順を確認するには Chat On Steroids を開いてください。"
+    "message": "安全な認証情報ストレージを利用できません。設定手順を確認するには ChatBBC を開いてください。"
   },
   "popup_sent_to_app": {
     "message": "アプリに送信済み"
@@ -1041,7 +1041,7 @@
     "message": "再試行"
   },
   "popup_version_mismatch_help": {
-    "message": "アプリ v$1（プロトコル $2）、連携拡張機能 v$3（プロトコル $4）。ブラウザーの拡張機能ページを開いてデベロッパーモードを有効にし、この連携拡張機能を更新または再読み込みしてください。まだ一致しない場合は、Chat On Steroids の「拡張機能フォルダーを開く」でそのフォルダーを読み込んでください。ChatGPT タブの作業が終わったら再読み込みしてください。"
+    "message": "アプリ v$1（プロトコル $2）、連携拡張機能 v$3（プロトコル $4）。ブラウザーの拡張機能ページを開いてデベロッパーモードを有効にし、この連携拡張機能を更新または再読み込みしてください。まだ一致しない場合は、ChatBBC の「拡張機能フォルダーを開く」でそのフォルダーを読み込んでください。ChatGPT タブの作業が終わったら再読み込みしてください。"
   },
   "popup_yes": {
     "message": "はい"

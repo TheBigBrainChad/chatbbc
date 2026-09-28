@@ -6,7 +6,7 @@
     "message": "uygulama yanıt vermedi"
   },
   "content_app_not_running": {
-    "message": "Chat On Steroids bu bilgisayarda çalışmıyor."
+    "message": "ChatBBC bu bilgisayarda çalışmıyor."
   },
   "content_auto_compaction": {
     "message": "Otomatik sıkıştırma"
@@ -84,7 +84,7 @@
     "message": "bunun için açılan sayfa farklı bir sohbet gösteriyordu"
   },
   "content_browser_disconnected": {
-    "message": "Tarayıcı bağlantısı Chat On Steroids'ta kesik."
+    "message": "Tarayıcı bağlantısı ChatBBC'ta kesik."
   },
   "content_cancel": {
     "message": "İptal"
@@ -93,7 +93,7 @@
     "message": "Sohbet engellendi"
   },
   "content_chat_blocked_tip": {
-    "message": "Bu sohbet Chat On Steroids uygulamasında engellenmiş: araç çağrıları reddedilir; Hedef, Döngü ve otomatik sıkıştırma kapalıdır. Engeli kaldırmak için uygulamanın Sohbet sekmesini açın, oturum listesindeki bu sohbetin üzerine gelin ve engelleme simgesine basın."
+    "message": "Bu sohbet ChatBBC uygulamasında engellenmiş: araç çağrıları reddedilir; Hedef, Döngü ve otomatik sıkıştırma kapalıdır. Engeli kaldırmak için uygulamanın Sohbet sekmesini açın, oturum listesindeki bu sohbetin üzerine gelin ve engelleme simgesine basın."
   },
   "content_chat_still_opening": {
     "message": "bu sohbet hâlâ açılıyor — yeniden deneyin"
@@ -588,7 +588,7 @@
     "message": "Kaydediliyor…"
   },
   "content_settings_aria": {
-    "message": "Chat On Steroids ayarları"
+    "message": "ChatBBC ayarları"
   },
   "content_stage_handoff_attention": {
     "message": "Devir özeti yanıtı ilgilenmenizi gerektiriyor"
@@ -738,13 +738,13 @@
     "message": "Yazılıyor…"
   },
   "extension_action_title": {
-    "message": "Chat On Steroids"
+    "message": "ChatBBC"
   },
   "extension_description": {
-    "message": "ChatGPT'yi Chat On Steroids'a bağlar ve tarayıcı sekmelerini DOM, ekran görüntüleri ve geliştirici araçlarıyla arka planda denetler."
+    "message": "ChatGPT konuşmalarını ChatBBC masaüstü uygulamasına bağlar."
   },
   "extension_name": {
-    "message": "Chat On Steroids yardımcı eklentisi"
+    "message": "ChatBBC Companion"
   },
   "popup_advanced": {
     "message": "Gelişmiş"
@@ -954,7 +954,7 @@
     "message": "Oturum kaydı"
   },
   "popup_secure_storage_unavailable": {
-    "message": "Güvenli kimlik bilgisi depolama kullanılamıyor. Kurulum talimatları için Chat On Steroids'u açın."
+    "message": "Güvenli kimlik bilgisi depolama kullanılamıyor. Kurulum talimatları için ChatBBC'u açın."
   },
   "popup_sent_to_app": {
     "message": "Uygulamaya gönderildi"
@@ -1041,7 +1041,7 @@
     "message": "Yeniden dene"
   },
   "popup_version_mismatch_help": {
-    "message": "Uygulama v$1 (protokol $2); yardımcı eklenti v$3 (protokol $4). Tarayıcınızın Uzantılar sayfasını açın, Geliştirici modunu etkinleştirin ve bu yardımcı eklentiyi Güncelle / Yeniden yükle ile yenileyin. Uyumsuzluk sürerse Chat On Steroids'ta Uzantı klasörünü aç seçeneğini kullanın ve o klasörü yükleyin. Etkin çalışmaları bittiğinde ChatGPT sekmelerini yeniden yükleyin."
+    "message": "Uygulama v$1 (protokol $2); yardımcı eklenti v$3 (protokol $4). Tarayıcınızın Uzantılar sayfasını açın, Geliştirici modunu etkinleştirin ve bu yardımcı eklentiyi Güncelle / Yeniden yükle ile yenileyin. Uyumsuzluk sürerse ChatBBC'ta Uzantı klasörünü aç seçeneğini kullanın ve o klasörü yükleyin. Etkin çalışmaları bittiğinde ChatGPT sekmelerini yeniden yükleyin."
   },
   "popup_yes": {
     "message": "evet"

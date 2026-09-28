@@ -1,10 +1,9 @@
 /** Native desktop host for Pets. Package state stays in pet-library; the overlay renderer owns animation. */
 import path from 'node:path';
 import { BrowserWindow, ipcMain, screen } from 'electron';
-import { defaultAppearance } from '../shared/appearance.js';
 import type { PetActivity, PetLibraryState, PetOverlayBounds, PetOverlayControlState, PetOverlayHitRegion, PetOverlayPointer, PetOverlaySnapshot } from '../shared/pets.js';
 import { highestPetActivityLevel, petActivityForAgent, petActivityForSession, petTaskSessionId } from '../shared/pet-activity.js';
-import { getConfig } from './config.js';
+import { resolvedAppearance } from './appearance.js';
 import { logWarn } from './logger.js';
 import { onPetLibraryChange, petLibraryState } from './pet-library.js';
 import { windowsPetFocus, type PetWindowFocus } from './pet-window-focus.js';
@@ -55,14 +54,12 @@ export function petOverlayControlState(): PetOverlayControlState {
 }
 
 function snapshot(): PetOverlaySnapshot {
-  const config = getConfig();
   return {
     visible: shouldShow(),
     dismissedPetIds: [...dismissedPetIds],
     level: highestPetActivityLevel(activities),
     activities,
-    theme: config.ui.theme,
-    appearance: config.ui.appearance ?? defaultAppearance()
+    resolvedAppearance: resolvedAppearance()
   };
 }
 

@@ -6,7 +6,7 @@
  */
 
 @font-face {
-  font-family: 'CoS Phosphor';
+  font-family: 'ChatBBC Phosphor';
   src: url('@phosphor-icons/web/regular/Phosphor.woff2') format('woff2');
   font-display: block;
   font-style: normal;
@@ -14,7 +14,7 @@
 }
 
 @font-face {
-  font-family: 'CoS Phosphor Fill';
+  font-family: 'ChatBBC Phosphor Fill';
   src: url('@phosphor-icons/web/fill/Phosphor-Fill.woff2') format('woff2');
   font-display: block;
   font-style: normal;
@@ -33,8 +33,8 @@
   -webkit-font-smoothing: antialiased;
 }
 
-.ph { font-family: 'CoS Phosphor' !important; }
-.ph-fill { font-family: 'CoS Phosphor Fill' !important; }
+.ph { font-family: 'ChatBBC Phosphor' !important; }
+.ph-fill { font-family: 'ChatBBC Phosphor Fill' !important; }
 
 /* The dock toggles turn the sidebar glyph toward the edge they open. */
 .ph.ico-turn-right { transform: scaleX(-1); }

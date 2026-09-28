@@ -111,12 +111,12 @@
    * the conversation that made it. The name is not user input: ChatGPT takes `app_name`
    * from the `resource_name` this app serves in its own protected-resource metadata
    * (`server.ts`), so these are this app naming itself rather than labels somebody typed.
-   * The pre-1.7.1 name stays so an older chat's evidence still reads.
+   * Only the three current connectors count; predecessor names are foreign.
    *
-   * Exact names, never a prefix: `Chat On Steroids Backup` would be somebody else's
+   * Exact names, never a prefix: `ChatBBC Backup` would be somebody else's
    * connector, and a prefix test would have this app vouch for its traffic.
    */
-  const OUR_APPS = ['Chat On Steroids Core', 'Chat On Steroids Desktop', 'Chat On Steroids Plugins', 'TobisComputer'];
+  const OUR_APPS = ['ChatBBC Core', 'ChatBBC Desktop', 'ChatBBC Plugins'];
 
   /** Whether an `invoked_resource.app_name` names one of this app's own connectors. */
   function ourApp(name) {
@@ -251,7 +251,7 @@
    *
    * Row identity must never come from this list because it contains many requests. For
    * attribution cardinality, though, that is exactly the useful property: it lets us count
-   * how many requests in the turn actually target TobisComputer instead of treating
+   * how many requests in the turn actually target our connectors instead of treating
    * ChatGPT's folded-row count as if api_tool metadata calls were local MCP calls.
    */
   function turnMessagesOf(fiber) {
@@ -1175,7 +1175,7 @@
     return out;
   }
 
-  /** "/Chat On Steroids Core/link_…/read" -> "read", or null if that is not a name. */
+  /** "/ChatBBC Core/link_…/read" -> "read", or null if that is not a name. */
   function toolName(value) {
     if (typeof value !== 'string' || value.length === 0) return null;
     const tail = value.slice(value.lastIndexOf('/') + 1);
@@ -2392,7 +2392,7 @@
    * `actions` prop; the connector object (with its `actions`) sits a few Fibers above each
    * management button, and only the Refresh-tools button's own wrapper carries a `loading`
    * state besides the row's "Actions" menu trigger (`aria-haspopup`). Delete and Uninstall are
-   * `danger*` coloured; either marker disqualifies a control in any language. Every CoS connector refresh on the new layout failed with "the connector settings
+   * `danger*` coloured; either marker disqualifies a control in any language. Every ChatBBC connector refresh on the new layout failed with "the connector settings
    * card could not be read", so ChatGPT kept whatever tool list it had before an update.
    */
   function pagePluginSnapshot(appId) {
@@ -2420,7 +2420,7 @@
       }
     }
     if (!connector || !Array.isArray(connector.actions) || typeof connector.name !== 'string') return null;
-    const externalPlugins = connector.name === 'Chat On Steroids Plugins';
+    const externalPlugins = connector.name === 'ChatBBC Plugins';
     if ((!connector.actions.length && !externalPlugins) || connector.actions.length > (externalPlugins ? 257 : 16)) return null;
     const budget = { bytes: 280000, nodes: 20000 };
     // Measured 2026-09-27: this page sends `description_model: ""` rather than null, so `??`
@@ -2466,7 +2466,7 @@
         if (props.actions === observedActions) continue;
         if (observedActions) return null;
         observedActions = props.actions;
-        const externalPlugins = props.connector.name === 'Chat On Steroids Plugins';
+        const externalPlugins = props.connector.name === 'ChatBBC Plugins';
         if ((!props.actions.length && !externalPlugins) || props.actions.length > (externalPlugins ? 257 : 16) || typeof props.connector.name !== 'string') return null;
         const budget = { bytes: 280000, nodes: 20000 };
         const tools = props.actions.map(action => ({ name: action.name, description: copySchema(action.description_model ?? action.description, budget), inputSchema: copySchema(action.params, budget) }));

@@ -6,7 +6,7 @@
     "message": "应用未响应"
   },
   "content_app_not_running": {
-    "message": "Chat On Steroids 未在此电脑上运行。"
+    "message": "ChatBBC 未在此电脑上运行。"
   },
   "content_auto_compaction": {
     "message": "自动压缩"
@@ -84,7 +84,7 @@
     "message": "为它打开的页面显示的是另一个对话"
   },
   "content_browser_disconnected": {
-    "message": "Chat On Steroids 中的浏览器连接已断开。"
+    "message": "ChatBBC 中的浏览器连接已断开。"
   },
   "content_cancel": {
     "message": "取消"
@@ -93,7 +93,7 @@
     "message": "聊天已阻止"
   },
   "content_chat_blocked_tip": {
-    "message": "此聊天已在 Chat On Steroids 应用中被阻止：其工具调用会被拒绝，目标、循环 和自动压缩均已关闭。要解除阻止，请打开应用的“聊天”标签页，在会话列表中将鼠标悬停在此聊天上，然后点击其阻止图标。"
+    "message": "此聊天已在 ChatBBC 应用中被阻止：其工具调用会被拒绝，目标、循环 和自动压缩均已关闭。要解除阻止，请打开应用的“聊天”标签页，在会话列表中将鼠标悬停在此聊天上，然后点击其阻止图标。"
   },
   "content_chat_still_opening": {
     "message": "此聊天仍在打开中，请重试"
@@ -588,7 +588,7 @@
     "message": "保存中…"
   },
   "content_settings_aria": {
-    "message": "Chat On Steroids 设置"
+    "message": "ChatBBC 设置"
   },
   "content_stage_handoff_attention": {
     "message": "交接回复需要处理"
@@ -738,13 +738,13 @@
     "message": "正在编写…"
   },
   "extension_action_title": {
-    "message": "Chat On Steroids"
+    "message": "ChatBBC"
   },
   "extension_description": {
-    "message": "将 ChatGPT 连接到 Chat On Steroids，并通过 DOM、截图和开发者工具在后台控制浏览器标签页。"
+    "message": "将 ChatGPT 对话连接到 ChatBBC 桌面应用。"
   },
   "extension_name": {
-    "message": "Chat On Steroids 配套扩展"
+    "message": "ChatBBC Companion"
   },
   "popup_advanced": {
     "message": "高级"
@@ -954,7 +954,7 @@
     "message": "会话捕获"
   },
   "popup_secure_storage_unavailable": {
-    "message": "安全凭据存储不可用。请打开 Chat On Steroids 查看设置说明。"
+    "message": "安全凭据存储不可用。请打开 ChatBBC 查看设置说明。"
   },
   "popup_sent_to_app": {
     "message": "已发送到应用"
@@ -1041,7 +1041,7 @@
     "message": "重试"
   },
   "popup_version_mismatch_help": {
-    "message": "应用 v$1（协议 $2）；配套扩展 v$3（协议 $4）。打开浏览器的“扩展程序”页面，启用“开发者模式”，然后更新 / 重新加载此配套扩展。如果仍不匹配，请在 Chat On Steroids 中使用“打开扩展文件夹”，并加载该文件夹。待 ChatGPT 标签页中的活动工作完成后，再重新加载这些标签页。"
+    "message": "应用 v$1（协议 $2）；配套扩展 v$3（协议 $4）。打开浏览器的“扩展程序”页面，启用“开发者模式”，然后更新 / 重新加载此配套扩展。如果仍不匹配，请在 ChatBBC 中使用“打开扩展文件夹”，并加载该文件夹。待 ChatGPT 标签页中的活动工作完成后，再重新加载这些标签页。"
   },
   "popup_yes": {
     "message": "是"

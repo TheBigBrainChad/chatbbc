@@ -20,7 +20,7 @@ app.whenReady().then(async () => {
     await win.loadFile(fixture);
     const js = code => win.webContents.executeJavaScript(code);
     await js(`document.fonts.ready;`);
-    assert.equal(await js(`document.fonts.check('16px "CoS Phosphor"')`), true);
+    assert.equal(await js(`document.fonts.check('16px "ChatBBC Phosphor"')`), true);
     await win.webContents.debugger.attach('1.3');
     for (const reduced of [false, true]) {
       await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {

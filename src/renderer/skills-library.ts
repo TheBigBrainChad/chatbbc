@@ -3,7 +3,7 @@ import { parseGitHubSkillUrl, type GitHubSkillUpdateCheck, type ManagedSkill } f
 import { $, el, icon, initCardMenuDismissal, run, toast } from './dom.js';
 import { t, ui } from './i18n.js';
 
-/** The managed CoS library only; project and user-discovered skills stay in composer discovery. */
+/** The managed ChatBBC library only; project and user-discovered skills stay in composer discovery. */
 export function initSkillsLibrary(api: AppApi): () => void {
   initCardMenuDismissal();
   let skills: ManagedSkill[] = [];
@@ -70,7 +70,7 @@ export function initSkillsLibrary(api: AppApi): () => void {
       install.type = 'button';
       install.addEventListener('click', () => void (async () => {
         install.disabled = true;
-        try { if (await update(api.installRecommendedSkill(entry.id))) toast(t('Skill imported into the CoS library')); }
+        try { if (await update(api.installRecommendedSkill(entry.id))) toast(t('Skill imported into the ChatBBC library')); }
         finally { if (install.isConnected) install.disabled = false; }
       })());
       foot.append(install);
@@ -201,7 +201,7 @@ export function initSkillsLibrary(api: AppApi): () => void {
     const close = el('button', 'btn', () => t('Close')) as HTMLButtonElement;
     close.type = 'button'; close.addEventListener('click', () => dialog.close()); head.append(title, close);
     const body = el('div', 'plugin-dialog-body');
-    body.append(el('p', '', () => t('Check this GitHub source for changes. If it changed, CoS replaces the whole skill folder and moves the previous version to Trash. Local edits to resources will be replaced.')));
+    body.append(el('p', '', () => t('Check this GitHub source for changes. If it changed, ChatBBC replaces the whole skill folder and moves the previous version to Trash. Local edits to resources will be replaced.')));
     body.append(el('p', 'skill-source-url', skill.origin.url));
     const actions = el('div', 'pet-delete-actions');
     const cancel = el('button', 'btn', () => t('Cancel')) as HTMLButtonElement;
@@ -276,7 +276,7 @@ export function initSkillsLibrary(api: AppApi): () => void {
       const button = $<HTMLButtonElement>(id); button.disabled = true;
       try {
         const imported = await update(api.skillsImport(kind));
-        if (imported) toast(t('Skill imported into the CoS library'));
+        if (imported) toast(t('Skill imported into the ChatBBC library'));
       } finally { if (button.isConnected) button.disabled = false; }
     })());
   }
@@ -291,7 +291,7 @@ export function initSkillsLibrary(api: AppApi): () => void {
     ui($('skillGithubTitle'), 'textContent', () => t(target ? 'Link {0} to GitHub' : 'Import from GitHub', target ? [target.name] : []));
     ui($('skillGithubDescription'), 'textContent', () => t(target
       ? 'Link only if the local SKILL.md matches the GitHub file. Your files stay in place; missing or changed resources will show as an available update.'
-      : 'Paste a public GitHub folder link or a link to its SKILL.md. The complete skill folder will be copied to your CoS library.'));
+      : 'Paste a public GitHub folder link or a link to its SKILL.md. The complete skill folder will be copied to your ChatBBC library.'));
     ui(githubSubmit, 'textContent', () => t(target ? 'Link source' : 'Import skill'));
     $('skillsImportGithub').closest('details')?.removeAttribute('open');
     githubError.hidden = true; githubError.textContent = '';

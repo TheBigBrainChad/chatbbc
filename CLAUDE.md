@@ -1,6 +1,6 @@
 # Claude repository instructions
 
-Read and follow `AGENTS.md` before changing this repository.
+Read and follow `AGENTS.md` and the downstream porting procedure in `docs/UPSTREAM.md` before changing this repository.
 
 This is a public repository. Never add Claude provenance session URLs or session trailers to
 commit messages, files, release notes, logs, or generated artifacts. Maintainer commits must use
@@ -11,9 +11,4 @@ commit, push, tag, or release, run `npm run verify:privacy`. The versioned Git h
 Do not bypass these guards with `--no-verify`. If a privacy check blocks a change, remove the
 private value at its source and create a new clean commit instead.
 
-Never push this clone's local branch history. Publish work as fresh commits built on the remote
-branch tip (`git write-tree` / `git commit-tree`, or a merge of `origin/main` done the same way),
-pointed at by a new local branch. The local history is private and stays here.
-
-Never add a `Co-Authored-By` trailer, a "Generated with" line, or any other Claude attribution to
-commits, pull requests, tags or release notes. The maintainer is the only author on this repository.
+Preserve the local ChatBBC main history and upstream attribution. Do not rewrite history, push a branch, tag or publish a release without explicit authorization. The MIT license and `CONTRIBUTORS.md` retain original credit; adapted upstream or community work must credit its actual authors. Do not add automated-assistant attribution that misstates authorship or contains private session provenance.

@@ -54,6 +54,21 @@ GVDB and libnsgif sources are embedded in their parent archives.
 
 Original release logs: https://github.com/lovell/sharp-libvips/actions/runs/32944388037
 
+## Linux x64 WebAssembly payload
+
+The ChatBBC Linux x64 package selects `@img/sharp-wasm32` 0.35.4, not the
+native `@img/sharp-linux-x64` and `@img/sharp-libvips-linux-x64` payloads.
+The archived sharp-libvips v1.3.3 recipe invokes `./build.sh dev-wasm32`,
+which calls `build/wasm.sh`. Its upstream wasm-vips `HEAD` is not immutable;
+the included `wasm-vips-build-79103664.tar.gz` pins the 2026-08-25 revision
+that upgraded to libvips 8.18.6, immediately before the v1.3.3 publication.
+Use that extracted tree in place of the recipe's HEAD download. The resulting
+libvips development archive feeds sharp's Emscripten target in the included
+sharp 0.35.4 source; `@img/sharp-wasm32` carries the compiled binding and
+libraries together. Check its packaged `versions.json` before replacement.
+The upstream recipe and source inventory are build inputs, not a claim that
+the resulting module was reproduced byte-for-byte locally.
+
 ## Windows
 
 Use build-win64-mxe commit `09cfccf20b91b441fbe97fa7a7ed8a597e55e830` (v8.18.6) and
@@ -93,25 +108,28 @@ retaining exported interfaces and library names. Under application resources:
 
 - Windows: `app.asar.unpacked/node_modules/@img/sharp-win32-{x64|arm64}/lib/`, with
   `libvips-42.dll` and `libvips-cpp-8.18.6.dll`.
-- Linux: `app.asar.unpacked/node_modules/@img/sharp-libvips-linux-{x64|arm64}/lib/`.
+- Linux x64: `app.asar.unpacked/node_modules/@img/sharp-wasm32/lib/` contains
+  `sharp-wasm32-0.35.4.node.wasm` and its JavaScript loader. Replace both
+  with a compatible sharp 0.35.4 / libvips 8.18.6 WebAssembly build.
 - macOS: `app.asar.unpacked/node_modules/@img/sharp-libvips-darwin-{x64|arm64}/lib/`
-  under `Chat On Steroids.app/Contents/Resources`.
+  under `ChatBBC.app/Contents/Resources`.
 
-Replace the corresponding shared libraries and retain required SONAME links. Sharp is
-also unpacked; its Apache-licensed binding source/build instructions are in the sharp
-source distribution if an ABI change requires rebuilding it. No application hash check
-or publisher-key requirement fences these files. On macOS seal the modified copy again:
+Replace the corresponding libraries and retain the expected interfaces.
+Sharp is also unpacked; its Apache-licensed binding source/build instructions
+are in the sharp source distribution if an ABI change requires rebuilding it.
+No application hash check or publisher-key requirement fences these files.
+On macOS seal the modified copy again:
 
 ```sh
-codesign --force --deep --sign - "Chat On Steroids.app"
-codesign --verify --deep --strict --verbose=2 "Chat On Steroids.app"
+codesign --force --deep --sign - "ChatBBC.app"
+codesign --verify --deep --strict --verbose=2 "ChatBBC.app"
 ```
 
-On Linux extract an AppImage or use an installed DEB copy to obtain ordinary writable
-files. Normal OS access controls apply. Preserve source/license notices with modifications.
+On Linux extract the AppImage to obtain ordinary writable files. Normal OS
+access controls apply. Preserve source/license notices with modifications.
 The application's MIT terms do not prohibit library modification or reverse engineering
 for debugging those modifications.
 
-The release pipeline tests the packaged Sharp runtime on each native OS/CPU. It does not
-claim bit-identical compiler output or a full offline rebuild of all native dependencies;
+The local release pipeline tests the packaged Sharp runtime on Linux x64. It does not
+claim bit-identical compiler output or a full offline rebuild of native dependencies;
 those are separate reproducibility properties.

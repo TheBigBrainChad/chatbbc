@@ -65,7 +65,7 @@ async function buildAndRun() {
     });
   `);
   fs.writeFileSync(path.join(fixture, 'index.html'), `<!doctype html><html lang="en"><head>
-    <meta charset="utf-8"><title>CoS Pet Performance</title></head><body>
+    <meta charset="utf-8"><title>ChatBBC Pet Performance</title></head><body>
     <div id="petStage"></div><section class="pet-tray" id="petTray" hidden>
       <div class="pet-tray-head"><strong>Tasks</strong><span id="petTrayCount"></span><button id="petTrayClose">×</button></div>
       <div id="petCards"></div></section><script type="module" src="./entry.ts"></script></body></html>`);
@@ -88,7 +88,7 @@ async function measure() {
   const owner = fullHost ? new BrowserWindow({ show: false, width: Math.min(1400, area.width - 120), height: Math.min(900, area.height - 120),
     backgroundColor: '#181818', webPreferences: { sandbox: true, contextIsolation: true, backgroundThrottling: false } }) : null;
   if (owner) {
-    await owner.loadURL('data:text/html,<style>html{background:%23181818;color:%23eee;font:14px system-ui}body{margin:0;padding:32px}.surface{height:72vh;border:1px solid %23333;border-radius:20px;background:%231b1b1b}</style><h1>CoS owner fixture</h1><div class="surface"></div>');
+    await owner.loadURL('data:text/html,<style>html{background:%23181818;color:%23eee;font:14px system-ui}body{margin:0;padding:32px}.surface{height:72vh;border:1px solid %23333;border-radius:20px;background:%231b1b1b}</style><h1>ChatBBC owner fixture</h1><div class="surface"></div>');
     owner.show();
   }
   const win = new BrowserWindow({ show: false, transparent: true,

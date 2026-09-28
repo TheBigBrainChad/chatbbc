@@ -6,22 +6,20 @@ authoritative; `src/main/mcp/surfaces.ts`, `src/main/mcp/tools-core.ts`,
 
 ## Connectors
 
-Chat On Steroids publishes Core on Windows, macOS and Linux. Windows and macOS additionally publish
-the optional Desktop connector. They are separate discovery and permission boundaries and use
-separate secret tokenized local paths.
+ChatBBC publishes **ChatBBC Core**, **ChatBBC Desktop** and **ChatBBC Plugins** as separate
+discovery and permission boundaries with secret tokenized local paths. On supported Linux x64
+releases, the Desktop surface exposes companion browser tools but not native screen/input APIs.
 
 | Connector | Purpose | Possible tools |
 | --- | --- | --- |
-| **Chat On Steroids Core** | Approved files, patches, terminal, task plans, workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `update_plan`, `agents` |
-| **Chat On Steroids Desktop** | **Windows/macOS:** screen, windows, mouse/keyboard and clipboard | `observe`, `computer` |
-
-The Desktop connector is optional on Windows/macOS. Core is the main connector everywhere.
+| **ChatBBC Core** | Approved files, patches, terminal, task plans, workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `update_plan`, `agents` |
+| **ChatBBC Desktop** | Paired Chromium browser inspection and control | `browser_tabs`, `browser_snapshot`, `browser_screenshot`, `browser_console`, `browser_network`, `browser_navigate`, `browser_action`, `browser_evaluate` |
+| **ChatBBC Plugins** | Enabled external MCP services | Upstream plugin tool names and schemas |
 
 On a fresh current config, Core permissions are enabled, along with
-session recording and multi-agent mode; read-only mode is off. Windows also enables Desktop permissions; macOS starts them off and the user switches them on. Linux masks
-Desktop permissions off at runtime while preserving stored choices for a config later reopened on
-Windows or macOS. Existing configs keep explicit choices during upgrades; missing legacy permissions are
-not silently widened.
+session recording and multi-agent mode; read-only mode is off. Linux enables extension browser
+screen/control under Desktop permissions but masks native desktop operations. Existing configs
+keep explicit choices during upgrades; missing legacy permissions are not silently widened.
 
 With fresh defaults, Core advertises `read`, `view_image`, `apply_patch`, `exec_command`,
 `write_stdin`, `update_plan`, and `agents`.
@@ -59,8 +57,8 @@ Directory deletion and arbitrary binary writes are deliberately not hidden patch
 
 ### `exec_command`
 
-Runs a command in the host's real shell: PowerShell/cmd on Windows and the user's normal POSIX
-shell on macOS/Linux. This permission is **not** confined to approved folders. Long-running
+Runs a command in the host's real shell (the user's normal POSIX shell on supported Linux).
+This permission is **not** confined to approved folders. Long-running
 commands return an opaque `session_id` that `write_stdin` can continue.
 
 It takes exactly one of `cmd` (a single command) or `cmds` (up to 20 commands run sequentially
@@ -143,9 +141,11 @@ There is no model-supplied agent credential or `agent_key`. Worker/prime identit
 the ChatGPT conversation using extension evidence; control calls fail closed when that identity
 cannot be proven.
 
-## Desktop tools
+## Native Desktop tools retained for upstream compatibility
 
-This section exists on Windows and macOS. Linux does not advertise or execute these schemas.
+The `observe` and `computer` native desktop tools below are not advertised or executed on
+supported Linux x64 releases. They describe retained cross-platform source behavior, not
+a Windows or macOS ChatBBC release promise.
 
 ### `observe`
 
@@ -176,9 +176,9 @@ can keep observation available while disabling state-changing desktop actions.
 - A tool call is checked against current permissions even if its schema was exposed earlier.
 - Core and Desktop do not forward or alias each other's tools.
 - A connector token for one surface does not authorize the other surface.
-- Read-only mode removes effective file-write, command, control and clipboard-write permissions
+- Read-only mode removes effective file-write, command and browser-control permissions
   without pretending the underlying configuration was changed.
-- Approved filesystem roots do not sandbox command execution or desktop control.
+- Approved filesystem roots do not sandbox command execution or browser control.
 - Tool results and validation errors are bounded; large structured or binary payloads must not
   grow without an explicit cap.
 

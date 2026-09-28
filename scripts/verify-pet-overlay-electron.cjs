@@ -25,7 +25,7 @@ if (!reusing) {
     goal: { enabled: false }
   }));
 }
-app.setName('CoS Pets Render Probe');
+app.setName('ChatBBC Pets Render Probe');
 app.setPath('userData', userData);
 app.setAppPath(root);
 process.env.CLF_BRIDGE_PORTS = '0';
@@ -113,7 +113,7 @@ app.on('browser-window-created', (_event, win) => {
             `The idle overlay must be click-through: ${JSON.stringify(ignoredMouseCalls)}`);
           assert.equal(ignoredMouseCalls.some(call => call.ignore && call.forward), false,
             `Windows must not forward ignored mouse movement to a second cursor owner: ${JSON.stringify(ignoredMouseCalls)}`);
-          const hoverOwner = BrowserWindow.getAllWindows().find(candidate => candidate !== win && candidate.getTitle() === 'Chat On Steroids');
+          const hoverOwner = BrowserWindow.getAllWindows().find(candidate => candidate !== win && candidate.getTitle() === 'ChatBBC');
           assert.ok(hoverOwner, 'The hover regression requires the visible owner behind Pets.');
           await hoverOwner.webContents.executeJavaScript(`(() => {
             clearInterval(window.__petBehindTimer);
@@ -241,7 +241,7 @@ app.on('browser-window-created', (_event, win) => {
         }
         const owners = BrowserWindow.getAllWindows().filter(candidate => candidate !== win);
         assert.ok(owners.length > 0, 'The desktop overlay needs an independently hosted owner window.');
-        const owner = owners.find(candidate => candidate.getTitle() === 'Chat On Steroids') ?? owners[0];
+        const owner = owners.find(candidate => candidate.getTitle() === 'ChatBBC') ?? owners[0];
         const titlebar = await owner.webContents.executeJavaScript(`(() => {
           const bar = document.querySelector('.app-topbar');
           const rect = bar?.getBoundingClientRect();
@@ -255,7 +255,7 @@ app.on('browser-window-created', (_event, win) => {
         assert.ok(String(titlebar.hit).includes('app-topbar'), `The drag point is covered: ${JSON.stringify(titlebar)}`);
         console.log(`titlebar=${JSON.stringify(titlebar)}`);
         for (const owner of owners) if (owner.isVisible()) owner.minimize();
-        assert.ok(win.isVisible(), 'Pets must remain visible after the CoS window is minimized.');
+        assert.ok(win.isVisible(), 'Pets must remain visible after the ChatBBC window is minimized.');
         console.log(`ownerMinimized=${owners.some(owner => owner.isMinimized())}; overlayVisible=${win.isVisible()}`);
         const screenBeforeClick = await owner.webContents.executeJavaScript('document.querySelector(".app")?.dataset.screen');
         const clickRect = await win.webContents.executeJavaScript('document.querySelector(".pet-shell").getBoundingClientRect().toJSON()');
@@ -266,9 +266,9 @@ app.on('browser-window-created', (_event, win) => {
         win.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', x: clickX, y: clickY, clickCount: 1 });
         win.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', x: clickX, y: clickY, clickCount: 1 });
         await new Promise(resolve => setTimeout(resolve, 150));
-        assert.equal(owner.isMinimized(), false, 'A short pet click must restore and focus its CoS owner.');
+        assert.equal(owner.isMinimized(), false, 'A short pet click must restore and focus its ChatBBC owner.');
         assert.equal(await owner.webContents.executeJavaScript('document.querySelector(".app")?.dataset.screen'), screenBeforeClick,
-          'A pet click must preserve the current CoS screen.');
+          'A pet click must preserve the current ChatBBC screen.');
         console.log(`petClickRestoredOwner=true; screen=${screenBeforeClick}`);
         const contextMenu = await win.webContents.executeJavaScript(`(() => {
           const shell = document.querySelector('.pet-shell');

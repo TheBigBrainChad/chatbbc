@@ -33,7 +33,7 @@ async function githubJson(endpoint: string, signal: AbortSignal, limit = 1024 * 
   try {
     response = await fetch(`https://api.github.com${endpoint}`, {
       redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(20_000)]),
-      headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'ChatOnSteroids-Skills' }
+      headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'ChatBBC-Skills' }
     });
   } catch {
     throw new Error(signal.aborted ? 'GitHub download timed out. Try again.' : 'Could not reach GitHub. Try again.');
@@ -103,7 +103,7 @@ async function inspectGitHubSkill(requested: GitHubSkillLocation, signal: AbortS
     }
   }
   if (!files.some(file => file.relative === 'SKILL.md')) throw new Error('GitHub skill folder needs SKILL.md');
-  if (files.some(file => file.relative === '.cos-github.json')) throw new Error('GitHub skill uses a reserved CoS metadata filename');
+  if (files.some(file => file.relative === '.cos-github.json')) throw new Error('GitHub skill uses a reserved ChatBBC metadata filename');
   const revision = skillPackageRevision(files);
   return { location, commit, revision, files };
 }
@@ -133,7 +133,7 @@ function revisionFromTree(entries: TreeEntry[], directory: string): string {
     files.push({ relative, sha: entry.sha, size: entry.size! });
   }
   if (!files.some(file => file.relative === 'SKILL.md')) throw new Error('GitHub skill folder needs SKILL.md');
-  if (files.some(file => file.relative === '.cos-github.json')) throw new Error('GitHub skill uses a reserved CoS metadata filename');
+  if (files.some(file => file.relative === '.cos-github.json')) throw new Error('GitHub skill uses a reserved ChatBBC metadata filename');
   return skillPackageRevision(files);
 }
 

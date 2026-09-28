@@ -1,25 +1,22 @@
-/*
- * ChatGPT's surface, rounded the way theirs is: near-black ground, raised cards at a
- * generous radius, one line icon per row, and green reserved for "this worked".
- */
+/* The companion popup uses browser light/dark preferences, not the desktop palette. */
 :root {
   color-scheme: dark light;
-  --bg: #0e0e0e;
-  --card: #1a1a1a;
-  --edge: rgba(255, 255, 255, 0.07);
-  --hover: rgba(255, 255, 255, 0.045);
-  --text: #f2f2f2;
-  --muted: #9d9d9d;
-  --faint: #6f6f6f;
-  --hollow: rgba(255, 255, 255, 0.16);
-  --scroll: rgba(255, 255, 255, 0.22);
-  --scroll-strong: rgba(255, 255, 255, 0.34);
-  --green: #1fbf75;
-  --green-soft: rgba(31, 191, 117, 0.12);
-  --red: #ef6b62;
-  --red-soft: rgba(239, 107, 98, 0.12);
-  --ink: #0b0b0b;
-  --sans: 'OpenAI Sans', 'Söhne', ui-sans-serif, -apple-system, 'Segoe UI Variable Text',
+  --bg: #151515;
+  --card: #242424;
+  --edge: #3b3b3b;
+  --hover: #333333;
+  --text: #f4f4f4;
+  --muted: #c3c3c3;
+  --faint: #ababab;
+  --hollow: #777777;
+  --scroll: #777777;
+  --scroll-strong: #999999;
+  --green: #65dca3;
+  --green-soft: #173d2c;
+  --red: #ff938c;
+  --red-soft: #492421;
+  --ink: #101010;
+  --sans: ui-sans-serif, -apple-system, 'Segoe UI Variable Text',
     'Segoe UI', system-ui, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, 'SF Mono', 'Cascadia Mono', 'Segoe UI Mono', Consolas, monospace;
 }
@@ -27,17 +24,19 @@
 @media (prefers-color-scheme: light) {
   :root {
     --bg: #ffffff;
-    --card: #f6f6f7;
-    --edge: rgba(0, 0, 0, 0.07);
-    --hover: rgba(0, 0, 0, 0.035);
-    --text: #0d0d0d;
-    --muted: #5c5c5c;
-    --faint: #8b8b8b;
-    --hollow: rgba(0, 0, 0, 0.18);
-    --scroll: rgba(0, 0, 0, 0.22);
-    --scroll-strong: rgba(0, 0, 0, 0.34);
-    --green: #12a06a;
-    --green-soft: rgba(18, 160, 106, 0.1);
+    --card: #f2f2f2;
+    --edge: #d5d5d5;
+    --hover: #e7e7e7;
+    --text: #181818;
+    --muted: #484848;
+    --faint: #555555;
+    --hollow: #777777;
+    --scroll: #777777;
+    --scroll-strong: #555555;
+    --green: #087346;
+    --green-soft: #e2f4e9;
+    --red: #b72e30;
+    --red-soft: #fbe7e6;
     --ink: #ffffff;
   }
 }

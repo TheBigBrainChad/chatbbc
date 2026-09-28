@@ -95,8 +95,8 @@ const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
  * uses to attribute traffic. Neither header carries anything about the user or the chat.
  */
 const ATTRIBUTION_HEADERS: Record<string, string> = {
-  'HTTP-Referer': 'https://github.com/chat-on-steroids',
-  'X-Title': 'Chat On Steroids'
+  'HTTP-Referer': 'https://github.com/TheBigBrainChad/chatbbc',
+  'X-Title': 'ChatBBC'
 };
 
 /** Which LLM endpoint the Goal/Loop second model runs on, resolved per call from config. */
@@ -144,7 +144,7 @@ export function goalProviderKey(kind: GoalProviderKind): Promise<string | null> 
 
 /** How many messages of history the goal model is given, newest kept. */
 const MAX_CONTEXT_MESSAGES = 120;
-/** Recent CoS calls read to count per turn; a busy turn can make hundreds. */
+/** Recent ChatBBC calls read to count per turn; a busy turn can make hundreds. */
 const MAX_TOOL_CALLS_COUNTED = 500;
 const HOLD_TOOLS = new Set(['session_finish', 'keep_astra_on_forever']);
 /** …and how many characters of them, so one 200k-character answer cannot be the whole prompt. */
@@ -2447,7 +2447,7 @@ export async function conversationMessages(sessionId: string, deliveredInput: re
     listInputs(),
     readRecentEvents(sessionId, MAX_TOOL_CALLS_COUNTED, { kinds: ['tool_call'] })
   ]);
-  // Only how many CoS calls each turn made. Without it the helper cannot tell "ran the
+  // Only how many ChatBBC calls each turn made. Without it the helper cannot tell "ran the
   // command" from "said it did" and keeps asking for the same work again.
   const callsByTurn = new Map<string, number>();
   for (const call of toolCalls) {
@@ -2496,7 +2496,7 @@ export async function conversationMessages(sessionId: string, deliveredInput: re
   }
   for (const [turn, at] of lastAnswerOfTurn) {
     const count = callsByTurn.get(turn)!;
-    ordered[at] = { ...ordered[at]!, content: `${ordered[at]!.content}\n\n[Chat On Steroids: ${count} tool call${count === 1 ? '' : 's'} ran in this turn. Arguments and results are not shown.]` };
+    ordered[at] = { ...ordered[at]!, content: `${ordered[at]!.content}\n\n[ChatBBC: ${count} tool call${count === 1 ? '' : 's'} ran in this turn. Arguments and results are not shown.]` };
   }
   for (const text of deliveredInput.slice(-5)) {
     const content = clip(userPromptText(text) ?? text, MAX_USER_MESSAGE_CHARS);

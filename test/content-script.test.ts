@@ -4248,7 +4248,7 @@ describe('the app-owned chronological stream', () => {
       ({ messageId, rawMessageId: messageId, stable: true, rawText, renderedHtml: '' }));
     section.setAttribute('data-clf-fiber-turn', '0');
     await replyFiber([{
-      v: 21, index: 0, messageId: 'interim-native-X', tool: 'read', app: 'Chat On Steroids Core', answered: true,
+      v: 21, index: 0, messageId: 'interim-native-X', tool: 'read', app: 'ChatBBC Core', answered: true,
       conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     }], [{ turnId: 'interrupted-fold-page', conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', messages,
       calls: [{ messageId: 'interim-native-X', requestId, tool: 'read', order: 0, answered: true }], activities: [],
@@ -5598,10 +5598,10 @@ describe('the app-owned chronological stream', () => {
     blocks[0]!.setAttribute('data-clf-fiber', '0');
     blocks[1]!.setAttribute('data-clf-fiber', '1');
     const rows = (secondAnswered: boolean) => [
-      { v: 21, index: 0, messageId: 'fiber-one', tool: 'read_file', path: '/Chat On Steroids Core/read_file',
-        app: 'Chat On Steroids Core', answered: true, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
-      { v: 21, index: 1, messageId: 'fiber-two', tool: 'exec_command', path: '/Chat On Steroids Core/exec_command',
-        app: 'Chat On Steroids Core', answered: secondAnswered, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }
+      { v: 21, index: 0, messageId: 'fiber-one', tool: 'read_file', path: '/ChatBBC Core/read_file',
+        app: 'ChatBBC Core', answered: true, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
+      { v: 21, index: 1, messageId: 'fiber-two', tool: 'exec_command', path: '/ChatBBC Core/exec_command',
+        app: 'ChatBBC Core', answered: secondAnswered, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }
     ];
     const turn = (secondAnswered: boolean) => ({
       turnId: 'page-live-call-gap',
@@ -5627,8 +5627,12 @@ describe('the app-owned chronological stream', () => {
   });
 
   it.each([
-    ['Chat On Steroids Plugins', true],
-    ['Chat On Steroids Backup', false]
+    ['ChatBBC Core', true],
+    ['ChatBBC Desktop', true],
+    ['ChatBBC Plugins', true],
+    ['Chat On Steroids Core', false],
+    ['TobisComputer', false],
+    ['ChatBBC Backup', false]
   ] as const)('suppresses only an answered exact supported connector block (%s)', async (app, hidden) => {
     live = await harness(undefined, { activity: () => ({ ok: true, data: {
       entries: [], userAnchors: [{ seq: 0, time: 50, messageId: 'm-exact-block-owner' }], stream: [
@@ -5667,7 +5671,7 @@ describe('the app-owned chronological stream', () => {
     blocks.forEach((block, index) => block.setAttribute('data-clf-fiber', String(index)));
     const calls = ['read', secondTool].map((tool, index) => ({ messageId: `result-provider-${index}`, tool, order: index, requestId, answered: true }));
     await replyFiber(calls.map((call, index) => ({ v: 21, index, ...call, path: null,
-      app: 'Chat On Steroids Core', resource: `/asdk_app_fixture/link_fixture/${call.tool}`,
+      app: 'ChatBBC Core', resource: `/asdk_app_fixture/link_fixture/${call.tool}`,
       conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' })), [{ turnId: 'result-only-page', calls }]);
     await live.hook.pullActivity(); live.hook.renderStreams();
     expect(overwriteRows(section, '[data-clf-call]')).toHaveLength(1);
@@ -6613,7 +6617,7 @@ describe('the app-owned chronological stream', () => {
     block.setAttribute('data-clf-fiber', '0');
     const bind = async (answered: boolean) => replyFiber([{
       v: 21, index: 0, messageId: 'fiber-moved-call', tool: 'read_file',
-      path: '/Chat On Steroids Core/read_file', app: 'Chat On Steroids Core', answered,
+      path: '/ChatBBC Core/read_file', app: 'ChatBBC Core', answered,
       conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     }], [{ turnId, calls: [{ messageId: 'fiber-moved-call', tool: 'read_file', order: 0,
       answered, requestId: 'wfr-app-stream' }] }]);
@@ -10203,8 +10207,8 @@ describe('evidence from the page context', () => {
     v: 21,
     index: 0,
     tool: 'agent_status',
-    path: '/TobisComputer/mcp/agent_status',
-    app: 'TobisComputer',
+    path: '/ChatBBC Core/mcp/agent_status',
+    app: 'ChatBBC Core',
     resource: 'resource://tools/agent_status',
     messageId: 'msg-1',
     turnId: 'turn-1',
@@ -10222,7 +10226,7 @@ describe('evidence from the page context', () => {
     expect(live.hook.readDescriptor(GOOD)).toMatchObject({
       index: 0,
       tool: 'agent_status',
-      app: 'TobisComputer',
+      app: 'ChatBBC Core',
       hidden: 4,
       localCount: 5,
       answered: true
@@ -11861,7 +11865,7 @@ describe('content-script localization', () => {
 
   it('uses the page-local catalog for settings, accessibility and progress labels', async () => {
     live = await harness(undefined, {}, localized({
-      content_settings_aria: 'Chat On Steroids ayarları',
+      content_settings_aria: 'ChatBBC ayarları',
       content_mode_off: 'Kapalı',
       content_mode_goal: 'Hedef',
       content_mode_loop: 'Döngü',
@@ -11875,8 +11879,8 @@ describe('content-script localization', () => {
 
     const control = live.document.querySelector('.clf-compact-btn') as HTMLElement;
     const menu = live.document.querySelector('.clf-menu') as HTMLElement;
-    expect(control.getAttribute('aria-label')).toBe('Chat On Steroids ayarları');
-    expect(menu.getAttribute('aria-label')).toBe('Chat On Steroids ayarları');
+    expect(control.getAttribute('aria-label')).toBe('ChatBBC ayarları');
+    expect(menu.getAttribute('aria-label')).toBe('ChatBBC ayarları');
     expect(menu.querySelector('.clf-menu-mode-track')?.getAttribute('aria-label')).toBe('Hedef modu');
     expect([...menu.querySelectorAll('.clf-menu-mode-option')].map(node => node.textContent)).toEqual([
       'Kapalı',
@@ -12378,7 +12382,7 @@ describe('the Compact & resume control', () => {
     expect(state({})).toMatchObject({ mode: 'idle', label: 'Compact', action: 'start' });
     expect(state({ disconnected: true })).toMatchObject({
       mode: 'off',
-      hint: 'Browser connection is disconnected in Chat On Steroids.',
+      hint: 'Browser connection is disconnected in ChatBBC.',
       action: 'none'
     });
     expect(state({ pressedAt: 900 })).toMatchObject({ mode: 'busy', label: 'Starting…', action: 'none' });
@@ -12920,7 +12924,7 @@ describe('the Compact & resume control', () => {
     expect(live.document.querySelector('.clf-pill-text')!.textContent).toContain(reason);
   });
 
-  it('preserves a stale COS handoff draft including user edits and retires the unsent ticket', async () => {
+  it('preserves a stale ChatBBC handoff draft including user edits and retires the unsent ticket', async () => {
     const pendingJob = {
       sessionId: 's-auto-stale-draft',
       stage: 'handoff-pending',
@@ -12961,7 +12965,7 @@ describe('the Compact & resume control', () => {
     live.hook.injectControl();
     const stale =
       '[[CLF-HANDOFF:fedcba9876543210fedcba9876543210]]\n\n' +
-      'Chat On Steroids is compacting this conversation so a fresh chat can continue the work. Stop whatever you were doing and do only this.\n\n' +
+      'ChatBBC is compacting this conversation so a fresh chat can continue the work. Stop whatever you were doing and do only this.\n\n' +
       'stale rejected handoff prompt';
     live.document.querySelector('#prompt-textarea')!.textContent = stale;
 
@@ -14478,7 +14482,7 @@ describe('the fresh chat the app opened', () => {
     // them — reported to the app as ChatGPT having replaced the composer, which retired
     // the worker slot before the chat had said a word. Live, both workers of a two-worker
     // run died this way.
-    const task = 'Read /project/chat-on-steroids/package.json and report the version field.';
+    const task = 'Read /project/chatbbc/package.json and report the version field.';
     live = await harness(
       'https://chatgpt.com/?clf=cmd-10',
       {
@@ -14489,7 +14493,7 @@ describe('the fresh chat the app opened', () => {
             type: 'worker',
             text: `${task}
 
-(You are a worker agent in a Chat On Steroids multi-agent run.)`,
+(You are a worker agent in a ChatBBC multi-agent run.)`,
             agent: 'worker-1'
           }
         }),
@@ -14499,7 +14503,7 @@ describe('the fresh chat the app opened', () => {
         document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
           submitted = composerText(document);
           dom.reconfigure({ url: 'https://chatgpt.com/c/22222222-3333-4444-5555-666666666666' });
-          userTurn(document, 'accepted-short-worker', `${task}\n\n(You are a worker agent in a Chat On Steroids multi-agent run.)`, { sent: false });
+          userTurn(document, 'accepted-short-worker', `${task}\n\n(You are a worker agent in a ChatBBC multi-agent run.)`, { sent: false });
         });
       }
     );

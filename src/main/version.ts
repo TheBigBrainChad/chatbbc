@@ -12,14 +12,16 @@
  * extension does nothing" into a diagnosable mismatch.
  */
 
-export const APP_VERSION = '2.1.18';
+export const APP_VERSION = '2.2.0';
+export const APP_TITLE = 'ChatBBC';
+export const APP_SLUG = 'chatbbc';
 
 /**
  * Standalone extension recovery must stay on the app's own release. Using GitHub's moving
  * `latest` asset can pair an older installed app with a newer, incompatible bridge protocol.
  */
 export function extensionDownloadUrl(version = APP_VERSION): string {
-  return `https://github.com/totec448-spec/chat-on-steroids/releases/download/v${encodeURIComponent(version)}/Chat-On-Steroids-Extension.zip`;
+  return `https://github.com/TheBigBrainChad/chatbbc/releases/download/v${encodeURIComponent(version)}/ChatBBC-Extension.zip`;
 }
 
 /**
@@ -68,4 +70,6 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
 // draft ownership. A 12 companion would silently send text without these files.
 // 14 — exact native generated-image metadata and bounded preview observations. A 13 app
 // would ACK the journal while silently discarding that new event kind.
-export const BRIDGE_PROTOCOL = 14;
+// 18 — ChatBBC changes both the stamped app identity and the companion gate.
+// Old same-slug protocol 17 peers must not access protected routes.
+export const BRIDGE_PROTOCOL = 18;

@@ -1,7 +1,7 @@
 # Native image-library licenses, source and replacement
 
-The sharp/libvips packages include separately licensed native libraries. Their README.md
-and versions.json files identify the components and versions for each target platform.
+The sharp/libvips packages include separately licensed native and WebAssembly libraries.
+Their README.md and versions.json files identify the components and versions for each payload.
 This supplement preserves full license texts omitted from the published native npm packages:
 
 - LGPL-3.0.txt: https://ftp.gnu.org/gnu/Licenses/lgpl-3.0.txt
@@ -9,18 +9,19 @@ This supplement preserves full license texts omitted from the published native n
 - MPL-2.0.txt: https://www.mozilla.org/media/MPL/2.0/index.815ca599c9df.txt
 
 Retrieved 2026-09-08. These are unmodified license texts. Including GPLv3 here supplies
-the text incorporated by LGPLv3; it does not relicense Chat On Steroids as GPL software.
+text incorporated by LGPLv3; it does not relicense ChatBBC as GPL software.
 
 Upstream build/source projects:
 - sharp: https://github.com/lovell/sharp
 - Unix libvips builds: https://github.com/lovell/sharp-libvips
 - Windows libvips builds: https://github.com/libvips/build-win64-mxe
+- WebAssembly libvips builds: https://github.com/kleisauke/wasm-vips
 - libvips source: https://github.com/libvips/libvips
 
-The current dependency set uses sharp 0.35.4 / libvips 8.18.6. The release pipeline
-places `Chat-On-Steroids-Native-Sources.tar.gz` beside the matching installers at:
-https://github.com/totec448-spec/chat-on-steroids/releases
-Use the source archive and checksums from the same release as your installer.
+The current dependency set uses sharp 0.35.4 / libvips 8.18.6. Linux x64 ships the
+official `@img/sharp-wasm32` payload rather than a native Linux GLib binary because
+Electron 44 and native Sharp collide in GLib during image processing. The local release
+pipeline places `ChatBBC-Native-Sources.tar.gz` beside the matching AppImage.
 
 It contains original component archives, locked Rust dependency sources, build repositories,
 patches, source license/copyright notices, a URL/SHA-256 inventory, and build/replacement
@@ -33,9 +34,9 @@ notices from those source distributions, in addition to each target's actual nat
 You may modify these libraries and debug those modifications, including by reverse
 engineering the combined application for that purpose. The application imposes no
 additional restriction on those rights. Libraries are ordinary files under
-`app.asar.unpacked`. See `SOURCE-BUILD.md` in the source download for exact revisions,
-rebuilding and replacement. On macOS a modified application copy needs a new local
-ad-hoc seal; no publisher key is required by this release.
+`app.asar.unpacked`. Linux's WebAssembly module is there under
+`node_modules/@img/sharp-wasm32/lib/`; a modified AppImage can be extracted and
+reassembled without a publisher key.
 
 Electron/Chromium notices ship separately as `LICENSE.electron.txt` and
 `LICENSES.chromium.html` in application resources. Electron 44.3.0's source, dependency

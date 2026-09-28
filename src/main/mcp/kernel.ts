@@ -1329,7 +1329,7 @@ export function createRegistrar(server: McpServer | null, ctx: ToolContext, surf
     },
     featureDisabled(feature, setting) {
       return fail(
-        `FEATURE_DISABLED: ${feature} is switched off in Chat On Steroids. ` +
+        `FEATURE_DISABLED: ${feature} is switched off in ChatBBC. ` +
           `Ask the user to enable "${setting}" in the app, then try again.`
       );
     }

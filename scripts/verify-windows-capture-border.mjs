@@ -49,7 +49,7 @@ public class BorderFixture : System.Windows.Forms.Form {
 ${bootstrap}
 Initialize-WindowsCapture
 $form = New-Object BorderFixture
-$form.Text = 'COS capture border test'
+$form.Text = 'ChatBBC capture border test'
 $form.StartPosition = 'Manual'
 $form.Location = New-Object System.Drawing.Point(80,80)
 $form.Size = New-Object System.Drawing.Size(360,240)

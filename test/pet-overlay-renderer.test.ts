@@ -1,6 +1,7 @@
 import { JSDOM } from 'jsdom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { PetLibraryState, PetOverlayBounds, PetOverlayPointer, PetOverlaySnapshot } from '../src/shared/pets.js';
+import { defaultAppearance } from '../src/shared/appearance.js';
 import authoredManifest from '../src/renderer/pet-assets/animations.json';
 
 let dom: JSDOM;
@@ -89,15 +90,23 @@ it('uses one spritesheet body per pet while preserving specials, multi-pet tasks
   const runningSnapshot: PetOverlaySnapshot = {
     visible: true, dismissedPetIds: [], level: 'running',
     activities: [{ id: 'task-1', title: 'Prime', body: 'Working', level: 'running', sessionId: 'session-one' }],
-    theme: 'dark',
-    appearance: {
-      light: { background: '#f4f4f5', sidebar: '#e9edf2', accent: '#486f9d', contrast: 45 },
-      dark: { background: '#181818', sidebar: '#1a2129', accent: '#b0cbed', contrast: 60 },
-      font: 'system', fontSize: 14, translucentSidebar: true
-    }
+    resolvedAppearance: { theme: 'dark', settings: defaultAppearance() }
   };
   snapshotListener!(runningSnapshot);
   await Promise.resolve(); await Promise.resolve();
+  snapshotListener!({
+    ...runningSnapshot,
+    resolvedAppearance: {
+      ...runningSnapshot.resolvedAppearance,
+      settings: {
+        ...runningSnapshot.resolvedAppearance.settings,
+        dark: { ...runningSnapshot.resolvedAppearance.settings.dark, background: '#282828', accent: '#7daea3' }
+      },
+      foreground: '#d4be98'
+    }
+  });
+  expect(dom.window.document.documentElement.style.getPropertyValue('--page')).toBe('#282828');
+  expect(dom.window.document.documentElement.style.getPropertyValue('--ink')).toBe('#d4be98');
 
   const shells = [...dom.window.document.querySelectorAll<HTMLElement>('.pet-shell')];
   expect(shells).toHaveLength(2);
@@ -216,12 +225,8 @@ it('sleeps between authored deadlines and uses display frames only for continuou
   await flushOverlay();
 
   snapshotListener!({
-    visible: true, dismissedPetIds: [], level: 'idle', activities: [], theme: 'dark',
-    appearance: {
-      light: { background: '#f4f4f5', sidebar: '#e9edf2', accent: '#486f9d', contrast: 45 },
-      dark: { background: '#181818', sidebar: '#1a2129', accent: '#b0cbed', contrast: 60 },
-      font: 'system', fontSize: 14, translucentSidebar: true
-    }
+    visible: true, dismissedPetIds: [], level: 'idle', activities: [],
+    resolvedAppearance: { theme: 'dark', settings: defaultAppearance() }
   });
 
   expect(dom.window.document.querySelectorAll('.pet-shell')).toHaveLength(1);

@@ -1,29 +1,19 @@
 /**
- * Generates every icon the project ships, with no image dependencies.
- *
- *   build/icon.ico            the Windows app icon (6 sizes in one file)
- *   build/icon.png            1024px source for macOS/Linux packaging (Retina-ready ICNS input)
- *   build/icon-preview.png    256px preview, for looking at what changed
- *   build/runtime-icon.png    256px Linux BrowserWindow icon, packaged as a real resource
- *   extension/icons/*.png     16/32/48/128 for the Chrome extension
- *
- *   artwork/app-icon-source.png  selected ImageGen concept (the one source image)
- *
- * The selected concept is a single continuous ribbon that folds into both a folder
- * pocket and a conversation tail. It keeps the old product meaning while matching the
- * monochrome, generously rounded app redesign. The source is decoded, reduced to the
- * UI's ink/paper palette, and area-resampled here so every shipped size is reproducible.
+ * Rasterize the ChatBBC vector mark, then generate the existing app and companion
+ * icon sizes from its single, reproducible source.
  */
 
 import { deflateSync, inflateSync } from 'node:zlib';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import sharp from 'sharp';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ICO_SIZES = [256, 128, 64, 48, 32, 16];
 const EXTENSION_SIZES = [128, 48, 32, 16];
 const SOURCE_PATH = path.join(root, 'artwork', 'app-icon-source.png');
+const VECTOR_PATH = path.join(root, 'artwork', 'chatbbc-mark.svg');
 const INK = [12, 12, 14];
 const PAPER = [244, 244, 246];
 
@@ -99,13 +89,17 @@ function decodeSourcePng(encoded) {
   return { width, height, pixels };
 }
 
-const source = decodeSourcePng(readFileSync(SOURCE_PATH));
+const rasterized = await sharp(readFileSync(VECTOR_PATH), { density: 600 })
+  .resize(512, 512)
+  .ensureAlpha()
+  .png({ bitdepth: 8, progressive: false, palette: false })
+  .toBuffer();
+writeFileSync(SOURCE_PATH, rasterized);
+const source = decodeSourcePng(rasterized);
 
 /**
- * Image generation left a handful of isolated opaque flecks outside the mark. Keep the
- * largest alpha-connected component only; the ribbon, its outline and the local dot are
- * one continuous component, while dust is not. The threshold also discards the model's
- * near-transparent shadow matte before any downsampling can turn it into a grey halo.
+ * Keep the largest connected opaque component. The bubble body and its embedded
+ * lettermark are a single component, preserving every glyph through the crop.
  */
 function sourceMask() {
   const count = source.width * source.height;
@@ -182,10 +176,7 @@ function sourceCrop() {
 
 const crop = sourceCrop();
 
-/**
- * Area-resample the generated concept after collapsing its near-monochrome shading to
- * the exact renderer palette. Premultiplied accumulation keeps transparent edges clean.
- */
+/** Area-resample the vector raster after reducing it to the exact ink/paper palette. */
 function render(size) {
   const pixels = Buffer.alloc(size * size * 4);
   for (let py = 0; py < size; py++) {

@@ -209,7 +209,7 @@ import {
 import type { ContinuationView } from './session/continuation.js';
 import { noteResumeOpening } from './session/resume-gate.js';
 import { readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
-import { APP_VERSION, BRIDGE_PROTOCOL } from './version.js';
+import { APP_SLUG, APP_VERSION, BRIDGE_PROTOCOL } from './version.js';
 import { conversationHasMcpCallSince } from './session/store.js';
 import { sessionWorkingAt } from '../shared/session-activity.js';
 import { requestCorrelation } from './session/correlation.js';
@@ -938,7 +938,7 @@ function noteExtensionVersion(req: http.IncomingMessage): void {
       logInfo(
         `bridge: the browser is running extension build ${stamp}, but this app ships ${shipped}. ` +
           'It updates itself once no chat is busy. If it stays on the old build, Chrome loaded it from a ' +
-          'different folder: load the CoS extension folder again at chrome://extensions.'
+          'different folder: load the ChatBBC extension folder again at chrome://extensions.'
       );
     }
     // Even an incompatible peer reports its version before the protocol fence.
@@ -1852,7 +1852,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       res,
       200,
       {
-        app: 'chat-on-steroids',
+        app: APP_SLUG,
         version: APP_VERSION,
         bridge: BRIDGE_PROTOCOL,
         compatible: protocolCompatible(req),
@@ -8934,7 +8934,7 @@ function bootstrapText(spec: CommandSpec, summary: string): string {
     // think before it starts.
     return (
       `${spec.task}\n\n` +
-      `(Chat On Steroids: you are ${spec.agent}, a worker. Report to prime through the agents tool — ` +
+      `(ChatBBC: you are ${spec.agent}, a worker. Report to prime through the agents tool — ` +
       'action=message to="prime" as you go, action=finish once at the end. Workers cannot reach each other. ' +
       'The prime assigns your task; its later messages may update the task and assigned files, including a read-only audit becoming an edit task. ' +
       'Follow that latest assignment within the user’s permissions and standing constraints. ' +

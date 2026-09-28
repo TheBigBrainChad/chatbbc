@@ -231,7 +231,7 @@ describe('what leaves this machine', () => {
     expect(sent.includes('/project/example')).toBe(false);
   });
 
-  it('tells the helper how many CoS calls a turn made, and nothing about them', async () => {
+  it('tells the helper how many ChatBBC calls a turn made, and nothing about them', async () => {
     // Live 2026-09-28: the helper saw only "goal-ok" and asked five more times to "actually run"
     // a command that had run every time.
     const session = await createSession({ title: 'tool count', conversationId: 'tool-count' });
@@ -250,7 +250,7 @@ describe('what leaves this machine', () => {
     const projected = await goal.conversationMessages(session.id);
     expect(projected).toEqual([
       { role: 'user', content: 'Run echo goal-ok' },
-      { role: 'assistant', content: 'goal-ok\n\n[Chat On Steroids: 2 tool calls ran in this turn. Arguments and results are not shown.]' }
+      { role: 'assistant', content: 'goal-ok\n\n[ChatBBC: 2 tool calls ran in this turn. Arguments and results are not shown.]' }
     ]);
     expect(JSON.stringify(projected)).not.toMatch(/exec_command|SECRET_ARGUMENT|SECRET_RESULT/);
   });

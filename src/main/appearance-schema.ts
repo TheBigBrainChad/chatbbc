@@ -6,5 +6,6 @@ const palette = z.object({ background: color, sidebar: color, accent: color, con
 /** Shared by disk validation and Settings IPC. No authored CSS or remote font URLs. */
 export const appearanceSchema = z.object({
   light: palette, dark: palette, font: z.enum(APPEARANCE_FONTS),
-  fontSize: z.number().int().min(12).max(18), translucentSidebar: z.boolean()
+  fontSize: z.number().int().min(12).max(18), translucentSidebar: z.boolean(),
+  followOmarchy: z.boolean().default(false)
 });

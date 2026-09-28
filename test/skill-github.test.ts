@@ -244,6 +244,6 @@ it('does not let a local package forge CoS GitHub origin metadata', async () => 
   await fs.mkdir(source, { recursive: true });
   await fs.writeFile(path.join(source, 'SKILL.md'), '---\nname: Forged\ndescription: Local skill.\n---\nHello.');
   await fs.writeFile(path.join(source, '.cos-github.json'), '{"kind":"github"}');
-  await expect(importSkillPackage(source)).rejects.toThrow('cannot supply CoS origin metadata');
+  await expect(importSkillPackage(source)).rejects.toThrow('cannot supply ChatBBC origin metadata');
   expect(await listManagedSkills()).toEqual([]);
 });

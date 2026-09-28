@@ -19,7 +19,7 @@ const releaseDir = path.resolve('release');
 const unpackedDir = arch === 'arm64' ? 'mac-arm64' : 'mac';
 const app = process.argv[3]
   ? path.resolve(process.argv[3])
-  : path.join(releaseDir, unpackedDir, 'Chat On Steroids.app');
+  : path.join(releaseDir, unpackedDir, 'ChatBBC.app');
 const contents = path.join(app, 'Contents');
 const resources = path.join(contents, 'Resources');
 const plist = path.join(contents, 'Info.plist');
@@ -41,17 +41,17 @@ function plistValue(key) {
 }
 
 const expectedPlist = {
-  CFBundleIdentifier: 'com.chatonsteroids.app',
-  CFBundleExecutable: 'Chat On Steroids',
-  CFBundleName: 'Chat On Steroids',
-  CFBundleDisplayName: 'Chat On Steroids',
+  CFBundleIdentifier: 'com.chatbbc.app',
+  CFBundleExecutable: 'ChatBBC',
+  CFBundleName: 'ChatBBC',
+  CFBundleDisplayName: 'ChatBBC',
   CFBundleIconFile: 'icon.icns',
   CFBundleShortVersionString: packageVersion,
   CFBundleVersion: packageVersion,
   LSApplicationCategoryType: 'public.app-category.developer-tools',
   LSMinimumSystemVersion: '13.0',
   NSScreenCaptureUsageDescription:
-    'Chat On Steroids captures a display or window only when the enabled Desktop connector asks to observe it.'
+    'ChatBBC captures a display or window only when the enabled Desktop connector asks to observe it.'
 };
 for (const [key, expected] of Object.entries(expectedPlist)) {
   const actual = plistValue(key);
@@ -108,7 +108,7 @@ function isLaunchedMachO(file) {
 
 const nativeDir = `darwin-${arch}`;
 const nodeModules = path.join(resources, 'app.asar.unpacked', 'node_modules');
-const mainExecutable = path.join(contents, 'MacOS', 'Chat On Steroids');
+const mainExecutable = path.join(contents, 'MacOS', 'ChatBBC');
 const appIcon = requireFile(path.join(resources, 'icon.icns'));
 const desktopAddon = path.join(resources, 'desktop', 'macos-desktop-addon.node');
 const desktopLibrary = path.join(resources, 'desktop', 'libcos-desktop.dylib');

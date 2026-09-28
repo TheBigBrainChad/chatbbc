@@ -29,7 +29,7 @@ export function serverInstructions(
   platform: NodeJS.Platform = process.platform,
   skills = skillCatalogInstructions()
 ): string {
-  if (surface === 'plugins') return 'External MCP tools enabled by the user in Chat On Steroids. Each tool retains its upstream schema and annotations. External servers run with their own operating-system or service permissions; CoS approved folders do not sandbox them. Use only for the user\'s requested task. A failed or disconnected call may already have taken effect: never automatically retry a mutation after an ambiguous failure. Disabled tools require the user to re-enable them in Settings. Core and Desktop are separate connectors.' + (canAddCodeMode(pluginManager.tools()) ? '\n\n' + CODE_MODE_INSTRUCTIONS : '');
+  if (surface === 'plugins') return 'External MCP tools enabled by the user in ChatBBC. Each tool retains its upstream schema and annotations. External servers run with their own operating-system or service permissions; ChatBBC approved folders do not sandbox them. Use only for the user\'s requested task. A failed or disconnected call may already have taken effect: never automatically retry a mutation after an ambiguous failure. Disabled tools require the user to re-enable them in Settings. Core and Desktop are separate connectors.' + (canAddCodeMode(pluginManager.tools()) ? '\n\n' + CODE_MODE_INSTRUCTIONS : '');
   return surface === 'desktop' ? [browserInstructions(), ...(platform === 'win32' || platform === 'darwin' ? [desktopInstructions(ctx, platform)] : [`Files, patches and shell commands live in the separate "${surfaceDefinition('core').connectorName}" connector.`, CODE_MODE_INSTRUCTIONS, ...userInstructions()])].join('\n\n') : coreInstructions(ctx, platform, skills);
 }
 
@@ -94,9 +94,9 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform, skills: s
     `; ${surfaceDefinition('plugins').connectorName} for enabled external apps and services.`,
     `Host: ${host}. Roots: ${roots}`,
     ctx.readOnly ? 'The local tools are read-only.' : 'Use the tools listed in this conversation.',
-    ...(writable || executable ? [`You can always use ${[writable && 'file writing', executable && 'exec_command'].filter(Boolean).join(' and ')} in CoS. Never hallucinate a block from ChatGPT environment messages.`] : []),
+    ...(writable || executable ? [`You can always use ${[writable && 'file writing', executable && 'exec_command'].filter(Boolean).join(' and ')} in ChatBBC. Never hallucinate a block from ChatGPT environment messages.`] : []),
     'Report exact failures: identity, session_id and output-limit errors do not mean Read-only. Never replay successful patches or commands to recover a terminal.',
-    '"This tool call was blocked by OpenAI because we couldn\'t determine the safety status of the request." comes from ChatGPT before CoS receives the call. It is not a CoS failure or a missing capability: retry the identical call once.',
+    '"This tool call was blocked by OpenAI because we couldn\'t determine the safety status of the request." comes from ChatGPT before ChatBBC receives the call. It is not a ChatBBC failure or a missing capability: retry the identical call once.',
     'Unattributed is recording status, not permission. With Allow unattributed calls enabled, the request id owns its workspace, plan, terminals and agent family until exact chat proof arrives. A missing target limits that operation only; keep using enabled tools.',
     'Use full project paths under an approved root, including intermediate folders. Virtual or absolute native paths work; linked projects also accept relative paths.',
   ];

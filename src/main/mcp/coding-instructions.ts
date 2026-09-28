@@ -2,11 +2,11 @@
  * Adapted from OpenAI Codex (Apache-2.0), current main on 2026-09-09:
  * https://github.com/openai/codex/blob/1a4096e273e80da30947e57fdfa45be92858ca91/codex-rs/models-manager/models.json
  * Source: gpt-6-astra.model_messages.instructions_template. Retained prose is copied.
- * CoS changes identity/channel terminology and replaces Codex tool routing, permission
+ * ChatBBC changes identity/channel terminology and replaces Codex tool routing, permission
  * flows, skills, plugins, compaction and app-specific rendering with its own live contracts.
  * See docs/licenses/codex and docs/codex-instructions-and-agent-plan-2026-09-09.md.
  */
-export const CODING_INSTRUCTIONS = `You are a coding agent working with the user through Chat On Steroids. You and the user share one workspace, and your job is to collaborate with them until their intended goal is completely handled.
+export const CODING_INSTRUCTIONS = `You are a coding agent working with the user through ChatBBC. You and the user share one workspace, and your job is to collaborate with them until their intended goal is completely handled.
 
 # When to ask the user for permission
 

@@ -1,0 +1,1124 @@
+{
+ "schemaVersion": 1,
+ "upstream": {
+  "repository": "https://github.com/totec448-spec/chat-on-steroids",
+  "commit": "dee4b5e94b8598d7630e6db62bada9ac6050f457",
+  "version": "2.1.18"
+ },
+ "downstream": {
+  "repository": "https://github.com/TheBigBrainChad/chatbbc",
+  "version": "2.2.0"
+ },
+ "changes": [
+  {
+   "id": "hosted-workflow-removal",
+   "category": "local-automation",
+   "paths": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/publish.yml",
+    ".github/workflows/release.yml"
+   ],
+   "upstreamAnchors": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/publish.yml",
+    ".github/workflows/release.yml"
+   ],
+   "decision": "Hosted GitHub Actions workflows are not imported. Build, test and release run on the local Linux x64 host, so the three workflow files are deleted rather than translated.",
+   "portRule": "Translate any new upstream workflow gate into a local script under scripts/ and map it; never restore a file under .github/workflows.",
+   "checks": [
+    "npm run verify:upstream-map",
+    "npm run verify:rebrand"
+   ]
+  },
+  {
+   "id": "identity",
+   "category": "identity",
+   "paths": [
+    "extension/background.js",
+    "extension/chatgpt-dom.js",
+    "extension/content.js",
+    "extension/fiber.js",
+    "extension/manifest.json",
+    "extension/popup.html",
+    "extension/popup.js",
+    "native/macos-desktop-helper/main.swift",
+    "package-lock.json",
+    "package.json",
+    "src/main/agents.ts",
+    "src/main/bridge.ts",
+    "src/main/codex/read-backend.ts",
+    "src/main/computer/index.ts",
+    "src/main/diagnostics.ts",
+    "src/main/exec.ts",
+    "src/main/extension-path.ts",
+    "src/main/goal.ts",
+    "src/main/mcp/kernel.ts",
+    "src/main/mcp/plan-tool.ts",
+    "src/main/mcp/surfaces.ts",
+    "src/main/mcp/tools-core.ts",
+    "src/main/mcp/tools-desktop-macos.ts",
+    "src/main/mcp/tools-plugins.ts",
+    "src/main/pet-library.ts",
+    "src/main/plugins/installer.ts",
+    "src/main/plugins/manager.ts",
+    "src/main/plugins/oauth.ts",
+    "src/main/plugins/uv-runtime.ts",
+    "src/main/secrets.ts",
+    "src/main/session/handoff.ts",
+    "src/main/session/title.ts",
+    "src/main/shutdown.ts",
+    "src/main/skill-github.ts",
+    "src/main/skill-package.ts",
+    "src/main/update.ts",
+    "src/main/version.ts",
+    "src/main/workspace.ts",
+    "src/renderer/index.html",
+    "src/renderer/main.ts",
+    "src/renderer/pets.ts",
+    "src/renderer/plugins.ts",
+    "src/renderer/skills-library.ts",
+    "src/renderer/skills.ts",
+    "src/shared/recovery.ts",
+    "src/shared/types.ts"
+   ],
+   "upstreamAnchors": [
+    "package.json",
+    "src/main/version.ts",
+    "src/main/bridge.ts",
+    "src/main/mcp/surfaces.ts",
+    "extension/manifest.json",
+    "extension/background.js"
+   ],
+   "decision": "The package, app, bridge, extension and connector identity is ChatBBC: slug chatbbc, protocol 18, app ID com.chatbbc.app, and the three connectors ChatBBC Core, Desktop and Plugins. Live product strings are renamed; tool schemas, route shapes and pairing behavior are unchanged.",
+   "portRule": "Reapply the ChatBBC identity values on every port. The slug and the protocol are independent fail-closed gates, so bump or rename them separately and update both sides together.",
+   "checks": [
+    "npm run verify:rebrand",
+    "npm test -- test/bridge.test.ts"
+   ]
+  },
+  {
+   "id": "identity-locales",
+   "category": "identity",
+   "paths": [
+    "extension/_locales/de/messages.json",
+    "extension/_locales/en/messages.json",
+    "extension/_locales/es/messages.json",
+    "extension/_locales/fr/messages.json",
+    "extension/_locales/ja/messages.json",
+    "extension/_locales/tr/messages.json",
+    "extension/_locales/zh_CN/messages.json",
+    "extension/_locales/zh_TW/messages.json",
+    "src/renderer/locales/de.json",
+    "src/renderer/locales/es.json",
+    "src/renderer/locales/fr.json",
+    "src/renderer/locales/ja.json",
+    "src/renderer/locales/pt-BR.json",
+    "src/renderer/locales/pt-PT.json",
+    "src/renderer/locales/tr.json",
+    "src/renderer/locales/zh-CN.json",
+    "src/renderer/locales/zh-TW.json"
+   ],
+   "upstreamAnchors": [
+    "extension/_locales/en/messages.json",
+    "src/renderer/locales/de.json"
+   ],
+   "decision": "Extension and renderer locale catalogs name ChatBBC in every live product string, with descriptive prose translated per locale. The catalog artwork copyright attribution is preserved in each renderer locale.",
+   "portRule": "Translate new product strings into every locale file and keep ChatBBC itself untranslated. Preserve the catalog artwork copyright sentence; do not machine-translate authored or provider text.",
+   "checks": [
+    "npm run verify:rebrand"
+   ]
+  },
+  {
+   "id": "prompts",
+   "category": "prompts",
+   "paths": [
+    "src/main/mcp/coding-instructions.ts",
+    "src/main/mcp/instructions.ts",
+    "src/main/plugins/catalog.ts",
+    "src/main/session/handoff-prompt.ts"
+   ],
+   "upstreamAnchors": [
+    "src/main/mcp/coding-instructions.ts",
+    "src/main/mcp/instructions.ts",
+    "src/main/session/handoff-prompt.ts",
+    "src/main/plugins/catalog.ts"
+   ],
+   "decision": "Product names in the coding, session and handoff prompts and in the plugin catalog explanation are ChatBBC. Capability contracts, tool authority, limits and the catalog artwork copyright comment are unchanged.",
+   "portRule": "Reapply the ChatBBC naming when merging prompt fixes. Do not alter tool authority, validation, limits or provider-policy statements, and keep the catalog artwork copyright line.",
+   "checks": [
+    "npm test -- test/mcp-user-instructions.test.ts"
+   ]
+  },
+  {
+   "id": "assets",
+   "category": "assets",
+   "paths": [
+    "artwork/README.md",
+    "artwork/app-icon-source.png",
+    "artwork/chatbbc-mark.svg",
+    "docs/images/readme-hero.svg",
+    "extension/icons/icon128.png",
+    "extension/icons/icon16.png",
+    "extension/icons/icon32.png",
+    "extension/icons/icon48.png",
+    "extension/overlay.css",
+    "extension/popup.css",
+    "scripts/make-icon.mjs",
+    "src/renderer/icons.css"
+   ],
+   "upstreamAnchors": [
+    "scripts/make-icon.mjs",
+    "artwork/app-icon-source.png",
+    "src/renderer/icons.css"
+   ],
+   "decision": "One original speech-bubble lettermark in artwork/chatbbc-mark.svg is the single source; the icon generator rasterizes it into the app, tray and extension icons. The companion popup and overlay use neutral grayscale styling.",
+   "portRule": "Regenerate icon outputs from artwork/chatbbc-mark.svg rather than editing them by hand. Keep the companion styling neutral and do not inject rules into ChatGPT's own transcript.",
+   "checks": [
+    "npm run icon"
+   ]
+  },
+  {
+   "id": "omarchy-theme",
+   "category": "omarchy",
+   "paths": [
+    "scripts/verify-omarchy-theme.cjs",
+    "src/main/appearance-schema.ts",
+    "src/main/appearance.ts",
+    "src/main/index.ts",
+    "src/main/ipc.ts",
+    "src/main/omarchy-theme.ts",
+    "src/main/pet-overlay.ts",
+    "src/renderer/appearance.ts",
+    "src/renderer/pet-overlay.ts",
+    "src/renderer/settings.css",
+    "src/renderer/styles.css",
+    "src/shared/appearance.ts",
+    "src/shared/pets.ts",
+    "test/appearance.test.ts",
+    "test/omarchy-theme.test.ts",
+    "test/pet-overlay-renderer.test.ts"
+   ],
+   "upstreamAnchors": [
+    "src/renderer/appearance.ts",
+    "src/shared/appearance.ts",
+    "src/main/ipc.ts",
+    "src/main/index.ts"
+   ],
+   "decision": "The desktop follows the live Omarchy palette through one main-process reader. The palette is projected over saved Appearance settings while Follow Omarchy theme is on and is never written back into config.",
+   "portRule": "Keep the live palette in the main-process owner and out of persisted config. Merge functional fixes into the shared appearance owner; do not add a second snapshot, poller or theme-sync protocol.",
+   "checks": [
+    "npm test -- test/omarchy-theme.test.ts",
+    "npm test -- test/appearance.test.ts"
+   ]
+  },
+  {
+   "id": "linux-release",
+   "category": "linux-release",
+   "paths": [
+    "THIRD-PARTY-NOTICES.txt",
+    "docs/licenses/native/README.md",
+    "docs/licenses/native/SOURCE-BUILD.md",
+    "docs/licenses/native/sources.json",
+    "docs/release-notes/v2.2.0.md",
+    "electron-builder.yml",
+    "scripts/check-release-absent.mjs",
+    "scripts/generate-third-party-notices.mjs",
+    "scripts/package-native-sources.mjs",
+    "scripts/package.mjs",
+    "scripts/packaging-targets.mjs",
+    "scripts/prepare-packaging-native.mjs",
+    "scripts/release-local.mjs",
+    "scripts/verify-chatbbc-package.mjs",
+    "scripts/windows-installer-acl.nsh",
+    "test/packaging.test.ts",
+    "test/release-local.test.ts"
+   ],
+   "upstreamAnchors": [
+    "electron-builder.yml",
+    "scripts/package.mjs",
+    ".github/workflows/release.yml"
+   ],
+   "decision": "The only supported distribution is a Linux x64 AppImage named ChatBBC-Linux-x64.AppImage, built and verified on the local host. Windows, macOS and ARM release targets, aliases and builder configuration are removed. Official Sharp WebAssembly replaces the native Linux payload because the Electron/GLib combination crashes during image processing; license and source inventory track the shipped module. The local release script builds a checked candidate and publishes only on explicit invocation.",
+   "portRule": "Keep the release target Linux x64 AppImage with a packaged-runtime image decode probe and an exact source/license inventory for its WebAssembly payload. Bind explicit publication's Git remote and gh operations to the same preflighted repository; bound packaged-smoke child shutdown. Translate new upstream packaging checks into local scripts; never restore hosted workflows or a Windows, macOS or ARM release target.",
+   "checks": [
+    "npm test -- test/packaging.test.ts",
+    "npm test -- test/release-local.test.ts"
+   ]
+  },
+  {
+   "id": "local-automation",
+   "category": "local-automation",
+   "paths": [
+    "scripts/afterpack-macos-adhoc-seal.mjs",
+    "scripts/fetch-ripgrep.mjs",
+    "scripts/fetch-tunnel-client.mjs",
+    "scripts/fixtures/shell-react-runtime.js",
+    "scripts/macos-audit-utils.mjs",
+    "scripts/smoke-macos-bundle.mjs",
+    "scripts/smoke-macos-gui.mjs",
+    "scripts/smoke-packaged-runtime.mjs",
+    "scripts/verify-appearance.cjs",
+    "scripts/verify-browser-control-entry.mjs",
+    "scripts/verify-browser-control.mjs",
+    "scripts/verify-current-tunnel.mjs",
+    "scripts/verify-history-scroll.cjs",
+    "scripts/verify-local-ui.mjs",
+    "scripts/verify-navigation-motion.cjs",
+    "scripts/verify-pet-electron.cjs",
+    "scripts/verify-pet-overlay-electron.cjs",
+    "scripts/verify-pet-performance.cjs",
+    "scripts/verify-pet-toggle.cjs",
+    "scripts/verify-pr-workspace.cjs",
+    "scripts/verify-settings-focus.cjs",
+    "scripts/verify-settings-layout.cjs",
+    "scripts/verify-sidebar-setup.cjs",
+    "scripts/verify-workspace-terminal.cjs",
+    "scripts/verify-windows-capture-border.mjs"
+   ],
+   "upstreamAnchors": [
+    "scripts/verify-appearance.cjs",
+    "scripts/verify-browser-control.mjs",
+    ".github/workflows/ci.yml"
+   ],
+   "decision": "Local verification and fetch scripts name ChatBBC in their fixtures, window titles and User-Agent strings, and scripts/verify-local-ui.mjs runs the Wayland GUI fixtures on the local host instead of a hosted runner.",
+   "portRule": "Keep verification local and on Wayland. Rename product strings in fixtures when the identity changes, and do not point a fixture at a hosted runner or a predecessor product name.",
+   "checks": [
+    "npm run verify:rebrand"
+   ]
+  },
+  {
+   "id": "documentation",
+   "category": "documentation",
+   "paths": [
+    ".github/ISSUE_TEMPLATE/bug_report.yml",
+    ".github/ISSUE_TEMPLATE/config.yml",
+    ".github/ISSUE_TEMPLATE/feature_request.yml",
+    ".github/pull_request_template.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
+    "README.md",
+    "SECURITY.md",
+    "docs/plugins.md",
+    "docs/setup.md",
+    "docs/tool-surface.md",
+    "docs/worklog-2026-09-28-chatbbc-port.md"
+   ],
+   "upstreamAnchors": [
+    "README.md",
+    "AGENTS.md",
+    "CONTRIBUTING.md"
+   ],
+   "decision": "Current docs, the agent guide and issue templates name ChatBBC, target Linux x64 and point at local commands. Upstream provenance links and historical reports stay, and the hosted-CI badges and Windows, macOS and ARM download promises are gone.",
+   "portRule": "Reapply the ChatBBC naming and Linux x64 scope to current docs. Keep upstream provenance links and historical reports as historical, and never restore a hosted-CI badge or a non-Linux download promise.",
+   "checks": [
+    "npm run verify:rebrand"
+   ]
+  },
+  {
+   "id": "verification",
+   "category": "verification",
+   "paths": [
+    "test/bridge.test.ts",
+    "test/connection.test.ts",
+    "test/content-script.test.ts",
+    "test/desktop-input-maintenance.test.ts",
+    "test/env.test.ts",
+    "test/exec-hints.test.ts",
+    "test/extension-path.test.ts",
+    "test/extension.test.ts",
+    "test/fiber.test.ts",
+    "test/goal.test.ts",
+    "test/input-delivery-integration.test.ts",
+    "test/macos-adhoc-seal.test.ts",
+    "test/mcp-user-instructions.test.ts",
+    "test/mcp.test.ts",
+    "test/pet-library.test.ts",
+    "test/platform.test.ts",
+    "test/plugin-refresh-dom.test.ts",
+    "test/plugin-refresh-workflow.test.ts",
+    "test/plugin-refresh.test.ts",
+    "test/plugins-ui.test.ts",
+    "test/renderer-skills.test.ts",
+    "test/renderer-state.test.ts",
+    "test/renderer-timeline.test.ts",
+    "test/request-agent-ownership.test.ts",
+    "test/secrets.test.ts",
+    "test/session.test.ts",
+    "test/shell-agent-roundtrip.test.ts",
+    "test/shell-compat.test.ts",
+    "test/skill-github.test.ts",
+    "test/update.test.ts",
+    "test/window-lifecycle.test.ts"
+   ],
+   "upstreamAnchors": [
+    "test/bridge.test.ts",
+    "test/extension.test.ts",
+    "test/update.test.ts"
+   ],
+   "decision": "Test fixtures and assertions use the ChatBBC identity, protocol 18 and the three ChatBBC connector names. Tests that pin a predecessor name do so to prove it is rejected.",
+   "portRule": "Update fixtures to the ChatBBC identity when a port changes observable identity. Keep a predecessor literal only in a test that proves it is rejected, and record that literal under retainedIdentifiers.",
+   "checks": [
+    "npm test -- test/bridge.test.ts",
+    "npm test -- test/extension.test.ts"
+   ]
+  },
+  {
+   "id": "porting-guards",
+   "category": "verification",
+   "paths": [
+    "scripts/verify-rebrand.mjs",
+    "scripts/verify-upstream-map.mjs",
+    "test/rebrand-guard.test.ts",
+    "test/upstream-map.test.ts"
+   ],
+   "upstreamAnchors": [
+    ".github/workflows/ci.yml"
+   ],
+   "decision": "Two local guards replace the hosted workflow checks: verify-upstream-map accounts for every added, modified and deleted path exactly once, and verify-rebrand accounts for every predecessor product literal.",
+   "portRule": "Extend the guards when a port adds an identity surface or a map field, and map the guards themselves. Do not weaken either check to make a port pass.",
+   "checks": [
+    "npm run verify:upstream-map",
+    "npm run verify:rebrand"
+   ]
+  },
+  {
+   "id": "porting-map",
+   "category": "documentation",
+   "paths": [
+    "docs/UPSTREAM.md",
+    "docs/upstream-map.json"
+   ],
+   "upstreamAnchors": [
+    "AGENTS.md"
+   ],
+   "decision": "docs/upstream-map.json is the machine-readable authority for which downstream path belongs to which decision; docs/UPSTREAM.md is the porting runbook and points at the map instead of duplicating it.",
+   "portRule": "Update the map in the same change as the port. Advance the pinned upstream commit only after the whole upstream delta is accounted for; record a partial port in ports instead.",
+   "checks": [
+    "npm run verify:upstream-map"
+   ]
+  }
+ ],
+ "retainedIdentifiers": [
+  {
+   "path": "AGENTS.md",
+   "literal": "Chat On Steroids",
+   "reason": "provenance-url: names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "AGENTS.md",
+   "literal": "chat-on-steroids",
+   "reason": "provenance-url: names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "CHANGELOG.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "CHANGELOG.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "CHANGELOG.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "CHANGELOG.md",
+   "literal": "chatonsteroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "CONTRIBUTING.md",
+   "literal": "Chat On Steroids",
+   "reason": "provenance-url: names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "CONTRIBUTING.md",
+   "literal": "chat-on-steroids",
+   "reason": "provenance-url: names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "CONTRIBUTORS.md",
+   "literal": "Chat On Steroids",
+   "reason": "provenance-url: names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "CONTRIBUTORS.md",
+   "literal": "chat-on-steroids",
+   "reason": "provenance-url: names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "LICENSE",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "README.md",
+   "literal": "Chat On Steroids",
+   "reason": "provenance-url: names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "README.md",
+   "literal": "chat-on-steroids",
+   "reason": "provenance-url: names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "docs/UPSTREAM.md",
+   "literal": "Chat On Steroids",
+   "reason": "provenance-url: names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "docs/UPSTREAM.md",
+   "literal": "chat-on-steroids",
+   "reason": "provenance-url: names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "docs/bug-audit-2026-08-24.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/bug-audit-2026-08-31.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/bug-audit-2026-08-31.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/bug-audit-2026-09-02.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/bughunt-2026-08-25.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/bughunt-2026-08-25.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/chatgpt-turn-signals.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/codex-desktop-bridge.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/codex-desktop-bridge.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/computer-use-overhaul-plan.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/github-triage-2026-09-22.md",
+   "literal": "COS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/github-triage-2026-09-22.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/github-triage-2026-09-22.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/interim-preambles-2026-09-20.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/licenses/codex/README.md",
+   "literal": "CoS",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "docs/licenses/plugins/README.md",
+   "literal": "CoS",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "docs/licenses/plugins/heygen-SERVICE-NOTICE",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "docs/licenses/plugins/heygen-SERVICE-NOTICE",
+   "literal": "CoS",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "docs/licenses/plugins/recraft-SERVICE-NOTICE",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "docs/licenses/plugins/recraft-SERVICE-NOTICE",
+   "literal": "CoS",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "docs/plugin-licenses.md",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "docs/plugin-notice-audit.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.0.0.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.0.1.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.0.2.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.0.2.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.0.2.md",
+   "literal": "chatonsteroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.0.3.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.0.4.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.0.5.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.0.6.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.0.7.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.0.8.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.0.9.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.1.0.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.1.11.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.1.12.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.1.13.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.1.13.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.1.14.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.1.15.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.1.15.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.1.16.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.1.16.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.1.17.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/release-notes/v2.1.17.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/setup.md",
+   "literal": "chat-on-steroids",
+   "reason": "provenance-url: names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "docs/tool-error-rate-2026-08-23.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/tool-error-rate-2026-08-24.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-18-manual-close-activity.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-18-maxim-pr-followup.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-19-backlog-triage.md",
+   "literal": "COS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-19-backlog-triage.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-19-backlog-triage.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-19-backlog-triage.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-19-computer-use-audit.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-19-followup-final-capture.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-19-model-discovery-311.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-19-pr-review.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-20-issues-323-330.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-20-selective-pr-review.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-22-french-locale.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-23-git-changes-readonly.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-26-managed-tab-departure.md",
+   "literal": "Chat-On-Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-26-managed-tab-departure.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-27-pet-native-input.md",
+   "literal": "CoS",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-27-phosphor-icon-font.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-27-startup-correlation-ledger.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "docs/worklog-2026-09-28-native-send-listeners.md",
+   "literal": "chat-on-steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "extension/content.js",
+   "literal": "COS",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "scripts/generate-third-party-notices.mjs",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "scripts/verify-appearance.cjs",
+   "literal": "chat-on-steroids",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "scripts/verify-omarchy-theme.cjs",
+   "literal": "chat-on-steroids",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "scripts/verify-public-history.mjs",
+   "literal": "chat-on-steroids",
+   "reason": "provenance-url: names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "scripts/verify-sidebar-setup.cjs",
+   "literal": "chat-on-steroids",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "src/main/env.ts",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "src/main/plugins/catalog.ts",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "src/main/version.ts",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: historical upstream report kept as evidence, not as current product documentation"
+  },
+  {
+   "path": "src/renderer/file-panel.ts",
+   "literal": "chat-on-steroids",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "src/renderer/index.html",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "src/renderer/locales/de.json",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "src/renderer/locales/es.json",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "src/renderer/locales/fr.json",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "src/renderer/locales/ja.json",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "src/renderer/locales/pt-BR.json",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "src/renderer/locales/pt-PT.json",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "src/renderer/locales/tr.json",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "src/renderer/locales/zh-CN.json",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "src/renderer/locales/zh-TW.json",
+   "literal": "Chat On Steroids",
+   "reason": "license: upstream copyright or license attribution preserved verbatim for retained third-party and catalog artwork"
+  },
+  {
+   "path": "src/renderer/sidebar-completion.ts",
+   "literal": "chat-on-steroids",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "src/renderer/sidebar-order.ts",
+   "literal": "chat-on-steroids",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "src/renderer/sidebar-resize.ts",
+   "literal": "chat-on-steroids",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "src/renderer/work-panel-resize.ts",
+   "literal": "chat-on-steroids",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "src/renderer/workspace-docks.ts",
+   "literal": "chat-on-steroids",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "src/shared/user-prompt.ts",
+   "literal": "COS",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/computer-windows-accessibility.test.ts",
+   "literal": "COS",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/content-script.test.ts",
+   "literal": "Chat On Steroids",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/content-script.test.ts",
+   "literal": "TobisComputer",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/extension.test.ts",
+   "literal": "chat-on-steroids",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/fiber.test.ts",
+   "literal": "Chat On Steroids",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/fiber.test.ts",
+   "literal": "TobisComputer",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/fixtures/windows-desktop/capture.cs",
+   "literal": "COS",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/input-delivery-integration.test.ts",
+   "literal": "Chat On Steroids",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/pet-library.test.ts",
+   "literal": "CoS",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/plugin-refresh-dom.test.ts",
+   "literal": "Chat On Steroids",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/plugin-refresh-dom.test.ts",
+   "literal": "TobisComputer",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/plugins-catalog-live.test.ts",
+   "literal": "CoS",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/plugins-installer.test.ts",
+   "literal": "CoS",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/plugins-live-proxy.test.ts",
+   "literal": "CoS",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/plugins-manager.test.ts",
+   "literal": "CoS",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/plugins-python-live.test.ts",
+   "literal": "CoS",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/project-git.test.ts",
+   "literal": "CoS",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/public-history-privacy.test.ts",
+   "literal": "chat-on-steroids",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/rebrand-guard.test.ts",
+   "literal": "COS",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/rebrand-guard.test.ts",
+   "literal": "Chat On Steroids",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/rebrand-guard.test.ts",
+   "literal": "ChatOnSteroids",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/rebrand-guard.test.ts",
+   "literal": "CoS",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/rebrand-guard.test.ts",
+   "literal": "TobisComputer",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/rebrand-guard.test.ts",
+   "literal": "chat-on-steroids",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/rebrand-guard.test.ts",
+   "literal": "chatonsteroids",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/release-local.test.ts",
+   "literal": "chat-on-steroids",
+   "reason": "provenance-url: names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "test/renderer-file-panel.test.ts",
+   "literal": "chat-on-steroids",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/renderer-html.test.ts",
+   "literal": "COS",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/renderer-timeline.test.ts",
+   "literal": "chat-on-steroids",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/session-prompt.test.ts",
+   "literal": "COS",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/sidebar-completion.test.ts",
+   "literal": "chat-on-steroids",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/sidebar-order.test.ts",
+   "literal": "chat-on-steroids",
+   "reason": "internal-identifier: persisted key, protocol marker or fixture identifier, not a product brand"
+  },
+  {
+   "path": "test/skill-github.test.ts",
+   "literal": "CoS",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  },
+  {
+   "path": "test/upstream-map.test.ts",
+   "literal": "Chat On Steroids",
+   "reason": "negative-test-fixture: proves a predecessor or foreign identity is rejected rather than accepted"
+  }
+ ]
+}

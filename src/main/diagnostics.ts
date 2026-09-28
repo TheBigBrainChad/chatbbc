@@ -184,7 +184,7 @@ export function describeMacOSDesktopAccess(
     checks.push(check(
       'macOS Accessibility',
       access.accessibility,
-      'macOS denied AXUIElement access to the in-process Chat On Steroids.app backend. Open Privacy & Security → Accessibility (Device Control and Data Access on newer macOS).'
+      'macOS denied AXUIElement access to the in-process ChatBBC.app backend. Open Privacy & Security → Accessibility (Device Control and Data Access on newer macOS).'
     ));
   }
   return checks;
@@ -288,7 +288,7 @@ function developerMode(seen: number | null, called: number | null): Check {
       'Cannot tell — ChatGPT connected and read the tool list, but has never run a tool. ' +
       'That is normal if you have not asked it to do anything yet. If you have asked and it ' +
       'answered “does not support developer MCPs”, the cause is on ChatGPT’s side: check that ' +
-      'the CoS app is still added and enabled under ChatGPT → Plugins. Older ChatGPT versions ' +
+      'the ChatBBC app is still added and enabled under ChatGPT → Plugins. Older ChatGPT versions ' +
       'also need Developer mode on (Settings → Security and login), which can switch itself off after an update.'
   };
 }

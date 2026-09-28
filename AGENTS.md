@@ -1,4 +1,4 @@
-# Chat On Steroids — product logic and agent map
+# ChatBBC — product logic and agent map
 
 Read this file before changing the app. It explains the product, feature logic, owners and
 working rules without requiring old worklogs. If the host injected only a prefix, read the
@@ -21,13 +21,16 @@ changed lines before applying an older patch. Document the work and its actual v
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: **2026-09-17**, including the 2.1.14 release candidate. App/extension **2.1.14**,
-bridge protocol **14** in the checked declarations (`package.json`, `src/main/version.ts`,
-`extension/manifest.json`). This does not prove release, installation or live Chrome behavior.
+Source alignment: downstream **ChatBBC 2.2.0**, app/companion bridge protocol **18**, forked
+from [Chat On Steroids](https://github.com/totec448-spec/chat-on-steroids/tree/dee4b5e94b8598d7630e6db62bada9ac6050f457)
+at `dee4b5e94b8598d7630e6db62bada9ac6050f457` (upstream 2.1.18). See
+[`docs/UPSTREAM.md`](docs/UPSTREAM.md) for the porting procedure and
+[`docs/upstream-map.json`](docs/upstream-map.json) for exact downstream path ownership.
+This declares the source baseline, not an installed or published release.
 
 ## 1. What the whole app is meant to do
 
-Chat On Steroids is a Windows/macOS/Linux Electron workspace around ChatGPT. The user can work
+ChatBBC is a Linux x64 Electron workspace around ChatGPT. The user can work
 from the desktop app while ChatGPT generates answers in its own browser conversation. The app
 sends instructions, records the conversation, supplies local tools over MCP, and coordinates
 long-running work. The companion extension connects that browser conversation to the local
@@ -197,7 +200,7 @@ define the tool/config/wire contract. README and worklogs are secondary and can 
 | Automatic Continue | On. | Unfinished-response recovery also serves enabled Goal/Loop. This switch controls ordinary chats; explicit Off survives and malformed config disables it. See §14. |
 | Goal / Loop | Off, preferred mode Goal. Both decision backends default to ChatGPT, helper `gpt-5.6-sol` High. | API uses the configured OpenRouter/custom endpoint and stored model. These defaults are not account-availability proof. |
 | Desktop | Windows on; macOS retains its off default and separate native OS consent; Linux supports extension browser control. | Existing screen/control grants also govern browser tools; unsupported native clipboard remains masked. No new per-tab permission dialog. |
-| Shell/UI | Dark theme, minimize to tray, no automatic connector connection/login startup by default. | Optional browser/finish/plan choices are resolved by current config and their consumer, not invented from absent fields. |
+| Shell/UI | Follow the live Omarchy theme when available; otherwise use saved manual appearance. Minimize to tray; no automatic connector connection/login startup by default. | Fresh installs follow Omarchy, while existing appearance settings without `followOmarchy` keep their manual palette. Font/language stay editable; optional browser/finish/plan choices remain resolved by their owners. |
 | Command policy | Off, in Allowlist mode, with no rules. | Missing legacy settings stay Off; a missing mode defaults to Allowlist. Rules and mode persist while Off. An enabled empty Allowlist rejects every launch; an enabled empty Denylist permits simple supported commands. |
 | Plugin auto-refresh | Off. | Local status/discovery never claims ChatGPT refreshed its connector snapshot. |
 | Browser bridge port | Auto. | `ui.browserBridgePort` accepts Auto or 8765–8769. Effective `CLF_BRIDGE_PORTS` overrides it and disables the Settings control. |
@@ -237,10 +240,10 @@ Paths in this section are repository-relative. Most mechanisms have `main`, `sha
 | Models/usage | `src/main/chat-models.ts`, `session/usage.ts`; `src/shared/{chat-models,usage}.ts`; `src/renderer/{chat-models,context-meter,usage}.ts`: account observations vs local estimates. |
 | External plugins | `src/main/plugins/{catalog,installer,manager,exposure,oauth}.ts`, `plugins-ipc.ts`, `plugin-refresh.ts`, `src/shared/{plugins,plugin-refresh}.ts`, `src/renderer/plugins.ts`. |
 | Renderer boundary | `src/main/ipc.ts`, `edit-context-menu.ts`, `src/preload/index.ts`; `src/renderer/{main,chat,dom,tool-result,timeline-scroll,sidebar-resize,browser-preferences,connection-popover,i18n}.ts`, `locales/{es,zh-CN,zh-TW,ja,tr,fr,pt-PT}.json`, `index.html`, `styles.css`. |
-| Appearance | `src/shared/appearance.ts`, `src/main/appearance-schema.ts`, `src/renderer/appearance.ts`: bounded saved colors/typography, field-wise Settings merge, immediate semantic CSS projection. `window-layout.ts` shares native caption/backing colors. |
+| Appearance | `src/shared/appearance.ts`, `src/main/{appearance,appearance-schema,omarchy-theme}.ts`, `src/renderer/appearance.ts`: saved manual colors/typography and field-wise Settings merge; one bounded live Omarchy reader and in-memory state publication; semantic CSS/native projection without persisting live colors. `window-layout.ts` shares native caption/backing colors. |
 | Native Desktop | `src/main/computer/{index,helper,browser-chords,windows-api,windows-capture,windows-apps,windows-keys}.ts`, `src/shared/windows-computer.ts`, `mcp/tools-desktop-{windows,macos}.ts`, `native/macos-desktop-helper/*`, `native/macos-desktop-addon/*`. |
 | Direct browser control | `src/main/browser-control.ts`, `mcp/tools-browser.ts`, `src/shared/browser-control.ts`, `extension/browser-control{,-page}.js`: short-lived RPCs, session-owned debugger tabs, bounded DOM/diagnostics and background input. |
-| Delivery/build | `src/main/{update,extension-path,version,logger,durable}.ts`, `electron.vite.config.ts`, `electron-builder.yml`, `scripts/*`, `.github/workflows/*`, `vitest.config.ts`. |
+| Delivery/build | `src/main/{update,extension-path,version,logger,durable}.ts`, `electron.vite.config.ts`, `electron-builder.yml`, `scripts/*`: local Linux x64 package, GUI/release verification and candidate assembly. No hosted workflows. |
 
 ### One durable fact, one authoritative owner
 
@@ -331,9 +334,9 @@ still checks live policy. Schema visibility is never the security boundary.
 
 | Surface | Advertised operations under current eligibility |
 | --- | --- |
-| Core — `chat-on-steroids-core` | `read`, `view_image`, `find` when command execution is off, `apply_patch`, `exec_command`/`write_stdin`, `update_plan`, `agents`, `session_finish`, code-mode `exec`. |
-| Desktop — `chat-on-steroids-desktop` | All Chromium extension hosts: `browser_tabs`, `browser_snapshot`, `browser_screenshot`, `browser_console`, `browser_network`, `browser_navigate`, `browser_action`, `browser_evaluate`. Windows additionally exposes 13 Window2 operations, clipboard and `exec` with `sky`; macOS adds `observe`/`computer`. Surface `exec` composes browser tools too. |
-| Plugins — `chat-on-steroids-plugins` | Enabled external tools with their upstream names and schemas, plus code-mode `exec` when that composition name is available. |
+| Core — `chatbbc-core` | `read`, `view_image`, `find` when command execution is off, `apply_patch`, `exec_command`/`write_stdin`, `update_plan`, `agents`, `session_finish`, code-mode `exec`. |
+| Desktop — `chatbbc-desktop` | On Linux: `browser_tabs`, `browser_snapshot`, `browser_screenshot`, `browser_console`, `browser_network`, `browser_navigate`, `browser_action`, `browser_evaluate`; no native Linux screen/input API. Retained Windows/macOS source helpers are not downstream release targets. |
+| Plugins — `chatbbc-plugins` | Enabled external tools with their upstream names and schemas, plus code-mode `exec` when that composition name is available. |
 
 `read` needs read/browse/metadata as appropriate; images need read; patch checks each hunk's
 create/edit/move/delete permission; command controls both terminal tools.
@@ -353,7 +356,7 @@ label. A permission change takes effect at the live guard without requiring a ne
 Core instructions distinguish operation-specific identity, process-id and output-limit failures
 from Read-only mode. A terminal ownership refusal names that process scope; it does not imply
 a global write restriction or authorize replaying an already completed job.
-They directly affirm that enabled file writing/exec_command can always be used in CoS and say
+They directly affirm that enabled file writing/exec_command can always be used in ChatBBC and say
 never to hallucinate a block from ChatGPT environment messages. The paragraph names only enabled
 capabilities and disappears when both are disabled, including Read-only mode.
 
@@ -407,7 +410,7 @@ remain non-linkable. Desktop and external plugins receive no managed root.
 Skills open through leading `/` completion in the composer; the attachment popup's Skills button
 inserts that leading slash and focuses the input while preserving existing draft text. Commands and Skills are
 separate compact sections; there is no sidebar entry, modal library or native import/remove UI.
-A small plus icon to the right of that Skills button inserts `Please add the following skills to my COS skills:`
+A small plus icon to the right of that Skills button inserts `Please add the following skills to my ChatBBC skills:`
 into the authored draft without sending it. ChatGPT can create Markdown instructions through
 the existing permission-checked `/skills` filesystem root. Leading `/id` or `/prompt id` completion projects selected
 commands as removable chips. The existing authored draft retains those command bytes; chips and
@@ -2711,9 +2714,14 @@ Current persistence/publication exceptions are in §21.
 
 ## 18. Desktop workspace, plugins, connection and native control
 
-Dark is the default theme. Theme selection belongs in Appearance settings; the main header
-has no light/dark shortcut. Files and worker-panel controls attach to the header independently
-of appearance controls.
+Fresh installations follow the live Omarchy palette when valid, otherwise use saved manual
+appearance. Theme selection belongs in Appearance settings; following locks manual palette
+controls without overwriting saved values and turning it off restores them. Main process reads
+only `~/.local/state/omarchy/current/theme/colors.toml` via `omarchy-theme.ts`; its in-memory
+snapshot is resolved with manual config in `main/appearance.ts` and published outside config.
+There is no theme command, installed hook, polling, duplicate palette store or companion theme
+protocol. Fonts/language remain editable. The main header has no light/dark shortcut; files
+and worker-panel controls attach to it independently of appearance controls.
 
 ### Renderer and IPC
 
@@ -2850,7 +2858,7 @@ in app and browser; it cannot expose the countdown early. `visibleAt` lets the e
 new backend scheduler. Selection generations fence delayed controls and clear old-chat timers.
 Listening rows name the next existing step: queued input takes priority, otherwise the active
 Continue, Goal or Loop obligation. An already pending browser repair takes display precedence
-over future watches. Post-reload rows say when CoS still holds the source turn generating;
+over future watches. Post-reload rows say when ChatBBC still holds the source turn generating;
 native-busy rows explicitly name the additional wait and show its actual remaining deadline.
 The generating flag belongs only to that post-reload wait and disappears when it is retired.
 This is a projection of delivery ownership, never another trigger.
@@ -3121,11 +3129,12 @@ process once and retains an explicit access error; ordinary network retry remain
 
 ### Native Desktop
 
-Desktop is available only on Windows and supported macOS. Linux removes it from live discovery
-and enforcement while preserving stored preferences. Windows uses the bounded PowerShell/Win32/
-UIA helper; macOS uses Swift ScreenCaptureKit/AX/CGEvent through an architecture-matched N-API
-addon on an Electron worker. The packaged Electron app is the macOS permission subject; a
-standalone CLI probe does not prove Screen Recording/Accessibility permission for the app.
+On supported Linux x64, the Desktop connector advertises browser tools but does not advertise
+native screen/input operations. The following Windows/macOS native helpers are retained
+upstream-compatible source, not ChatBBC release targets or Linux capabilities. Windows uses
+the bounded PowerShell/Win32/UIA helper; macOS uses Swift ScreenCaptureKit/AX/CGEvent through
+an architecture-matched N-API addon on an Electron worker. A standalone CLI probe does not
+prove packaged Mac Screen Recording/Accessibility permission.
 
 `computer/index.ts` owns native actions, capture frames/accessibility refs, batching and
 postconditions. Registrars own live capability checks. Windows `windows-api.ts` implements the
@@ -3262,21 +3271,24 @@ npm run dev
 npm run typecheck
 npm test -- --run test/<target>.test.ts
 npm run verify:privacy
-npm run verify:notices
+npm run verify:rebrand
+npm run verify:upstream-map
 npm run verify
 npm run build
-npm run dist                       # current OS, x64 + arm64
-npm run dist:dir:mac:x64            # example unpacked target on a matching host
+npm run verify:ui                 # Wayland Electron fixtures
+npm run dist:linux:x64            # Linux x64 AppImage
+npm run dist:dir:linux:x64        # local unpacked package smoke
+npm run release:local             # verified candidate, no publication
 ```
 
 Use `npm ci` for an intentionally needed reproducible dependency install, not as routine
-cleanup of this shared tree. `verify:ci` fetches rg, checks privacy/notices/native-source metadata,
-typechecks, verifies Electron resolves, runs Vitest excluding `computer` and `mcp-shutdown`,
-then runs those suites with one worker. The real desktop foreground assertion must not compete
-with other suites' native windows or input; its assertions remain unchanged. `vitest.config.ts`
-forces Node, bounded hooks/tests, `CLF_BRIDGE_PORTS=0`
+cleanup of this shared tree. `npm run verify` invokes the local verification gate: rg,
+privacy/rebrand/upstream-map/notices/native-source checks, typecheck, Electron runtime resolution
+and Vitest excluding `computer` and `mcp-shutdown`, then those suites with one worker.
+The real desktop foreground assertion must not compete with other suites' native windows or
+input. `vitest.config.ts` forces Node, bounded hooks/tests, `CLF_BRIDGE_PORTS=0`
 and test-only `CLF_EVIDENCE_MS=1500`; never let tests contact the installed production bridge.
-Opt-in live plugin/macOS probes are separate evidence, not implied by the ordinary suite.
+Opt-in live plugin probes are separate evidence, not implied by the ordinary suite.
 
 When delegation is authorized, reuse a suitable worker. Give each assignment the project,
 concrete task, evidence, allowed files, ownership boundaries, checks and expected handoff.
@@ -3293,8 +3305,8 @@ Record changes and actual checks in a focused worklog. Keep security reproductio
 session material out of public docs and fixtures; follow `SECURITY.md`. Do not package, install,
 commit or publish merely because a source/documentation task was requested.
 
-Runtime data is under Electron userData: `%APPDATA%/chat-on-steroids` on Windows,
-`~/Library/Application Support/chat-on-steroids` on macOS and the XDG config location on Linux.
+Runtime data belongs to the `chatbbc` Electron userData profile on Linux under the
+user's XDG config location. Do not migrate/copy another product's profile as part of a rebrand.
 Inspect exact session/state files (§4), never edit live ledgers as a repair shortcut. `logger.ts`
 keeps a redacted 500-entry ring and bounded async `app.log` batches with rotation, explicit
 overload omissions, a two-second final flush and separate `.crash` snapshot. Logs are human
@@ -3302,19 +3314,19 @@ diagnostics, not restart authority; secrets must never be printed to investigate
 
 ## 20. Build, installation, updater and release
 
-Source, bundle, package, installed bytes and live behavior are separate gates (§3). The app id
-is `com.chatonsteroids.app`. Native release targets are Windows x64/arm64 NSIS, macOS x64/arm64
-DMG+ZIP and Linux x64/arm64 AppImage+DEB. Windows is per-user-capable and `asInvoker`; replacing
-the package preserves userData. Synchronize package/main/extension versions deliberately.
+Source, bundle, package, installed bytes and live behavior are separate gates (§3). Identity:
+display `ChatBBC`, slug/executable `chatbbc`, app id `com.chatbbc.app`, desktop file
+`com.chatbbc.app.desktop`, companion `ChatBBC Companion`; connector titles are
+`ChatBBC Core`, `ChatBBC Desktop`, `ChatBBC Plugins` with server IDs `chatbbc-core`,
+`chatbbc-desktop`, `chatbbc-plugins`. App and companion use bridge protocol 18.
+Supported release output is Linux x64 `ChatBBC-Linux-x64.AppImage` only; the unpacked
+Linux x64 directory supports local smoke. Synchronize package/main/extension versions
+deliberately. Do not restore Windows/macOS/ARM/DEB release promises or hosted workflows.
 
 `electron-vite` builds main/preload/renderer into `out/`; extension files ship directly without
 a bundler. `electron-builder.yml` puts executable tunnel/rg, extension and required native
 payloads outside asar. `extension-path.ts` transactionally mirrors the packaged extension to
-stable `userData/extension`, never an ephemeral AppImage mount.
-The macOS afterPack hook removes Electron's unused camera, microphone and audio-capture
-privacy descriptions before sealing, retaining Screen Recording. Strict plist readback and
-bundle smoke checks reject failed cleanup. This does not establish publisher signing,
-notarization or permission continuity across updates.
+stable `userData/extension`, never an ephemeral AppImage mount or another product's userData.
 
 Dependency updates retain upstream compatibility contracts: Node typings follow Electron's
 embedded Node major, and Vite stays within electron-vite's declared peer range. Electron 44
@@ -3325,11 +3337,10 @@ upstream binaries while retaining that distribution's checksum or notices.
 
 | Build owner | Contract |
 | --- | --- |
-| `scripts/package.mjs` | Icons → bundle → explicit target resources/native staging → builder with publishing disabled. |
-| `packaging-targets.mjs`, `packaging-versions.mjs` | Supported OS/arch vocabulary and pinned target checksums; fetchers share these authorities. |
+| `scripts/package.mjs` | Notices → icons → extension stamp → bundle → explicit Linux x64 resources/native staging → builder with publishing disabled → packaged runtime smoke. |
+| `packaging-targets.mjs`, `packaging-versions.mjs` | Retained helper contracts and pinned target checksums; supported release gate is Linux x64. |
 | `prepare-packaging-native.mjs` | Exact target node-pty/Sharp/tree-sitter from verified package material; host leftovers cannot win. |
-| `prepare-macos-desktop-helper.mjs` | Thin target Swift dylib + matching N-API addon; packaged in-process permission identity. |
-| `smoke-packaged-runtime.mjs`, `smoke-macos-{bundle,gui}.mjs` | In-place resource/native-stack checks, Mac bundle/seal and real GUI startup evidence. |
+| `release-local.mjs`, `verify-local-ui.mjs`, `verify-chatbbc-package.mjs` | Local candidate, Wayland UI fixtures and packaged AppImage GUI acceptance. |
 | `generate-third-party-notices.mjs`, `package-native-sources.mjs` | Production notices and corresponding native source inventory/archive; exact lockfile/catalog provenance. |
 | `verify-public-history.mjs`, `check-release-absent.mjs` | Public-history/privacy gate and positive proof that publishing will not overwrite a release. |
 
@@ -3341,24 +3352,26 @@ insufficient. A dirty-tree snapshot request does not authorize exposing all loca
 
 `update.ts` checks immediately and every six hours with one in-flight pass. Download to a
 partial file, verify SHA-256 before staging/adoption, and rehash at ordinary quit before handing
-off. Windows NSIS/Linux AppImage can apply automatically; macOS/DEB present the supported manual
-path, development does not stage. Explicit install may relaunch; ordinary quit does not force
-relaunch. Failed checks never replace a verified staged candidate with unverified bytes.
+off. Packaged Linux x64 AppImage can stage with `APPIMAGE`; without it, manual download is
+offered. Other targets are unsupported. Development does not stage. Failed checks never replace
+a verified staged candidate with unverified bytes.
 
-CI verifies supported OS families; native `release.yml` builds/smokes all six targets, then
-assembles installers, extension ZIP, native-sources archive and `SHA256SUMS.txt`. `publish.yml`
-is dispatched **at the reviewed version tag**, calls that reusable build in the same run,
-requires `docs/release-notes/vX.Y.Z.md`, rechecks versions/privacy/hashes and refuses an existing
-release. A tag alone does not build/publish. An unpublished candidate can be built separately,
-but do not mix artifacts from another ref/run into a release.
+Repository Actions are disabled. Do not restore `.github/workflows`, use `act`, dispatch a
+workflow or claim hosted verification. `npm run release:local` verifies this local Linux x64
+tree, runs Wayland UI and packaged checks, and assembles an immutable candidate containing
+AppImage, companion ZIP, native-sources archive, manifest and SHA-256 checksums. A tag is
+not required for a candidate and no upload is implied. Explicit
+`npm run release:publish -- --tag v2.2.0` requires a reviewed local tag at clean HEAD,
+disabled Actions, no tracked workflows, absent remote release, tunnel freshness and verified
+uploaded draft asset hashes before publication. Never silently overwrite a tag/release.
 
 `verify:notices` checks installed production dependencies against the lockfile and rejects
 missing license material or mismatched reviewed catalog hashes. Custom package updates cannot
 inherit an older license review. Notice completeness and native source/replacement obligations
 are separate checks; inspect the actual assembled artifacts. Hooks installed with
 `npm run hooks:install` help keep personal identities/session provenance out of public history.
-Release completion requires every target, assembly/hash check, Publish and public artifact
-inspection to pass, preserving the user's exact requested title/changelog.
+Release completion requires the Linux x64 candidate, assembly/hash checks and separately
+reported live GUI/companion/provider evidence. A local candidate is not a public release.
 
 ## 21. Known implementation gaps — not intended behavior
 
@@ -3391,7 +3404,8 @@ tree has changed those contracts. Comments/worklogs can lag even when nearby cod
 A production change is complete when its root failure and neighboring negative case are
 covered, all protocol participants agree, relevant checks pass, and the claimed evidence level
 is actually demonstrated. Preserve unrelated dirty work. Update model-visible contracts,
-user-facing behavior and this map together; do not call source success a live hotfix.
+user-facing behavior, this agent map and the exact downstream path map in
+[`docs/upstream-map.json`](docs/upstream-map.json) together; do not call source success a live hotfix.
 
 Keep this file self-contained: explain purpose → user behavior → owner/flow → invariants →
 failure/test entry points. Integrate changed logic into its owning section instead of appending

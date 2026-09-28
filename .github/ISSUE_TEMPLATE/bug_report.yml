@@ -16,7 +16,7 @@ body:
     attributes:
       label: App version
       description: Settings → About.
-      placeholder: "1.9.4"
+      placeholder: "2.2.0"
     validations:
       required: true
 
@@ -24,7 +24,7 @@ body:
     id: operating_system
     attributes:
       label: Operating system and version
-      placeholder: "Windows 11 24H2, macOS 15.6, Ubuntu 24.04, …"
+      placeholder: "Omarchy on Linux x64, kernel version, Wayland/Hyprland version"
     validations:
       required: true
 
@@ -32,13 +32,12 @@ body:
     id: architecture
     attributes:
       label: Architecture
+      description: ChatBBC releases support Linux x64 only.
       options:
         - "x64 (Intel/AMD)"
-        - "ARM64"
-        - "Not sure"
+        - "Other or not sure (unsupported release target)"
     validations:
       required: true
-
   - type: dropdown
     id: extension
     attributes:

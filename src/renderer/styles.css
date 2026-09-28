@@ -16,6 +16,8 @@
    so long content scrolls inside its own panes rather than growing or clipping the page.
    --------------------------------------------------------------------------- */
 
+::selection { background: var(--selection, var(--accent-wash)); color: var(--selection-ink, var(--ink)); }
+
 .panel.plugins-panel { overflow-y: auto; padding: 46px 36px 32px; scrollbar-gutter: stable; }
 .panel.plugins-panel.is-active { display: block; }
 .plugins-content { width: 100%; max-width: 940px; margin-inline: auto; }
@@ -3298,7 +3300,7 @@ select option::checkmark { order: 1; margin-inline-start: auto; color: var(--ink
 .file-preview.is-editing .file-preview-head, .file-preview.is-editing .file-preview-meta { flex: 0 0 auto; }
 .file-code-editor-host { min-width: 0; min-height: 0; flex: 1; overflow: hidden; background: var(--sunk); }
 .file-code-editor-host .cm-editor { height: 100%; }
-/* The merge extension's light gradient otherwise wins over CoS's live appearance tokens. */
+/* The merge extension's light gradient otherwise wins over ChatBBC's live appearance tokens. */
 .file-diff-viewer-host .cm-collapsedLines { color: var(--soft) !important; background: var(--hover) !important; border-block: 1px solid var(--line); }
 .file-diff-viewer-host .cm-collapsedLines::before, .file-diff-viewer-host .cm-collapsedLines::after { content: none; }
 .file-diff-viewer-host :is(.cm-insertedLine, .cm-deletedLine) { text-decoration: none; }

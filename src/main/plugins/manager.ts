@@ -599,7 +599,7 @@ export class PluginManager {
     row.status = 'connecting';
     row.error = undefined;
     this.changed();
-    const client = new Client({ name: 'Chat On Steroids Plugins', version: '1.0.0' });
+    const client = new Client({ name: 'ChatBBC Plugins', version: '1.0.0' });
     let transport: StdioClientTransport | undefined;
     let oauth: PluginOAuth | undefined;
     const retire = () => {
@@ -863,7 +863,7 @@ export class PluginManager {
         this.changed();
       }
       return errorResult(
-        'PLUGIN_CALL_FAILED: The server failed or disconnected. The operation may have completed; inspect its state before retrying. CoS did not retry.',
+        'PLUGIN_CALL_FAILED: The server failed or disconnected. The operation may have completed; inspect its state before retrying. ChatBBC did not retry.',
       );
     } finally { this.release(row, live); }
   }

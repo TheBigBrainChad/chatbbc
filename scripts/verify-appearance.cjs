@@ -14,6 +14,7 @@ app.whenReady().then(async () => {
     const config = {
       roots: [{name:'demo',path:'C:/demo'}], readOnly:true,
       capabilities: {browse:true,search:true,read:true,metadata:true,create:false,edit:false,move:false,deleteFile:false,command:false,screen:false,control:false,clipboardRead:false,clipboardWrite:false},
+      commandAllowlist:{enabled:false,mode:'allow',rules:[]},mcp:{instructions:''},
       tunnel: {kind:'openai',tunnelId:'',desktopTunnelId:'',binaryPath:''},
       ui: {minimizeToTray:true,autoConnect:false,privacyScreenshots:false,theme:'dark',tabsToKeepOpen:7,finishAction:'notify'},
       sessions: {record:true,retainDays:30,advisoryTokens:300000,limitTokens:400000}, compaction:{auto:true,autoTokens:300000},
@@ -23,6 +24,7 @@ app.whenReady().then(async () => {
     const state = {config,hasApiKey:false,hasGoalKey:false,resolvedBinary:null,bundledTunnelVersion:null,
       status:{state:'disconnected',detail:'',publicUrl:null,localUrl:null,handshakeAt:null,lastRequestAt:null,lastToolCallAt:null,health:null,surfaces:[]},
       bridge:{running:false,port:0,paired:false,present:false,lastSeenAt:null,extensionVersion:null},
+      omarchyTheme:{status:'unavailable',generation:0,palette:null},
       update:{current:'2.0.9',latest:null,stage:'idle',error:null,checkedAt:null}};
     const project = {id:'demo-project',name:'VideoClipper',path:'C:/demo',createdAt:1};
     const rows = Array.from({length:22},(_,i)=>({id:'task-'+i,title:'Project chat '+(i+1),projectId:project.id,
@@ -59,7 +61,7 @@ app.whenReady().then(async () => {
   let win;
   try {
     await server.listen(); fs.mkdirSync(output,{recursive:true});
-    win = new BrowserWindow({show:false,width:1100,height:900,webPreferences:{sandbox:true,backgroundThrottling:false}});
+    win = new BrowserWindow({show:true,width:1100,height:900,webPreferences:{sandbox:true,backgroundThrottling:false}});
     await win.loadURL(server.resolvedUrls.local[0]+'fixture.html');
     win.webContents.setZoomFactor(1);
     const js = code=>win.webContents.executeJavaScript(code);

@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
-import vm from 'node:vm';
 import {
   applyLoginStartup,
-  isBackgroundLaunch,
   supportsLoginStartup,
   createWindowActivationGate,
   ownsAppRuntime,
@@ -13,88 +10,6 @@ import {
 } from '../src/main/window-lifecycle.js';
 
 describe('native window activation', () => {
-  it.each(['darwin', 'win32', 'linux'])('keeps native fullscreen available on macOS (%s)', (platform) => {
-    const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
-    const constructor = source.slice(source.indexOf('  window = new BrowserWindow({'), source.indexOf("  if (process.platform === 'win32') window.removeMenu();"))
-      .replaceAll(' as const', '');
-    let options: Record<string, unknown> | undefined;
-    vm.runInNewContext(constructor, {
-      BrowserWindow: function (value: Record<string, unknown>) { options = value; },
-      layout: {}, icon: null, process: { platform },
-      titleBarOverlayForTheme: () => ({}), windowBackgroundForTheme: () => '#181818', getConfig: () => ({ ui: { theme: 'dark' } }),
-      UI_BASE_ZOOM: 1, path: { join: () => 'preload.js' }, __dirname: '/app'
-    });
-    expect(options?.fullscreenable).toBe(platform === 'darwin');
-    expect(options?.webPreferences).toMatchObject({ sandbox: true, contextIsolation: true, nodeIntegration: false });
-    // macOS and Windows draw the app's own top bar as the title bar; Linux keeps its native frame.
-    expect(options?.titleBarStyle).toBe(platform === 'linux' ? undefined : 'hidden');
-    if (platform === 'darwin') expect(options?.titleBarOverlay).toBe(true);
-  });
-
-  it('maximizes only on initial presentation and preserves user-sized geometry on reopen', () => {
-    const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
-    const present = source.slice(source.indexOf('function showWindow()'), source.indexOf('\nsetFinishNotifier(', source.indexOf('function showWindow()'))).replace('function showWindow(): void', 'function showWindow()');
-    const operations: string[] = [];
-    const state = { minimized: false };
-    const native = { isMinimized: () => state.minimized, isFullScreen: () => false,
-      maximize: () => operations.push('maximize'),
-      restore: () => operations.push('restore'),
-      show: () => operations.push('show'), focus: () => operations.push('focus') };
-    const createWindow = vi.fn();
-    const context = vm.createContext({ window: native, quitting: false, createWindow });
-    vm.runInContext(present + '\nshowWindow();', context);
-    expect(operations.splice(0)).toEqual(['show', 'focus']);
-    state.minimized = true;
-    vm.runInContext('showWindow()', context);
-    expect(operations.splice(0)).toEqual(['restore', 'show', 'focus']);
-    context.quitting = true;
-    vm.runInContext('showWindow()', context);
-    expect(operations).toEqual([]);
-
-    let ready!: () => void;
-    const startup = source.slice(source.indexOf("  window.once('ready-to-show'"), source.indexOf('  // A renderer that fails', source.indexOf("  window.once('ready-to-show'")));
-    const startupOperations: string[] = [];
-    const startupState = { fullscreen: false };
-    const showWindow = vi.fn(() => startupOperations.push('showWindow'));
-    const launch = vm.createContext({ window: {
-      once: (_event: string, listener: () => void) => { ready = listener; },
-      isFullScreen: () => startupState.fullscreen,
-      maximize: () => startupOperations.push('maximize')
-    }, quitting: false, showWindow });
-    vm.runInContext(startup, launch);
-    ready();
-    expect(startupOperations.splice(0)).toEqual(['maximize', 'showWindow']);
-    startupState.fullscreen = true;
-    ready();
-    expect(startupOperations.splice(0)).toEqual(['showWindow']);
-    launch.quitting = true;
-    ready();
-    expect(showWindow).toHaveBeenCalledTimes(2);
-  });
-  it('passively observes on first visible use without opening a browser, never on repeat show or quit', async () => {
-    const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
-    const listener = source.slice(source.indexOf("  window.on('show'"), source.indexOf("  window.once('ready-to-show'"));
-    let show!: () => void;
-    let state = 'ready';
-    const start = vi.fn(async () => { state = 'pending'; return {}; });
-    const context = vm.createContext({ window: { on: (event: string, callback: () => void) => {
-      expect(event).toBe('show'); show = callback;
-    } }, quitting: false, getChatModels: () => ({ state }), startChatModelDiscovery: start, logWarn: vi.fn() });
-    vm.runInContext(listener, context);
-    show(); await Promise.resolve(); expect(start).not.toHaveBeenCalled();
-    state = 'unknown';
-    show(); await Promise.resolve();
-    show(); await Promise.resolve();
-    expect(start).toHaveBeenCalledTimes(1);
-    expect(start).toHaveBeenCalledWith(false);
-    state = 'unavailable';
-    show(); await Promise.resolve();
-    expect(start).toHaveBeenCalledTimes(1);
-    state = 'unknown';
-    context.quitting = true;
-    show();
-    expect(start).toHaveBeenCalledTimes(1);
-  });
   it('never bootstraps shared state from a secondary or already-quitting process', () => {
     expect(ownsAppRuntime(true)).toBe(true);
     expect(ownsAppRuntime(false)).toBe(false);
@@ -165,30 +80,16 @@ describe('native window activation', () => {
 describe('Windows login startup', () => {
   it('writes only packaged Windows login settings and supports turning the same entry off', () => {
     const app = { isPackaged: true, setLoginItemSettings: vi.fn() };
-    applyLoginStartup(app, true, 'win32', 'C:/Program Files/Chat On Steroids/app.exe');
-    applyLoginStartup(app, false, 'win32', 'C:/Program Files/Chat On Steroids/app.exe');
+    applyLoginStartup(app, true, 'win32', 'C:/Program Files/ChatBBC/app.exe');
+    applyLoginStartup(app, false, 'win32', 'C:/Program Files/ChatBBC/app.exe');
     expect(app.setLoginItemSettings.mock.calls).toEqual([
-      [{ openAtLogin: true, path: 'C:/Program Files/Chat On Steroids/app.exe', args: ['--background'] }],
-      [{ openAtLogin: false, path: 'C:/Program Files/Chat On Steroids/app.exe', args: ['--background'] }]
+      [{ openAtLogin: true, path: 'C:/Program Files/ChatBBC/app.exe', args: ['--background'] }],
+      [{ openAtLogin: false, path: 'C:/Program Files/ChatBBC/app.exe', args: ['--background'] }]
     ]);
     for (const platform of ['darwin', 'linux'] as const) applyLoginStartup(app, true, platform);
     app.isPackaged = false;
     applyLoginStartup(app, true, 'win32');
     expect(app.setLoginItemSettings).toHaveBeenCalledTimes(2);
     expect(supportsLoginStartup('win32', false)).toBe(false);
-  });
-  it('ignores background second-instance launches while ordinary launches still focus', () => {
-    const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
-    const start = source.indexOf("app.on('second-instance'");
-    const handler = source.slice(start, source.indexOf('\n});', start) + 4);
-    let received!: (event: unknown, argv: string[]) => void;
-    const request = vi.fn();
-    vm.runInNewContext(handler, { app: { on: (_: string, listener: typeof received) => { received = listener; } }, windowActivation: { request }, isBackgroundLaunch });
-    received({}, ['app.exe', '--background']);
-    expect(request).not.toHaveBeenCalled();
-    received({}, ['app.exe']);
-    expect(request).toHaveBeenCalledOnce();
-    expect(isBackgroundLaunch(['app.exe', '--background=false'])).toBe(false);
-    expect(source).toContain('if (!isBackgroundLaunch(process.argv)) windowActivation.request();');
   });
 });

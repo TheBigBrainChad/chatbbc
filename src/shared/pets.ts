@@ -1,3 +1,4 @@
+import type { ResolvedAppearance } from './appearance.js';
 export const COS_PET_ATLAS = {
   width: 1280,
   height: 1920,
@@ -132,6 +133,5 @@ export interface PetOverlaySnapshot {
   dismissedPetIds: string[];
   level: PetActivityLevel;
   activities: PetActivity[];
-  theme: 'light' | 'dark';
-  appearance: import('./appearance.js').AppearanceSettings;
+  resolvedAppearance: ResolvedAppearance;
 }

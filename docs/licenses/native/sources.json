@@ -11,6 +11,7 @@
     "@img/sharp-linux-x64": "0.35.4",
     "@img/sharp-win32-arm64": "0.35.4",
     "@img/sharp-win32-x64": "0.35.4",
+    "@img/sharp-wasm32": "0.35.4",
     "sharp": "0.35.4"
   },
   "sources": [
@@ -9630,6 +9631,16 @@
       "sha256": "9e84202dc927f0c0dfda583301f245b6d92bdd8c5af7bd4dae436c608f01785f",
       "bytes": 41797945,
       "file": "sharp-source-903128da.tar.gz"
+    },
+    {
+      "id": "wasm-vips-build",
+      "url": "https://codeload.github.com/kleisauke/wasm-vips/tar.gz/79103664d21ce00982e80571cf12f58bd3dcc5f3",
+      "version": "8.18.6@79103664d21ce00982e80571cf12f58bd3dcc5f3",
+      "type": "build-repo",
+      "targets": ["linux"],
+      "sha256": "d1b576e49b082cb012b566162753a7857d54398580ffd00d883c53ac4c472632",
+      "bytes": 7714993,
+      "file": "wasm-vips-build-79103664.tar.gz"
     }
   ],
   "noticeSupplements": [

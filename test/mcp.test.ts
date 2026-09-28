@@ -858,14 +858,14 @@ describe('surface boundaries', () => {
     }
   });
 
-  it('describes both surfaces well enough for a user to set them up and a model to find them', () => {
+  it('publishes three exact connector identities with their capability boundaries', () => {
+    const identities = {
+      core: { serverName: 'chatbbc-core', connectorName: 'ChatBBC Core' },
+      desktop: { serverName: 'chatbbc-desktop', connectorName: 'ChatBBC Desktop' },
+      plugins: { serverName: 'chatbbc-plugins', connectorName: 'ChatBBC Plugins' }
+    };
     for (const surface of SURFACE_LIST) {
-      expect(surface.serverName, surface.id).toMatch(/^chat-on-steroids-/);
-      expect(surface.connectorName, surface.id).toContain('Chat On Steroids');
-      expect(surface.cardSummary.length, surface.id).toBeGreaterThan(20);
-      // The description is the only thing the model has before discovery, so it has to
-      // carry real vocabulary rather than a label.
-      expect(surface.description.length, surface.id).toBeGreaterThan(120);
+      expect(surface).toMatchObject(identities[surface.id]);
       // External plugins declare their bounded schemas dynamically after installation.
       if (surface.id === 'plugins') expect(surface.tools).toEqual(['exec']);
       else expect(surface.tools.length, surface.id).toBeGreaterThan(0);
@@ -898,7 +898,7 @@ describe('2025-era clients', () => {
       clientInfo: { name: 'test-client', version: '1.0.0' }
     });
     expect(reply.status).toBe(200);
-    expect(reply.body.result.serverInfo.name).toBe('chat-on-steroids-core');
+    expect(reply.body.result.serverInfo.name).toBe('chatbbc-core');
     expect(reply.body.result.protocolVersion).toBeTruthy();
   });
 

@@ -9,7 +9,7 @@ import { agentPlanUpdateSchema } from '../../shared/agent-plan.js';
 
 /**
  * Adapted from OpenAI Codex's update_plan (Apache-2.0), revision
- * 1a4096e273e80da30947e57fdfa45be92858ca91. CoS adds bounded step details and
+ * 1a4096e273e80da30947e57fdfa45be92858ca91. ChatBBC adds bounded step details and
  * stores the plan under the proven durable session instead of an outer Codex turn.
  */
 export function registerPlanTool(reg: SurfaceRegistrar): void {

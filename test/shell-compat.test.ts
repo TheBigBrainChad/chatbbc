@@ -42,7 +42,7 @@ function fixture() {
     { type: 'user-message', messageId: USER, serverMessageId: USER, message: 'hello' },
     { type: 'chatgpt-reasoning-group', items: [
       { type: 'reasoning', presentation: 'preamble', content: 'Commentary without a provider message id' },
-      { type: 'mcp-tool-call', callId: CALL, completed: false, invocation: { server: 'Chat On Steroids Core', tool: 'link_x/read', arguments: { private: 'NEVER_COPY_TOOL_ARGS' } }, result: null }
+      { type: 'mcp-tool-call', callId: CALL, completed: false, invocation: { server: 'ChatBBC Core', tool: 'link_x/read', arguments: { private: 'NEVER_COPY_TOOL_ARGS' } }, result: null }
     ] },
     { type: 'assistant-message', messageId: ANSWER, content: 'Answer', phase: 'final_answer', completed: false }
   ] as any[] } };
@@ -292,7 +292,7 @@ it('reads request metadata only for the mounted shell message ids in the exact n
   const f = fixture();
   const message = { id: CALL, author: { role: 'assistant' }, recipient: 'api_tool.call_tool',
     metadata: { request_id: OTHER }, create_time: 1700000000,
-    content: { content_type: 'code', text: '{"path":"/Chat On Steroids Core/link_x/read","args":{"secret":"NEVER_COPY"}}' } };
+    content: { content_type: 'code', text: '{"path":"/ChatBBC Core/link_x/read","args":{"secret":"NEVER_COPY"}}' } };
   f.queries.push({ queryKey: ['chatgpt-conversation', THREAD], state: { data: { mapping: {
     [CALL]: { id: CALL, message },
     [OTHER]: { id: OTHER, message: { ...message, id: OTHER, metadata: { request_id: 'wfr_UNSELECTED' } } }
@@ -323,7 +323,7 @@ function liveShellMapping(f: ReturnType<typeof fixture>, compiler = false) {
   const mapping: any = {
     [USER]: plain(USER, 'user', 'hello'), [ANSWER]: plain(ANSWER, 'assistant', 'Answer', 'final'),
     [CALL]: { id: CALL, message: { id: CALL, author: { role: 'assistant' }, recipient: 'api_tool.call_tool',
-      metadata: { request_id: OTHER }, content: { content_type: 'code', text: '{"path":"/Chat On Steroids Core/link_x/read","args":{"private":"DO_NOT_COPY"}}' } } },
+      metadata: { request_id: OTHER }, content: { content_type: 'code', text: '{"path":"/ChatBBC Core/link_x/read","args":{"private":"DO_NOT_COPY"}}' } } },
     [thought]: { id: thought, message: { id: thought, author: { role: 'assistant' },
       content: { content_type: 'thoughts', thoughts: [{ summary: 'Inspecting the project', content: 'PRIVATE_REASONING_CONTENT' }] }, metadata: {} } },
     [preamble]: plain(preamble, 'assistant', 'I will inspect the project.', 'commentary')
@@ -592,10 +592,10 @@ function pairedShellCall(f: ReturnType<typeof fixture>) {
   const step = f.entry.turn.items[1].items.find((item: any) => item.type === 'mcp-tool-call');
   step.completed = true;
   step.widgetStateSource = { messageId: resultId };
-  step.invocationResourceUri = '/Chat On Steroids Core/link_x/read';
+  step.invocationResourceUri = '/ChatBBC Core/link_x/read';
   mapping[resultId] = { id: resultId, parent: CALL, message: { id: resultId,
     author: { role: 'tool', name: 'api_tool.call_tool' }, recipient: 'all',
-    metadata: { invoked_resource: { app_name: 'Chat On Steroids Core', resource_uri: step.invocationResourceUri } },
+    metadata: { invoked_resource: { app_name: 'ChatBBC Core', resource_uri: step.invocationResourceUri } },
     content: { content_type: 'text', parts: ['PRIVATE_TOOL_RESULT'] } } };
   mapping[ANSWER].parent = resultId;
   f.entry.turn.messageIds = f.entry.turn.messageIds.map(id => id === CALL ? resultId : id);
@@ -627,8 +627,8 @@ it.each(['request', 'result', 'embedded'] as const)('keeps native paired shell r
 it.each(['unselected-source', 'wrong-tool', 'wrong-server', 'wrong-role', 'conflicting-request', 'duplicate-source'])('does not borrow paired shell invocation metadata from %s', async scenario => {
   const f = fixture(), { mapping, step, resultId } = pairedShellCall(f);
   if (scenario === 'unselected-source') step.widgetStateSource.messageId = OTHER;
-  if (scenario === 'wrong-tool') mapping[CALL].message.content.text = '{"path":"/Chat On Steroids Core/link_x/agents","args":{}}';
-  if (scenario === 'wrong-server') mapping[CALL].message.content.text = '{"path":"/Chat On Steroids Core Backup/link_x/read","args":{}}';
+  if (scenario === 'wrong-tool') mapping[CALL].message.content.text = '{"path":"/ChatBBC Core/link_x/agents","args":{}}';
+  if (scenario === 'wrong-server') mapping[CALL].message.content.text = '{"path":"/ChatBBC Core Backup/link_x/read","args":{}}';
   if (scenario === 'wrong-role') mapping[CALL].message.author.role = 'user';
   if (scenario === 'conflicting-request') mapping[resultId].message.metadata.request_id = 'wfr_conflicting_result';
   if (scenario === 'duplicate-source') f.entry.turn.items[1].items.push({ ...step, callId: OTHER });
@@ -651,9 +651,9 @@ it.each(['duplicate-cache', 'conflicting-conversation', 'duplicate-id', 'unavail
 });
 it('recognizes the shell recipient spelling without admitting similarly named connectors', async () => {
   const f = fixture(), step = f.entry.turn.items[1].items[1];
-  step.invocation.server = 'Chat_On_Steroids_Core'; step.invocation.tool = 'read';
+  step.invocation.server = 'ChatBBC_Core'; step.invocation.tool = 'read';
   expect((await f.ask()).turns[0].calls).toHaveLength(1);
-  step.invocation.server = 'Chat_On_Steroids_Core_Backup';
+  step.invocation.server = 'ChatBBC_Core_Backup';
   expect((await f.ask()).turns[0].calls).toEqual([]);
 });
 it('retires shell busy evidence when its owner becomes unreadable or another question is mounted', async () => {

@@ -489,17 +489,17 @@ describe('who is allowed to talk to it', () => {
     expect(await companionDiagnostics()).toBeNull();
   });
 
-  it('pushes newly detected incompatible extension versions without granting browser presence', async () => {
+  it('refuses protocol 17 pairing without granting browser presence', async () => {
     const changed = vi.fn();
     const unsubscribe = onBridgeChange(changed);
     try {
-      const options = { auth: null, extensionVersion: '0.0.1', protocol: BRIDGE_PROTOCOL - 1 };
+      const options = { auth: null, extensionVersion: '0.0.1', protocol: 17 };
       const hello = await request('GET', '/hello', options);
-      expect(hello.body.compatible).toBe(false);
+      expect(hello.body).toMatchObject({ app: 'chatbbc', bridge: 18, compatible: false });
       expect(changed).toHaveBeenCalledTimes(1);
       expect(await bridgeStatus()).toMatchObject({ extensionVersion: '0.0.1', present: false, lastSeenAt: null });
       const rejected = await request('POST', '/pair', options);
-      expect(rejected.status).toBe(426);
+      expect(rejected).toMatchObject({ status: 426, body: { error: 'incompatible_extension' } });
       expect(changed).toHaveBeenCalledTimes(1);
       await request('GET', '/hello', { ...options, extensionVersion: '0.0.2' });
       expect(changed).toHaveBeenCalledTimes(2);
@@ -521,7 +521,7 @@ describe('who is allowed to talk to it', () => {
   it('identifies itself to an extension without any credential', async () => {
     const reply = await request('GET', '/hello', { auth: null });
     expect(reply.status).toBe(200);
-    expect(reply.body.app).toBe('chat-on-steroids');
+    expect(reply.body.app).toBe('chatbbc');
     // Against the constant, not a literal: what matters is that the handshake reports the
     // build's own version, and a hard-coded number here only ever fails on release day.
     expect(reply.body.version).toBe(APP_VERSION);
@@ -531,6 +531,13 @@ describe('who is allowed to talk to it', () => {
     expect(Object.keys(reply.body)).toEqual(['app', 'version', 'bridge', 'compatible', 'paired', 'disconnected']);
     expect(reply.body.disconnected).toBe(false);
     expect(reply.body.compatible).toBe(true);
+  });
+
+  it('rejects protocol 17 even with an otherwise valid paired token', async () => {
+    await pair();
+    expect((await request('GET', '/status')).status).toBe(200);
+    const reply = await request('GET', '/status', { protocol: 17 });
+    expect(reply).toMatchObject({ status: 426, body: { error: 'incompatible_extension', bridge: 18 } });
   });
 
   it('refuses every web page origin, chatgpt.com included', async () => {
@@ -3390,7 +3397,7 @@ describe('delivering a bootstrap', () => {
           {
             kind: 'user_message',
             time: Date.now(),
-            text: 'Continue the previous Chat On Steroids session. Read the handoff below.',
+            text: 'Continue the previous ChatBBC session. Read the handoff below.',
             messageId: 'boot-resume'
           }
         ]
@@ -7236,7 +7243,7 @@ describe('unattributed activity recovery', () => {
       {
         kind: 'user_message',
         time: Date.now(),
-        text: '[[CLF-RESUME:O8THi8gMTC6LvH9GLclDIQ]]\n\nContinuing a Chat On Steroids session that was compacted.',
+        text: '[[CLF-RESUME:O8THi8gMTC6LvH9GLclDIQ]]\n\nContinuing a ChatBBC session that was compacted.',
         messageId: 'm-b-bootstrap'
       }
     ]);

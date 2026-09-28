@@ -34,7 +34,7 @@ export function automaticTitle(summary: SessionSummary, first?: Extract<SessionE
 
 /**
  * ChatGPT names a chat from its first message. In a chat this app opened, that message is the
- * CoS instructions around the user's request, so every such chat was called some variant of
+ * ChatBBC instructions around the user's request, so every such chat was called some variant of
  * "Coding Agent Instructions". There the user's own request names the chat instead.
  */
 export function providerTitleIgnored(summary: SessionSummary): boolean {

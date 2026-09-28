@@ -1,31 +1,14 @@
 /**
- * The updater, held to the two things that actually matter about it.
- *
- * One: a file that is going to be executed on quit is the published file and nothing else. The
- * release pipeline writes a `SHA256SUMS.txt` over the exact artifacts it uploads, so that is the
- * bar here — a byte count would pass a same-length wrong file straight into an installer.
- *
- * Two: nothing it does can wedge the app. Every failure has to leave the running version intact
- * and be retried the next time the app opens, which is the only schedule this has.
- *
- * The platform is faked rather than abstracted: `stagedArtifact()` reads `process.platform` and
- * `process.env.APPIMAGE` because those *are* the facts that decide what an installation can
- * apply to itself, and a seam in front of them would be a second answer to the same question.
+ * A staged AppImage must match the published SHA-256 both on download and at quit.
+ * Failed checks leave the running image intact; later checks can retry or reuse verified bytes.
  */
 
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const spawned: Array<{ file: string; args: string[] }> = [];
-vi.mock('node:child_process', () => ({
-  spawn: (file: string, args: string[]) => {
-    spawned.push({ file, args });
-    return { on: () => undefined, unref: () => undefined };
-  }
-}));
 
 let userData = '';
 let packaged = true;
@@ -56,8 +39,7 @@ const {
 } = await import('../src/main/update.js');
 
 const NEXT = '99.0.0';
-const WINDOWS_ASSET = `Chat-On-Steroids-Setup-${process.arch}.exe`;
-const APPIMAGE_ASSET = `Chat-On-Steroids-Linux-${process.arch}.AppImage`;
+const APPIMAGE_ASSET = 'ChatBBC-Linux-x64.AppImage';
 
 const sha256 = (body: string): string => createHash('sha256').update(body).digest('hex');
 
@@ -74,8 +56,8 @@ function github(options: {
   fail?: 'release' | 'sums' | 'asset';
 } = {}) {
   const version = options.version ?? NEXT;
-  const body = options.body ?? 'installer bytes';
-  const sums = options.checksums ?? `${sha256(body)}  ${WINDOWS_ASSET}\n${sha256(body)}  ${APPIMAGE_ASSET}\n`;
+  const body = options.body ?? 'new AppImage bytes';
+  const sums = options.checksums ?? `${sha256(body)}  ${APPIMAGE_ASSET}\n`;
   const asked: string[] = [];
   const fetch = vi.fn(async (input: string | URL) => {
     const url = String(input);
@@ -96,71 +78,66 @@ function github(options: {
   return { asked, fetch, body };
 }
 
-/** Runs the pass as an installation of the given shape, and puts the real one back. */
-async function asPlatform(platform: string, appImage: string | undefined, run: () => Promise<void>): Promise<void> {
+/** Runs a pass with isolated platform, architecture and AppImage path, restoring all three. */
+async function asPlatform(platform: string, appImage: string | undefined, run: () => Promise<void>, arch = 'x64'): Promise<void> {
   const realPlatform = process.platform;
+  const realArch = process.arch;
   const realAppImage = process.env.APPIMAGE;
   Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+  Object.defineProperty(process, 'arch', { value: arch, configurable: true });
   if (appImage) process.env.APPIMAGE = appImage;
   else delete process.env.APPIMAGE;
   try {
     await run();
   } finally {
     Object.defineProperty(process, 'platform', { value: realPlatform, configurable: true });
+    Object.defineProperty(process, 'arch', { value: realArch, configurable: true });
     if (realAppImage === undefined) delete process.env.APPIMAGE;
     else process.env.APPIMAGE = realAppImage;
   }
 }
 
 beforeEach(() => {
-  userData = mkdtempSync(path.join(tmpdir(), 'cos-update-'));
+  userData = mkdtempSync(path.join(tmpdir(), 'chatbbc-update-'));
   packaged = true;
-  spawned.length = 0;
   relaunched.length = 0;
   resetUpdateForTests();
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  rmSync(userData, { recursive: true, force: true });
 });
 
 describe('the file Get update opens for an installation that cannot update itself', () => {
-  it('names the exact macOS disk image or Linux package for this machine', () => {
-    expect(manualDownloadName('darwin', 'arm64', undefined, true)).toBe('Chat-On-Steroids-macOS-arm64.dmg');
-    expect(manualDownloadName('darwin', 'x64', undefined, true)).toBe('Chat-On-Steroids-macOS-x64.dmg');
-    expect(manualDownloadName('linux', 'x64', undefined, true)).toBe('Chat-On-Steroids-Linux-x64.deb');
-    // Installations that update themselves, a dev tree and an unpublished architecture get none.
-    expect(manualDownloadName('linux', 'x64', '/opt/cos.AppImage', true)).toBeNull();
+  it('offers only the published Linux x64 AppImage for a packaged non-AppImage install', () => {
+    expect(manualDownloadName('linux', 'x64', undefined, true)).toBe(APPIMAGE_ASSET);
+    expect(manualDownloadName('linux', 'x64', '/opt/chatbbc.AppImage', true)).toBeNull();
+    expect(manualDownloadName('linux', 'arm64', undefined, true)).toBeNull();
     expect(manualDownloadName('win32', 'x64', undefined, true)).toBeNull();
-    expect(manualDownloadName('darwin', 'arm64', undefined, false)).toBeNull();
-    expect(manualDownloadName('darwin', 'ia32', undefined, true)).toBeNull();
+    expect(manualDownloadName('darwin', 'x64', undefined, true)).toBeNull();
+    expect(manualDownloadName('linux', 'x64', undefined, false)).toBeNull();
   });
-  it('links that file for the announced version, and the release page otherwise', () => {
-    expect(manualDownloadUrl('2.1.17', 'Chat-On-Steroids-macOS-arm64.dmg'))
-      .toBe('https://github.com/totec448-spec/chat-on-steroids/releases/download/v2.1.17/Chat-On-Steroids-macOS-arm64.dmg');
-    expect(manualDownloadUrl(null, 'Chat-On-Steroids-macOS-arm64.dmg')).toBe('https://github.com/totec448-spec/chat-on-steroids/releases/latest');
-    expect(manualDownloadUrl('2.1.17', null)).toBe('https://github.com/totec448-spec/chat-on-steroids/releases/latest');
-    expect(manualDownloadUrl('../evil', 'x.dmg')).toBe('https://github.com/totec448-spec/chat-on-steroids/releases/latest');
+  it('links the exact file for the announced version, and the release page otherwise', () => {
+    expect(manualDownloadUrl('2.2.0', APPIMAGE_ASSET))
+      .toBe('https://github.com/TheBigBrainChad/chatbbc/releases/download/v2.2.0/ChatBBC-Linux-x64.AppImage');
+    expect(manualDownloadUrl(null, APPIMAGE_ASSET)).toBe('https://github.com/TheBigBrainChad/chatbbc/releases/latest');
+    expect(manualDownloadUrl('2.2.0', null)).toBe('https://github.com/TheBigBrainChad/chatbbc/releases/latest');
+    expect(manualDownloadUrl('../evil', 'x.AppImage')).toBe('https://github.com/TheBigBrainChad/chatbbc/releases/latest');
   });
 });
 
 describe('which installations update themselves', () => {
-  it('takes the Windows installer and the Linux AppImage, and nothing else', () => {
-    expect(stagedArtifact('win32', 'x64')).toMatchObject({ name: 'Chat-On-Steroids-Setup-x64.exe', kind: 'installer' });
-    expect(stagedArtifact('linux', 'arm64', '/opt/cos.AppImage')).toMatchObject({
-      name: 'Chat-On-Steroids-Linux-arm64.AppImage',
-      kind: 'appimage',
-      target: '/opt/cos.AppImage'
+  it('stages only a packaged Linux x64 AppImage', () => {
+    expect(stagedArtifact('linux', 'x64', '/opt/chatbbc.AppImage', true)).toEqual({
+      name: APPIMAGE_ASSET, target: '/opt/chatbbc.AppImage'
     });
+    expect(stagedArtifact('win32', 'x64', undefined, true)).toBeNull();
+    expect(stagedArtifact('linux', 'arm64', '/opt/chatbbc.AppImage', true)).toBeNull();
   });
 
-  /**
-   * A `.deb` is the system package manager's file and replacing it needs root. Asking for a
-   * password during quit is not something this app does, so that installation is told a new
-   * version exists and given the release page - it is not quietly left waiting for a download
-   * that was never going to happen. Same for macOS, where the artifacts ship unsigned.
-   */
-  it('leaves a Linux package install and macOS to be updated by hand', async () => {
+  /** An unpacked installation has no running AppImage to replace. */
+  it('leaves an unpacked Linux install to download the AppImage manually', async () => {
     expect(stagedArtifact('linux', 'x64', undefined)).toBeNull();
     expect(stagedArtifact('darwin', 'arm64')).toBeNull();
     expect(stagedArtifact('win32', 'ia32')).toBeNull();
@@ -172,25 +149,33 @@ describe('which installations update themselves', () => {
     expect(updateStatus()).toMatchObject({ latest: NEXT, stage: 'idle', error: null });
     expect(asked).toEqual(['latest']);
     await applyStagedUpdate();
-    expect(spawned).toEqual([]);
+    expect(relaunched).toEqual([]);
   });
 
-  /**
-   * A development tree is not an installation. It is permanently "behind" the moment a release
-   * ships, and staging for it would mean quitting `electron-vite dev` silently ran an NSIS
-   * installer over the maintainer's real per-user install.
-   */
+  /** A development tree is not an installation, even when APPIMAGE is set. */
   it('never stages for an unpackaged run', async () => {
     packaged = false;
-    expect(stagedArtifact('win32', 'x64')).toBeNull();
+    expect(stagedArtifact('linux', 'x64', '/opt/chatbbc.AppImage')).toBeNull();
 
     const { asked } = github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    await asPlatform('linux', path.join(userData, 'ChatBBC.AppImage'), () => checkForUpdates());
 
     expect(updateStatus()).toMatchObject({ latest: NEXT, stage: 'idle', error: null });
     expect(asked).toEqual(['latest']);
     await applyStagedUpdate();
-    expect(spawned).toEqual([]);
+    expect(relaunched).toEqual([]);
+  });
+  it('does not stage or offer downloads on an unsupported host or architecture', async () => {
+    const live = path.join(userData, 'ChatBBC.AppImage');
+    for (const [platform, arch] of [['win32', 'x64'], ['darwin', 'x64'], ['linux', 'arm64']] as const) {
+      resetUpdateForTests();
+      const { asked } = github();
+      await asPlatform(platform, live, () => checkForUpdates(), arch);
+      expect(updateStatus()).toMatchObject({ latest: NEXT, stage: 'idle', error: null });
+      expect(asked).toEqual(['latest']);
+      expect(manualDownloadName(platform, arch, undefined, true)).toBeNull();
+    }
+    expect(existsSync(path.join(userData, 'updates'))).toBe(false);
   });
 });
 
@@ -228,21 +213,22 @@ describe('finding a newer release', () => {
 });
 
 describe('staging the new version', () => {
-  it('downloads the artifact, checks it against the published SHA-256, and installs it on quit', async () => {
+  it('downloads the digest-verified AppImage and replaces the running file on ordinary quit', async () => {
+    const live = path.join(userData, 'ChatBBC.AppImage');
+    writeFileSync(live, 'old image bytes');
     const { asked, body } = github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    await asPlatform('linux', live, () => checkForUpdates());
 
     expect(updateStatus()).toMatchObject({ latest: NEXT, stage: 'ready', error: null });
-    expect(asked).toEqual(['latest', 'SHA256SUMS.txt', WINDOWS_ASSET]);
-
-    const staged = path.join(userData, 'updates', NEXT, WINDOWS_ASSET);
+    expect(asked).toEqual(['latest', 'SHA256SUMS.txt', APPIMAGE_ASSET]);
+    const staged = path.join(userData, 'updates', NEXT, APPIMAGE_ASSET);
     expect(readFileSync(staged, 'utf8')).toBe(body);
     expect(existsSync(`${staged}.part`)).toBe(false);
 
-    // The quit half of the restart: the file that was staged is the one handed over, silently,
-    // and without starting the app again behind a user who quit for their own reasons.
     await applyStagedUpdate();
-    expect(spawned).toEqual([{ file: staged, args: ['/S', '--updated'] }]);
+    expect(readFileSync(live, 'utf8')).toBe(body);
+    expect(existsSync(`${live}.new`)).toBe(false);
+    expect(relaunched).toEqual([]);
   });
 
   /**
@@ -251,249 +237,209 @@ describe('staging the new version', () => {
    * and nothing may be left on disk for a later quit to find.
    */
   it('stages nothing when the artifact is not the file the release published', async () => {
-    github({ checksums: `${sha256('a different build')}  ${WINDOWS_ASSET}\n` });
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    const live = path.join(userData, 'ChatBBC.AppImage');
+    writeFileSync(live, 'old image bytes');
+    github({ checksums: `${sha256('a different build')}  ${APPIMAGE_ASSET}\n` });
+    await asPlatform('linux', live, () => checkForUpdates());
 
     expect(updateStatus().stage).toBe('failed');
     expect(updateStatus().error).toContain('not the published file');
-    // The `.part` is gone with it: nothing a later quit could find and run is left behind.
     expect(readdirSync(path.join(userData, 'updates', NEXT))).toEqual([]);
-
     await applyStagedUpdate();
-    expect(spawned).toEqual([]);
+    expect(readFileSync(live, 'utf8')).toBe('old image bytes');
+    expect(relaunched).toEqual([]);
   });
 
   it('stages nothing when the release does not publish an artifact for this installation', async () => {
-    github({ checksums: `${sha256('x')}  Chat-On-Steroids-Extension.zip\n` });
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    const live = path.join(userData, 'ChatBBC.AppImage');
+    writeFileSync(live, 'old image bytes');
+    github({ checksums: `${sha256('x')}  ChatBBC-Extension.zip\n` });
+    await asPlatform('linux', live, () => checkForUpdates());
     expect(updateStatus().stage).toBe('failed');
-    expect(updateStatus().error).toContain(`publishes no ${WINDOWS_ASSET}`);
-    expect(spawned).toEqual([]);
-  });
-
-  /**
-   * An AppImage has no installer: the running file is the whole application, so the update is
-   * that file being replaced. By rename, never by writing through it - the old build is still
-   * executing out of that path while this runs.
-   */
-  it('replaces the running AppImage with the staged one', async () => {
-    const live = path.join(userData, 'Chat-On-Steroids.AppImage');
-    writeFileSync(live, 'the old build');
-    const { body } = github();
-
-    await asPlatform('linux', live, async () => {
-      await checkForUpdates();
-      expect(updateStatus().stage).toBe('ready');
-      await applyStagedUpdate();
-    });
-
-    expect(readFileSync(live, 'utf8')).toBe(body);
-    expect(existsSync(`${live}.new`)).toBe(false);
-    expect(spawned).toEqual([]);
+    expect(updateStatus().error).toContain(`publishes no ${APPIMAGE_ASSET}`);
+    expect(readFileSync(live, 'utf8')).toBe('old image bytes');
   });
 });
 
 describe('one pass at a time, and one more next time the app opens', () => {
-  it('joins a check that is already running instead of downloading twice', async () => {
-    const { asked } = github();
-    await asPlatform('win32', undefined, async () => {
+  it('joins an in-flight check instead of downloading twice', async () => {
+    const live = path.join(userData, 'ChatBBC.AppImage');
+    const { asked, body } = github();
+    await asPlatform('linux', live, async () => {
       await Promise.all([checkForUpdates(), checkForUpdates(), checkForUpdates()]);
     });
-    expect(asked).toEqual(['latest', 'SHA256SUMS.txt', WINDOWS_ASSET]);
-    expect(updateStatus().stage).toBe('ready');
+    expect(asked).toEqual(['latest', 'SHA256SUMS.txt', APPIMAGE_ASSET]);
+    expect(readFileSync(path.join(userData, 'updates', NEXT, APPIMAGE_ASSET), 'utf8')).toBe(body);
   });
 
-  /**
-   * The only schedule this has is the app being opened, so a pass that failed has to leave
-   * itself repeatable. A retained in-flight promise would turn one unreachable network into an
-   * app that never checks again for as long as it runs.
-   */
-  it('retries the next time the app opens after a check that could not reach GitHub', async () => {
+  it('retries a failed release check on a later pass', async () => {
     github({ fail: 'release' });
     await checkForUpdates();
     expect(updateStatus()).toMatchObject({ latest: null, stage: 'failed', checkedAt: null });
     expect(updateStatus().error).toContain('503');
-
-    github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    const live = path.join(userData, 'ChatBBC.AppImage');
+    const { body } = github();
+    await asPlatform('linux', live, () => checkForUpdates());
     expect(updateStatus()).toMatchObject({ latest: NEXT, stage: 'ready', error: null });
+    expect(readFileSync(path.join(userData, 'updates', NEXT, APPIMAGE_ASSET), 'utf8')).toBe(body);
   });
 
-  it('retries the next time the app opens after a download that stopped', async () => {
+  it('retries a failed artifact download on a later pass', async () => {
+    const live = path.join(userData, 'ChatBBC.AppImage');
     github({ fail: 'asset' });
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    await asPlatform('linux', live, () => checkForUpdates());
     expect(updateStatus()).toMatchObject({ latest: NEXT, stage: 'failed' });
-
-    github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    const { body } = github();
+    await asPlatform('linux', live, () => checkForUpdates());
+    expect(readFileSync(path.join(userData, 'updates', NEXT, APPIMAGE_ASSET), 'utf8')).toBe(body);
     expect(updateStatus().stage).toBe('ready');
   });
 
-  /** Already staged: the same release is not fetched a second time. */
   it('does not download a version it has already staged', async () => {
+    const live = path.join(userData, 'ChatBBC.AppImage');
     const first = github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
-    expect(first.asked).toEqual(['latest', 'SHA256SUMS.txt', WINDOWS_ASSET]);
-
+    await asPlatform('linux', live, () => checkForUpdates());
+    expect(first.asked).toEqual(['latest', 'SHA256SUMS.txt', APPIMAGE_ASSET]);
     const second = github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    await asPlatform('linux', live, () => checkForUpdates());
     expect(second.asked).toEqual(['latest']);
-    expect(updateStatus().stage).toBe('ready');
+    expect(readFileSync(path.join(userData, 'updates', NEXT, APPIMAGE_ASSET), 'utf8')).toBe(first.body);
   });
 
-  /** Handed over once. A second quit has nothing to install and must not re-run an installer. */
-  it('hands a staged update over exactly once', async () => {
-    github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
+  it('replaces the running AppImage only once', async () => {
+    const live = path.join(userData, 'ChatBBC.AppImage');
+    writeFileSync(live, 'old image bytes');
+    const { body } = github();
+    await asPlatform('linux', live, () => checkForUpdates());
     await applyStagedUpdate();
+    expect(readFileSync(live, 'utf8')).toBe(body);
+    writeFileSync(live, 'changed after first quit');
     await applyStagedUpdate();
-    expect(spawned).toHaveLength(1);
+    expect(readFileSync(live, 'utf8')).toBe('changed after first quit');
+    expect(relaunched).toEqual([]);
   });
 });
 
-/**
- * The failure this exists for: this app is closed to the tray and can go days without a real
- * quit, and a staged artifact used to live only in the memory of the process that fetched it.
- * Every start after that downloaded the same hundred megabytes, staged it, and ended in the
- * same place - and any start that ended by being killed rather than quit applied none of it.
- */
 describe('a download that survives the process that fetched it', () => {
-  it('reuses the artifact a previous run already staged instead of fetching it again', async () => {
+  it('reuses a previous run’s verified bytes instead of downloading again', async () => {
+    const live = path.join(userData, 'ChatBBC.AppImage');
+    writeFileSync(live, 'old image bytes');
     const first = github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
-    expect(first.asked).toEqual(['latest', 'SHA256SUMS.txt', WINDOWS_ASSET]);
-
-    // A new run of the app: same disk, no memory of what the last one did.
+    await asPlatform('linux', live, () => checkForUpdates());
     resetUpdateForTests();
     const second = github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
-
-    // The sums are read again — the proof has to be current, not remembered — and the artifact
-    // itself is not. That request is the hundred megabytes.
+    await asPlatform('linux', live, () => checkForUpdates());
     expect(second.asked).toEqual(['latest', 'SHA256SUMS.txt']);
     expect(updateStatus()).toMatchObject({ latest: NEXT, stage: 'ready', error: null });
-
     await applyStagedUpdate();
-    expect(spawned).toEqual([
-      { file: path.join(userData, 'updates', NEXT, WINDOWS_ASSET), args: ['/S', '--updated'] }
-    ]);
+    expect(readFileSync(live, 'utf8')).toBe(first.body);
+    expect(relaunched).toEqual([]);
   });
 
-  /**
-   * Reuse is never trust. A file that no longer matches what the release publishes - a corrupted
-   * disk, a re-cut release under the same tag - is not adopted and not run; it is fetched again.
-   */
-  it('fetches again when the artifact on disk is not what the release publishes', async () => {
+  it('refetches a corrupted staged artifact before it can replace the running file', async () => {
+    const live = path.join(userData, 'ChatBBC.AppImage');
+    writeFileSync(live, 'old image bytes');
     github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
-    writeFileSync(path.join(userData, 'updates', NEXT, WINDOWS_ASSET), 'something else entirely');
-
+    await asPlatform('linux', live, () => checkForUpdates());
+    writeFileSync(path.join(userData, 'updates', NEXT, APPIMAGE_ASSET), 'something else entirely');
     resetUpdateForTests();
     const second = github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
-
-    expect(second.asked).toEqual(['latest', 'SHA256SUMS.txt', WINDOWS_ASSET]);
-    expect(updateStatus().stage).toBe('ready');
-    expect(readFileSync(path.join(userData, 'updates', NEXT, WINDOWS_ASSET), 'utf8')).toBe(second.body);
+    await asPlatform('linux', live, () => checkForUpdates());
+    expect(second.asked).toEqual(['latest', 'SHA256SUMS.txt', APPIMAGE_ASSET]);
+    await applyStagedUpdate();
+    expect(readFileSync(live, 'utf8')).toBe(second.body);
   });
 
-  /** A staged build for a release nobody is going to install is not kept alongside the new one. */
-  it('keeps one version staged at a time', async () => {
+  it('keeps only the latest version staged', async () => {
+    const live = path.join(userData, 'ChatBBC.AppImage');
     github({ version: '98.0.0' });
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    await asPlatform('linux', live, () => checkForUpdates());
     expect(readdirSync(path.join(userData, 'updates'))).toEqual(['98.0.0']);
-
     resetUpdateForTests();
     github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    await asPlatform('linux', live, () => checkForUpdates());
     expect(readdirSync(path.join(userData, 'updates'))).toEqual([NEXT]);
   });
 });
 
-/**
- * The Install button. It applies nothing itself: it records that the user is waiting, and the
- * quit it triggers runs the same handoff every other quit runs. The difference the flag makes is
- * the one the user can see - the app comes back.
- */
 describe('installing on request', () => {
-  it('asks the installer to start the app again', async () => {
-    github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
-
-    expect(markInstallOnQuit()).toBe(true);
-    await applyStagedUpdate();
-    expect(spawned).toEqual([
-      { file: path.join(userData, 'updates', NEXT, WINDOWS_ASSET), args: ['/S', '--updated', '--force-run'] }
-    ]);
-  });
-
-  it('relaunches an AppImage install itself, having no installer to ask', async () => {
-    const live = path.join(userData, 'Chat-On-Steroids.AppImage');
-    writeFileSync(live, 'the old build');
+  it('relaunches only after replacing the running AppImage', async () => {
+    const live = path.join(userData, 'ChatBBC.AppImage');
+    writeFileSync(live, 'old image bytes');
     const { body } = github();
-
     await asPlatform('linux', live, async () => {
       await checkForUpdates();
       expect(markInstallOnQuit()).toBe(true);
       await applyStagedUpdate();
     });
-
     expect(readFileSync(live, 'utf8')).toBe(body);
     expect(relaunched).toEqual([{ execPath: live }]);
   });
 
-  /** Nothing staged, nothing to do — and above all, no quit. */
-  it('refuses when there is nothing downloaded to install', async () => {
+  it('refuses an Install request when no new image was downloaded', async () => {
     github({ version: APP_VERSION });
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    await checkForUpdates();
     expect(markInstallOnQuit()).toBe(false);
+    expect(relaunched).toEqual([]);
   });
 
-  /** The flag belongs to one press. A later ordinary quit must not reopen the app. */
-  it('does not carry the request into the next quit', async () => {
+  it('does not carry a relaunch request into the next ordinary quit', async () => {
+    const live = path.join(userData, 'ChatBBC.AppImage');
+    writeFileSync(live, 'old image bytes');
     github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    await asPlatform('linux', live, () => checkForUpdates());
     expect(markInstallOnQuit()).toBe(true);
     await applyStagedUpdate();
-
+    expect(relaunched).toEqual([{ execPath: live }]);
     resetUpdateForTests();
-    spawned.length = 0;
+    relaunched.length = 0;
+    writeFileSync(live, 'old image bytes');
     github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    await asPlatform('linux', live, () => checkForUpdates());
     await applyStagedUpdate();
-    expect(spawned).toEqual([
-      { file: path.join(userData, 'updates', NEXT, WINDOWS_ASSET), args: ['/S', '--updated'] }
-    ]);
+    expect(readFileSync(live, 'utf8')).toBe('new AppImage bytes');
+    expect(relaunched).toEqual([]);
   });
 });
 
 describe('staged executable authority across later events', () => {
-  it('retires the old staged installer before a replacement download fails', async () => {
+  it('retires the old staged artifact before a replacement download fails', async () => {
+    const live = path.join(userData, 'ChatBBC.AppImage');
+    writeFileSync(live, 'old image bytes');
     github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    await asPlatform('linux', live, () => checkForUpdates());
     github({ version: '99.0.1', fail: 'asset' });
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    await asPlatform('linux', live, () => checkForUpdates());
     expect(updateStatus().stage).toBe('failed');
     expect(markInstallOnQuit()).toBe(false);
     await applyStagedUpdate();
-    expect(spawned).toEqual([]);
+    expect(readFileSync(live, 'utf8')).toBe('old image bytes');
   });
+
   it('does not apply a staged release withdrawn from the latest feed', async () => {
+    const live = path.join(userData, 'ChatBBC.AppImage');
+    writeFileSync(live, 'old image bytes');
     github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
+    await asPlatform('linux', live, () => checkForUpdates());
     github({ version: APP_VERSION });
     await checkForUpdates();
     expect(markInstallOnQuit()).toBe(false);
     await applyStagedUpdate();
-    expect(spawned).toEqual([]);
+    expect(readFileSync(live, 'utf8')).toBe('old image bytes');
   });
-  it('checks staged bytes again at the actual installer handoff', async () => {
+
+  it('checks staged bytes again at the actual AppImage handoff', async () => {
+    const live = path.join(userData, 'ChatBBC.AppImage');
+    writeFileSync(live, 'old image bytes');
     github();
-    await asPlatform('win32', undefined, () => checkForUpdates());
-    writeFileSync(path.join(userData, 'updates', NEXT, WINDOWS_ASSET), 'changed after download');
+    await asPlatform('linux', live, () => checkForUpdates());
+    writeFileSync(path.join(userData, 'updates', NEXT, APPIMAGE_ASSET), 'changed after download');
+    expect(markInstallOnQuit()).toBe(true);
     await applyStagedUpdate();
-    expect(spawned).toEqual([]);
+    expect(readFileSync(live, 'utf8')).toBe('old image bytes');
+    expect(relaunched).toEqual([]);
   });
+
   it('starts immediately and repeats on the unreferenced six-hour timer', async () => {
     const unref = vi.fn();
     let repeat: (() => void) | undefined;

@@ -69,7 +69,9 @@ export function sharpPackagesFor(platformValue, archValue) {
   const arch = normalizeArch(archValue);
   if (platform === 'win32') return [`@img/sharp-win32-${arch}`];
   if (platform === 'darwin') return [`@img/sharp-darwin-${arch}`, `@img/sharp-libvips-darwin-${arch}`];
-  return [`@img/sharp-linux-${arch}`, `@img/sharp-libvips-linux-${arch}`];
+  // Electron's Linux GLib symbols conflict with libvips' native binary. The official
+  // WebAssembly payload avoids loading a second incompatible GLib into the process.
+  return ['@img/sharp-wasm32'];
 }
 
 export function nativePrebuildDir(platformValue, archValue) {

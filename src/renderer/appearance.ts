@@ -1,5 +1,6 @@
-import { defaultAppearance, mixColor, paletteTokens, type AppearanceSettings, type AppearanceTheme } from '../shared/appearance.js';
+import { defaultAppearance, mixColor, paletteTokens, resolveAppearance, type AppearanceSettings, type AppearanceTheme, type OmarchyThemeState, type ResolvedAppearance } from '../shared/appearance.js';
 import type { UiPrefs } from '../shared/types.js';
+import { t, ui } from './i18n.js';
 import { $ } from './dom.js';
 
 const FONT_FAMILIES = {
@@ -14,13 +15,18 @@ export function onAppearanceChanged(listener: () => void): () => void {
 }
 function tokens(element: HTMLElement, values: Record<string, string>): void {
   for (const [key, value] of Object.entries(values)) if (element.style.getPropertyValue(key) !== value) element.style.setProperty(key, value);
+  for (const key of ['--selection', '--selection-ink']) {
+    if (!(key in values)) element.style.removeProperty(key);
+  }
 }
 
-export function applyAppearance(theme: AppearanceTheme, settings?: AppearanceSettings): void {
+export function applyAppearance(theme: AppearanceTheme, settings?: AppearanceSettings,
+  options?: Pick<ResolvedAppearance, 'foreground' | 'selection' | 'red' | 'green'>): void {
   const value = settings ?? defaultAppearance(), palette = value[theme], root = document.documentElement;
+  const colors = options && (options.foreground || options.selection || options.red || options.green) ? options : undefined;
   root.dataset.theme = theme;
   root.dataset.translucentSidebar = String(value.translucentSidebar);
-  tokens(root, paletteTokens(palette.background, palette.accent, palette.contrast));
+  tokens(root, paletteTokens(palette.background, palette.accent, palette.contrast, colors));
   root.style.setProperty('--text-scale', String(value.fontSize / 14));
   if (value.font === 'system') root.style.removeProperty('--ui-font');
   else root.style.setProperty('--ui-font', FONT_FAMILIES[value.font]);
@@ -29,29 +35,50 @@ export function applyAppearance(theme: AppearanceTheme, settings?: AppearanceSet
   // No native transparent window, desktop capture, or platform permission is needed.
   const sidebarBackground = value.translucentSidebar ? mixColor(palette.sidebar, palette.background, .13) : palette.sidebar;
   for (const element of document.querySelectorAll<HTMLElement>('.sidebar, .app-topbar, .appearance-preview-sidebar, .connection-popover')) {
-    tokens(element, paletteTokens(sidebarBackground, palette.accent, palette.contrast));
+    tokens(element, paletteTokens(sidebarBackground, palette.accent, palette.contrast, colors));
   }
   for (const listener of appearanceListeners) listener();
 }
 
 /** Only the in-progress form edit is local; the existing Settings queue owns persistence. */
-export function initAppearance(save: (patch: { theme?: AppearanceTheme; appearance?: AppearanceSettings }) => void): { apply(ui: UiPrefs): void } {
+export function initAppearance(save: (patch: { theme?: AppearanceTheme; appearance?: AppearanceSettings }) => void): { apply(ui: UiPrefs, omarchy: OmarchyThemeState): void } {
   const panel = $('appearancePanel');
   let theme: AppearanceTheme = 'dark';
   let current = defaultAppearance();
+  let omarchy: OmarchyThemeState = { status: 'unavailable', generation: 0, palette: null };
   let editing = false;
   const colorKeys = ['accent', 'background', 'sidebar'] as const;
-  function paint(): void {
-    applyAppearance(theme, current);
-    $<HTMLSelectElement>('appearanceTheme').value = theme;
+  const manualControls = panel.querySelectorAll<HTMLInputElement | HTMLSelectElement>(
+    '#appearanceTheme, [data-color], [data-hex], #appearanceContrast');
+  const status = $('appearanceOmarchyStatus');
+  const statusText = (): string => {
+    if (!current.followOmarchy) return t('Manual colors selected.');
+    if (omarchy.palette) {
+      if (omarchy.status === 'invalid') return t('Latest Omarchy colors are invalid; using the last valid palette.');
+      if (omarchy.status === 'unavailable') return t('Omarchy theme unavailable; using the last valid palette.');
+      return t('Omarchy colors are active.');
+    }
+    return t(omarchy.status === 'invalid'
+      ? 'Omarchy colors are invalid; using saved colors.'
+      : 'Omarchy theme unavailable; using saved colors.');
+  };
+  function paint(updateControls = true): void {
+    const resolved = resolveAppearance(theme, current, omarchy);
+    applyAppearance(resolved.theme, resolved.settings, resolved);
+    const following = current.followOmarchy && omarchy.palette !== null;
+    for (const control of manualControls) control.disabled = following;
+    ui(status, 'textContent', statusText);
+    if (!updateControls) return;
+    $<HTMLInputElement>('appearanceFollowOmarchy').checked = current.followOmarchy;
+    $<HTMLSelectElement>('appearanceTheme').value = following ? resolved.theme : theme;
     $<HTMLSelectElement>('appearanceFont').value = current.font;
     $<HTMLInputElement>('appearanceSize').value = String(current.fontSize);
     $('appearanceSizeValue').textContent = `${current.fontSize} px`;
-    $<HTMLInputElement>('appearanceContrast').value = String(current[theme].contrast);
-    $('appearanceContrastValue').textContent = String(current[theme].contrast);
+    $<HTMLInputElement>('appearanceContrast').value = String(resolved.settings[resolved.theme].contrast);
+    $('appearanceContrastValue').textContent = String(resolved.settings[resolved.theme].contrast);
     $<HTMLInputElement>('appearanceTranslucent').checked = current.translucentSidebar;
     for (const key of colorKeys) {
-      const color = current[theme][key];
+      const color = resolved.settings[resolved.theme][key];
       panel.querySelector<HTMLInputElement>(`[data-color="${key}"]`)!.value = color;
       const hex = panel.querySelector<HTMLInputElement>(`[data-hex="${key}"]`)!;
       if (document.activeElement !== hex) hex.value = color.toUpperCase();
@@ -73,19 +100,19 @@ export function initAppearance(save: (patch: { theme?: AppearanceTheme; appearan
     else if (control.id === 'appearanceContrast') current = { ...current, [theme]: { ...current[theme], contrast: Number(control.value) } };
     else if (control.id === 'appearanceFont') current = { ...current, font: control.value as AppearanceSettings['font'] };
     else if (control.id === 'appearanceTranslucent') current = { ...current, translucentSidebar: (control as HTMLInputElement).checked };
-    else return false;
+    else if (control.id === 'appearanceFollowOmarchy') current = { ...current, followOmarchy: (control as HTMLInputElement).checked };
     paint();
     return true;
   }
   panel.addEventListener('input', event => {
     const control = event.target;
-    if (!(control instanceof HTMLInputElement) || !control.id.startsWith('appearance')) return;
+    if (!(control instanceof HTMLInputElement) || !control.id.startsWith('appearance') || control.disabled) return;
     editing = true;
     update(control);
   });
   panel.addEventListener('change', event => {
     const control = event.target;
-    if (!(control instanceof HTMLInputElement || control instanceof HTMLSelectElement) || !control.id.startsWith('appearance')) return;
+    if (!(control instanceof HTMLInputElement || control instanceof HTMLSelectElement) || !control.id.startsWith('appearance') || control.disabled) return;
     editing = false;
     if (control.id === 'appearanceTheme') {
       theme = control.value as AppearanceTheme;
@@ -98,10 +125,14 @@ export function initAppearance(save: (patch: { theme?: AppearanceTheme; appearan
     }
   });
   $('appearanceReset').addEventListener('click', () => {
-    editing = false; current = defaultAppearance(); paint(); save({ appearance: current });
+    editing = false; current = { ...defaultAppearance(), followOmarchy: current.followOmarchy }; paint(); save({ appearance: current });
   });
-  return { apply(ui) {
-    if (editing) return;
-    theme = ui.theme; current = ui.appearance ?? defaultAppearance(); paint();
+  return { apply(preferences, snapshot) {
+    omarchy = snapshot ?? { status: 'unavailable', generation: 0, palette: null };
+    if (!editing) {
+      theme = preferences.theme;
+      current = preferences.appearance ?? defaultAppearance();
+    }
+    paint(!editing);
   } };
 }

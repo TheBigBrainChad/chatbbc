@@ -574,7 +574,7 @@ function applySnapshot(next: PetOverlaySnapshot): void {
   if (canAnimate()) advance(performance.now());
   const previous = snapshot?.level;
   snapshot = next;
-  applyAppearance(next.theme, next.appearance);
+  applyAppearance(next.resolvedAppearance.theme, next.resolvedAppearance.settings, next.resolvedAppearance);
   syncLibrary();
   if (previous !== undefined && previous !== next.level) {
     for (const view of views.values()) {

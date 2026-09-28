@@ -1327,7 +1327,7 @@ var CLF_DOM = (() => {
   /**
    * Visible assistant activity in the exact DOM order ChatGPT drew it.
    *
-   * Chat On Steroids remains authoritative for its own call labels/results. This only supplies
+   * ChatBBC remains authoritative for its own call labels/results. This only supplies
    * the missing chronology: a visible commentary paragraph can sit between two calls, and
    * the recorder clock cannot recover that after a fast turn. ChatGPT's completed DOM can.
    */
@@ -1527,7 +1527,7 @@ var CLF_DOM = (() => {
    * and in use" as recorded chat errors — 60 of them against 5 real transport failures in
    * one run — and every error count the app showed was inflated by them. An offscreen
    * announcement is not a banner. Neither is this extension's own surface, which was
-   * recording "Chat On Steroids Desktop is now connected" as a ChatGPT failure.
+   * recording "ChatBBC Desktop is now connected" as a ChatGPT failure.
    */
   const acknowledgedAccessNotices = new WeakSet();
   function errors() {
@@ -2319,7 +2319,7 @@ var CLF_DOM = (() => {
   }
   /** Observed ChatGPT Plugins settings surface. Missing/ambiguous structure is not proof. */
   async function pluginRefreshView(connectorName, expectedTools = [], expectedAppId = null) {
-    const externalPlugins = connectorName === 'Chat On Steroids Plugins';
+    const externalPlugins = connectorName === 'ChatBBC Plugins';
     const snapshot = await new Promise(resolve => {
       const nonce = crypto.randomUUID();
       const finish = value => { clearTimeout(timer); window.removeEventListener('message', receive); resolve(value); };

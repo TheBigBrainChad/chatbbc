@@ -6,7 +6,7 @@
  * Issue #66: the 2.0.5 arm64 DMG launched to "the application is damaged" on macOS 27, with
  * Gatekeeper assessment already disabled — so this was a structural failure, not a policy one:
  *
- *     codesign --verify --deep --strict "Chat On Steroids.app"
+ *     codesign --verify --deep --strict "ChatBBC.app"
  *     -> code has no resources but signature indicates they must be present
  *     codesign -dvv -> flags=0x20002(adhoc,linker-signed), Sealed Resources=none
  *
@@ -66,9 +66,9 @@ export default async function sealMacOsBundle(context) {
   }
 
   // Electron's generic app template declares camera/microphone/audio capture even when an app
-  // never uses those APIs. CoS denies renderer permission requests and has no media-capture
+  // never uses those APIs. ChatBBC denies renderer permission requests and has no media-capture
   // feature, so shipping those declarations is misleading and can make macOS surface unrelated
-  // privacy prompts. Keep only privacy declarations for capabilities CoS actually exposes.
+  // privacy prompts. Keep only privacy declarations for capabilities ChatBBC actually exposes.
   const cleanedPlist = JSON.parse(run('plutil', ['-convert', 'json', '-o', '-', plist]).stdout);
   for (const key of UNUSED_MEDIA_PRIVACY_KEYS) {
     if (Object.hasOwn(cleanedPlist, key)) throw new Error(`afterPack failed to remove unused Info.plist key ${key}`);

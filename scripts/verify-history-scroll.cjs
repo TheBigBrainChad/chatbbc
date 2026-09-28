@@ -28,7 +28,7 @@ app.whenReady().then(async () => {
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '').replace(/<link\b[^>]*>/g, '')
     .replace('</head>', `<style>${css}</style></head>`);
   const show = process.argv.includes('--show');
-  const win = new BrowserWindow({ show, title: 'CoS history scroll verification', width: 1400, height: 1000,
+  const win = new BrowserWindow({ show, title: 'ChatBBC history scroll verification', width: 1400, height: 1000,
     webPreferences: { sandbox: true, backgroundThrottling: false, offscreen: !show } });
   await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
   await win.webContents.executeJavaScript(`(() => {

@@ -520,7 +520,7 @@ function paintDesktopAccess(next: AppState): void {
   if (box.hidden) return;
 
   ui($('desktopAccessTitle'), 'textContent', () => t("Desktop access needs attention"));
-  ui($('desktopAccessDetail'), 'textContent', () => t("{0}. These are live verdicts from the native backend executing inside Chat On Steroids. ", [missing.join(' · ')]) +
+  ui($('desktopAccessDetail'), 'textContent', () => t("{0}. These are live verdicts from the native backend executing inside ChatBBC. ", [missing.join(' · ')]) +
     t("Grant the missing macOS permission, then fully quit and reopen the app."));
   $<HTMLButtonElement>('openDesktopScreen').hidden =
     !needsScreen || access.screen === 'granted';
@@ -958,12 +958,12 @@ function updateSummary({ bridge, update, config, status }: AppState): { text: st
       update.stage === 'checking'
         ? t("Checking for the latest update…")
         : update.stage === 'ready'
-        ? t("Chat On Steroids {0} is downloaded and ready. Install it now, or it installs the next time you quit.", [update.latest])
+        ? t("ChatBBC {0} is downloaded and ready. Install it now, or it installs the next time you quit.", [update.latest])
         : update.stage === 'downloading'
-          ? t("Chat On Steroids {0} is downloading. Keep working; you can install it when it lands.", [update.latest])
+          ? t("ChatBBC {0} is downloading. Keep working; you can install it when it lands.", [update.latest])
           : update.stage === 'failed'
-            ? t("Chat On Steroids {0} could not be downloaded: {1}.", [update.latest, update.error ?? t("the download stopped")])
-            : t("Chat On Steroids {0} is out. This installation has to be updated by hand.", [update.latest])
+            ? t("ChatBBC {0} could not be downloaded: {1}.", [update.latest, update.error ?? t("the download stopped")])
+            : t("ChatBBC {0} is out. This installation has to be updated by hand.", [update.latest])
     );
     if (update.stage === 'failed') tone = 'bad';
   } else if (update.stage === 'failed') {
@@ -973,7 +973,7 @@ function updateSummary({ bridge, update, config, status }: AppState): { text: st
     lines.push(t("Checking for a newer version…"));
   } else if (!stale && !missing) {
     const extension = bridge.present && bridge.extensionVersion ? t(" · extension {0}", [bridge.extensionVersion]) : '';
-    lines.push(t("Up to date! Chat On Steroids {0}{1}", [update.current, extension]));
+    lines.push(t("Up to date! ChatBBC {0}{1}", [update.current, extension]));
     tone = 'ok';
   }
   if (stale) {
@@ -1131,7 +1131,7 @@ function apply(next: AppState): void {
 
   // ---- theme
   const appearanceUi = requestedSettings?.ui ?? config.ui;
-  appearance.apply(appearanceUi);
+  appearance.apply(appearanceUi, next.omarchyTheme);
 
   const headerConnect = $<HTMLButtonElement>('headerConnect');
   const wasVisible = !headerConnect.hidden;
@@ -1318,7 +1318,7 @@ function apply(next: AppState): void {
   ui(chatgptNote, 'textContent', () => status.lastRequestAt === null
       ? t("ChatGPT has not called this app yet.")
       : status.lastToolCallAt === null
-        ? t("ChatGPT connected {0} but has never run a tool. Check that the CoS app is enabled in ChatGPT → Plugins.", [ago(status.lastRequestAt)])
+        ? t("ChatGPT connected {0} but has never run a tool. Check that the ChatBBC app is enabled in ChatGPT → Plugins.", [ago(status.lastRequestAt)])
         : unverified.length > 0
           ? // One connector working is not the whole setup. Naming the missing one is the
             // difference between "something is off" and knowing what to go and create.
@@ -1928,7 +1928,7 @@ $('updateGet').addEventListener('click', () => void run(api.downloadUpdate()));
  * click looking like a crash. Both buttons are the same action; either can be the one pressed.
  */
 function installUpdate(): void {
-  toast(t("Installing the update. Chat On Steroids closes and starts again as the new version."));
+  toast(t("Installing the update. ChatBBC closes and starts again as the new version."));
   void run(api.installUpdate());
 }
 

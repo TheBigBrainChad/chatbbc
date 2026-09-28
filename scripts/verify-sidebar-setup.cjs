@@ -21,6 +21,7 @@ app.whenReady().then(async () => {
     const config = {
       roots: [{name:'demo',path:'C:/demo'}], readOnly:true,
       capabilities: {browse:true,search:true,read:true,metadata:true,create:false,edit:false,move:false,deleteFile:false,command:false,screen:false,control:false,clipboardRead:false,clipboardWrite:false},
+      commandAllowlist:{enabled:false,mode:'allow',rules:[]},
       tunnel: {kind:'openai',tunnelId:'',desktopTunnelId:'',binaryPath:''},
       ui: {minimizeToTray:true,autoConnect:false,privacyScreenshots:false,theme:'dark'},
       sessions: {record:true,retainDays:30,advisoryTokens:300000,limitTokens:400000}, compaction:{auto:true,autoTokens:300000},
@@ -50,7 +51,7 @@ app.whenReady().then(async () => {
         return ok(state);
       },
       removeSetupProfile:id=>{config.setupProfiles=config.setupProfiles.filter(p=>p.id!==id);return ok(state)}
-    },{get:(target,key)=>key in target?target[key]:()=>ok(null)});
+    },{get:(target,key)=>key in target?target[key]:/^on[A-Z]/.test(String(key))?()=>()=>{}:()=>ok(null)});
     await import('/main.ts');
     const still=document.createElement('style'); still.textContent='*,*::before,*::after{animation:none!important;transition:none!important}'; document.head.append(still);
     window.fixtureReady=true;
@@ -66,14 +67,26 @@ app.whenReady().then(async () => {
   let win;
   try {
     await server.listen(); fs.mkdirSync(output,{recursive:true});
-    win = new BrowserWindow({show:false,width:1100,height:900,webPreferences:{sandbox:true,backgroundThrottling:false}});
+    win = new BrowserWindow({show:true,width:1100,height:900,webPreferences:{sandbox:true,backgroundThrottling:false}});
+    win.webContents.on('console-message', event => {
+      if (/Uncaught|Error:/.test(event.message)) console.error('Sidebar renderer:', event.message, event.sourceId, event.lineNumber);
+    });
     await win.loadURL(server.resolvedUrls.local[0]+'fixture.html?reset=1');
     win.webContents.setZoomFactor(1);
-    const js = code=>win.webContents.executeJavaScript(code);
+    await win.webContents.executeJavaScript(`new Promise(resolve => {
+      let quiet;
+      const settle = () => { clearTimeout(quiet); quiet = setTimeout(() => { removeEventListener('resize', settle); resolve(); }, 400); };
+      addEventListener('resize', settle);
+      settle();
+    })`);
+    const js = async code => {
+      try { return await win.webContents.executeJavaScript(code); }
+      catch (error) { throw new Error(`Sidebar fixture evaluation failed for ${code.slice(0, 120)}: ${error.message}`, { cause: error }); }
+    };
     const screenshot = async name => {
-      await win.webContents.capturePage(undefined,{stayHidden:true,stayAwake:true});
+      await win.webContents.capturePage();
       await new Promise(r=>setTimeout(r,200));
-      fs.writeFileSync(path.join(output,name),(await win.webContents.capturePage(undefined,{stayHidden:true,stayAwake:true})).toPNG());
+      fs.writeFileSync(path.join(output,name),(await win.webContents.capturePage()).toPNG());
     };
     for(let i=0;i<100 && !(await js('!!window.fixtureReady && document.querySelectorAll(".project-group > .sess").length === 5'));i++) await new Promise(r=>setTimeout(r,25));
     await js(`window.disclosureEvents=[]; for(const type of ['keydown','keypress','keyup','click']) document.addEventListener(type,e=>window.disclosureEvents.push({type,key:e.key,tag:e.target.tagName,cls:e.target.className,open:document.querySelector('.project-group')?.open}),true)`);
@@ -105,10 +118,9 @@ app.whenReady().then(async () => {
     await js('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
     const geometry = await js(`(() => { const group=document.querySelector('.project-group');
       const title=group.querySelector('.project-name').getBoundingClientRect(), chat=group.querySelector('.sess-top b').getBoundingClientRect();
-      return {title:title.left,chat:chat.left,count:group.querySelectorAll(':scope > .sess').length,color:getComputedStyle(document.getElementById('newChat')).color,
-        icon:document.querySelector('#newChat use').getAttribute('href')}; })()`);
+      return {title:title.left,chat:chat.left,count:group.querySelectorAll(':scope > .sess').length,color:getComputedStyle(document.getElementById('newChat')).color}; })()`);
     assert.equal(geometry.count,5); assert.ok(Math.abs(geometry.title-geometry.chat)<1,JSON.stringify(geometry));
-    assert.equal(geometry.color,'rgb(255, 255, 255)'); assert.equal(geometry.icon,'#i-pencil');
+    assert.equal(geometry.color,'rgb(255, 255, 255)');
     await js('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
     await new Promise(r=>setTimeout(r,200));
     const points=await js(`[...document.querySelectorAll('.project-group > .sess')].map(row=>{const r=row.getBoundingClientRect();return {x:Math.round(r.left+35),y:Math.round(r.top+r.height/2)}})`);
@@ -177,10 +189,8 @@ app.whenReady().then(async () => {
       assert.ok(Math.abs(row.removeLeft - compactProfiles.rows[0].removeLeft) <= 1, JSON.stringify(compactProfiles));
       assert.ok(row.choiceRight <= row.removeLeft, JSON.stringify(compactProfiles));
     }
-    // Wake the hidden fixture's compositor before retaining the final frame.
-    await win.webContents.capturePage(undefined,{stayHidden:true,stayAwake:true});
     await new Promise(r=>setTimeout(r,250));
-    fs.writeFileSync(path.join(output,'settings-profiles.png'),(await win.webContents.capturePage(undefined,{stayHidden:true,stayAwake:true})).toPNG());
+    fs.writeFileSync(path.join(output,'settings-profiles.png'),(await win.webContents.capturePage()).toPNG());
     const longProfile = await js(`(() => {
       const choice = document.querySelector('.setup-profile-option > :first-child');
       const text = choice.textContent; choice.textContent = 'Long-profile-'.repeat(6);

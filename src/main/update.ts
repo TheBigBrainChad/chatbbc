@@ -1,11 +1,10 @@
 /**
- * Whether a newer Chat On Steroids has been published, and the file that becomes it.
+ * Whether a newer ChatBBC has been published, and the file that becomes it.
  *
  * This is the whole updater: one pass, run at startup and repeated on a slow timer, that asks
- * GitHub for the latest release, stages the artifact this installation can actually apply, and
- * hands that file to the platform's own installer on the way out. There is no renderer-side
- * download state and no `electron-updater`; the shipping pipeline already publishes exactly the
- * artifacts named below, so the smallest correct updater is the one that fetches them by name.
+ * GitHub for the latest release, stages the AppImage this installation can actually apply, and
+ * replaces the running AppImage on quit. There is no renderer-side download state and no
+ * `electron-updater`; the release pipeline publishes the artifact named below.
  *
  * Three rules shape everything here:
  *
@@ -16,20 +15,15 @@
  *   second download of the same file. That is what makes the repeat timer free: a pass that
  *   finds the release it already staged stops at the release call.
  * - **The user says when.** A staged update is applied during the ordinary quit sequence, and
- *   `installStagedUpdate` is the button that starts that quit on purpose. Nothing here quits or
+ *   `markInstallOnQuit` is called by the Install button before it starts that quit. Nothing here quits or
  *   interrupts anything on its own.
  * - **A staged artifact outlives the process that fetched it.** It is kept under the version it
  *   belongs to, so the next start recognises the file it already has and reverifies it rather
- *   than spending another hundred megabytes on the same installer.
+ *   than downloading the same AppImage again.
  *
- * **What updates itself, and what does not.** Windows, and Linux installed as an AppImage. A
- * Linux `.deb` is owned by the system package manager and cannot be replaced without root, and
- * asking for a password during quit is not something this app will do — so a `.deb` install is
- * *told* a new version exists and is given the release page, and nothing is downloaded behind
- * it. That is a real limitation, not parity, and the notice says so rather than implying an
- * update is on its way. macOS is out entirely: those artifacts ship unsigned and unnotarized
- * (see electron-builder.yml), so an app that silently replaced itself there would be handing
- * Gatekeeper a binary the user never chose to trust.
+ * **What updates itself:** a Linux x64 AppImage. A packaged Linux x64 installation
+ * without `APPIMAGE` receives the exact AppImage download link for manual replacement.
+ * Other platforms and architectures have no supported release artifact.
  *
  * What this module does **not** own: the version of the browser extension. The bridge already
  * learns that from the authenticated `x-extension-version` header of a paired extension, and
@@ -37,7 +31,6 @@
  * wrong.
  */
 
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmod, copyFile, mkdir, rename, rm } from 'node:fs/promises';
 import { createReadStream, createWriteStream, existsSync } from 'node:fs';
@@ -49,7 +42,7 @@ import { logInfo, logWarn } from './logger.js';
 import { APP_VERSION } from './version.js';
 import { isNewer, type UpdateStatus } from '../shared/types.js';
 
-const REPO = 'totec448-spec/chat-on-steroids';
+const REPO = 'TheBigBrainChad/chatbbc';
 const LATEST_RELEASE_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 
 const CHECK_TIMEOUT_MS = 15_000;
@@ -66,43 +59,28 @@ const RECHECK_MS = 6 * 60 * 60_000;
 /**
  * The artifact this exact installation can apply to itself, or null for one that cannot.
  *
- * Null is a normal answer, not a failure: macOS is out by policy, a Linux `.deb` belongs to the
- * system package manager and would need root to replace, and an architecture with no published
- * artifact has nothing to fetch. Those installations are still told a newer version exists —
- * that is what `latest` with a stage of `idle` means, and the notice turns it into a download
- * link — they are simply not updated for.
- *
- * `APPIMAGE` is the environment variable the AppImage runtime sets to the path of the file that
- * is running. Its absence is exactly what distinguishes a portable AppImage from a `.deb`
- * install, so it is both the eligibility test and the target of the swap.
+ * Other platforms and architectures have no published artifact. A packaged Linux x64
+ * run without `APPIMAGE` can download the AppImage manually but cannot update itself.
+ * `APPIMAGE` is set by the AppImage runtime to the running file's path.
  *
  * An unpackaged run — `electron-vite dev`, or a maintainer's working tree — is not an
  * installation. Its version is whatever the source says, so it reads as out of date the moment a
- * release ships, and staging for it would let quitting a dev session silently run an installer
- * over the real per-user install. It is told what is published and replaces nothing.
+ * release ships, and staging for it would let quitting a dev session replace a real AppImage.
+ * It is told what is published and replaces nothing.
  */
 export function stagedArtifact(
   platform: NodeJS.Platform = process.platform,
   arch: string = process.arch,
   appImage: string | undefined = process.env.APPIMAGE,
   packaged: boolean = app.isPackaged
-): { name: string; kind: 'installer' | 'appimage'; target: string } | null {
-  if (!packaged) return null;
-  if (arch !== 'x64' && arch !== 'arm64') return null;
-  if (platform === 'win32') return { name: `Chat-On-Steroids-Setup-${arch}.exe`, kind: 'installer', target: '' };
-  if (platform === 'linux' && appImage) {
-    return { name: `Chat-On-Steroids-Linux-${arch}.AppImage`, kind: 'appimage', target: appImage };
-  }
-  return null;
+): { name: string; target: string } | null {
+  if (!packaged || platform !== 'linux' || arch !== 'x64' || !appImage) return null;
+  return { name: 'ChatBBC-Linux-x64.AppImage', target: appImage };
 }
 
 /**
- * The published file an installation that cannot update itself should download, or null.
- *
- * macOS and a Linux `.deb` are told about a release but never replaced from here (see above).
- * Pointing their "Get update" at the exact file for this machine, instead of the release page,
- * saves the search for the right one of thirteen assets. The download still happens in the
- * user's browser, so macOS applies its normal quarantine and Gatekeeper checks to it.
+ * A packaged Linux x64 installation outside an AppImage can download the exact
+ * supported AppImage; every unsupported target falls back to the release page.
  */
 export function manualDownloadName(
   platform: NodeJS.Platform = process.platform,
@@ -110,10 +88,8 @@ export function manualDownloadName(
   appImage: string | undefined = process.env.APPIMAGE,
   packaged: boolean = app.isPackaged
 ): string | null {
-  if (!packaged || (arch !== 'x64' && arch !== 'arm64')) return null;
-  if (platform === 'darwin') return `Chat-On-Steroids-macOS-${arch}.dmg`;
-  if (platform === 'linux' && !appImage) return `Chat-On-Steroids-Linux-${arch}.deb`;
-  return null;
+  return packaged && platform === 'linux' && arch === 'x64' && !appImage
+    ? 'ChatBBC-Linux-x64.AppImage' : null;
 }
 
 /** Where "Get update" sends this installation: its exact file for `version`, else the page. */
@@ -130,9 +106,9 @@ export function releaseVersion(tag: unknown): string | null {
 }
 
 const CLEAR: UpdateStatus = { current: APP_VERSION, latest: null, stage: 'idle', error: null, checkedAt: null };
-
 let status: UpdateStatus = CLEAR;
-let staged: { version: string; file: string; kind: 'installer' | 'appimage'; target: string; digest: string } | null = null;
+
+let staged: { version: string; file: string; target: string; digest: string } | null = null;
 let pass: Promise<void> | null = null;
 /** Set by `markInstallOnQuit`: the user pressed Install, so bring the app back afterwards. */
 let runAfterInstall = false;
@@ -166,8 +142,8 @@ export function startUpdateChecks(): void {
 /**
  * Looks for a newer release and, if this installation can apply one, stages it.
  *
- * Concurrent callers get the pass that is already running, which is what keeps a second call
- * from downloading the same installer twice.
+ * Concurrent callers get the pass that is already running, so a second call does not
+ * download the same AppImage twice.
  */
 export function checkForUpdates(): Promise<void> {
   if (pass) return pass;
@@ -210,21 +186,20 @@ async function runPass(): Promise<void> {
     set({ latest: release.version, stage: 'ready' });
     return;
   }
-  // One read of the release's own checksums, for whichever of the two paths below runs. It is
-  // both the manifest of what the release contains and the proof of what may be executed, so
-  // neither adopting a file nor fetching one happens without it.
+  // The release's checksums authorize both adopting a previous download and fetching a new
+  // one. Neither path may hand over an unverified file.
   const expected = (await releaseDigests(release.version)).get(artifact.name);
   if (!expected) throw new Error(`release ${release.version} publishes no ${artifact.name}`);
   const carried = await adopt(release.version, artifact.name, expected);
   if (carried) {
-    staged = { version: release.version, file: carried, kind: artifact.kind, target: artifact.target, digest: expected };
+    staged = { version: release.version, file: carried, target: artifact.target, digest: expected };
     set({ latest: release.version, stage: 'ready' });
     logInfo(`update: ${release.version} was already downloaded and is ready to install`);
     return;
   }
   set({ latest: release.version, stage: 'downloading' });
   const file = await download(release.version, artifact.name, expected);
-  staged = { version: release.version, file, kind: artifact.kind, target: artifact.target, digest: expected };
+  staged = { version: release.version, file, target: artifact.target, digest: expected };
   set({ stage: 'ready' });
   logInfo(`update: ${release.version} is downloaded and ready to install`);
 }
@@ -246,9 +221,8 @@ async function fileDigest(file: string): Promise<string> {
  *
  * Staging is per version, so this is a question the file system alone can answer and there is no
  * second record of it to fall out of step. The digest is checked again, against the release's
- * own published sums rather than anything this app wrote beside the file: what makes an artifact
- * safe to hand to an installer is that it still matches what the release publishes, and a staged
- * update can sit here for days before anyone quits.
+ * own published sums rather than anything this app wrote beside the file: a staged update can
+ * sit here for days before anyone quits.
  *
  * Reusing it is not an optimisation. This app lives in the tray and is closed to it, so an
  * update staged on Monday is applied whenever the user next really quits — and without this,
@@ -278,9 +252,8 @@ async function latestVersion(): Promise<string> {
 }
 
 /**
- * The SHA-256 of every artifact in a release, from the `SHA256SUMS.txt` the pipeline publishes
- * beside them (see .github/workflows/release.yml, which generates it with `sha256sum` over the
- * exact files it then uploads).
+ * The SHA-256 of every artifact in a release, from the `SHA256SUMS.txt` published
+ * beside them by the local release pipeline.
  *
  * This doubles as the manifest of what a release contains: a name that is not in here is not
  * something to download, and a file whose digest is not in here is not something to run.
@@ -305,7 +278,7 @@ async function get(url: string, timeout: number, headers: Record<string, string>
   const response = await fetch(url, {
     signal: AbortSignal.timeout(timeout),
     redirect: 'follow',
-    headers: { 'user-agent': `chat-on-steroids/${APP_VERSION}`, ...headers }
+    headers: { 'user-agent': `chatbbc/${APP_VERSION}`, ...headers }
   });
   if (!response.ok) throw new Error(`${new URL(url).pathname.split('/').pop()} answered ${response.status}`);
   return response;
@@ -320,12 +293,11 @@ async function get(url: string, timeout: number, headers: Record<string, string>
  *
  * The artifact is then checked against the release's own published SHA-256, hashed as it
  * arrives so nothing is read twice. A length check would only catch a truncated download; this
- * is a file that becomes an executable installer the moment the app quits, so the bar is the
- * one the release pipeline already publishes for it. Anything that does not match is deleted
- * and staged as nothing.
+ * file becomes the running application on quit, so the release digest is required. Anything
+ * that does not match is deleted and staged as nothing.
  *
- * `.part` until it has passed: the rename is what publishes it, so a download that was
- * interrupted or is not the right file can never be handed to an installer.
+ * `.part` until it has passed: the rename is what publishes it, so an interrupted or wrong
+ * download cannot replace the running AppImage.
  */
 async function download(version: string, name: string, expected: string): Promise<string> {
   const dir = stagingDir(version);
@@ -350,15 +322,13 @@ async function download(version: string, name: string, expected: string): Promis
 }
 
 /**
-/**
  * Records that the user pressed Install, and says whether there was anything to install.
  *
- * It deliberately installs nothing itself. The handoff belongs at the end of the ordinary
+ * It deliberately replaces nothing itself. The handoff belongs at the end of the ordinary
  * shutdown sequence and nowhere else: that is what guarantees the bridge has drained, the child
- * processes are gone and every durable write has landed before an installer starts replacing
- * files underneath them. All this does is record that the user asked — which is also what makes
- * the difference between an update applied on the way out of a quit the user wanted for other
- * reasons, and one they are waiting to come back from.
+ * processes are gone and every durable write has landed before the AppImage is replaced.
+ * All this does is record that the user asked — which is also what makes the difference between
+ * an update applied on an ordinary quit and one they are waiting to come back from.
  *
  * The caller quits. This module still never does.
  */
@@ -369,20 +339,11 @@ export function markInstallOnQuit(): boolean {
 }
 
 /**
- * Hands a staged update to the platform, during the quit this app is already performing.
+ * Replaces the running AppImage at the end of the ordinary quit sequence.
  *
- * This is the only thing that installs anything, and it runs at the end of the shutdown
- * sequence — after the bridge, the child processes and every durable flush — so the version the
- * user next starts is the new one and nothing was interrupted to achieve that.
- *
- * Windows gets the NSIS installer in silent mode. It is a per-user install (electron-builder.yml
- * sets `perMachine: false`), so `/S` needs no elevation and shows no prompt. Detached, because
- * this process is about to stop existing.
- *
- * An AppImage has no installer: the file that is running is the whole application, so the update
- * is a rename over it. A rename rather than a copy, because the running AppImage is mounted from
- * that path — writing through it would corrupt the process that is still shutting down, while a
- * rename gives the new build a new inode and leaves the old one alive until it exits.
+ * The running image is mounted from its path. Copying to a new path and renaming over the old
+ * one gives the new build a new inode while the old build finishes shutting down. The staged
+ * bytes are verified again at handoff, including when the download survived a prior process.
  */
 export async function applyStagedUpdate(): Promise<void> {
   const ready = staged;
@@ -392,26 +353,12 @@ export async function applyStagedUpdate(): Promise<void> {
   if (!ready) return;
   try {
     if ((await fileDigest(ready.file)) !== ready.digest) throw new Error('the staged artifact changed after verification');
-    if (ready.kind === 'installer') {
-      // `--updated` tells the assisted NSIS installer this is an upgrade of the install it
-      // already owns, so it keeps the location and the shortcuts instead of asking about them.
-      // `--force-run` is added only when the user pressed Install and is waiting for the app to
-      // come back; an update applied on the way out of an ordinary quit must not reopen it.
-      const args = relaunch ? ['/S', '--updated', '--force-run'] : ['/S', '--updated'];
-      const installer = spawn(ready.file, args, { detached: true, stdio: 'ignore', windowsHide: true });
-      // An installer that cannot start reports it asynchronously, and an unhandled 'error' on a
-      // child process would take the quit down with it.
-      installer.on('error', (err: Error) => logWarn(`the ${ready.version} installer did not start: ${err.message}`));
-      installer.unref();
-    } else {
-      const next = `${ready.target}.new`;
-      await copyFile(ready.file, next);
-      await chmod(next, 0o755);
-      await rename(next, ready.target);
-      // No installer to hand the "start it again" to, so this process arranges its own successor.
-      // Electron spawns it as this one exits, which is the app.exit() that ends the shutdown.
-      if (relaunch) app.relaunch({ execPath: ready.target });
-    }
+    const next = `${ready.target}.new`;
+    await copyFile(ready.file, next);
+    await chmod(next, 0o755);
+    await rename(next, ready.target);
+    // An ordinary quit stays closed; Install explicitly asks Electron to reopen the new image.
+    if (relaunch) app.relaunch({ execPath: ready.target });
     logInfo(
       relaunch
         ? `update: installing ${ready.version} now; the app starts itself again as the new version`

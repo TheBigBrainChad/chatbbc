@@ -30,7 +30,7 @@ function sha512FromIntegrity(integrity) {
 
 async function download(url, target) {
   if (existsSync(target)) return;
-  const response = await fetch(url, { headers: { 'user-agent': 'chat-on-steroids-build' } });
+  const response = await fetch(url, { headers: { 'user-agent': 'chatbbc-build' } });
   if (!response.ok) throw new Error(`${url} -> HTTP ${response.status}`);
   await writeFile(target, Buffer.from(await response.arrayBuffer()));
 }
@@ -108,7 +108,8 @@ async function stageNativePackage(lock, packageName, platform, arch) {
 
   const extracted = path.join(extractDir, 'package');
   const metadata = JSON.parse(await readFile(path.join(extracted, 'package.json'), 'utf8'));
-  if (metadata.version !== lockEntry.version || !metadata.cpu?.includes(arch) || !metadata.os?.includes(platform)) {
+  if (metadata.version !== lockEntry.version || (packageName !== '@img/sharp-wasm32' &&
+    (!metadata.cpu?.includes(arch) || !metadata.os?.includes(platform)))) {
     throw new Error(`Unexpected metadata in ${packageName}@${lockEntry.version}`);
   }
 

@@ -7,7 +7,7 @@ export type RecoveryCountdown = {
   next?: 'queue' | 'goal' | 'loop' | 'continue';
   /** The original attribution retry conditions are currently satisfied. */
   reload?: true;
-  /** CoS still holds the source turn open during the existing post-reload wait. */
+  /** ChatBBC still holds the source turn open during the existing post-reload wait. */
   generating?: true;
 };
 

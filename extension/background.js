@@ -47,7 +47,7 @@ const MODEL_REQUEST_TIMEOUT_MS = 190_000;
 /** The reason a deadline aborts with, so it is a fact the caller can act on rather than prose. */
 const TIMED_OUT = 'the app took too long to answer';
 /** Bumped only when the request/response shape changes; the app compares it. */
-const BRIDGE_PROTOCOL = 14;
+const BRIDGE_PROTOCOL = 18;
 /** Browser-owned presentation preferences also exposed by the popup. */
 const RENDER_STREAM_KEY = 'renderStreamEnabled';
 const SHOW_TIMES_KEY = 'showStreamTimes';
@@ -975,7 +975,7 @@ async function hello(candidate) {
     }, HELLO_TIMEOUT_MS);
     if (!response.ok) return null;
     const body = await response.json();
-    return body && body.app === 'chat-on-steroids' ? body : null;
+    return body && body.app === 'chatbbc' ? body : null;
   } catch {
     return null;
   }
@@ -3295,7 +3295,7 @@ const HANDLERS = {
     await persist();
     return { ok: true };
   },
-  /** Ask every eligible ChatGPT tab to rebuild its Chat On Steroids activity stream now. */
+  /** Ask every eligible ChatGPT tab to rebuild its ChatBBC activity stream now. */
   async overwriteNow() {
     await load();
     const known = Object.keys(tabConversations)

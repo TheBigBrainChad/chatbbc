@@ -46,15 +46,13 @@ interface Descriptor {
 
 const THREAD = 'f0f00004-1111-4111-8111-111111111111';
 /**
- * The connector name the live page actually holds, taken from a real conversation.
- *
- * Spaces and all — this is `resource_name` out of this app's own protected-resource
- * metadata, and the fixture spells it exactly because the whole evidence pipeline once
- * matched a single hardcoded name that no longer existed.
+ * The exact connector name in this product's protected-resource metadata.
+ * Matching must not accept older products or names that merely share a prefix.
  */
-const APP = 'Chat On Steroids Core';
-const DESKTOP_APP = 'Chat On Steroids Desktop';
-/** What the connector was called before 1.7.1 split it. Older chats still hold it. */
+const APP = 'ChatBBC Core';
+const DESKTOP_APP = 'ChatBBC Desktop';
+const PLUGINS_APP = 'ChatBBC Plugins';
+const PREDECESSOR_APP = 'Chat On Steroids Core';
 const LEGACY_APP = 'TobisComputer';
 /** The connector's link id, as it appears in a request path. */
 const LINK = 'link_11111111222233334444555555555555';
@@ -557,7 +555,7 @@ describe('reading a row out of the page', () => {
       answered: true, requestId: 'wfr_01a009', createTime: 1786873669.5 }]);
   });
 
-  it.each(['Chat On Steroids Core', 'Chat On Steroids Desktop', 'Chat On Steroids Plugins', 'Chat On Steroids Backup', 'Gmail'])(
+  it.each([APP, DESKTOP_APP, PLUGINS_APP, PREDECESSOR_APP, LEGACY_APP, 'ChatBBC Backup', 'Gmail'])(
     'keeps result-only metadata scoped to the exact supported connector %s', async app => {
       const result = answer('result-scope', 'unused', 'read', app);
       result.author.name = 'api_tool.call_tool';
@@ -566,7 +564,7 @@ describe('reading a row out of the page', () => {
       // Duplicate provider objects are ambiguous, including result-only shapes.
       expect(turns[0]!.calls).toEqual([]);
       const single = await scan([], [{ id: 'result-scope-turn', messages: [result] }]);
-      expect(single.turns[0]!.calls).toHaveLength(['Chat On Steroids Backup', 'Gmail'].includes(app) ? 0 : 1);
+      expect(single.turns[0]!.calls).toHaveLength([PREDECESSOR_APP, LEGACY_APP, 'ChatBBC Backup', 'Gmail'].includes(app) ? 0 : 1);
     });
 
   /**
@@ -602,7 +600,7 @@ describe('reading a row out of the page', () => {
     expect(version).toBe(21);
     expect(rows[0]!.v).toBe(21);
   });
-  it('counts only TobisComputer requests in the complete turn, not api_tool metadata calls', async () => {
+  it('counts only exact ChatBBC requests in the complete turn, not api_tool metadata calls', async () => {
     const mine1 = request('req-1', 'read_file');
     const mine2 = request('req-2', 'search_files');
     const meta: Message = {
@@ -667,40 +665,32 @@ describe('the calls a turn says it made', () => {
       expect(turns[0]!.codeModeCalls).toEqual([{ messageId: root.id, requestId: 'wfr_01a009', answered: mode === 'complete' }]);
     });
 
-  /**
-   * The live regression: 1.7.1 renamed the connector and split it in two, and this test
-   * spelled only the old name. Every request on every page stopped being recognised as
-   * ours, so no turn produced evidence and one chat's whole run of calls was filed under
-   * `Unattributed activity`. Both current connectors and the old name must read.
-   */
-  it('recognises both 1.7.1 connectors and the pre-1.7.1 name', async () => {
+  it('recognises only the three current connectors, not predecessor or lookalike requests', async () => {
     const messages = [
       request('req-core', 'read'),
       answer('res-core', 'req-core', 'read'),
       request('req-desk', 'computer', { app: DESKTOP_APP }),
       answer('res-desk', 'req-desk', 'computer', DESKTOP_APP),
-      request('req-old', 'read_file', { app: LEGACY_APP }),
-      answer('res-old', 'req-old', 'read_file', LEGACY_APP)
+      request('req-plugins', 'exec', { app: PLUGINS_APP }),
+      answer('res-plugins', 'req-plugins', 'exec', PLUGINS_APP),
+      request('req-predecessor', 'read', { app: PREDECESSOR_APP }),
+      answer('res-predecessor', 'req-predecessor', 'read', PREDECESSOR_APP),
+      request('req-legacy', 'read_file', { app: LEGACY_APP }),
+      answer('res-legacy', 'req-legacy', 'read_file', LEGACY_APP)
     ];
     const { turns } = await scan([], [{ id: 'turn-renamed', messages }]);
 
-    expect(turns[0]!.calls).toEqual([
-      { messageId: 'req-core', tool: 'read', order: 0, answered: true, requestId: 'wfr_01a009', createTime: 1786873658.125 },
-      { messageId: 'req-desk', tool: 'computer', order: 1, answered: true, requestId: 'wfr_01a009', createTime: 1786873658.125 },
-      { messageId: 'req-old', tool: 'read_file', order: 2, answered: true, requestId: 'wfr_01a009', createTime: 1786873658.125 }
-    ]);
+    expect(turns[0]!.calls.map(call => call.messageId)).toEqual(['req-core', 'req-desk', 'req-plugins']);
   });
 
   /**
-   * A name is not a prefix game. `Chat On Steroids Backup` shares every character of the
-   * brand and is still a different integration; matching on the brand rather than on the
-   * exact connector names would make this app vouch for its calls and file a stranger's
-   * traffic into this chat's session.
+   * A name is not a prefix game. `ChatBBC Backup` is a different integration,
+   * so its calls must never be attributed to this chat's session.
    */
   it('refuses a connector whose name merely starts with this app’s brand', async () => {
     const messages = [
-      request('req-fake', 'read', { app: 'Chat On Steroids Backup' }),
-      answer('res-fake', 'req-fake', 'read', 'Chat On Steroids Backup'),
+      request('req-fake', 'read', { app: 'ChatBBC Backup' }),
+      answer('res-fake', 'req-fake', 'read', 'ChatBBC Backup'),
       request('req-mine', 'read')
     ];
     const { turns } = await scan([], [{ id: 'turn-lookalike', messages }]);
