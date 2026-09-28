@@ -1,0 +1,2928 @@
+/**
+ * Everything that knows what ChatGPT's page looks like.
+ *
+ * This is the only file that will break when ChatGPT changes, which is why it is the
+ * only file allowed to contain a selector. Every function returns a safe empty value
+ * instead of throwing, so a redesign degrades the companion to "records nothing new"
+ * rather than breaking the page the user is working in.
+ *
+ * Anchors used, in order of how directly the live page exposes them:
+ *   · turn/message data-* attributes when present (data-turn-id, data-message-id,
+ *     data-message-author-role, data-interrupted, data-testid)
+ *   · `.markdown` for assistant prose when the current renderer supplies no assistant
+ *     data-message-id; progress markdown under data-interrupted is excluded
+ *   · the id #prompt-textarea on the composer, and the send/stop/dictation buttons beside
+ *     it, which is where our own composer control is anchored
+ *   · one structural tool-message class substring, plus a display-contents row shape that
+ *     is confirmed structurally (short header line, no prose) before it is believed
+ *
+ * None of these are a public ChatGPT API. In the live 2026-08-15 page one logical
+ * assistant request can also be split into several sections sharing data-turn-id, so
+ * turns are grouped before messages, progress or tool blocks are counted. Hashed
+ * CSS-module class names are never matched because they are intentionally ephemeral.
+ */
+
+var CLF_DOM = (() => {
+  // @ehkogh/#318: an alternate exchange contains both roles. Keep the native
+  // structure intact; the MAIN reader supplies exact message ids on its slots.
+  const LEGACY_TURN = 'section[data-testid^="conversation-turn"]';
+  const SHELL_TURN = '[data-app-shell-main-surface] [data-thread-find-target="conversation"] [data-turn-key]';
+  const SHELL_UNIT = '[data-content-search-unit-key]';
+  // September 2026 search-unit rollout: the user/assistant rows are direct children of a
+  // data-turn-key container rather than section[data-testid] or data-content-search units.
+  const SEARCH_TURN = '[data-chatgpt-search-unit-key]';
+  const TURN = `${LEGACY_TURN}, ${SHELL_TURN}, ${SEARCH_TURN}`;
+  const PICKER = '[data-testid="composer-intelligence-picker-content"], [data-model-picker-view]';
+  // ChatGPT has used both shapes in the live renderer: the older tool-message span
+  // and, as of 2026-08-15, a display-contents row wrapping the visible tool label.
+  // Keep both explicit structural anchors; hashed CSS-module names remain off limits.
+  const TOOL_LEGACY = 'span[class*="tool-message"]';
+  const STATUS_V5 = 'div:has(> [data-testid="cot-v5-tool-icon-pile"])';
+  const TOOL = `${TOOL_LEGACY}, div.pointer-events-none.contents, ${STATUS_V5}`;
+  // MAIN-world scan stamps only a row whose own message group proves api_tool.
+  // A translated label or a generic built-in tool button never establishes identity.
+  const CONNECTOR = '[data-clf-fiber]';
+  const STOP =
+    'button[data-testid="stop-button"], button[data-testid="composer-stop-button"], ' +
+    'button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop answering"]';
+  const SEND = 'button[data-testid="send-button"], form button[aria-label^="Send" i], form[data-chatgpt-composer] button[type="submit"]';
+  /** The composer's own trailing controls, where the send and dictation buttons live. */
+  const TRAILING =
+    '[data-testid="composer-trailing-actions"], [data-testid="composer-footer-actions"], ' +
+    '[class~="[grid-area:trailing]"]';
+  const SPEECH =
+    'button[data-testid="composer-speech-button"], button[data-testid="composer-dictate-button"], ' +
+    'button[aria-label^="Dictate" i], button[aria-label^="Voice" i], ' +
+    'button[aria-label="Start dictation" i], button[aria-label="Start Voice" i]';
+  const safe = (fn, fallback) => {
+    try {
+      const value = fn();
+      return value === undefined || value === null ? fallback : value;
+    } catch {
+      return fallback;
+    }
+  };
+
+  const text = (node, cap = 256_000) =>
+    node ? (node.textContent || '').replace(/ /g, ' ').trim().slice(0, cap) : '';
+
+  function searchUnitRole(node) {
+    const key = node?.getAttribute?.('data-chatgpt-search-unit-key') ||
+      node?.getAttribute?.('data-content-search-unit-key') || '';
+    return /:(user|assistant)$/.exec(key)?.[1] || '';
+  }
+
+  // Wire framing matches shared/user-prompt.ts; neither reader changes provider text.
+  const promptContinuation = value => /^\[\[CLF-(?:HANDOFF|RESUME):[A-Za-z0-9_-]{16,64}\]\]\n\n/.exec(value)?.[0] ?? '';
+  // The composer treats what it is given as Markdown source and escapes it on readback: a
+  // backslash before ASCII punctuation, and one before a newline for a hard line break. The
+  // frame is punctuation and newlines almost entirely, so an escaped readback matches none of
+  // it — and the declared length stops matching too, because escaping adds characters. Read
+  // exactly first, as everywhere else; only a frame that cannot be read as sent is read as one
+  // the page escaped. Keep in sync with asTyped() in shared/user-prompt.ts.
+  const promptAsTyped = value => value.replace(/\\\n/g, '\n').replace(/\\([!-/:-@[-`{-~])/g, '$1');
+  function readPromptFrame(value) {
+    const identity = promptContinuation(value);
+    const header = /^\[\[COS_CONTEXT:(\d{1,6})\]\]\n/.exec(value.slice(identity.length));
+    if (!header) return null;
+    const end = identity.length + header[0].length + Number(header[1]);
+    const boundary = '\n[[/COS_CONTEXT]]\n\n';
+    return value.startsWith(boundary, end) ? identity + value.slice(end + boundary.length) : null;
+  }
+  function userPromptText(value) {
+    value = value.replace(/\r\n?/g, '\n');
+    const exact = readPromptFrame(value);
+    if (exact !== null) return exact;
+    const typed = promptAsTyped(value);
+    return typed === value ? null : readPromptFrame(typed);
+  }
+  function presentUserPrompts(readUserText) {
+    return safe(() => {
+      for (const raw of document.querySelectorAll(`[data-message-author-role="user"] :is(.whitespace-pre-wrap, .markdown):not([data-clf-user-text]), ${SHELL_TURN} [data-content-search-unit-key$=":user"] [data-user-message-bubble] .whitespace-pre-wrap:not([data-clf-user-text])`)) {
+        // Both native renderers can consume Markdown bytes. Parse the same
+        // exact-id source used by receipts/recording, never reconstructed HTML.
+        const classic = raw.closest('[data-message-author-role="user"]');
+        const holder = classic || raw.closest(SHELL_UNIT), id = messageIdOf(holder);
+        const source = !classic && (!id || !readUserText) ? null : readUserText ? readUserText({ role: 'user', id,
+          node: classic ? raw.closest(TURN) : holder, text: messageText(holder, 'user') }) : raw.textContent;
+        // The native editor can prepend a blank paragraph to the exact provider
+        // source. Ignore that outer whitespace only for display; the frame's
+        // internal length/boundary and all receipt/recording bytes stay exact.
+        const authored = typeof source === 'string' ? userPromptText(source.trimStart()) : null;
+        let display = raw.nextElementSibling?.matches('[data-clf-user-text]') ? raw.nextElementSibling : null;
+        if (authored === null) {
+          raw.removeAttribute('data-clf-prompt-hidden'); display?.remove(); continue;
+        }
+        if (!display) {
+          display = document.createElement('div');
+          display.setAttribute('data-clf-user-text', '');
+          display.className = 'whitespace-pre-wrap';
+          display.dir = 'auto';
+          raw.after(display);
+        }
+        if (display.textContent !== authored) display.textContent = authored;
+        if (!raw.hasAttribute('data-clf-prompt-hidden')) raw.setAttribute('data-clf-prompt-hidden', '');
+      }
+    });
+  }
+
+  /**
+   * Visible page text with every CLF-owned surface removed first.
+   *
+   * The synthetic stream is mounted inside an assistant turn. On the live page ChatGPT's
+   * reasoning container can later expand/reparent around that mount, so reading the outer
+   * container's textContent naively feeds our own rendered transcript back into the recorder.
+   * That is the exact loop that produced twenty copies of the same assistant update. Clone
+   * and strip our nodes before extracting page text. Unknown/fake DOMs fall back safely.
+   */
+  const OWN_SURFACES = '.clf-stream, .clf-stage, .clf-composer, .clf-boot, [data-clf-user-text]';
+
+  /**
+   * Removes this extension's own rendered surfaces from a clone, in place.
+   *
+   * Every read of assistant DOM has to do this, not just pageText: our stream is mounted
+   * inside the turn, so anything that reads the turn and feeds the result back into the
+   * stream compounds on each repaint — one copy, then two, then three.
+   */
+  function stripOwn(clone) {
+    if (!clone || typeof clone.querySelectorAll !== 'function') return clone;
+    for (const own of clone.querySelectorAll(OWN_SURFACES)) own.remove();
+    return clone;
+  }
+
+  function pageText(node, cap = 256_000) {
+    return safe(() => {
+      if (!node) return '';
+      if (typeof node.cloneNode !== 'function') return text(node, cap);
+      return text(stripOwn(node.cloneNode(true)), cap);
+    }, '');
+  }
+
+  /** How an accessible page hides a live region from sight while keeping it announced. */
+  const SCREEN_READER_ONLY = '.sr-only, .visually-hidden, [data-testid="visually-hidden"]';
+
+  /**
+   * Whether a node is rendered for a person to read, rather than only announced.
+   *
+   * The one thing this separates is a visible banner from a screen-reader-only live region.
+   * Both are `role="alert"`; only one of them is an error the user saw.
+   *
+   * Two independent signals, because either alone is brittle: the conventional hiding class,
+   * and a box clipped to the couple of pixels that hiding leaves behind.
+   *
+   * Anything else counts as displayed, including a box of zero size — that is what a DOM
+   * with no layout engine reports for every node, and a DOM that cannot answer must not be
+   * able to delete evidence of a real transport failure. The turn-outcome check reads this
+   * same list, and silently losing an error there turns a failed turn into a completed one.
+   */
+  function displayed(node) {
+    return safe(() => {
+      if (!node) return true;
+      if (typeof node.closest === 'function' && node.closest(SCREEN_READER_ONLY)) return false;
+      if (typeof node.getBoundingClientRect !== 'function') return true;
+      const rect = node.getBoundingClientRect();
+      if (!rect) return true;
+      const clipped = (size) => size > 0 && size <= 8;
+      return !(clipped(rect.width) || clipped(rect.height));
+    }, true);
+  }
+  /**
+   * ChatGPT sometimes renders transport failures inside the same `.markdown` shape as
+   * a final assistant answer. Treating "Message delivery timed out … Retry" as model
+   * prose makes a broken/reloaded turn look completed. role=alert remains the primary
+   * signal; these are narrow fallbacks for failure copy observed on the live site.
+   */
+  /**
+   * Authored message text, without ChatGPT's controls around it.
+   *
+   * Reading the whole `[data-message-id].textContent` also captures UI chrome. The live
+   * page reproduced stored messages ending `Show moreShow less`, which polluted session
+   * history and compaction. Prefer ChatGPT's content subtrees; strip controls only as a
+   * fallback for an unfamiliar renderer shape.
+   */
+  function messageText(node, role) {
+    return safe(() => {
+      if (!node) return '';
+      if (role === 'user') {
+        // Only blocks that nothing else here already contains. `querySelectorAll` also
+        // returns a match nested inside an earlier match, and `text()` reads a whole
+        // subtree, so an inner block was read twice: once as part of its container and
+        // once on its own. The recorded message then carried that passage twice, and every
+        // reader comparing authored text against what was submitted saw a message longer
+        // than the one it sent. `node` itself never counts as a container: the query cannot
+        // return it, and treating it as one would empty this preferred path.
+        const parts = [...node.querySelectorAll('.whitespace-pre-wrap')]
+          .filter((part) => {
+            const outer = part.parentElement && part.parentElement.closest &&
+              part.parentElement.closest('.whitespace-pre-wrap');
+            return !outer || outer === node || !(node.contains && node.contains(outer));
+          })
+          .filter(part => !part.hasAttribute?.('data-clf-user-text'))
+          .map((part) => text(part))
+          .filter(Boolean);
+        if (parts.length > 0) return parts.join('\n');
+      }
+      if (role === 'assistant') {
+        const parts = [...node.querySelectorAll('.markdown, [data-markdown-text-style="assistant-message"]')]
+          .filter((part) => !(part.closest && part.closest('[data-interrupted]')))
+          .filter((part) => !(part.closest && part.closest(TOOL)))
+          .map((part) => text(part))
+          .filter(Boolean);
+        if (parts.length > 0) return parts.join('\n\n');
+      }
+      // Structural test fakes and a future partial DOM shim may not implement cloneNode.
+      // The live browser always does, but falling back to the node's own text is safer than
+      // turning an otherwise valid authored message into an empty string. Real ChatGPT
+      // still takes the clone/remove path, which is what strips Show more / Show less.
+      if (typeof node.cloneNode !== 'function') return role === 'assistant' ? '' : text(node);
+      const clone = node.cloneNode(true);
+      // Our own surfaces first, and this is not defensive tidying. A live assistant
+      // container with no authored `.markdown` fell through to here and returned the whole
+      // node — which contains the stream this extension drew into that very turn. The
+      // recorder stored `▣Listed open windows … ›_Ran …` as the assistant's final answer.
+      // Anything that reads a turn and feeds the result back into the stream compounds on
+      // every repaint, so the strip has to happen before any fallback, not only in
+      // pageText().
+      stripOwn(clone);
+      for (const control of clone.querySelectorAll('button, [role="button"], [data-testid*="copy"], [data-testid*="feedback"], [data-testid="assistant-message-reaction"]')) {
+        control.remove();
+      }
+      // Everything the preferred path above excludes, excluded here too — otherwise the
+      // fallback is not a fallback, it is a different and much laxer rule that fires
+      // exactly when the strict one found nothing.
+      //
+      // Tool rows are ChatGPT's chrome, not its prose, and are reported separately as
+      // page_tool activity; reading them here turned one answer into a transcript of its
+      // own tool labels. Commentary is not the answer either: a turn that narrated its
+      // work and then produced no prose would otherwise have its narration promoted to
+      // `final: true`, which is what closes a turn and what a recovery later trusts.
+      //
+      // Nothing authored left is the honest record. An assistant final is the one thing a
+      // reader takes as "what it said", so absence beats a plausible-looking invention.
+      if (role === 'assistant') {
+        for (const row of clone.querySelectorAll(TOOL)) row.remove();
+        for (const commentary of clone.querySelectorAll('[data-interrupted]')) commentary.remove();
+      }
+      return text(clone);
+    }, '');
+  }
+
+  /**
+   * What ChatGPT itself has put into a section, as a value comparable with a later reading.
+   *
+   * Deliberately not `textContent`. content.js uses "this section's text changed since the
+   * baseline" as evidence that the generation now running is writing into it — and this
+   * extension rewrites the visible label of tool rows *inside assistant sections* as steps
+   * land (`applyLabel`, `applyPageLabel`). Raw text therefore changes in sections ChatGPT
+   * has not touched, and our own relabel of an old row was enough to bind a finished
+   * section to the new generation and file this turn's work under the previous answer.
+   *
+   * So it is built only from signals this extension does not write: authored prose, and how
+   * many tool rows the page is showing. A relabel moves neither. New prose or a new row
+   * moves one, which is precisely the page-authored activity the caller is asking about.
+   */
+  function sectionSignature(node) {
+    return safe(() => {
+      if (!node || typeof node.querySelectorAll !== 'function') return '0|0|';
+      // Structural, so it survives a relabel: this extension rewrites what a row *says*,
+      // never how many there are. A row appearing is page activity; "Inspecting" becoming
+      // "Inspected" is ours.
+      const rows = [...node.querySelectorAll(TOOL)].filter(
+        (row) => !(row.closest && row.closest(OWN_SURFACES))
+      ).length;
+      let authored = '';
+      if (typeof node.cloneNode === 'function') {
+        // Everything ChatGPT put here, with the two things this extension writes taken out:
+        // its own surfaces, and the tool rows whose labels it rewrites. Commentary counts —
+        // it is usually the *first* thing a new generation writes, and a signature made of
+        // final prose and rows alone stayed identical through the whole commentary phase,
+        // so a generation writing into an already-mounted section could not be recognised
+        // and its visible commentary was never recorded at all.
+        const clone = stripOwn(node.cloneNode(true));
+        for (const row of clone.querySelectorAll(TOOL)) row.remove();
+        authored = text(clone);
+      } else {
+        authored = [...node.querySelectorAll('.markdown')]
+          .filter((part) => !(part.closest && (part.closest(TOOL) || part.closest(OWN_SURFACES))))
+          .map((part) => text(part))
+          .join('\n');
+      }
+      return `${rows}|${authored.length}|${authored.slice(-96)}`;
+    }, '0|0|');
+  }
+
+  // The newer shell's wording, measured live on 2026-09-26 after a reload mid-stream: "A network error
+  // occurred. Please check your connection and try again." and "Resume stream unavailable".
+  function transportFailure(value) {
+    const line = String(value || '').replace(/\s+/g, ' ').trim();
+    return /^(?:message delivery timed out(?:\. please try again\.?)?|connection interrupted\.? waiting for the complete answer\.?|chatgpt stream recovery polling timed out\.?|unknown error occurred\.?|there was an error generating (?:a|the) response\.?|error in message stream\.?|network error\.?|a network error occurred\.?(?: please check your connection and try again\.?)?|resume stream unavailable\.?|something went wrong\.?|something went wrong while generating the response(?:\. if this issue persists please contact us through our help center at help\.openai\.com\.?)?\.?)(?: retry)?$/i.test(line);
+  }
+
+  /**
+   * A visible transport-failure card whose wrapper carries no alert role.
+   *
+   * The live 2026-09-03 renderer put the full help-center failure beside an exact Retry
+   * button, outside assistant markdown and without `role="alert"`. The accessible live
+   * region announced unrelated toast text instead, so the real failure never reached the
+   * session and recovery waited for the two-minute silence fallback. Start from the page's
+   * semantic control and climb only to the nearest whole recognised notice; never search
+   * arbitrary page prose for error wording.
+   */
+  function retryFailure(button) {
+    return safe(() => {
+      const label = (button.innerText || button.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!/^retry$/i.test(label) || !displayed(button)) return null;
+      let node = button.parentElement;
+      for (let up = 0; node && up < 8 && node !== document.body; up++, node = node.parentElement) {
+        if (node.closest && node.closest(OWN_SURFACES)) return null;
+        const value = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+        if (value.length >= 500) return null;
+        if (displayed(node) && transportFailure(value)) return { text: value, node };
+      }
+      return null;
+    }, null);
+  }
+
+  /**
+   * The conversation a ChatGPT path names, or null when it names none.
+   *
+   * A conversation inside a Project is routed as `/g/<project>/c/<id>`, so anchoring at
+   * `/c/` recognised only chats at the site root. Everything downstream — the app session,
+   * the ownership registry, caller attribution — is keyed on this id, so in a Project the
+   * page was never recognised as being on a conversation at all.
+   *
+   * Deliberately not a loose `/c/<id>` search anywhere in the path: `/share/c/<id>` is a
+   * public read-only snapshot of someone's conversation, not a conversation this document
+   * can own, record or bind. One optional `/g/<slug>` segment is the whole exception.
+   */
+  function conversationFromPath(pathname) {
+    return safe(() => {
+      const match = /^\/(?:g\/[^/]+\/)?c\/([0-9a-f-]{8,64})(?:\/|$)/i.exec(String(pathname || ''));
+      return match ? match[1] : null;
+    }, null);
+  }
+
+  /** The conversation this tab is on, or null for a chat that has not been sent yet. */
+  function conversationId() {
+    return safe(() => conversationFromPath(location.pathname), null);
+  }
+
+  /** Human ChatGPT title when one has actually been generated; never conversation identity. */
+  function conversationTitle() {
+    return safe(() => {
+      let value = (document.title || '').trim();
+      if (!value) return '';
+      value = value.replace(/\s*(?:[-|·]\s*)ChatGPT\s*$/i, '').trim();
+      if (!value || /^(?:ChatGPT|New chat)$/i.test(value)) return '';
+      // A project chat reads "ChatGPT - <project>" until ChatGPT names the conversation.
+      // That is the project, not this chat's title.
+      if (/^ChatGPT\s*[-|·–]\s*/i.test(value)) return '';
+      return value.slice(0, 200);
+    }, '');
+  }
+
+  /**
+   * Logical conversation turns, newest last.
+   *
+   * ChatGPT can render one assistant request as several sibling `section` elements
+   * carrying the same data-turn-id. Treating each section as a turn makes a five-call
+   * request look like several partial requests, so every one fails content.js's
+   * one-block-per-call safety check and the page is left with a wall of "Called tool".
+   * Group only consecutive sections that explicitly share role + id. A user question
+   * separates responses even when ChatGPT reuses the same page id. Recording and
+   * presentation must agree on that boundary; otherwise one final descriptor is joined
+   * to both the old and current local generation and loses its completion owner.
+   * Id-less sections stay independent because merging those would be a guess.
+   */
+  /**
+   * What this layer has already read out of a section, kept until the section changes.
+   *
+   * The content script reads the whole transcript once a second, and several times over: the
+   * recorder's message scan, the presentation pass per assistant turn, the progress and tool
+   * row lookups. Each of those walked every section and took the text of every message on the
+   * page again — six to eight full walks a second, on a page that only ever changes in one
+   * place. On a 300-turn chat that was most of a second of main thread per second, and the
+   * 2026-09-03 prime, over 300k tokens, sat unresponsive for three minutes after every reload.
+   *
+   * A section's rows, tool blocks and progress boxes are therefore read once and kept on the
+   * element. A MutationObserver of our own drops the entry for any section whose subtree or
+   * relevant attributes change, and — because a test, or React inside one frame, can mutate
+   * and read back before the observer's microtask runs — its pending records are drained
+   * synchronously before every cached read. Sections we never see mutate cost nothing after
+   * their first read; the one being streamed into is re-read as it grows, as it always was.
+   */
+  const sectionCache = new WeakMap();
+  let cacheObserver = null;
+  let cacheObserverFailed = false;
+  const CACHE_ATTRIBUTES = [
+    'class',
+    'data-interrupted',
+    'data-message-id',
+    'data-message-author-role',
+    'data-turn',
+    'data-turn-id',
+    'data-testid',
+    'aria-label', 'data-turn-key', 'data-content-search-turn-key', 'data-content-search-unit-key',
+    'data-chatgpt-search-message-ids', 'data-chatgpt-search-unit-key', 'data-chatgpt-selection-message-id',
+    'data-clf-fiber-turn', 'data-clf-fiber-message'
+  ];
+
+  function invalidateFrom(record) {
+    const target = record && record.target;
+    if (!target) return;
+    const element = target.nodeType === 1 ? target : target.parentElement;
+    const section = element && typeof element.closest === 'function' ? element.closest(TURN) : null;
+    if (section) sectionCache.delete(section);
+    const slot = element?.closest?.(SHELL_UNIT);
+    if (slot) sectionCache.delete(slot);
+  }
+
+  function ensureCacheObserver() {
+    if (cacheObserver) return true;
+    if (cacheObserverFailed) return false;
+    try {
+      if (typeof MutationObserver !== 'function' || !document.body) return false;
+      cacheObserver = new MutationObserver((records) => {
+        for (const record of records) invalidateFrom(record);
+      });
+      cacheObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: CACHE_ATTRIBUTES
+      });
+      return true;
+    } catch {
+      cacheObserverFailed = true;
+      cacheObserver = null;
+      return false;
+    }
+  }
+
+  /** The memo for one section, valid as of now. Null when caching is unavailable. */
+  function memoOf(section) {
+    if (!section || !ensureCacheObserver()) return null;
+    for (const record of cacheObserver.takeRecords()) invalidateFrom(record);
+    let memo = sectionCache.get(section);
+    if (!memo) {
+      memo = { rows: null, parts: null, blocks: null, boxes: null, interrupted: null, answers: null };
+      sectionCache.set(section, memo);
+    }
+    return memo;
+  }
+
+  /** The explicit messages of one section: id, the role attribute, text. */
+  function sectionRows(section) {
+    const memo = memoOf(section);
+    if (memo && memo.rows) return memo.rows;
+    const rows = [];
+    const directHolder = section.matches?.(`[data-message-id], ${SHELL_UNIT}, [data-chatgpt-search-message-ids], [data-chatgpt-selection-message-id]`);
+    const holders = [
+      ...(directHolder ? [section] : []),
+      ...section.querySelectorAll(`[data-message-id], ${SHELL_UNIT}, [data-chatgpt-search-message-ids], [data-chatgpt-selection-message-id]`)
+    ];
+    const seen = new Set();
+    for (const node of holders) {
+      const id = messageIdOf(node);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const roleAttr = node.getAttribute('data-message-author-role') || searchUnitRole(node);
+      const readable = roleAttr === 'user' || roleAttr === 'assistant';
+      rows.push({ id, roleAttr, text: readable ? messageText(node, roleAttr) : null, node });
+    }
+    if (memo) memo.rows = rows;
+    return rows;
+  }
+
+  /** The authored markdown blocks of one section, for a turn without explicit messages. */
+  function sectionParts(section) {
+    const memo = memoOf(section);
+    if (memo && memo.parts) return memo.parts;
+    const parts = [];
+    for (const markdown of section.querySelectorAll('.markdown')) {
+      if (markdown.closest && markdown.closest('[data-interrupted]')) continue;
+      if (markdown.closest && markdown.closest(TOOL)) continue;
+      if (markdown.closest && markdown.closest(OWN_SURFACES)) continue;
+      const value = text(markdown);
+      if (value && parts[parts.length - 1] !== value) parts.push(value);
+    }
+    if (memo) memo.parts = parts;
+    return parts;
+  }
+
+  const shellRole = searchUnitRole;
+  /**
+   * A shell exchange's identity, preferring the key that is one.
+   *
+   * `data-content-search-turn-key` is the search index's key, and on the current shell it has
+   * degraded to a position: measured on the live page on 2026-09-26, three consecutive exchanges
+   * carried `fallback-turn-0`, `fallback-turn-1` and `fallback-turn-2` while their own
+   * `data-turn-key` held real UUIDs — the same UUIDs `messages()` reports for those turns' user
+   * items. A position is not an identity: it renumbers when history virtualizes or an exchange is
+   * inserted, so every join keyed on it silently moves to a different turn.
+   *
+   * `data-turn-key` is read first for that reason, and the search key stays as the fallback so a
+   * shell that supplies a real one there keeps working unchanged.
+   */
+  function turnIdOf(section) {
+    if (!section?.matches?.(SHELL_TURN)) {
+      if (section?.matches?.(SEARCH_TURN)) {
+        return section.closest?.('[data-turn-key]')?.getAttribute?.('data-turn-key') || messageIdOf(section) || null;
+      }
+      return section?.getAttribute?.('data-turn-id') || null;
+    }
+    const key = section.getAttribute('data-turn-key');
+    if (key && !/^fallback-turn-\d+$/.test(key)) return key;
+    return section.querySelector('[data-content-search-turn-key]')?.getAttribute('data-content-search-turn-key') || null;
+  }
+  function messageIdOf(node) {
+    const explicit = node?.getAttribute?.('data-message-id');
+    if (explicit) return explicit;
+    const selected = node?.getAttribute?.('data-chatgpt-selection-message-id') ||
+      node?.querySelector?.('[data-chatgpt-selection-message-id]')?.getAttribute?.('data-chatgpt-selection-message-id');
+    if (selected) return selected;
+    const listed = node?.getAttribute?.('data-chatgpt-search-message-ids') || '';
+    const listedId = listed.trim().split(/\s+/).find(Boolean);
+    if (listedId) return listedId;
+    // The slot's layout key is not a message UUID. Only a current same-exchange
+    // MAIN stamp can join it to the actual typed item; stale stamps fail closed.
+    const section = node?.closest?.(SHELL_TURN), turn = section?.getAttribute('data-clf-fiber-turn');
+    const stamp = node?.getAttribute?.('data-clf-fiber-message');
+    if (!turn || node.getAttribute('data-clf-fiber-turn') !== turn || !stamp?.startsWith(`${turn}:`)) return null;
+    try { return decodeURIComponent(stamp.slice(turn.length + 1)) || null; } catch { return null; }
+  }
+  function turns() {
+    return safe(() => {
+      const out = [];
+      let previous = null;
+      for (const node of document.querySelectorAll(TURN)) {
+        if (node.closest?.(`${OWN_SURFACES},.markdown,[data-markdown-text-style],[data-content-search-unit-key],[contenteditable]`)) continue;
+        if (node.matches?.(SEARCH_TURN) && (node.closest?.(LEGACY_TURN) || node.closest?.(SHELL_TURN))) continue;
+        const id = turnIdOf(node);
+        if (node.matches?.(SHELL_TURN)) {
+          const users = [...node.querySelectorAll('[data-content-search-unit-key$=":user"]')].filter(slot => slot.closest('[data-turn-key]') === node);
+          if (users.length !== 1 || !id) continue;
+          out.push({ node: users[0], nodes: [users[0]], id, role: 'user' });
+          if (node.querySelector('[data-chatgpt-agent-turn-start], [data-content-search-unit-key$=":assistant"]')) out.push({ node, nodes: [node], id, role: 'assistant' });
+          previous = null; continue;
+        }
+        const role = node.getAttribute('data-turn') || searchUnitRole(node) || null;
+        if (previous && id && previous.id === id && previous.role === role) {
+          previous.nodes.push(node);
+          continue;
+        }
+        previous = { node, nodes: [node], id, role };
+        out.push(previous);
+      }
+      return out;
+    }, []);
+  }
+
+  // Shell exchanges contain both sides. The normal presentation owner still
+  // requires the exact user/message stamps before mounting recorded activity.
+  const presentationTurns = () => turns();
+
+  const turnNodes = (turn) =>
+    turn && Array.isArray(turn.nodes) && turn.nodes.length > 0 ? turn.nodes : turn && turn.node ? [turn.node] : [];
+
+  /**
+   * Visible messages, newest last.
+   *
+   * textContent rather than innerText on purpose: a long user message is visually
+   * clamped by ChatGPT, and the clamped part is exactly the part a five-hour session
+   * cannot afford to lose.
+   */
+  // Read only the native badge beneath its exact stable user-message node. A
+  // neighbouring assistant, quoted markup or recycled turn id cannot own it.
+  const reactionSegments = new Intl.Segmenter('en', { granularity: 'grapheme' });
+  function userMessageReaction(message) {
+    if (message.role !== 'user' || !message.id || !message.node) return undefined;
+    const holders = [...message.node.querySelectorAll('[data-message-author-role="user"][data-message-id]')];
+    if (message.node.matches?.('[data-message-author-role="user"][data-message-id]')) holders.push(message.node);
+    const owned = holders.filter(node => node.getAttribute('data-message-id') === message.id);
+    if (owned.length !== 1) return undefined;
+    const badges = [...owned[0].querySelectorAll('[data-testid="assistant-message-reaction"][role="img"]')]
+      .filter(node => node.closest('[data-message-id]') === owned[0] && !node.closest('.markdown, .whitespace-pre-wrap'));
+    if (!badges.length) return null;
+    if (badges.length !== 1) return undefined;
+    const emoji = badges[0].textContent?.trim() || '';
+    // Keep aligned with shared/message-reaction.ts (extension ships unbundled).
+    return emoji.length <= 32 && /^(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|\p{Emoji_Modifier}|[\u200d\ufe0f\u20e3\u{e0020}-\u{e007f}0-9#*])+$/u.test(emoji) &&
+      /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(emoji) &&
+      [...reactionSegments.segment(emoji)].length === 1 ? emoji : undefined;
+  }
+
+  function messages() {
+    return safe(() => {
+      const out = [];
+      const seen = new Set();
+      for (const [index, turn] of turns().entries()) out.push(...messagesIn(turn, index, seen));
+      return out;
+    }, []);
+  }
+
+  /**
+   * The messages of exactly one turn.
+   *
+   * Split out of messages() rather than duplicated because callers that need turn-scoped
+   * evidence — "did *this* turn produce an answer" — must read the page the same way the
+   * whole-conversation scan does, including the no-data-message-id fallback below. Asking
+   * that question by filtering messages() on `turnId` is not the same thing: sections
+   * ChatGPT renders without a turn id all report `turnId: null`, so the filter silently
+   * merges every id-less turn into one.
+   *
+   * `seen` is shared by the whole-conversation scan so a message id rendered in two
+   * sections is reported once. On its own each turn gets a fresh one.
+   */
+  function messagesIn(turn, index = 0, seen = new Set()) {
+    return safe(() => {
+      const out = [];
+      const nodes = turnNodes(turn);
+      let explicit = 0;
+      for (const section of nodes) {
+        for (const row of sectionRows(section)) {
+          if (seen.has(row.id)) continue;
+          const role = row.roleAttr || turn.role;
+          if (role !== 'user' && role !== 'assistant') continue;
+          if (section.closest?.(SHELL_TURN) && role !== turn.role) continue;
+          seen.add(row.id);
+          explicit++;
+          out.push({
+            id: row.id,
+            role,
+            // Read with the section's own role attribute when it has one; a node that carries
+            // none is read under the turn's role, which the cache cannot know in advance.
+            text: row.text !== null ? row.text : messageText(row.node, role),
+            turnId: turn.id,
+            node: section,
+            interrupted: interrupted(turn)
+          });
+        }
+      }
+
+      // The current ChatGPT renderer no longer gives streaming assistant prose a
+      // data-message-id. Final prose is still exposed as `.markdown`; live progress
+      // prose is also `.markdown`, but lives under `[data-interrupted]`. Only use the
+      // fallback when there is no explicit assistant message and only collect
+      // markdown outside progress/tool containers. content.js itself waits until the
+      // turn has stopped generating before recording this as the final answer.
+      if (turn.role === 'assistant' && explicit === 0 && !nodes[0]?.matches?.(SHELL_TURN)) {
+        const parts = [];
+        for (const section of nodes) {
+          for (const value of sectionParts(section)) {
+            if (parts[parts.length - 1] !== value) parts.push(value);
+          }
+        }
+        if (parts.length > 0) {
+          // The live renderer can leave several assistant-authored markdown blocks in one
+          // logical turn: interim commentary messages followed by the actual final answer.
+          // Joining them all promoted the whole visible work log to one "final answer" and
+          // later re-recorded those interim messages under an older reused page turn id.
+          // The final answer is the last authored markdown block. Canonical transcript
+          // identity/content is captured from ChatGPT's message model by fiber.js; this DOM
+          // fallback is used only for local lifecycle/compaction decisions.
+          const value = parts[parts.length - 1];
+          if (!transportFailure(value)) {
+            out.push({
+              id: `assistant:${turn.id || index}`,
+              role: 'assistant',
+              text: value,
+              turnId: turn.id,
+              node: nodes[0] || null,
+              interrupted: interrupted(turn)
+            });
+          }
+        }
+      }
+      return out;
+    }, []);
+  }
+
+  /** A pre-Send draft lease lasts only for this operation and these exact DOM nodes. */
+  function captureComposerDraft(value, stillCurrent = () => true) {
+    const box = composer(), host = composerBox() || composerActions()?.host;
+    // Native rich-text normalization moves line breaks into paragraph structure.
+    // Keep the same text comparison used by send receipts; editor identity and
+    // trusted edits still revoke the lease even when a user only changes spacing.
+    const compact = text => String(text || '').replace(/\s+/g, '');
+    const insertedText = compact(box?.textContent);
+    let touched = false;
+    let files = [];
+    const events = ['input', 'change', 'keydown', 'pointerdown', 'paste', 'drop'];
+    const changed = event => { if (event.isTrusted) touched = true; };
+    for (const name of events) host?.addEventListener(name, changed, true);
+    const same = () => !touched && stillCurrent() && composer() === box && box?.isConnected && compact(box.textContent) === insertedText;
+    const ownsAttachments = () => {
+      if (!same() || !host) return false;
+      const current = [...host.querySelectorAll('button[aria-label]')].filter(node => composerFileName(node));
+      return current.length === files.length && current.every(node => files.includes(node)) &&
+        !host.querySelector('[aria-busy="true"], [role="progressbar"], [data-inline-file-uploading]');
+    };
+    return {
+      attachments(nodes) { if (same()) files = [...nodes]; },
+      current: ownsAttachments,
+      async clear() {
+        if (!ownsAttachments() || !host) return false;
+        const current = [...host.querySelectorAll('button[aria-label]')].filter(node => composerFileName(node));
+        if (current.length !== files.length || current.some(node => !files.includes(node)) ||
+            host.querySelector('[aria-busy="true"], [role="progressbar"], [data-inline-file-uploading]')) return false;
+        for (const node of current) {
+          if (!same() || !node.isConnected) return false;
+          node.click();
+        }
+        if (current.length) await new Promise(resolve => {
+          let observer, timer;
+          const finish = () => { observer?.disconnect(); clearTimeout(timer); resolve(); };
+          const check = () => { if (!same() || !hasComposerAttachments()) finish(); };
+          observer = new MutationObserver(check);
+          observer.observe(host, { childList: true, subtree: true, attributes: true });
+          timer = setTimeout(finish, 1500); check();
+        });
+        return same() && !hasComposerAttachments() && clearPromptExact(value);
+      },
+      dispose() { for (const name of events) host?.removeEventListener(name, changed, true); }
+    };
+  }
+
+  /** A native control must belong to the rendered composer, never quoted history or a stale hidden tree. */
+  function renderedComposerNode(node) {
+    if (!node?.isConnected || node.closest(`${OWN_SURFACES}, ${TURN}, [data-message-author-role], [hidden], [aria-hidden="true"], [inert]`)) return false;
+    for (let parent = node; parent; parent = parent.parentElement) {
+      const style = getComputedStyle(parent);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+    }
+    return true;
+  }
+
+  function nativeComposerControls(selector) {
+    const form = composer()?.closest('form');
+    return [...(form || document).querySelectorAll(selector)].filter(button =>
+      renderedComposerNode(button) && (!form || button.closest('form') === form));
+  }
+
+  /** Stop is a busy hint only; the exact provider terminal still owns turn completion. */
+  function generating() {
+    return safe(() => {
+      if (stopControls().length > 0) return true;
+      // Historical interrupted exchanges can retain in_progress forever. Only the
+      // latest native response can describe this composer's current generation.
+      const latest = [...document.querySelectorAll(SHELL_TURN)].filter(node =>
+        !node.closest(`${OWN_SURFACES},.markdown,[data-markdown-text-style],[data-content-search-unit-key],[contenteditable]`)).at(-1);
+      if (latest?.getAttribute('data-clf-shell-running') !== location.pathname) return false;
+      /*
+       * The stamp alone is not enough, and the comment above understates why: `in_progress` is
+       * React's own word, it outlives an interrupted exchange, and the "latest turn only" guard
+       * does not help when the latest turn *is* the interrupted one.
+       *
+       * Measured on the live page on 2026-09-26, in the chat this was found in: all three shell
+       * turns carried `data-clf-shell-running` for the current pathname at once, hours after the
+       * generation had died. Three turns cannot be running. `generating()` therefore answered yes
+       * for the rest of the chat's life, `nowGenerating` never went false, and the observer's whole
+       * outcome branch — the only path that can end a turn — was unreachable. The turn stayed open
+       * for nine hours, and with it the compaction handoff and every queued follow-up behind it.
+       *
+       * The composer settles it without a label or a clock: voice, send and stop are one button in
+       * one slot on this shell, so a slot occupied by anything that is not the stop square is a
+       * page that is not generating, whatever React still says. An empty slot proves nothing and is
+       * left to the stamp.
+       */
+      const primary = primarySlotControls();
+      if (primary.length > 0 && !primary.some(isStopSquare)) return false;
+      return true;
+    }, false);
+  }
+
+  /**
+   * The stop control on a composer whose buttons carry nothing but a translated label.
+   *
+   * `STOP` is a list of English labels and two test ids. ChatGPT's newer composer has neither:
+   * voice, send and stop are the same `type="button"` in the same slot, and only the label and
+   * the icon change. On a localised install the label is translated — `aria-label="Durdur"`
+   * measured on a Turkish page on 2026-09-25 — so stop was never found, `generating()` never
+   * said yes, and nothing could end a turn through the page.
+   *
+   * What is not translated is the icon. Stop is a rounded square: one `path`, its `d` beginning
+   * `M4.5 5.75`. The dictation control in the same slot draws four paths and carries
+   * `data-state`; send draws an arrow. Matching the square is therefore both locale-free and
+   * narrow, and narrow is what matters here: a send button mistaken for stop would report a
+   * generation that never ends.
+   *
+   * Tried second, never first. Where the labels do match they stay authoritative.
+   */
+  const STOP_SQUARE = /^\s*M4\.5 5\.75/;
+  /**
+   * The composer's primary-action slot: the one button that is voice, send or stop by turn.
+   *
+   * Named separately because who occupies it is evidence in its own right — see `generating`.
+   */
+  function primarySlotControls() {
+    const form = composer()?.closest('form');
+    if (!form) return [];
+    return [...form.querySelectorAll('button[class*="size-token-button-composer"][class*="bg-composer-primary"]')]
+      .filter(button => renderedComposerNode(button) && button.closest('form') === form);
+  }
+
+  /** The rounded square, which is the one thing about stop that nobody translates. */
+  function isStopSquare(button) {
+    // The dictation control keeps a popover state on itself; stop never does.
+    if (!button || button.hasAttribute('data-state')) return false;
+    const paths = button.querySelectorAll('svg path');
+    return paths.length === 1 && STOP_SQUARE.test(paths[0].getAttribute('d') || '');
+  }
+
+  function localeFreeStopControls() {
+    return primarySlotControls().filter(isStopSquare);
+  }
+
+  function stopControls() {
+    const labelled = nativeComposerControls(STOP);
+    return labelled.length > 0 ? labelled : localeFreeStopControls();
+  }
+
+  /**
+   * Send, found without a label, for the same composer and the same reason as the square above.
+   *
+   * All three of `SEND`'s strategies fail on ChatGPT's newer composer: the `data-testid` is gone,
+   * `aria-label^="Send"` is translated, and nothing in that slot is `type="submit"` any more —
+   * voice, send and stop are one `type="button"`. Measured on a Turkish page on 2026-09-25 and
+   * reported in #415 on an English one: a new chat opened, the prompt was typed, and nothing was
+   * ever submitted, because `submitDraft` waits on `sendButton()` and deliberately has no Enter
+   * fallback ("neither a guessed Enter nor an unrelated Stop/composer-clear is evidence that this
+   * draft was submitted").
+   *
+   * Send has no icon signature of its own worth trusting — an arrow's path data is not a contract
+   * — so this identifies it by the state it is the only occupant of. Every caller consults this
+   * with our exact text standing in the composer and `generating()` false, and in that state the
+   * primary-action slot cannot be stop (which exists only while generating) and cannot be voice
+   * (which the composer replaces as soon as it holds text, and which carries `data-state`
+   * regardless). Both are excluded explicitly all the same, and one candidate is still required,
+   * so an unexpected third control refuses rather than being clicked.
+   */
+  function localeFreeSendControls() {
+    const box = composer();
+    const form = box?.closest('form');
+    if (!form) return [];
+    // Read the editor here rather than reusing the submitter's own `draftText`, which is a local
+    // closure over its captured box. Only "the composer holds something" is needed, not equality.
+    const drafted = (typeof box.innerText === 'string' ? box.innerText : box.textContent || '').trim();
+    if (drafted === '' || generating()) return [];
+    return [...form.querySelectorAll('button[class*="size-token-button-composer"][class*="bg-composer-primary"]')]
+      .filter(button => {
+        if (!renderedComposerNode(button) || button.closest('form') !== form) return false;
+        // Dictation keeps a popover state on itself; send never does.
+        if (button.hasAttribute('data-state')) return false;
+        const paths = button.querySelectorAll('svg path');
+        // Not the stop square, and not the four-path microphone.
+        if (paths.length === 1 && STOP_SQUARE.test(paths[0].getAttribute('d') || '')) return false;
+        return paths.length >= 1 && paths.length <= 2;
+      });
+  }
+
+  function sendControls() {
+    const labelled = nativeComposerControls(SEND);
+    return labelled.length > 0 ? labelled : localeFreeSendControls();
+  }
+
+  function stopButton() {
+    return safe(() => {
+      const buttons = stopControls();
+      return buttons.length === 1 ? buttons[0] : null;
+    }, null);
+  }
+
+  /** Only a visible, enabled native Stop control may end a proven turn. */
+  function stopGeneration(stillCurrent) {
+    if (typeof stillCurrent !== 'function' || !stillCurrent()) return false;
+    const button = stopButton();
+    if (!button || !button.isConnected || button.disabled || button.getAttribute('aria-disabled') === 'true' ||
+        button.hidden || button.closest('[hidden],[inert]') || button.getClientRects().length === 0) return false;
+    const style = getComputedStyle(button);
+    if (style.display === 'none' || style.visibility === 'hidden' || !stillCurrent()) return false;
+    button.click();
+    return true;
+  }
+
+  /** The page-owned Send control, exposed so content.js can witness an actual submission. */
+  function sendButton() {
+    return safe(() => {
+      const buttons = sendControls();
+      return buttons.length === 1 ? buttons[0] : null;
+    }, null);
+  }
+
+  // File tiles can appear while ChatGPT is still processing them and disables Send
+  // through ARIA only. Upload readiness and the final click must use the same gate.
+  function sendButtonEnabled(button) {
+    return !!button && !button.disabled && button.getAttribute('aria-disabled') !== 'true';
+  }
+
+  /**
+   * The live progress line of a turn.
+   *
+   * ChatGPT keeps its running commentary inside the block it also marks with
+   * data-interrupted, so that attribute doubles as the anchor for both.
+   */
+  function progressLine(turn) {
+    return safe(() => {
+      const parts = [];
+      for (const section of turnNodes(turn)) {
+        // Outermost containers only. These boxes nest, and reading whichever one came last
+        // in document order made this value flip between the whole reasoning block and
+        // whatever inner box was newest. A shrink is not a prefix of what came before, so
+        // the delta below could only report it as brand-new text — which is exactly how the
+        // same commentary line came to be printed two and three times.
+        for (const box of progressRoots(section)) {
+          const lines = pageText(box, 32_000)
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean);
+          if (lines.length > 0) parts.push(lines.join('\n'));
+        }
+      }
+      return parts.length > 0 ? parts.join('\n').slice(0, 8000) : null;
+    }, null);
+  }
+
+  /**
+   * The outermost commentary containers of one section, in document order.
+   *
+   * Outermost only. These boxes nest, and a scan that returns the inner ones too reports
+   * the same sentence under two identities — which is how one caption came to be recorded,
+   * and drawn, several times over.
+   */
+  /**
+   * The identity a commentary root inherits from the prose block it swallowed, if any.
+   *
+   * The two families of item here are told apart by where the text sits: prose blocks are
+   * `.markdown` *outside* a `[data-interrupted]` container, commentary is what is inside
+   * one. ChatGPT moves text across that line mid-answer — it mounts the markdown first and
+   * wraps it a moment later — and the same visible words were then reported twice, once
+   * under each family's stamp. The commentary chain revises itself correctly, so what the
+   * user saw was a frozen truncated prefix of their answer sitting above the answer:
+   * "Yeah bro, I'll stay on the **current" and then the whole paragraph, in one turn.
+   *
+   * It is one block of text, so it gets one identity: the stamp the prose block already
+   * carries from this same generation. Only when the root has exactly one stamped block —
+   * two would make the inheritance a guess, and a guess here merges two different things
+   * into one row.
+   */
+  function adoptedProseId(box, namespace) {
+    if (!box || !box.querySelectorAll) return '';
+    let found = '';
+    for (const node of box.querySelectorAll('[data-clf-assistant-prose-id]')) {
+      const stamp = node.getAttribute('data-clf-assistant-prose-id') || '';
+      if (stamp.indexOf(`${namespace}#`) !== 0) continue;
+      if (found) return '';
+      found = stamp;
+    }
+    return found;
+  }
+
+  function progressRoots(section) {
+    return [...section.querySelectorAll('[data-interrupted]')].filter(
+      (node) => !(node.parentElement && node.parentElement.closest && node.parentElement.closest('[data-interrupted]'))
+    );
+  }
+
+  /**
+   * Stamps a list of nodes with per-generation identities, reusing a stamp only within the
+   * generation that minted it.
+   *
+   * The namespace is the caller's generation key, and that is the whole point. Stamping
+   * with ChatGPT's `data-turn-id` looked equivalent and was not: live, the page reuses the
+   * id `request-<conversation>-0` for turn after turn, and it reuses the commentary
+   * container node itself across turns as well. So a stamp minted on turn one was still
+   * sitting on the node during turn four, every turn's commentary was recorded under one
+   * identity, and the recorder folded four different captions into one row at the position
+   * of the first. A stamp from another generation is therefore treated as absent.
+   *
+   * Within a generation the stamp is what ties identity to the node's own lifecycle: React
+   * keeping the node — including reparenting it — keeps the id, and a container ChatGPT
+   * genuinely replaces gets a new one. The ordinal is only how an unstamped node is *named*;
+   * two nodes carrying the same stamp (React cloned a subtree) are separated rather than
+   * merged, because merging them would put two different things in one row.
+   */
+  function stampIdentities(nodes, attribute, key, letter) {
+    const namespace = `${key}#`;
+    const taken = new Set();
+    const ids = [];
+    for (const node of nodes) {
+      const stamp = node && node.getAttribute ? node.getAttribute(attribute) : null;
+      if (stamp && stamp.indexOf(namespace) === 0 && !taken.has(stamp)) {
+        taken.add(stamp);
+        ids.push(stamp);
+      } else {
+        ids.push(null);
+      }
+    }
+    let next = 0;
+    for (let at = 0; at < nodes.length; at++) {
+      if (ids[at]) continue;
+      let id = `${namespace}${letter}${next++}`;
+      while (taken.has(id)) id = `${namespace}${letter}${next++}`;
+      taken.add(id);
+      ids[at] = id;
+      try {
+        nodes[at].setAttribute(attribute, id);
+      } catch {
+        // A DOM that will not take the stamp still gets a usable id for this pass; it
+        // simply cannot keep it across a redraw. One row per redraw is the old failure,
+        // so the caller's own per-id state is what actually holds the line here.
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * One commentary container's text, with the streaming double-write collapsed.
+   *
+   * `textContent` of a live commentary container is not the sentence on screen. While
+   * ChatGPT streams, the container holds the raw markdown buffer *and* the parsed render of
+   * the same words at the same time, so reading it naively returns
+   * `…**that screenshot basically confirms` immediately followed by
+   * `…that screenshot basically confirms the gate theory`. That is a real duplication in
+   * what the page exposes, not a bug in how it is read, and every layer downstream that
+   * tried to reconcile snapshots against each other was reconciling text that already said
+   * everything twice.
+   *
+   * Two collapses, because the page produces the duplication in two shapes.
+   *
+   * Within a line, because there is very often no newline between the two copies at all.
+   * The recorded example is a single line reading
+   * `Yep bro, **that screenshot basically confirmsYep bro, that screenshot basically
+   * confirms the gate theory` — the raw buffer runs straight into the rendered copy, and a
+   * deduper that only looks across lines cannot see it. So a line that begins with a long
+   * prefix which then starts again immediately is cut back to the second copy, which is the
+   * complete one: the buffer is always the shorter, earlier half.
+   *
+   * Then across lines, where a block contained in one already kept — or containing one —
+   * collapses to the longer of the two.
+   *
+   * Markdown punctuation is ignored for both comparisons; the text kept is always the
+   * page's own, never a rewritten one. The prefix has to be long to count, because prose
+   * legitimately repeats short openings and this must never eat a real sentence.
+   */
+  const MARKDOWN_CHAR = /[*_`#>~[\]()]/;
+  const SPACE_CHAR = /\s/;
+  const bareText = (value) => value.replace(/[*_`#>~[\]()]/g, '').replace(/\s+/g, ' ').trim();
+
+  /** Shortest repeated opening that is taken as a streaming double-write rather than prose. */
+  const MIN_ECHO_CHARS = 12;
+
+  /**
+   * Where the segment starting at `from` is immediately restated, or -1.
+   *
+   * A restatement has to be exact and back-to-back — `plain.slice(from, cut)` repeated at
+   * `cut` — so this never fires on prose that merely opens the same way twice. The candidate
+   * positions are the places the segment's own opening occurs again, which is a handful of
+   * indices rather than every one; a commentary line can be thousands of characters long and
+   * this runs on every container on every tick. The nearest candidate wins, because the
+   * shortest restated segment is the one that was interrupted earliest.
+   */
+  function echoCut(plain, from) {
+    const probe = plain.slice(from, from + MIN_ECHO_CHARS);
+    if (probe.length < MIN_ECHO_CHARS) return -1;
+    for (let at = plain.indexOf(probe, from + MIN_ECHO_CHARS); at > from; at = plain.indexOf(probe, at + 1)) {
+      const width = at - from;
+      if (at + width > plain.length) break;
+      // Two words at minimum. A repeated single long word is a word, not a double-write.
+      if (plain.slice(from, at).indexOf(' ') < 0) continue;
+      if (plain.slice(from, at) === plain.slice(at, at + width)) return at;
+    }
+    return -1;
+  }
+
+  /**
+   * A line the page wrote over itself while streaming, reduced to its last and fullest pass.
+   *
+   * Measured live: ChatGPT's commentary container briefly holds the paragraph it is replacing
+   * alongside the replacement, and `innerText` runs the two together without a newline. The
+   * result is not `A + A` but a chain of ever-longer prefixes — `**Schritt 3 erled` then
+   * `Schritt 3 erledigt: Die ersten 15 Zeilen` then the same sentence carried further — all on
+   * one line, which is how a single interim message came to be stored reading itself three and
+   * four times over. Only `A + A` was recognised before, so none of that chain was caught.
+   *
+   * Each pass is a prefix of the one after it, so stripping the restated segment repeatedly
+   * peels the chain from the front and leaves the last pass. Markdown punctuation is ignored
+   * for the comparison; the text kept is always the page's own, never a rewritten one, and a
+   * line the page did not double is returned untouched.
+   */
+  function dropEcho(line) {
+    // React can briefly mount the old streaming buffer immediately beside the new one with
+    // no separator at all. The smallest live reproducer was `I’veI’ve gotI’ve got ...`:
+    // the old long-echo guard intentionally ignored the four-character first pass, so the
+    // corruption survived and every later snapshot compounded it. Peel only *immediate*
+    // duplicate prefixes whose join has no whitespace; normal prose such as `ha ha` keeps
+    // its separating space and is therefore untouched. Repeating this also handles the
+    // growing-prefix chain: A + AB + ABC -> AB + ABC -> ABC.
+    let compact = line;
+    for (;;) {
+      let cut = -1;
+      const max = Math.min(200, Math.floor(compact.length / 2));
+      for (let width = 3; width <= max; width++) {
+        const prefix = compact.slice(0, width);
+        if (/\s$/.test(prefix) || /^\s/.test(compact.slice(width))) continue;
+        if (compact.slice(width).startsWith(prefix)) {
+          cut = width;
+          break;
+        }
+      }
+      if (cut < 0) break;
+      compact = compact.slice(cut);
+    }
+    line = compact;
+    if (line.length < MIN_ECHO_CHARS * 2) return line;
+    const chars = [];
+    const origin = [];
+    for (let at = 0; at < line.length; at++) {
+      const ch = line[at];
+      if (MARKDOWN_CHAR.test(ch)) continue;
+      if (SPACE_CHAR.test(ch)) {
+        if (chars.length === 0 || chars[chars.length - 1] === ' ') continue;
+        chars.push(' ');
+        origin.push(at);
+        continue;
+      }
+      chars.push(ch);
+      origin.push(at);
+    }
+    const plain = chars.join('');
+    let from = 0;
+    for (let cut = echoCut(plain, from); cut > from; cut = echoCut(plain, from)) from = cut;
+    return from === 0 ? line : line.slice(origin[from]).trim();
+  }
+
+  function commentaryText(node) {
+    const blocks = pageText(node, 32_000)
+      .split('\n')
+      .map((line) => dropEcho(line.trim()))
+      .filter(Boolean);
+    const kept = [];
+    for (const block of blocks) {
+      const plain = bareText(block);
+      if (!plain) continue;
+      let merged = false;
+      for (let at = 0; at < kept.length; at++) {
+        const held = bareText(kept[at]);
+        if (held.indexOf(plain) >= 0) {
+          merged = true;
+          break;
+        }
+        if (plain.indexOf(held) >= 0) {
+          kept[at] = block;
+          merged = true;
+          break;
+        }
+      }
+      if (!merged) kept.push(block);
+    }
+    return kept.join('\n').slice(0, 8000);
+  }
+
+  /**
+   * This turn's visible commentary, as identified items rather than as one blob of text.
+   *
+   * `progressLine()` answers "what does the whole reasoning area say right now", which is
+   * the wrong question for recording. ChatGPT grows one caption block in place, reparents
+   * it, shrinks it during a re-layout and grows it again; a caller comparing consecutive
+   * blobs can only see "the text changed" and has to guess whether that is new commentary
+   * or the same commentary redrawn. It guessed wrong, repeatedly, and every wrong guess
+   * became another stored event and another row on screen.
+   *
+   * `key` is the caller's generation key — see stampIdentities for why it may not be
+   * ChatGPT's turn id.
+   */
+  function progressItems(turn, key) {
+    return safe(() => {
+      const namespace = key || (turn && turn.id) || 'turn';
+      const boxes = [];
+      for (const section of turnNodes(turn)) boxes.push(...progressRoots(section));
+      const ids = stampIdentities(boxes, 'data-clf-progress-id', namespace, 'p');
+
+      const out = [];
+      for (let at = 0; at < boxes.length; at++) {
+        const value = commentaryText(boxes[at]);
+        if (value) out.push({ id: adoptedProseId(boxes[at], namespace) || ids[at], text: value });
+      }
+      return out;
+    }, []);
+  }
+
+  function interrupted(turn) {
+    return safe(
+      () =>
+        turnNodes(turn).some((section) => {
+          const memo = memoOf(section);
+          if (memo && memo.interrupted !== null) return memo.interrupted;
+          const value = section.querySelector('[data-interrupted="true"]') !== null;
+          if (memo) memo.interrupted = value;
+          return value;
+        }),
+      false
+    );
+  }
+
+  /** Marks ChatGPT's own progress/reasoning containers so our CSS can make them legible. */
+  function markProgress(turn) {
+    return safe(() => {
+      let marked = 0;
+      for (const section of turnNodes(turn)) {
+        for (const box of section.querySelectorAll('[data-interrupted]')) {
+          if (!box.hasAttribute('data-clf-progress')) marked++;
+          box.setAttribute('data-clf-progress', '1');
+        }
+      }
+      return marked;
+    }, 0);
+  }
+
+  /**
+   * Is this candidate really one tool row?
+   *
+   * `div.pointer-events-none.contents` is a layout shape, not a semantic one: ChatGPT uses
+   * display-contents wrappers in several places, and matching the class alone once counted
+   * containers that hold a whole answer. A tool row is a short header line — no prose, no
+   * nested tool row — so require that shape rather than trusting the class.
+   *
+   * A block we have already relabelled is always accepted. Expanding one puts its output
+   * inside, which would otherwise make our own row stop looking like a tool row and let
+   * its call be handed to a different block on the next repaint.
+   */
+  function isToolBlock(node) {
+    if (node.hasAttribute && node.hasAttribute('data-clf-call')) return true;
+    // A row that carries the tool-call control is a tool row whatever its size. Expanding
+    // one puts its result — markdown and all — inside it, and the length/markdown test
+    // below would then stop recognising it. Judging by the control instead of by the body
+    // is what keeps an expanded connector result out of the chronology as prose.
+    if (node.querySelector && node.querySelector(CONNECTOR)) return true;
+    if (node.closest && node.closest(CONNECTOR)) return true;
+    if (node.querySelector && node.querySelector('.markdown')) return false;
+    // The semantic icon pile owns the new status row even before its caption arrives.
+    if (node.matches?.(STATUS_V5)) return true;
+    const label = (node.textContent || '').replace(/\s+/g, ' ').trim();
+    return label.length > 0 && label.length <= 200;
+  }
+
+  /**
+   * Collapse nested selector matches without comparing every node with every other node.
+   * Long chats can contain hundreds of activity rows; the old `filter(...some(...))`
+   * shape turned every transcript pass into quadratic containment work.
+   */
+  function collapseNested(found, keepInnermost) {
+    if (found.length < 2) return found;
+    const candidates = new Set(found);
+    if (keepInnermost) {
+      const containsCandidate = new Set();
+      for (const node of found) {
+        for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+          if (candidates.has(parent)) containsCandidate.add(parent);
+        }
+      }
+      return found.filter((node) => !containsCandidate.has(node));
+    }
+    return found.filter((node) => {
+      for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+        if (candidates.has(parent)) return false;
+      }
+      return true;
+    });
+  }
+
+  /** The tool-call blocks of one logical turn, across every split section, in DOM order. */
+  function toolBlocks(turn) {
+    return safe(
+      () =>
+        turnNodes(turn).flatMap((section) => {
+          const memo = memoOf(section);
+          if (memo && memo.blocks) return memo.blocks;
+          const current = [...section.querySelectorAll(TOOL)];
+          const found = (current.length > 0 ? current : [...section.querySelectorAll(TOOL_LEGACY)]).filter(
+            isToolBlock
+          );
+          // The two shapes nest — the display-contents wrapper can sit inside the legacy
+          // span — and relabelling both would put our icon and title inside our own row.
+          // Keep the innermost, which is the element that actually carries the label.
+          const blocks = collapseNested(found, true);
+          if (memo) memo.blocks = blocks;
+          return blocks;
+        }),
+      []
+    );
+  }
+
+  /**
+   * Whether this block is a connector (API tool) row rather than a built-in one.
+   *
+   * Structural, not textual: the row carries the control named by CONNECTOR, and built-in
+   * rows — "Searched the web", canvas, image generation — do not. That makes it stable
+   * across locales and immune to the label games a name-frequency guess is open to.
+   *
+   * It says "a connector", not "this connector". The provider's identity — the account
+   * name, the tool name, the request path — exists in ChatGPT's client state and appears
+   * in the expanded card and the side panel, but nothing in the collapsed row carries it,
+   * so a Gmail or Calendar row is indistinguishable from this app's from here. Callers
+   * that use this as evidence must treat it as narrowing, not as proof of provider.
+   */
+  /**
+   * Visible assistant activity in the exact DOM order ChatGPT drew it.
+   *
+   * Chat On Steroids remains authoritative for its own call labels/results. This only supplies
+   * the missing chronology: a visible commentary paragraph can sit between two calls, and
+   * the recorder clock cannot recover that after a fast turn. ChatGPT's completed DOM can.
+   */
+  function activityItems(turn) {
+    return safe(() => {
+      const out = [];
+      let markerBase = 0;
+      for (const section of turnNodes(turn)) {
+        const roots = [...section.querySelectorAll('[data-interrupted]')].filter((node) => {
+          const parent = node.parentElement && node.parentElement.closest
+            ? node.parentElement.closest('[data-interrupted]')
+            : null;
+          return !parent;
+        });
+
+        for (const root of roots) {
+          // ChatGPT's reasoning is one outer data-interrupted container. Its inner
+          // display-contents activity rows are the *actual chronology slots*; plain text
+          // between them is the visible commentary. Replacing those rows with sentinels in
+          // a clone gives us the ordering without having to depend on hashed prose classes.
+          // Strip our own stream before reading a single character of this subtree. Without
+          // it, every repaint reads back what we rendered last time and republishes it.
+          const clone = stripOwn(root.cloneNode(true));
+          const found = [...clone.querySelectorAll(TOOL)].filter(isToolBlock);
+          const slots = collapseNested(found, true);
+          if (slots.length === 0) {
+            const value = (clone.innerText || clone.textContent || '').trim();
+            if (value) out.push({ kind: 'progress', text: value });
+            continue;
+          }
+
+          const markers = [];
+          slots.forEach((node, index) => {
+            const token = `\n[[CLF_ACTIVITY_${markerBase + index}]]\n`;
+            markers.push(token.trim());
+            node.replaceWith(document.createTextNode(token));
+          });
+          markerBase += slots.length;
+
+          const text = (clone.innerText || clone.textContent || '').replace(/\u00a0/g, ' ');
+          const pattern = /\[\[CLF_ACTIVITY_(\d+)\]\]/g;
+          let at = 0;
+          let match;
+          while ((match = pattern.exec(text)) !== null) {
+            const prose = text.slice(at, match.index).trim();
+            if (prose) out.push({ kind: 'progress', text: prose });
+            out.push({ kind: 'tool' });
+            at = match.index + match[0].length;
+          }
+          const tail = text.slice(at).trim();
+          if (tail) out.push({ kind: 'progress', text: tail });
+        }
+      }
+      return out;
+    }, []);
+  }
+
+  /**
+   * Whether this row is one of our own connector calls rather than something ChatGPT did.
+   *
+   * The answer is remembered on the row once it is known, and that is the point. The only
+   * live marker is the control ChatGPT puts in a connector row, and it does not survive
+   * everything the page does to that row: a collapse, a relabel, a React replacement of the
+   * button can all take it away. A row that loses its marker then reads as ChatGPT-native,
+   * and the call this app already recorded first-hand — with its arguments, outcome and
+   * duration — gets written down a second time as an anonymous page caption.
+   *
+   * Being wrong in this direction is cheap and the other direction is not: a row wrongly
+   * remembered as ours is one missing native caption, while a row wrongly read as native is
+   * a duplicate of work already in the log.
+   */
+  function isConnectorBlock(node) {
+    return safe(() => {
+      if (!node) return false;
+      if (node.getAttribute && node.getAttribute('data-clf-local') === '1') return true;
+      const found = !!node.querySelector(CONNECTOR) || !!node.closest(CONNECTOR);
+      if (found) markLocalBlock(node);
+      return found;
+    }, false);
+  }
+
+  /**
+   * Records that a row belongs to this connector, for callers who know it from elsewhere.
+   *
+   * The Fiber pass can prove it — a request whose resource path is this app's — and that
+   * proof outlives the DOM control, so it is worth keeping on the row.
+   */
+  function markLocalBlock(node) {
+    return safe(() => {
+      if (!node || !node.setAttribute) return false;
+      node.setAttribute('data-clf-local', '1');
+      return true;
+    }, false);
+  }
+
+  /**
+   * Whether this node is a connector row or contains one.
+   *
+   * Separate from isConnectorBlock because the questions are different: that one asks what
+   * a known tool row is, and answers upwards as well, while this one asks whether an
+   * arbitrary node that just appeared brought any evidence with it. React inserts whole
+   * subtrees, so the row is as often a descendant of what was added as it is the node
+   * itself, and only looking at the node would miss it.
+   */
+  function hasConnectorRow(node) {
+    return safe(() => !!node && node.nodeType === 1 && (node.matches(CONNECTOR) || !!node.querySelector(CONNECTOR)), false);
+  }
+
+  /**
+   * The connector rows inside a root, outermost first and counted once each.
+   *
+   * The evidence path asks this rather than filtering toolBlocks(), and that is deliberate.
+   * toolBlocks() exists for *relabelling*, so it has to find the element that carries the
+   * visible title, which means the display-contents/tool-message shapes and a heuristic
+   * about what a row looks like. Attribution needs none of that: it only needs to know how
+   * many connector calls this page has shown, and the one anchor that says so is CONNECTOR.
+   * Depending on the relabelling shapes for it meant a renderer change that moved the title
+   * silently turned every call in the browser into an unplaceable one.
+   *
+   * Nested matches are collapsed to the outermost, so a row whose control is labelled twice
+   * — the wrapper and the button inside it — is still one call.
+   */
+  function connectorRows(root) {
+    return safe(() => {
+      const scope = root || document;
+      const found = [...scope.querySelectorAll(CONNECTOR)];
+      if (scope.nodeType === 1 && scope.matches(CONNECTOR)) found.unshift(scope);
+      return collapseNested(found, false);
+    }, []);
+  }
+
+  /**
+   * The exact MAIN-world scan reference stamped on this block's connector row, or null.
+   *
+   * An index alone is not identity: React can leave a row stamped `0` from an earlier scan
+   * while the next scan also has a completely different descriptor at index 0. The helper
+   * therefore stamps `{scanToken,index}` and callers must match both. Numeric/legacy stamps
+   * deliberately fail closed rather than being reinterpreted against a newer frame.
+   */
+  function fiberRef(block) {
+    return safe(() => {
+      if (!block) return null;
+      const marked =
+        (block.closest && block.closest('[data-clf-fiber]')) ||
+        (block.querySelector && block.querySelector('[data-clf-fiber]'));
+      if (!marked) return null;
+      const value = marked.getAttribute('data-clf-fiber');
+      if (!value) return null;
+      const split = value.lastIndexOf(':');
+      if (split <= 0 || split === value.length - 1) return null;
+      const scanToken = value.slice(0, split);
+      const rawIndex = value.slice(split + 1);
+      if (scanToken.length > 64 || !/^\d+$/.test(rawIndex)) return null;
+      const index = Number(rawIndex);
+      if (!Number.isInteger(index) || index < 0) return null;
+      return { scanToken, index };
+    }, null);
+  }
+
+  /**
+   * The single text node inside a tool block that reads "Called tool".
+   *
+   * Found structurally — the first text-bearing leaf of the block's header button —
+   * rather than by matching the English string, so it also works in other languages.
+   */
+  function toolLabel(block) {
+    return safe(() => {
+      const marked = block.querySelector('[data-clf-label]');
+      if (marked) return marked;
+      const header = block.querySelector('button') || block;
+      for (const node of header.querySelectorAll('*')) {
+        if (node.children.length === 0 && (node.textContent || '').trim().length > 0) {
+          node.setAttribute('data-clf-label', '1');
+          return node;
+        }
+      }
+      return null;
+    }, null);
+  }
+
+  /**
+   * Visible error banners plus narrowly recognised transport-failure markdown.
+   *
+   * Occurrences, not strings. The same wording failing twice is two failures, and the
+   * caller has to be able to tell them apart: keyed on text alone, "Message delivery timed
+   * out" on turn nine was indistinguishable from the same banner on turn three, so the
+   * second one was never recorded and — because the outcome check consults the same
+   * filter — the failed turn could be written down as completed instead.
+   *
+   * What gives an occurrence its identity is the node it is rendered in, plus the turn it
+   * belongs to when it is inside one. A toast lives outside every turn, so it has no
+   * turnId; its node is still its identity.
+   *
+   * "Visible" is load-bearing and used to be assumed rather than checked. ChatGPT announces
+   * ordinary UI state through screen-reader-only `role="alert"` live regions, so a session
+   * accumulated "Reasoning details opened", "Actions refreshed." and "Dictation is active
+   * and in use" as recorded chat errors — 60 of them against 5 real transport failures in
+   * one run — and every error count the app showed was inflated by them. An offscreen
+   * announcement is not a banner. Neither is this extension's own surface, which was
+   * recording "Chat On Steroids Desktop is now connected" as a ChatGPT failure.
+   */
+  const acknowledgedAccessNotices = new WeakSet();
+  function errors() {
+    return safe(() => {
+      const out = [];
+      const texts = new Set();
+      // Live provider access throttling is a dialog, not a broken transport. Match
+      // its semantic heading and notice together; quoted assistant prose is not it.
+      for (const node of document.querySelectorAll('[role="dialog"], [role="alertdialog"]')) {
+        if (node.closest(OWN_SURFACES) || node.closest('[hidden],[inert],[aria-hidden="true"]') || !node.getClientRects().length) continue;
+        const heading = node.querySelector('h1,h2,h3,[role="heading"]');
+        const headingText = (heading?.textContent || '').trim();
+        const value = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+        const english = /^too many requests$/i.test(headingText) && /temporarily limited.*access/i.test(value) && /few minutes/i.test(value);
+        const korean = headingText === '요청이 너무 많습니다' && value.includes('데이터를 보호하기 위해 대화에 대한 액세스가 일시적으로 제한되었습니다.') && value.includes('몇 분 후 다시 시도해 주세요.');
+        if (value.length >= 500 || (!english && !korean)) continue;
+        const notice = value.startsWith(headingText) ? `${headingText} ${value.slice(headingText.length).trim()}` : value;
+        out.push({ text: notice, node, turnId: null, recoverable: false, blocking: true });
+        texts.add(value);
+        // Acknowledge this identified informational notice once. The returned
+        // blocking diagnostic survives the click; it grants no retry authority.
+        const buttons = [...node.querySelectorAll('button')].filter(button =>
+          displayed(button) && !button.disabled && button.getAttribute('aria-disabled') !== 'true' &&
+          (korean ? button.textContent.trim() === '알겠습니다' : /^got it$/i.test(button.textContent.trim())));
+        if (!acknowledgedAccessNotices.has(node) && buttons.length === 1) {
+          acknowledgedAccessNotices.add(node); buttons[0].click();
+        }
+      }
+      for (const node of document.querySelectorAll('[role="alert"]')) {
+        if (node.closest('[aria-hidden="true"]')) continue;
+        if (out.some(error => error.blocking && error.node.contains(node))) continue;
+        if (node.closest && node.closest(OWN_SURFACES)) continue;
+        if (!displayed(node)) continue;
+        const value = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+        if (value.length <= 2 || value.length >= 500) continue;
+        // Provider live regions also announce successful settings/actions changes. Only the
+        // existing transport classifier makes an announcement a chat error. A failed send
+        // can precede an assistant section, so recognized failures still need no turn id.
+        if (!transportFailure(value)) continue;
+        out.push({ text: value, node, turnId: null, recoverable: true });
+        texts.add(value);
+      }
+      // The current full-width failure card has no alert role. Its exact Retry control is
+      // the stable semantic anchor; retryFailure() accepts only the nearest complete notice
+      // whose whole text is already in the narrow transport-failure vocabulary above.
+      for (const button of document.querySelectorAll('button')) {
+        const failure = retryFailure(button);
+        if (!failure || texts.has(failure.text)) continue;
+        texts.add(failure.text);
+        out.push({ ...failure, turnId: null, recoverable: true });
+      }
+      for (const turn of turns()) {
+        if (turn.role !== 'assistant') continue;
+        for (const section of turnNodes(turn)) {
+          // Native Pro failure header observed in Chrome, 2026-09-12: an
+          // expandable button outside authored markdown, not an alert/Retry card.
+          // Keep every occurrence's node identity; old failed turns remain rendered.
+          for (const button of section.querySelectorAll('button[aria-expanded]')) {
+            if (button.closest(`${OWN_SURFACES}, .markdown, [data-message-author-role="user"], [hidden], [inert], [aria-hidden="true"]`) ||
+                button.closest(TURN) !== section || !displayed(button) ||
+                (button.textContent || '').trim() !== 'Thinking failed') continue;
+            let hidden = false;
+            for (let parent = button; parent; parent = parent.parentElement) {
+              const style = getComputedStyle(parent);
+              if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') { hidden = true; break; }
+            }
+            if (hidden) continue;
+            out.push({ text: 'Thinking failed', node: button, turnId: turn.id, turn,
+              reason: 'thinking_failed', recoverable: false });
+          }
+          for (const markdown of section.querySelectorAll('.markdown')) {
+            const value = text(markdown, 500).replace(/\s+/g, ' ').trim();
+            if (!value || !transportFailure(value) || texts.has(value)) continue;
+            texts.add(value);
+            out.push({ text: value, node: markdown, turnId: turn.id, turn, recoverable: true });
+          }
+        }
+      }
+      return out;
+    }, []);
+  }
+
+  function composer() {
+    return safe(() => {
+      const classic = document.querySelector('#prompt-textarea');
+      if (classic) return classic;
+      const candidates = [...document.querySelectorAll('form[data-chatgpt-composer] [contenteditable="true"][role="textbox"]')]
+        .filter(node => !node.closest(`${OWN_SURFACES},[data-turn-key],.markdown,[hidden],[aria-hidden="true"],[inert]`));
+      return candidates.length === 1 ? candidates[0] : null;
+    }, null);
+  }
+
+  /**
+   * ChatGPT's own "this conversation could not be loaded" surface, as its retry button, or null.
+   *
+   * Measured 2026-09-26 on the new shell after a tab reload landed mid-turn: the main area held
+   * one centred message and one "Retry" button, with no composer and no turn. Nothing about it
+   * is identified — no test id, role or stable class — so the recognition is structural and
+   * locale-free: a /c/ route whose main area has no composer, no turn, no editable host, little
+   * text and exactly one rendered button. The page stayed that way indefinitely while the turn
+   * kept running server-side, so every later observation of that chat was blind.
+   */
+  function conversationLoadFailure() {
+    return safe(() => {
+      if (!conversationId() || composer() || document.querySelector(`${TURN},[data-turn-key]`)) return null;
+      const area = document.querySelector('[data-app-shell-focus-area="main"]') || document.querySelector('main');
+      if (!area || area.querySelector('[contenteditable="true"],textarea,[role="textbox"],form')) return null;
+      const text = (area.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!text || text.length > 300) return null;
+      const buttons = [...area.querySelectorAll('button')].filter(button =>
+        !button.closest(`${OWN_SURFACES},[hidden],[inert],[aria-hidden="true"]`) && button.getClientRects().length > 0);
+      if (buttons.length !== 1 || buttons[0].disabled || buttons[0].getAttribute('aria-disabled') === 'true') return null;
+      return buttons[0];
+    }, null);
+  }
+
+  /**
+   * Whether ChatGPT's editing host is presently safe to receive a new user message.
+   *
+   * This deliberately says nothing about whether *our* recorder still considers the previous
+   * turn open; content.js owns that stronger lifecycle state. It is the page-native half of the
+   * same proof: a connected/editable composer, no Stop/generation control, and no user draft.
+   * Keeping the emptiness check here also makes it impossible for a revival waiter to "reserve"
+   * the composer by inserting its text before the page is actually ready.
+   */
+  function composerSubmitReady() {
+    return safe(() => {
+      const box = composer();
+      if (!composerWritable()) return false;
+      if (generating() || stopButton()) return false;
+      if ((box.textContent || '').trim() !== '') return false;
+      return true;
+    }, false);
+  }
+
+  /** A visible editor can still be read-only while the provider mounts or changes models. */
+  function composerWritable() {
+    const box = composer();
+    return !!box?.isConnected && box.getAttribute('aria-disabled') !== 'true' &&
+      box.getAttribute('contenteditable') !== 'false';
+  }
+
+  /** The composer as a whole, used as the root to watch for React replacing it. */
+  function composerBox() {
+    return safe(() => {
+      const box = composer();
+      if (!box) return null;
+      return box.closest('form') || box.parentElement || null;
+    }, null);
+  }
+
+  /** A mounted editor behind Settings is not an available model-discovery surface. */
+  function composerVisible() {
+    const box = composer();
+    return !!box && !box.closest('[hidden],[aria-hidden="true"],[inert]') && box.getClientRects().length > 0;
+  }
+
+  /**
+   * Whether the page is currently drawn light or dark: `'light'` or `'dark'`.
+   *
+   * Not `prefers-color-scheme`. ChatGPT's appearance setting is its own — it can be pinned
+   * to Light on a dark Windows and the other way round — so asking the operating system
+   * gives our injected menu the opposite surface from the page it is sitting on. Not the
+   * `html` class either: the theme classes are ChatGPT's and would be one more name to
+   * break. What is asked instead is the paint: the composer's own background, which is the
+   * surface our control physically sits on, climbing until an ancestor is actually opaque
+   * (the composer's inner layers are transparent over the one that carries the colour).
+   */
+  function pageTheme() {
+    return safe(() => {
+      for (let node = composerBox() || document.body; node; node = node.parentElement) {
+        const found = luminance(getComputedStyle(node).backgroundColor);
+        if (found !== null) return found < 0.5 ? 'dark' : 'light';
+      }
+      const declared = getComputedStyle(document.documentElement).colorScheme || '';
+      return declared.indexOf('dark') >= 0 ? 'dark' : 'light';
+    }, 'dark');
+  }
+
+  /** Perceived brightness of a painted colour, or null if it paints nothing at all. */
+  function luminance(color) {
+    const parts = String(color).match(/[\d.]+/g);
+    if (!parts || parts.length < 3) return null;
+    // A transparent layer shows what is behind it, so it is not this node's answer.
+    if (parts.length > 3 && Number(parts[3]) === 0) return null;
+    const [red, green, blue] = parts.slice(0, 3).map(Number);
+    return (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
+  }
+
+  /**
+   * Where a control of ours belongs in the composer: `{ host, before }`.
+   *
+   * ChatGPT gives its trailing button row no stable id, so the anchor is the send button
+   * (or the stop button that replaces it while generating, or the dictation button when
+   * the composer is empty and there is no send button at all). Our control goes *before*
+   * that anchor, so send stays the rightmost thing in the composer — moving the primary
+   * action of the page is not ours to do.
+   */
+  function composerActions() {
+    return safe(() => {
+      // The current provider microphone has no stable button test id; its sprite and
+      // composer trailing parent identify it without interpreting a translated label.
+      const anchor = sendButton() || stopButton() || nativeComposerControls(SPEECH)[0] ||
+        [...(composerBox()?.querySelectorAll(`${TRAILING} button`) || [])]
+        .find(button => !button.closest(OWN_SURFACES) && [...button.querySelectorAll('svg use')].some(use => {
+          const href = use.getAttribute('href') || use.getAttribute('xlink:href') || '';
+          return href.slice(href.lastIndexOf('#')) === '#microphone-regular-24';
+        }));
+      const explicit = anchor ? anchor.closest(TRAILING) : [...(composerBox() || document).querySelectorAll(TRAILING)].find(renderedComposerNode);
+      if (!anchor) return explicit ? { host: explicit, before: null } : null;
+
+      // The row that holds several controls, not the wrapper around this one button.
+      // Capped: climbing all the way to <body> because every ancestor happens to have one
+      // child would put our control somewhere it has no business being.
+      // The native trailing area owns both the model picker and submit controls.
+      // Voice now has a nested wrapper with two children (button + description),
+      // so child count alone would stop below the model picker and never find it.
+      let host = explicit || anchor.parentElement;
+      for (let up = 0; up < 3 && host && host !== explicit && host.children.length < 2 && host.parentElement; up++) {
+        host = host.parentElement;
+      }
+      if (!host) return null;
+      let before = anchor;
+      while (before && before.parentElement !== host) before = before.parentElement;
+      return { host, before: before || null };
+    }, null);
+  }
+
+  /**
+   * The node holding the text of the chat's first user message, if there is one.
+   *
+   * Only ever asked for on a chat this app opened, where the first user message is the
+   * instruction the app typed. Returns the message element itself, so the caller folds
+   * away the text and nothing structural around it.
+   */
+  function firstUserMessage() {
+    return safe(() => {
+      for (const turn of turns()) {
+        for (const section of turnNodes(turn)) {
+          if (section.matches?.(SHELL_UNIT) && shellRole(section) === 'user' && messageIdOf(section)) return section;
+          for (const node of section.querySelectorAll('[data-message-id]')) {
+            const role = node.getAttribute('data-message-author-role') || turn.role;
+            if (role === 'assistant') return null;
+            if (role === 'user') return node;
+          }
+        }
+      }
+      return null;
+    }, null);
+  }
+
+  /**
+   * Where a panel of ours belongs *above* the composer: `{ host, before }`.
+   *
+   * Outside the composer's own container rather than inside it. A block element inside
+   * ChatGPT's input row fights the row's layout, and a click that lands anywhere in there
+   * is turned into "focus the textarea" — so a panel with text to read and scroll cannot
+   * live there.
+   */
+  function composerStack() {
+    return safe(() => {
+      const box = composerBox();
+      if (!box || !box.parentElement) return null;
+      return { host: box.parentElement, before: box };
+    }, null);
+  }
+
+  const ACTIVITY_CONTROL = 'button, [role="button"], a[href], input, select, textarea';
+  const hiddenActivityBySection = new WeakMap();
+
+  /** Native answer/media and React controls are never represented by local activity.
+   * Re-evaluate on each existing paint: a once-empty container may gain output. */
+  function canHideActivity(node) {
+    return safe(() => {
+      if (!node || node.matches?.('.clf-stream') || node.querySelector?.('.clf-stream')) return false;
+      const protectedOutput = '[class~="group/imagegen-image"], canvas, video, audio, summary, [role="toolbar"], [data-message-author-role], [data-clf-fiber-message]';
+      if (node.matches?.(protectedOutput) || node.querySelector?.(protectedOutput)) return false;
+      // Logos in connector controls are not answer images. Images outside those
+      // controls, native downloads and generated-output actions stay usable.
+      for (const image of node.querySelectorAll('img')) {
+        if (!image.closest('button, [role="button"]') || image.closest('[class~="group/imagegen-image"]')) return false;
+      }
+      if (node.querySelector?.('a[download], button[aria-label="Edit image"], button[aria-label="Share this image"]')) return false;
+      if ([...node.querySelectorAll('.markdown')].some(part =>
+        !part.closest(OWN_SURFACES) && text(part).length > 0)) return false;
+      // The live renderer does not wrap every public/interim line in `.markdown`.
+      // Text belonging to the tool leaf is replaceable; any other text (including
+      // Worked summaries) makes this an answer/progress owner and stops the climb.
+      const pending = [node];
+      while (pending.length) {
+        const current = pending.pop();
+        for (const child of current.childNodes || []) {
+          if (child.nodeType === 3) {
+            const parent = child.parentElement;
+            if (String(child.nodeValue || '').trim() &&
+                !parent?.closest?.(TOOL) && !parent?.closest?.(TOOL_LEGACY) &&
+                !parent?.closest?.(OWN_SURFACES)) return false;
+          } else if (child.nodeType === 1) pending.push(child);
+        }
+      }
+      return true;
+    }, false);
+  }
+
+  /** Noninteractive native status captions have no result or action to preserve.
+   * The caller checks current native response identity and the Overwrite setting. */
+  function activitySummaryRows(turn) {
+    return safe(() => {
+      const interactive = `${ACTIVITY_CONTROL}, [tabindex]:not([tabindex="-1"]), [contenteditable="true"], [aria-expanded], [aria-controls]`;
+      return toolBlocks(turn).filter(row => !row.closest(`${OWN_SURFACES}, ${interactive}, ${CONNECTOR}, [data-clf-fiber-thought]`) &&
+        !row.querySelector('[data-clf-fiber-thought]') &&
+        !row.querySelector(`${interactive}, ${CONNECTOR}, pre, code, table, details`) && canHideActivity(row));
+    }, []);
+  }
+
+  /** Exact current typed-thought rows stamped by the matching MAIN-world scan. */
+  function thoughtActivityRows(turn, scanToken, turnIndex, messageIds) {
+    return safe(() => {
+      if (typeof scanToken !== 'string' || !scanToken || scanToken.length > 64 ||
+          !Number.isInteger(turnIndex) || turnIndex < 0 || !Array.isArray(messageIds) || messageIds.length > 200) return [];
+      const wanted = new Set();
+      for (const messageId of messageIds) {
+        if (typeof messageId !== 'string' || !messageId || messageId.length > 200) return [];
+        wanted.add(`${scanToken}:${turnIndex}:${encodeURIComponent(messageId)}`);
+      }
+      if (!wanted.size) return [];
+      const out = [];
+      for (const section of turnNodes(turn)) {
+        for (const row of section.querySelectorAll('[data-clf-fiber-thought]')) {
+          if (row.closest(OWN_SURFACES)) continue;
+          if (wanted.has(row.getAttribute('data-clf-fiber-thought'))) out.push(row);
+        }
+      }
+      return out;
+    }, []);
+  }
+
+  /** Controls structurally owned by one tool disclosure.
+   *
+   * A generated-output action can sit beside a tool row in the same native branch. Treating
+   * every sibling button as part of the tool made localized Edit/Share actions disappear when
+   * the duplicate native tool row was hidden. Keep controls inside the row, plus the observed
+   * sibling disclosure whose semantic label exactly matches the row itself. Anything else is
+   * unrelated native UI and therefore stops the hide climb without reading translated labels.
+   */
+  function activityControls(block) {
+    const own = new Set(block.querySelectorAll?.(ACTIVITY_CONTROL) || []);
+    const label = text(block, 240);
+    for (const control of block.parentElement?.querySelectorAll?.(ACTIVITY_CONTROL) || []) {
+      const semantics = [control.getAttribute?.('aria-label'), control.getAttribute?.('title'), text(control, 240)]
+        .map(value => String(value || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+      if (label && semantics.includes(label)) own.add(control);
+    }
+    return own;
+  }
+
+  /**
+   * Find the layout child whose removal also removes its flex/grid gap. Never cross the
+   * turn section, a native fold/progress owner, an uncovered row, or unrelated controls.
+   */
+  function activityHideTarget(block, section, blocks, covered, allowedControls) {
+    if (!canHideActivity(block)) return null;
+    let target = block;
+    for (let parent = target.parentElement; parent && parent !== section; parent = parent.parentElement) {
+      if (parent.matches?.('[data-interrupted], [data-clf-progress]') || !canHideActivity(parent)) break;
+      if (blocks.some(other => !covered.has(other) && parent.contains(other))) break;
+      if ([...parent.querySelectorAll(ACTIVITY_CONTROL)].some(control => !allowedControls.has(control))) break;
+      target = parent;
+    }
+    return target;
+  }
+
+  /** Publish one desired marker set without removing/readding unchanged targets every paint. */
+  function syncHiddenActivity(turn, desiredBySection) {
+    return safe(() => {
+      for (const section of turnNodes(turn)) {
+        const desired = desiredBySection.get(section) || new Set();
+        const prior = new Set(hiddenActivityBySection.get(section) || []);
+        for (const marked of section.querySelectorAll('[data-clf-native-hidden]')) prior.add(marked);
+        for (const target of prior) if (!desired.has(target)) target.removeAttribute('data-clf-native-hidden');
+        for (const target of desired) if (!prior.has(target)) target.setAttribute('data-clf-native-hidden', '1');
+        hiddenActivityBySection.set(section, desired);
+      }
+    }, undefined);
+  }
+
+  function progressHideTargets(section, blocks) {
+    const targets = [];
+    for (const box of section.querySelectorAll('[data-interrupted], [data-clf-progress]')) {
+      if (!canHideActivity(box)) continue;
+      const localBlocks = blocks.filter(block => box.contains(block));
+      const allowed = new Set(localBlocks.flatMap(block => [...activityControls(block)]));
+      if ([...box.querySelectorAll(ACTIVITY_CONTROL)].some(control => !allowed.has(control))) continue;
+      targets.push(box);
+    }
+    return targets;
+  }
+
+  function hideActivity(turn, coveredBlocks, typedThoughtBlocks = [], summaryBlocks = [], presentation = null) {
+    const sections = turnNodes(turn);
+    const blocks = toolBlocks(turn);
+    const candidates = [...new Set([...blocks, ...(Array.isArray(typedThoughtBlocks) ? typedThoughtBlocks : [])])];
+    const desired = new Map(sections.map(section => [section, new Set()]));
+    const covered = new Set([
+      ...(Array.isArray(coveredBlocks) ? coveredBlocks : []),
+      ...(Array.isArray(typedThoughtBlocks) ? typedThoughtBlocks : []),
+      ...(Array.isArray(summaryBlocks) ? summaryBlocks : [])
+    ]);
+    const summaries = new Set(Array.isArray(summaryBlocks) ? summaryBlocks : []);
+    const allowedControls = new Set(candidates.filter(block => covered.has(block) && !summaries.has(block))
+      .flatMap(block => [...activityControls(block)]));
+    if (covered.size > 0) {
+      for (const block of candidates) {
+        if (!covered.has(block)) continue;
+        const section = sections.find(candidate => candidate.contains(block));
+        const target = section && activityHideTarget(block, section, candidates, covered, allowedControls);
+        if (target) {
+          desired.get(section).add(target);
+          // When unrelated native UI keeps the shared parent visible, retire only this
+          // tool row's own sibling disclosure controls. This avoids leaving an orphaned
+          // chevron while preserving adjacent localized output actions.
+          if (!summaries.has(block)) for (const control of activityControls(block)) {
+            if (control !== target && !target.contains(control)) desired.get(section).add(control);
+          }
+        }
+      }
+    }
+    syncHiddenActivity(turn, desired);
+    syncActivityLayout(turn, presentation);
+  }
+
+  /**
+   * The native activity disclosure owns an immediately adjacent clipped height box.
+   * Its translated caption and React's hashed classes are not identity. Public message
+   * anchors or a mounted canonical projection must separately prove the content we reveal.
+   */
+  function activityFold(turn) {
+    return safe(() => {
+      const candidates = [];
+      for (const section of turnNodes(turn)) {
+        for (const button of section.querySelectorAll('button[aria-expanded="false"], button[aria-expanded="true"]')) {
+          if (button.closest(`${OWN_SURFACES}, .markdown, ${CONNECTOR}`)) continue;
+          const clip = button.nextElementSibling;
+          if (!clip || !clip.matches('div[data-item-anchor="start"][data-clip="true"][data-dimension="height"]')) continue;
+          candidates.push({ button, clip, section });
+        }
+      }
+      return candidates.length === 1 ? candidates[0] : null;
+    }, null);
+  }
+
+  function collapsedActivityFold(turn) {
+    const fold = activityFold(turn);
+    if (!fold || fold.button.getAttribute('aria-expanded') !== 'false' ||
+        [...fold.clip.childNodes].some(node => node.nodeType === 1 || String(node.nodeValue || '').trim())) return null;
+    return fold;
+  }
+
+  /** Presentation markers are rebuilt with the same paint as native suppression. Nothing
+   * clicks the disclosure, moves React children or changes its remembered open state. */
+  function syncActivityLayout(turn, presentation) {
+    const desired = new Map();
+    if (presentation) {
+      const fold = presentation.fold || activityFold(turn);
+      if (fold && (presentation.fold || (presentation.anchors || []).some(anchor => fold.clip.contains(anchor)))) {
+        desired.set(fold.button, 'header');
+        const hasContent = [...fold.clip.childNodes].some(node => node.nodeType === 1 || String(node.nodeValue || '').trim());
+        desired.set(fold.clip, hasContent ? 'clip' : 'empty-clip');
+      }
+      for (const gap of presentation.chunks || []) {
+        if (!gap.interim || gap.before || !gap.anchor?.isConnected) continue;
+        const section = turnNodes(turn).find(node => node.contains(gap.anchor));
+        if (!section) continue;
+        let step = null;
+        // A tool chunk is a sibling of its exact native interim. That message's trailing
+        // wrappers still carry native spacing after the chunk, producing the reported gap.
+        // Stop before another message, the activity clip or any native action container.
+        for (let parent = gap.anchor.parentElement; parent && parent !== section && parent !== fold?.clip; parent = parent.parentElement) {
+          const messages = [...parent.querySelectorAll('[data-clf-fiber-message]')].filter(node => !node.closest(OWN_SURFACES));
+          if (messages.length !== 1 || messages[0] !== gap.anchor ||
+              [...parent.querySelectorAll('button, summary, [role="toolbar"], [data-message-author-role="user"]')]
+                .some(node => !node.closest(OWN_SURFACES))) break;
+          desired.set(parent, 'step');
+          step = parent;
+        }
+        // Only the native list directly grouping these proven message wrappers loses its
+        // large inter-item gap. Paragraphs, code blocks and the final answer keep their CSS.
+        const stack = step?.parentElement;
+        if (stack && stack !== section && stack !== fold?.clip && !stack.closest('.markdown')) {
+          const style = getComputedStyle(stack);
+          if (style.display === 'flex' && style.flexDirection === 'column') desired.set(stack, 'stack');
+        }
+      }
+    }
+    for (const section of turnNodes(turn)) {
+      for (const node of section.querySelectorAll('[data-clf-activity-part]')) {
+        if (!desired.has(node)) node.removeAttribute('data-clf-activity-part');
+      }
+    }
+    for (const [node, value] of desired) {
+      if (node.getAttribute('data-clf-activity-part') !== value) node.setAttribute('data-clf-activity-part', value);
+    }
+  }
+
+  /** Keep the native folded progress owner whenever it contains prose/media/chunks. */
+  function hideProgress(turn, hidden) {
+    const sections = turnNodes(turn);
+    const blocks = toolBlocks(turn);
+    const desired = new Map(sections.map(section => [section, new Set()]));
+    if (hidden) {
+      for (const section of sections) {
+        for (const target of progressHideTargets(section, blocks)) desired.get(section).add(target);
+      }
+    }
+    syncHiddenActivity(turn, desired);
+  }
+
+  /** Place only our chunk beside its proven native anchor; never reparent React nodes. */
+  function replaceActivity(turn, root, replaced, placement = null) {
+    return safe(() => {
+      const sections = turnNodes(turn);
+      if (!sections.length) return false;
+      for (const section of sections) {
+        if (replaced) section.setAttribute('data-clf-turn-replaced', '1');
+        else section.removeAttribute('data-clf-turn-replaced');
+      }
+      if (replaced && root) {
+        const anchor = placement && placement.anchor;
+        if (anchor) {
+          if (!anchor.isConnected || !sections.some(section => section.contains(anchor)) || !anchor.parentElement) return false;
+          if (!placement.before && anchor.nextSibling === root) return true;
+          const before = placement.before ? anchor : anchor.nextSibling;
+          if (root.parentElement !== anchor.parentElement || root.nextSibling !== before) anchor.parentElement.insertBefore(root, before);
+        } else {
+          const first = sections[0];
+          if (first.matches?.(SHELL_TURN)) {
+            const users = [...first.querySelectorAll('[data-content-search-unit-key$=":user"]')]
+              .filter(node => node.closest('[data-turn-key]') === first && messageIdOf(node));
+            if (users.length !== 1 || !users[0].parentElement) return false;
+            const user = users[0];
+            if (root.parentElement !== user.parentElement || user.nextSibling !== root) user.parentElement.insertBefore(root, user.nextSibling);
+            return true;
+          }
+          if (!first.parentElement) return false;
+          // A tool-only response has no authored separator. Keep the existing
+          // response sibling stable through React's temporary host moves.
+          if (!root.isConnected || sections.includes(root.parentElement)) first.parentElement.insertBefore(root, first);
+        }
+      }
+      return true;
+    }, false);
+  }
+
+  /** Types into the composer; dedicated fresh-chat automation may replace an autosaved draft. */
+  /**
+   * Puts `value` in the composer.
+   *
+   * `mode` says what to do with text already there: `false` refuses, `true` replaces it, and
+   * `'append'` writes after it on a new line — a stray character somebody left in the box is
+   * not a reason to hold a finished Goal reply at "sending" (2026-09-03: one letter did).
+   */
+  function insertPrompt(value, mode = false, failure = () => undefined) {
+    const box = composer();
+    const reject = reason => {
+      // A bounded predicate survives tab retirement without exposing authored data.
+      safe(() => failure(reason), undefined);
+      return false;
+    };
+    try {
+      if (!box) return reject('composer_missing');
+      const existing = (box.textContent || '').trim();
+      if (value === '' && mode !== true) return false;
+      // Text this same value already put there is not a draft to protect: inserting it again would
+      // produce exactly what is on screen. The residue of an attempt whose Send never landed used to
+      // refuse every later attempt by the same delivery — one recovery ticket spent thirteen hours
+      // that way on 2026-09-26, blocked by its own 352 characters. Compared with the same whitespace
+      // normalisation the send receipt uses, so both agree on "the same message".
+      const sameAsValue = String(existing).replace(/\s+/g, '') === String(value || '').replace(/\s+/g, '');
+      if (existing !== '' && mode === false && !sameAsValue) return reject('existing_draft');
+      box.focus();
+      const selection = document.getSelection();
+      if (!selection) return reject('selection_missing');
+      if (existing !== '') {
+        selection.selectAllChildren(box);
+        if (mode === 'append') {
+          selection.collapseToEnd();
+          value = `\n${value}`;
+        }
+      } else selection.selectAllChildren(box);
+      if (!box.isConnected || composer() !== box) return reject('editor_replaced');
+      if (document.activeElement !== box) return reject('composer_not_focused');
+      if (!selection.rangeCount || !box.contains(selection.anchorNode) || !box.contains(selection.focusNode)) return reject('selection_changed');
+      // One native HTML edit uses the actual browser selection, including on a
+      // freshly mounted editor whose custom paste handler can consume and drop
+      // synthetic clipboard events. Insert inline content into the editor's own
+      // paragraph: an extra block wrapper is not part of the authored prompt.
+      // Text nodes keep markup literal; there is no paste fallback.
+      const paragraph = document.createElement('p');
+      // @ehkogh/#318: the shell's Markdown serializer otherwise escapes text and
+      // hard breaks. Its native literalPaste mark preserves the submitted bytes.
+      const host = box.matches('[data-composer-markdown]') && box.closest('form[data-chatgpt-composer]')
+        ? document.createElement('span') : paragraph;
+      if (host !== paragraph) {
+        host.setAttribute('data-prompt-literal-paste', '');
+        paragraph.append(host);
+      }
+      value.split('\n').forEach((line, index) => {
+        if (index) host.append(document.createElement('br'));
+        host.append(document.createTextNode(line));
+      });
+      if (value === '') host.append(document.createElement('br'));
+      if (!document.execCommand('insertHTML', false, paragraph.innerHTML)) return reject('native_edit_rejected');
+      const compact = text => String(text || '').replace(/\s+/g, '');
+      const expected = mode === 'append' ? existing + value : value;
+      if (!box.isConnected || composer() !== box) return reject('editor_replaced');
+      if (compact(box.textContent) !== compact(expected)) return reject('text_mismatch');
+      return true;
+    } catch {
+      return reject('insertion_exception');
+    }
+  }
+
+  /** Clears only app-owned text that still exactly matches the value it inserted. */
+  function clearPromptExact(value) {
+    return safe(() => {
+      const box = composer();
+      const compact = (text) => String(text || '').replace(/\s+/g, '');
+      if (!box || compact(box.textContent) !== compact(value)) return false;
+      box.focus();
+      document.execCommand('selectAll', false);
+      document.execCommand('delete', false);
+      box.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
+      return (box.textContent || '').trim() === '';
+    }, false);
+  }
+
+  async function send({ acceptanceTimeoutMs = 30000, stillCurrent = () => true, matchesUser = null, observeEvidence = null, clearAcceptedDraft = true, beforeSend = null, acceptUserReceipt = null } = {}) {
+    try {
+      const box = composer();
+      if (!box || !box.isConnected || !stillCurrent() || generating() || stopButton()) return false;
+      if (box.getAttribute('aria-disabled') === 'true' || box.getAttribute('contenteditable') === 'false') return false;
+      // Rich editors use adjacent paragraphs for newlines; textContent concatenates
+      // their words. Preserve those boundaries when matching the rendered user message.
+      const draftText = () => (typeof box.innerText === 'string' ? box.innerText : [...box.childNodes]
+        .map((node) => (node.textContent || '') + (/^(P|DIV|BR)$/.test(node.nodeName) ? '\n' : '')).join('')).trim();
+      const submitted = draftText();
+      if (!submitted) return false;
+      const compact = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const expected = compact(submitted);
+      const beforeConversation = conversationId();
+      const beforeGenerating = generating();
+      const beforeStop = stopButton();
+      const priorUsers = messages().filter((message) => message.role === 'user');
+      const priorUserNodes = new Set(priorUsers.map((message) => message.node));
+      const priorUserIds = new Set(priorUsers.map((message) => message.id).filter(Boolean));
+      let submittedMessageObserved = false;
+
+      // click()/dispatchEvent() only prove that JavaScript ran, not that ChatGPT accepted a
+      // prompt. Observe for a page-owned consequence instead of sleeping and re-sampling on a
+      // clock. Composer clear and a freshly rendered matching user message are direct submit
+      // evidence. Navigation alone is not acceptance: the user can open an unrelated chat
+      // while an already-clicked submit is still pending. A fresh chat's assigned id is
+      // accepted only with the exact new user message, not a Stop button in another chat.
+      const accepted = () => {
+        const currentConversation = conversationId();
+        if (beforeConversation && currentConversation !== beforeConversation) return false;
+        const visible = messages();
+        for (let at = visible.length - 1; at >= 0; at--) {
+          const message = visible[at];
+          if (message.role !== 'user') continue;
+          if (!priorUserNodes.has(message.node) && !priorUserIds.has(message.id) && (matchesUser ? matchesUser(message, submitted) : compact(message.text) === expected)) {
+            if (acceptUserReceipt && !acceptUserReceipt(message, currentConversation)) continue;
+            submittedMessageObserved = true;
+            return true;
+          }
+        }
+        // Receipt-owned delivery must settle on this exact native row. Composer clear
+        // or Stop alone cannot hand off a receipt, and a later DOM read can lose it.
+        if (acceptUserReceipt || currentConversation !== beforeConversation) return false;
+        const current = composer();
+        if (current === box && box.isConnected && (current.textContent || '').trim() === '') return true;
+        if (!beforeGenerating && generating()) return true;
+        if (!beforeStop && stopButton()) return true;
+        return false;
+      };
+
+      return await new Promise((resolve) => {
+        let done = false;
+        let attempted = false;
+        let authorizing = false;
+        let observer = null;
+        let timer = null;
+        let unsubscribeEvidence = null;
+        const finish = (value) => {
+          if (done) return;
+          done = true;
+          if (observer) observer.disconnect();
+          if (unsubscribeEvidence) unsubscribeEvidence();
+          if (timer !== null) clearTimeout(timer);
+          // A fresh matching user row proves this text was accepted. Some provider
+          // transitions retain that same draft; leaving it lets the next Loop append
+          // to and resend the entire bootstrap. Preserve replaced editors/new drafts.
+          if (clearAcceptedDraft && value && submittedMessageObserved && stillCurrent() && composer() === box)
+            clearPromptExact(submitted);
+          resolve(value);
+        };
+        const check = () => {
+          if (done) return;
+          if (!stillCurrent() || (beforeConversation && conversationId() !== beforeConversation)) return finish(false);
+          if (attempted) {
+            if (accepted()) finish(true);
+            return;
+          }
+          // React can enable/mount Send after accepting our editor input. Observe that
+          // readiness through this same bounded operation; neither a guessed Enter nor
+          // an unrelated Stop/composer-clear is evidence that this draft was submitted.
+          if (conversationId() !== beforeConversation || composer() !== box || !box.isConnected ||
+              draftText() !== submitted || generating()) return finish(false);
+          if (box.getAttribute('aria-disabled') === 'true' || box.getAttribute('contenteditable') === 'false') return;
+          const button = sendButton();
+          if (!sendButtonEnabled(button)) return;
+          if (authorizing) return;
+          const click = () => {
+            if (done) return;
+            // Authorization can await the app. The exact editor, text and native control
+            // must still be the ones it authorized; a late answer cannot revive this send.
+            if (!stillCurrent() || conversationId() !== beforeConversation || composer() !== box ||
+                !box.isConnected || draftText() !== submitted || generating() || sendButton() !== button ||
+                !sendButtonEnabled(button) || box.getAttribute('aria-disabled') === 'true' ||
+                box.getAttribute('contenteditable') === 'false') return finish(false);
+            attempted = true;
+            // The deadline bounds readiness, not an already-dispatched receipt.
+            // Keep this same observer and exact send lifetime until the provider
+            // publishes its identity; never click again because that is delayed.
+            if (acceptUserReceipt && timer !== null) { clearTimeout(timer); timer = null; }
+            try { button.click(); } catch { return finish(false); }
+            check(); // Synchronous navigation/cancellation during click also re-proves ownership.
+          };
+          if (!beforeSend) return click();
+          authorizing = true;
+          // Claim/dispatch authority belongs at readiness, not before a possibly long
+          // disabled-Send wait. This is still one attempt under the existing deadline.
+          try { Promise.resolve(beforeSend(() => !done && stillCurrent())).then(allowed => allowed === true ? click() : finish(false), () => finish(false)); }
+          catch { finish(false); }
+        };
+
+        observer = new MutationObserver(check);
+        observer.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+          attributes: true
+        });
+        if (observeEvidence) unsubscribeEvidence = observeEvidence(check);
+        // Readiness and acceptance share one deadline below the app's command lease.
+        const timeout = Number.isFinite(acceptanceTimeoutMs) ? Math.max(1, Math.min(30000, acceptanceTimeoutMs)) : 30000;
+        timer = setTimeout(() => { if (attempted) check(); if (!attempted || !acceptUserReceipt) finish(false); }, timeout);
+        check();
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /** Native attachment identity from the composer's exact tile/remove control. */
+  function composerFileName(button) {
+    const tile = button.closest('[data-composer-attachments] [role="button"][aria-label]');
+    if (tile && tile !== button) {
+      const name = tile.getAttribute('aria-label');
+      const actions = [...tile.querySelectorAll('button')];
+      if (name && actions.length === 1 && actions[0] === button &&
+          [...tile.querySelectorAll('img[alt]')].some(image => image.getAttribute('alt') === name)) return name;
+    }
+    const group = button.closest('[role="group"][aria-label]');
+    if (group?.querySelector('[data-default-action="true"] button')) {
+      const actions = [...group.querySelectorAll('button')].filter(node => !node.closest('[data-default-action="true"]'));
+      return actions.length === 1 && actions[0] === button ? group.getAttribute('aria-label') : undefined;
+    }
+    return /^Remove file(?: \d+)?: (.+)$/.exec(button.getAttribute('aria-label') || '')?.[1];
+  }
+  function hasComposerAttachments() {
+    const host = composerBox() || composerActions()?.host;
+    return !!host && (!!host.querySelector('[data-inline-file-uploading], [role="progressbar"]') ||
+      [...host.querySelectorAll('button[aria-label]')].some(button => composerFileName(button)));
+  }
+  function composerAttachmentNames() {
+    const host = composerBox() || composerActions()?.host;
+    return host ? [...host.querySelectorAll('button[aria-label]')].map(composerFileName).filter(Boolean).slice(0, 20).sort() : [];
+  }
+  /** Observed ChatGPT Plugins settings surface. Missing/ambiguous structure is not proof. */
+  async function pluginRefreshView(connectorName, expectedTools = [], expectedAppId = null) {
+    const externalPlugins = connectorName === 'Chat On Steroids Plugins';
+    const snapshot = await new Promise(resolve => {
+      const nonce = crypto.randomUUID();
+      const finish = value => { clearTimeout(timer); window.removeEventListener('message', receive); resolve(value); };
+      const receive = event => {
+        const data = event.data;
+        if (event.source === window && event.origin === location.origin && data?.source === 'clf-plugin-reply' && data.nonce === nonce && data.v === 1) finish(data.plugin);
+      };
+      const timer = setTimeout(() => finish(null), 1500);
+      window.addEventListener('message', receive); window.postMessage({ source: 'clf-plugin-ask', nonce }, location.origin);
+    });
+    const route = /^#settings\/Plugins\/plugin_(asdk_app_[a-zA-Z0-9_-]+)$/.exec(location.hash) ||
+      (!location.hash ? /^\/(?:settings\/plugins-settings|plugins)\/plugin_(asdk_app_[a-zA-Z0-9_-]+)$/.exec(location.pathname) : null);
+    if (!snapshot || snapshot.appId !== route?.[1] || (expectedAppId ? snapshot.appId !== expectedAppId : snapshot.connectorName !== connectorName) ||
+        !Array.isArray(snapshot.tools) || (snapshot.tools.length < 1 && !externalPlugins) || snapshot.tools.length > (externalPlugins ? 257 : 16) || JSON.stringify(snapshot.tools).length > 300000 ||
+        snapshot.tools.some(tool => !tool || typeof tool.name !== 'string' || !/^[a-z][a-z0-9_]{0,79}$/.test(tool.name) || typeof tool.description !== 'string' || tool.inputSchema?.type !== 'object') ||
+        new Set(snapshot.tools.map(tool => tool.name)).size !== snapshot.tools.length) return null;
+    const buttons = [...document.querySelectorAll('button[data-clf-plugin-refresh]')].filter(button => button.getAttribute('data-clf-plugin-refresh') === snapshot.appId && button.getClientRects().length > 0);
+    return typeof snapshot.refreshAvailable === 'boolean' && buttons.length === (snapshot.refreshAvailable ? 1 : 0) ? { appId: snapshot.appId, connectorName: snapshot.connectorName, versionId: typeof snapshot.versionId === 'string' ? snapshot.versionId.slice(0, 200) : null,
+      tools: snapshot.tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), refresh: buttons[0] || null,
+      tunnelId: typeof snapshot.tunnelId === 'string' && /^tunnel_[a-zA-Z0-9]{8,80}$/.test(snapshot.tunnelId) ? snapshot.tunnelId : null, settled: snapshot.settled === true } : null;
+  }
+  function pluginInstalledButtons(connectorName) {
+    return safe(() => {
+      // The newer shell lists installed plugins on the /settings/plugins-settings page itself.
+      if (location.pathname === '/settings/plugins-settings' && !location.hash) {
+        const main = document.querySelector('main');
+        if (!main) return null;
+        const rows = [...main.querySelectorAll('button')].filter(button => !button.disabled && button.getClientRects().length > 0 &&
+          [...button.querySelectorAll('*')].some(node => !node.children.length && text(node) === connectorName));
+        return rows.length ? rows : null;
+      }
+      const panels = [...document.querySelectorAll('[role="tabpanel"]')].filter(panel => panel.getClientRects().length > 0 &&
+        (panel.querySelector('[data-testid="plugin-icon-wrapper"]') || panel.querySelector('a[href="/plugins"]')));
+      if (panels.length !== 1) return null;
+      // Installed settings rows are buttons, not the links in the /plugins catalog.
+      // Match the name's own leaf so adjacent permission text cannot alter identity.
+      const rows = [...panels[0].querySelectorAll('button')].filter(button => !button.disabled && button.getClientRects().length > 0 &&
+        button.querySelector('[data-testid="plugin-icon-wrapper"]'));
+      if (!rows.length) return null;
+      return rows.filter(button => [...button.querySelectorAll('*')].some(node => !node.children.length && text(node) === connectorName));
+    }, null);
+  }
+  function pluginManagementIdle() {
+    return safe(() => ![...document.querySelectorAll('textarea,input:not([type="hidden"]),[contenteditable="true"]')].some(node => node.getClientRects().length > 0 && String(node.value || node.textContent || '').trim()), false);
+  }
+  async function uploadImages(images, stillCurrent = () => true, draft = null, files = []) {
+    if (files.length) images = [...(images || []), ...files];
+    if (!images?.length) return true;
+    if (!Array.isArray(images) || images.length > 20 || !stillCurrent() || hasComposerAttachments()) return false;
+    // The current shell uses React-generated ids. Elect by the native upload kind
+    // inside this exact composer's form; a second matching input is ambiguous.
+    const host = composerBox();
+    const candidates = [...(host?.querySelectorAll('input[type="file"]') || [])].filter(node =>
+      !node.disabled && (files.length ? !node.accept : node.accept === 'image/*'));
+    const input = candidates.length === 1 ? candidates[0] : null;
+    if (!input) return false;
+    const priorTiles = new Set((composerBox() || composerActions()?.host)?.querySelectorAll('button[aria-label]') || []);
+    const transfer = new DataTransfer();
+    try {
+      for (const image of images) {
+        if (image instanceof File) { transfer.items.add(image); continue; }
+        if (typeof image.name !== 'string' || !/^data:image\/webp;base64,[A-Za-z0-9+/]+={0,2}$/.test(image.dataUrl) || image.dataUrl.length > 512100) return false;
+        const raw = atob(image.dataUrl.split(',')[1]);
+        const bytes = Uint8Array.from(raw, (char) => char.charCodeAt(0));
+        transfer.items.add(new File([bytes], image.name, { type: 'image/webp' }));
+      }
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    } catch { return false; }
+    return new Promise((resolve) => {
+      let observer, timer;
+      let ownedTiles = null;
+      const finish = (ok) => { observer?.disconnect(); clearTimeout(timer); resolve(ok); };
+      const check = () => {
+        if (!stillCurrent()) return finish(false);
+        const host = composerBox() || composerActions()?.host;
+        if (!host) return;
+        // ChatGPT's remove control names the complete filename. Each requested image
+        // needs its own new tile; a substring or an old same-name tile is no upload ACK.
+        const tiles = [...host.querySelectorAll('button[aria-label]')].filter((button) => !priorTiles.has(button) && composerFileName(button));
+        // Every attached file must belong to this input. A newly added user attachment
+        // cannot be silently included just because the requested subset finished uploading.
+        if (tiles.length > images.length) return finish(false);
+        if (!ownedTiles) {
+          const unmatched = [...tiles];
+          if (images.every((image) => {
+            const index = unmatched.findIndex((button) => composerFileName(button) === image.name);
+            if (index < 0) return false;
+            unmatched.splice(index, 1);
+            return true;
+          })) ownedTiles = tiles;
+        }
+        if (!ownedTiles) return;
+        // The provider can rename report.md to report(1).md during processing.
+        // Bind once by exact original names, then retain those exact remove controls.
+        if (tiles.length !== ownedTiles.length || tiles.some(node => !ownedTiles.includes(node))) return finish(false);
+        if (!host.querySelector('[aria-busy="true"], [role="progressbar"], [data-inline-file-uploading]') && sendButtonEnabled(sendButton())) {
+          draft?.attachments(ownedTiles);
+          finish(true);
+        }
+      };
+      observer = new MutationObserver(check);
+      observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+      timer = setTimeout(() => finish(false), files.length ? 600000 : 60000);
+      check();
+    });
+  }
+
+  const normalizeModelLabel = value => String(value || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}.]/gu, '');
+  /** One bounded read through the existing MAIN-world helper; no provider API or setters. */
+  function readPickerState() {
+    return new Promise(resolve => {
+      const nonce = crypto.randomUUID();
+      const finish = value => { clearTimeout(timer); window.removeEventListener('message', receive); resolve(value); };
+      const receive = event => {
+        const data = event.data;
+        if (event.source !== window || event.origin !== location.origin || data?.source !== 'clf-picker-reply' || data.nonce !== nonce || data.v !== 1) return;
+        const state = data.picker;
+        const groupId = value => typeof value === 'string' && value.length <= 80 && /^[\p{L}\p{N}._ -]+$/u.test(value) && value.trim() === value && value.trim();
+        const valid = state && typeof state.version === 'string' && Number.isInteger(state.currentBucket) &&
+          Array.isArray(state.versions) && state.versions.length > 0 && state.versions.length <= 20 &&
+          state.versions.every(v => groupId(v.id) && typeof v.label === 'string' && v.label.length > 0 && v.label.length <= 80) &&
+          Array.isArray(state.choices) && state.choices.length > 0 && state.choices.length <= 12 &&
+          state.choices.every(c => Number.isInteger(c.bucket) && typeof c.id === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(c.id) && typeof c.label === 'string' && c.label.length > 0 && c.label.length <= 80 &&
+            groupId(c.familyId) && typeof c.familyLabel === 'string' && c.familyLabel.length > 0 && c.familyLabel.length <= 80 &&
+            ['none','minimal','low','medium','high','xhigh','max','ultra','pro'].includes(c.effort) && typeof c.available === 'boolean') &&
+          new Set(state.versions.map(v => v.id)).size === state.versions.length && new Set(state.choices.map(c => c.bucket)).size === state.choices.length &&
+          state.versions.some(v => v.id === state.version) && state.choices.some(c => c.bucket === state.currentBucket);
+        finish(valid ? state : null);
+      };
+      const timer = setTimeout(() => finish(null), 1500);
+      window.addEventListener('message', receive);
+      window.postMessage({ source: 'clf-picker-ask', nonce }, location.origin);
+    });
+  }
+  /** UI only transports a requested selection. Provider state proves identity and availability. */
+  function modelPickerTrigger() {
+    const reported = '[data-codex-intelligence-trigger],[data-composer-navigation-target="reasoning"]';
+    const candidates = [...new Set([...(composer()?.closest('form')?.querySelectorAll('button[aria-haspopup="menu"]') || []),
+      ...document.querySelectorAll(reported)])]
+      .filter(node => node.matches('button,[role="button"]') && !node.closest(`${OWN_SURFACES},[data-testid^="conversation-turn"],[data-message-author-role],.markdown,[contenteditable],[hidden],[aria-hidden="true"],[inert]`) && node.getClientRects().length > 0 &&
+        node.id !== 'composer-plus-btn' && node.getAttribute('data-testid') !== 'composer-plus-btn');
+    const observed = candidates.filter(node => node.getAttribute('data-clf-picker-route') === location.pathname);
+    // Alternate native anchors are actionable only after MAIN identified their
+    // model owner. A quoted attribute or an effort value alone cannot authorize it.
+    return observed.length === 1 ? observed[0] : candidates.length === 1 && !candidates[0].matches(reported) ? candidates[0] : null;
+  }
+  /** Match the row's leading name, excluding secondary captions and decorations. */
+  function pickerVersionNamed(row, expected) {
+    const text = node => String(node.textContent || '').replace(/\s+/g, ' ').trim();
+    const name = expected.replace(/\s+/g, ' ').trim();
+    for (let node = row, depth = 0; node && depth < 8; depth++) {
+      if (text(node) === name) return true;
+      node = [...node.childNodes].find(child => text(child) &&
+        (child.nodeType === Node.TEXT_NODE || child.nodeType === Node.ELEMENT_NODE &&
+          !child.matches('svg,[hidden],[aria-hidden="true"],[inert]')));
+    }
+    return false;
+  }
+  function modelPickerAccess(stillCurrent) {
+    const shown = node => node && !node.closest('[hidden],[aria-hidden="true"],[inert]') && node.getClientRects().length > 0;
+    const picker = () => document.querySelector(PICKER);
+    const trigger = modelPickerTrigger;
+    let motion = null;
+    const openPicker = () => {
+      const panel = picker();
+      return panel && panel.closest('[role="menu"],[role="dialog"]')?.getAttribute('data-state') !== 'closed' ? panel : null;
+    };
+    const wait = (read, timeout = 3000) => new Promise(resolve => {
+      let reading = false, dirty = false, done = false;
+      const finish = value => { if (done) return; done = true; observer.disconnect(); clearTimeout(timer); resolve(value); };
+      const check = async () => {
+        if (done) return;
+        if (!stillCurrent()) return finish(null);
+        if (reading) { dirty = true; return; }
+        reading = true;
+        try { let value = read(); if (value?.then) value = await value; if (stillCurrent() && value) finish(value); }
+        catch { finish(null); }
+        finally { reading = false; if (dirty && !done) { dirty = false; void check(); } }
+      };
+      const observer = new MutationObserver(check);
+      observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+      const timer = setTimeout(() => finish(null), timeout); void check();
+    });
+    const state = predicate => wait(async () => { const value = await readPickerState(); return value && (!predicate || predicate(value)) ? value : null; });
+    // The shell trigger needs MAIN ownership proof. A cold account can hydrate
+    // after the first reply, so DOM readiness must refresh that proof as well.
+    const readyTrigger = () => wait(async () => { await readPickerState(); return trigger(); }, 15000);
+    const key = (node, value) => { if (!node || !stillCurrent()) return false; node.focus(); node.dispatchEvent(new KeyboardEvent('keydown', { key: value, code: value, bubbles: true, cancelable: true })); return true; };
+    return {
+      state,
+      async open() {
+        if (!stillCurrent()) return null;
+        // Native Presence waits for the menu's exit animation. Chrome can suspend
+        // that animation in a hidden window, retaining a closed picker and its
+        // focus scope indefinitely. Suppress only this owned picker animation for
+        // this operation; native state still closes/unmounts it and proves release.
+        motion = document.createElement('style');
+        motion.textContent = '[role="menu"]:has(> [data-testid="composer-intelligence-picker-content"]),[role="dialog"]:has([data-testid="composer-intelligence-picker-content"]),[role="menu"]:has([data-model-picker-view]),[role="menu"][data-model-picker-view]{animation:none!important}';
+        document.head.append(motion);
+        // The read-only helper identifies the exact native owner when another menu
+        // shares the composer. Never select by translated captions or button order.
+        // A cold home editor mounts before its native Chat/Work picker. Workers
+        // enter here directly, without the New Chat reuse/catalog preparation.
+        // Wait for that surface, then use the same owned Chat transition before
+        // interpreting account choices. Work's picker is not a denied Chat model.
+        if (!await readyTrigger() || !await prepareChatModelSurface(stillCurrent)) return null;
+        // A retained exit-animation node is not an open native menu.
+        if (!openPicker()) { const button = await readyTrigger(); if (!key(button, 'Enter') || !await wait(openPicker)) return null; }
+        return state();
+      },
+      async close() {
+        try {
+        if (!stillCurrent()) return false;
+        const panel = picker();
+        if (!panel) return true;
+        const dialog = panel.closest('[role="dialog"]'), active = document.activeElement;
+        if (!shown(panel) && !shown(dialog)) return true;
+        // Escape belongs inside the picker focus trap, not to its outside trigger.
+        // A dispatched key is only an attempt: native unmount/animation owns closure.
+        if (!key(panel.contains(active) || dialog?.contains(active) ? active : panel, 'Escape')) return false;
+        const closed = Boolean(await wait(() => !shown(picker()) && (!dialog?.isConnected || !shown(dialog))));
+        // Rebind passive selection proof to the closed trigger, not the removed
+        // menu node. Reading metadata never reopens or changes the picker.
+        if (closed && stillCurrent()) await readPickerState();
+        return closed && stillCurrent();
+        } finally { motion?.remove(); motion = null; }
+      },
+      async version(version) {
+        const before = await state(); if (!before) return null;
+        const versionRows = () => [...(picker()?.querySelectorAll('[role="menuitemradio"]') || [])].filter(shown);
+        if (before.version === version && !versionRows().length) return before;
+        const label = before.versions.find(v => v.id === version)?.label;
+        if (!label) return null;
+        // The picker may already show the version list (including a checked row).
+        // Select that row to return to its effort view; never assume the slider is open.
+        if (!versionRows().length) {
+          const toggle = [...picker().querySelectorAll('[role="menuitem"][aria-expanded], [role="menuitem"][data-model-picker-view-toggle]')].filter(shown);
+          if (toggle.length !== 1) return null;
+          toggle[0].click();
+        }
+        const option = await wait(() => {
+          const rows = versionRows().filter(node => pickerVersionNamed(node, label) && node.getAttribute('aria-disabled') !== 'true');
+          return rows.length === 1 ? rows[0] : null;
+        });
+        if (!key(option, 'Enter')) return null;
+        return state(next => next.version === version && !versionRows().length);
+      },
+      async bucket(bucket) {
+        let current = await state();
+        for (let count = 0; current && count < 12; count++) {
+          if (current.currentBucket === bucket) return current;
+          const from = current.choices.findIndex(c => c.bucket === current.currentBucket), to = current.choices.findIndex(c => c.bucket === bucket);
+          if (from < 0 || to < 0) return null;
+          const expected = current.choices[from + (to > from ? 1 : -1)].bucket;
+          const controls = [...picker().querySelectorAll('[role="menuitem"][aria-keyshortcuts]')].filter(node => shown(node) && node.getAttribute('aria-keyshortcuts').includes('ArrowRight'));
+          if (controls.length !== 1 || !key(controls[0], to > from ? 'ArrowRight' : 'ArrowLeft')) return null;
+          const version = current.version;
+          current = await state(next => next.version === version && next.currentBucket === expected);
+        }
+        return null;
+      }
+    };
+  }
+  // The current native picker or closed trigger carries the MAIN-world snapshot.
+  // The route stamp prevents a retained composer from lending another chat proof.
+  function visibleModelSelection() {
+    const node = document.querySelector(PICKER) || modelPickerTrigger();
+    if (node?.getAttribute('data-clf-selected-route') !== location.pathname) return null;
+    const model = node?.getAttribute('data-clf-selected-model'), reasoningEffort = node?.getAttribute('data-clf-selected-effort');
+    return model && /^[a-zA-Z0-9._-]{1,80}$/.test(model) && ['none','minimal','low','medium','high','xhigh','max','ultra','pro'].includes(reasoningEffort)
+      ? { model, reasoningEffort } : null;
+  }
+  /** Account model discovery belongs to Chat; Work mounts a different picker.
+   * The caller owns one idle document and verifies draft/epoch before and after this transition. */
+  async function prepareChatModelSurface(stillCurrent = () => true) {
+    const radios = () => [...document.querySelectorAll('[role="radio"][data-tpp-toggle-value]')]
+      .filter(node => !node.closest(OWN_SURFACES) && node.getClientRects().length > 0);
+    const state = () => {
+      const nodes = radios(), chat = nodes.filter(node => node.getAttribute('data-tpp-toggle-value') === 'chatgpt'),
+        work = nodes.filter(node => node.getAttribute('data-tpp-toggle-value') === 'work');
+      return chat.length === 1 && work.length === 1 ? { chat: chat[0], work: work[0] } : null;
+    };
+    if (!stillCurrent()) return false;
+    const before = state();
+    // Existing ordinary conversations do not expose the new-chat surface toggle.
+    if (!before) return radios().length === 0;
+    if (before.chat.getAttribute('aria-checked') === 'true') return true;
+    if (before.work.getAttribute('aria-checked') !== 'true' || before.chat.disabled || before.chat.getAttribute('aria-disabled') === 'true') return false;
+    return new Promise(resolve => {
+      let done = false;
+      const finish = value => { if (done) return; done = true; observer.disconnect(); clearTimeout(timer); resolve(value); };
+      const check = () => {
+        if (!stillCurrent()) return finish(false);
+        const next = state();
+        if (next?.chat.getAttribute('aria-checked') === 'true' && next.work.getAttribute('aria-checked') === 'false') finish(true);
+      };
+      const observer = new MutationObserver(check);
+      observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true });
+      const timer = setTimeout(() => finish(false), 5000);
+      before.chat.click(); check();
+    });
+  }
+  function collectModelChoices(result, state) {
+    for (const choice of state.choices.filter(c => c.available)) {
+      const entry = result.get(choice.familyId) || { id: choice.familyId, label: choice.familyLabel, efforts: [], aliases: [] };
+      if (!entry.efforts.includes(choice.effort)) entry.efforts.push(choice.effort);
+      if (!entry.aliases.includes(choice.id)) entry.aliases.push(choice.id);
+      result.set(choice.familyId, entry);
+    }
+  }
+  async function inspectModelSettings(stillCurrent = () => true, failure = () => {}) {
+    const ui = modelPickerAccess(stillCurrent), original = await ui.open();
+    if (!original) { await ui.close(); failure('picker_unavailable'); return null; }
+    const result = new Map();
+    let restored = false, closed = false;
+    try {
+      // One observation per version, not one mutation per effort. Computed choices
+      // include account/workspace denials which the raw global preset list does not prove.
+      for (const version of original.versions) {
+        const state = await ui.version(version.id);
+        if (!state) throw new Error('model_unconfirmed');
+        collectModelChoices(result, state);
+      }
+    } catch { failure('model_unconfirmed'); result.clear(); }
+    finally {
+      if (stillCurrent() && await ui.version(original.version)) {
+        const state = await ui.bucket(original.currentBucket);
+        const previous = original.choices.find(c => c.bucket === original.currentBucket);
+        const selected = state?.choices.find(c => c.bucket === state.currentBucket);
+        restored = selected?.id === previous.id && selected?.effort === previous.effort;
+      }
+      closed = await ui.close();
+    }
+    if (!restored) failure('restore_failed');
+    if (!closed) failure('picker_close_failed');
+    return restored && closed && stillCurrent() && result.size ? [...result.values()] : null;
+  }
+  async function selectModelSettings(model, effort, stillCurrent = () => true) {
+    if (!model && !effort) return true;
+    const ui = modelPickerAccess(stillCurrent), original = await ui.open();
+    if (!original) { await ui.close(); return false; }
+    let selected = false, closed = false;
+    try {
+      // Exact provider slug is preferred. Existing saved display slugs may resolve
+      // only to an actually observed, available pair; never to an account default.
+      const name = normalizeModelLabel(model);
+      const modelRank = choice => !model || choice.familyId === model || choice.id === model ? 2
+        : name && normalizeModelLabel(choice.familyLabel) === name ? 1 : 0;
+      // Every available choice of the requested model, read once across versions, so the effort
+      // can be resolved against what the account actually offers before anything is moved.
+      const offered = [];
+      for (const version of [original.versions.find(v => v.id === original.version), ...original.versions.filter(v => v.id !== original.version)]) {
+        const state = await ui.version(version.id); if (!state) return false;
+        for (const choice of state.choices) {
+          const rank = choice.available ? modelRank(choice) : 0;
+          if (rank) offered.push({ version: version.id, choice, rank });
+        }
+      }
+      /*
+       * An effort the account no longer offers resolves to the nearest one it does.
+       *
+       * ChatGPT's newer model picker replaced its effort ladder: measured on 2026-09-26, the thinking
+       * models offer `medium`, `high` and `max`, and the step the UI now labels "Sehr hoch" is `max`.
+       * `xhigh` is simply gone. A saved `multiAgent.defaultReasoning = xhigh` therefore matched no
+       * choice at all, and every worker spawn failed outright with "The requested model or reasoning
+       * is unavailable" — worker-11, -12 and -13 in one homelab run, each one work the prime then had
+       * to do itself or abandon.
+       *
+       * Nearest by position in the shared vocabulary, ties upward: the request asked for at least
+       * this much reasoning, so the step above honours it better than the step below. Only within the
+       * requested model — a missing model still refuses, because picking a different model is not a
+       * rounding decision.
+       */
+      let wantedEffort = effort;
+      if (effort && offered.length && !offered.some(entry => entry.choice.effort === effort)) {
+        const ladder = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+        const target = ladder.indexOf(effort);
+        const efforts = [...new Set(offered.map(entry => entry.choice.effort))].filter(value => ladder.includes(value));
+        if (target >= 0 && efforts.length) {
+          efforts.sort((a, b) => {
+            const da = Math.abs(ladder.indexOf(a) - target), db = Math.abs(ladder.indexOf(b) - target);
+            return da - db || ladder.indexOf(b) - ladder.indexOf(a);
+          });
+          wantedEffort = efforts[0];
+        }
+      }
+      const candidates = offered.filter(entry => !wantedEffort || entry.choice.effort === wantedEffort);
+      // An earlier version's display name cannot shadow a later exact execution id.
+      // Captions such as High are effort labels, never model-name aliases. Repeated
+      // Latest/version entries may describe the same pair; distinct families may not.
+      const rank = Math.max(0, ...candidates.map(candidate => candidate.rank));
+      const matches = candidates.filter(candidate => candidate.rank === rank);
+      if (!matches.length || (model && new Set(matches.map(candidate => candidate.choice.familyId)).size !== 1) ||
+          (model && wantedEffort && new Set(matches.map(candidate => `${candidate.choice.id}\u0000${candidate.choice.effort}`)).size !== 1)) return false;
+      const wanted = matches.find(candidate => candidate.version === original.version && candidate.choice.bucket === original.currentBucket) || matches[0];
+      const state = await ui.version(wanted.version), choice = wanted.choice;
+      // Versions can change while traversing the UI. Revalidate before moving its slider.
+      if (!state?.choices.some(next => next.bucket === choice.bucket && next.available && next.id === choice.id && next.effort === choice.effort)) return false;
+      const after = await ui.bucket(choice.bucket);
+      const confirmed = after?.choices.find(c => c.bucket === after.currentBucket);
+      selected = stillCurrent() && confirmed?.available === true && confirmed.id === choice.id && confirmed.effort === choice.effort;
+    } finally {
+      if (!selected && stillCurrent() && await ui.version(original.version)) await ui.bucket(original.currentBucket);
+      closed = await ui.close();
+    }
+    return selected && closed && stillCurrent();
+  }
+
+  function projectHomeId(pathname = location.pathname) {
+    return /^\/g\/(g-p-[0-9a-f]{32})(?:-[^/]+)?\/project\/?$/i.exec(pathname)?.[1]?.toLowerCase() || null;
+  }
+
+  /**
+   * How long the source chat may take to finish loading before the one native click. A large
+   * Project chat is exactly the one Compact & Resume moves, and it hydrates slowly: #212 measured
+   * handoffs failing at ~600k tokens with "could not open the source Project", and the published
+   * reproduction fails when the source is ready at 13 s against the old shared 12 s budget.
+   * User input still cancels at once; only the native transition keeps the short deadline.
+   */
+  const PROJECT_SOURCE_READY_MS = 60_000;
+  const PROJECT_TRANSITION_MS = 12_000;
+
+  /** Enter a Project through its source chat's native link. Cold /project loads can error. */
+  async function enterProject(entry, stillCurrent = () => true) {
+    if (!entry || !/^g-p-[0-9a-f]{32}$/.test(entry.id) || conversationId() !== entry.sourceConversationId) return false;
+    return new Promise(resolve => {
+      let clicked = false, done = false, sourceComposer = null;
+      const interrupt = event => { if (event.isTrusted) finish(false); };
+      const finish = result => {
+        if (done) return;
+        done = true; observer.disconnect(); clearTimeout(timer);
+        document.removeEventListener('pointerdown', interrupt, true);
+        document.removeEventListener('keydown', interrupt, true);
+        resolve(result);
+      };
+      const check = () => {
+        if (done) return;
+        if (!stillCurrent()) return finish(false);
+        if (clicked && projectHomeId() === entry.id && composer()?.isConnected && composer() !== sourceComposer && !turns().length) return finish(true);
+        if (conversationId() !== entry.sourceConversationId) {
+          if (projectHomeId() !== entry.id) finish(false);
+          return;
+        }
+        if (clicked) return;
+        // The native header arrives before the source chat finishes loading. Its link
+        // alone is not readiness: an early click can be swallowed during hydration and
+        // would also leave us comparing the destination editor with a null source.
+        // Preserve the source draft/generation and spend our one click only once its
+        // actual editor is mounted and ready.
+        const source = composer();
+        if (!source?.isConnected || !composerSubmitReady() || hasComposerAttachments()) return;
+        const links = [...document.querySelectorAll('header a[href], [role="banner"] a[href]')].filter(link =>
+          link.querySelector('[data-testid="project-folder-icon"]') && !link.closest(OWN_SURFACES) &&
+          new URL(link.href, location.href).origin === location.origin && projectHomeId(new URL(link.href, location.href).pathname) === entry.id);
+        if (links.length !== 1) return;
+        sourceComposer = source;
+        clicked = true;
+        // Loading the source and following its link are separate page transitions.
+        // Reuse the same deadline timer; source loading must not consume the budget
+        // for observing the replacement editor after the one permitted click.
+        clearTimeout(timer);
+        timer = setTimeout(() => finish(false), PROJECT_TRANSITION_MS);
+        links[0].click();
+        check();
+      };
+      const observer = new MutationObserver(check);
+      observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true });
+      let timer = setTimeout(() => finish(false), PROJECT_SOURCE_READY_MS);
+      document.addEventListener('pointerdown', interrupt, true);
+      document.addEventListener('keydown', interrupt, true);
+      check();
+    });
+  }
+
+  async function newChatControl(stillCurrent = () => true) {
+    const shown = node => node && !node.closest(OWN_SURFACES) && !node.closest('[hidden],[aria-hidden="true"],[inert]') && node.getClientRects().length > 0;
+    const link = (root = document) => [...root.querySelectorAll('a[data-testid="create-new-chat-button"][data-sidebar-item="true"][href="/"]')].find(shown) || null;
+    if (!stillCurrent()) return null;
+    if (link()) return link();
+    // Compact ChatGPT unmounts navigation when its sidebar is closed. Reveal the
+    // actual native control before concluding that this document cannot be reused.
+    const toggles = [...document.querySelectorAll('button[data-testid="open-sidebar-button"][aria-expanded="false"][aria-controls]')].filter(shown);
+    if (toggles.length !== 1 || toggles[0].disabled) return null;
+    const toggle = toggles[0], sidebarId = toggle.getAttribute('aria-controls');
+    return new Promise(resolve => {
+      let done = false;
+      const finish = value => { if (done) return; done = true; observer.disconnect(); clearTimeout(timer); resolve(value); };
+      const check = () => {
+        if (!stillCurrent()) return finish(null);
+        const sidebar = document.getElementById(sidebarId), control = sidebar && link(sidebar);
+        if (toggle.getAttribute('aria-expanded') === 'true' && control) finish(control);
+      };
+      const observer = new MutationObserver(check);
+      observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true });
+      const timer = setTimeout(() => finish(null), 3000);
+      toggle.click(); check();
+    });
+  }
+  return {
+    TURN_SELECTOR: TURN,
+    AUTHORED_SELECTOR: '[data-message-author-role="assistant"], .markdown, [data-content-search-unit-key], [data-markdown-text-style="assistant-message"]',
+    turnIdOf,
+    messageIdOf,
+    userPromptText,
+    userMessageReaction,
+    presentUserPrompts,
+    composerVisible,
+    conversationLoadFailure,
+    prepareChatModelSurface,
+    newChatControl,
+    projectHomeId,
+    enterProject,
+    visibleModelSelection,
+    inspectModelSettings,
+    uploadImages,
+    captureComposerDraft,
+    hasComposerAttachments,
+    composerAttachmentNames,
+    pluginRefreshView,
+    pluginInstalledButtons,
+    pluginManagementIdle,
+    selectModelSettings,
+    temporaryChatReady: () => safe(() => {
+      // The page's own state, where a mounted turn has published it. The glyph below is the only
+      // evidence an empty document has, and a layout that stops drawing it stops proving the
+      // mode at all; React holds the answer either way. The stamp carries the pathname it was
+      // made on, so one left behind by another route cannot answer for this one.
+      if ([...document.querySelectorAll(`${SHELL_TURN}[data-clf-temporary-chat]`)]
+        .some(node => node.getAttribute('data-clf-temporary-chat') === location.pathname)) return true;
+      // An empty document: the header toggle's own state, stamped by fiber.js on each scan.
+      if (document.documentElement.getAttribute('data-clf-temporary-page') === location.pathname) return true;
+      return [...document.querySelectorAll('button')].some(button => {
+        if (button.closest(`${OWN_SURFACES}, [data-message-author-role], [data-testid^="conversation-turn-"]`) || !button.getClientRects().length) return false;
+        // The current toolbar stopped using the checked sprite. The same 20x20 icon is three
+        // paths while Temporary Chat is off and gains this exact fourth path when it is on.
+        // React state above remains primary; this is a measured rendered fallback only.
+        const paths = [...button.querySelectorAll('svg path')];
+        if (paths.length === 4 && /^\s*M16\.8525 7\.06128/.test(paths[0].getAttribute('d') || '') &&
+            /^\s*M9\.99902 2\.25171/.test(paths[3].getAttribute('d') || '')) return true;
+        // The provider renders both icons at once. Only the visible checked glyph proves
+        // the mode; translated labels and the requested URL are not activation receipts.
+        return [...button.querySelectorAll('svg use')].some(use => {
+          const href = use.getAttribute('href') || use.getAttribute('xlink:href') || '';
+          if (href.slice(href.lastIndexOf('#')) !== '#chat-temp-checked') return false;
+          for (let node = use.parentElement; node; node = node.parentElement) {
+            const style = getComputedStyle(node);
+            if (node.hidden || style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
+          }
+          return true;
+        });
+      });
+    }, false),
+    confirmTemporaryChatIntroduction: () => {
+      const dialog = [...document.querySelectorAll('[role="dialog"]')].find(node =>
+        [...node.querySelectorAll('h1,h2,[role="heading"]')].some(heading => /^Temporary chat$/i.test(text(heading, 100))) &&
+        /(?:Not in history|won['’]t appear in history)/i.test(text(node, 2000)));
+      const button = dialog && [...dialog.querySelectorAll('button')].find(node => /^Continue$/i.test(text(node, 100)));
+      if (button) button.click();
+    },
+    conversationId,
+    conversationFromPath,
+    conversationTitle,
+    turns,
+    presentationTurns,
+    messages,
+    messagesIn,
+    sectionSignature,
+    generating,
+    stopButton,
+    stopGeneration,
+    sendButton,
+    progressLine,
+    progressItems,
+    interrupted,
+    markProgress,
+    toolBlocks,
+    activityItems,
+    isConnectorBlock,
+    markLocalBlock,
+    hasConnectorRow,
+    connectorRows,
+    fiberRef,
+    activitySummaryRows,
+    thoughtActivityRows,
+    toolLabel,
+    errors,
+    composer,
+    composerSubmitReady,
+    composerWritable,
+    composerBox,
+    pageTheme,
+    composerActions,
+    composerStack,
+    firstUserMessage,
+    hideProgress,
+    hideActivity,
+    activityFold,
+    collapsedActivityFold,
+    canHideActivity,
+    replaceActivity,
+    insertPrompt,
+    clearPromptExact,
+    send
+  };
+})();
