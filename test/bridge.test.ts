@@ -245,7 +245,7 @@ interface Reply {
 function request(
   method: string,
   path: string,
-  options: { body?: unknown; origin?: string | null; auth?: string | null; raw?: string; extensionVersion?: string; protocol?: number; extensionBuild?: string } = {}
+  options: { body?: unknown; origin?: string | null; auth?: string | null; raw?: string; extensionVersion?: string; protocol?: number | null; extensionBuild?: string } = {}
 ): Promise<Reply> {
   const url = new URL(path, base);
   const payload = options.raw ?? (options.body === undefined ? null : JSON.stringify(options.body));
@@ -254,7 +254,7 @@ function request(
   // across incompatible app/extension builds instead of provisioning a token that can
   // only produce confusing downstream failures.
   headers['x-extension-version'] = options.extensionVersion ?? APP_VERSION;
-  headers['x-extension-protocol'] = String(options.protocol ?? BRIDGE_PROTOCOL);
+  if (options.protocol !== null) headers['x-extension-protocol'] = String(options.protocol ?? BRIDGE_PROTOCOL);
   if (options.extensionBuild) headers['x-extension-build'] = options.extensionBuild;
   if (payload !== null) {
     headers['content-type'] = 'application/json';
@@ -531,6 +531,18 @@ describe('who is allowed to talk to it', () => {
     expect(Object.keys(reply.body)).toEqual(['app', 'version', 'bridge', 'compatible', 'paired', 'disconnected']);
     expect(reply.body.disconnected).toBe(false);
     expect(reply.body.compatible).toBe(true);
+  });
+
+  it('reports unknown compatibility when /hello carries no protocol', async () => {
+    const reply = await request('GET', '/hello', { auth: null, protocol: null });
+    expect(reply.status).toBe(200);
+    expect(reply.body).toMatchObject({ app: 'chatbbc', bridge: BRIDGE_PROTOCOL, compatible: null });
+    expect(Object.keys(reply.body)).toEqual(['app', 'version', 'bridge', 'compatible', 'paired', 'disconnected']);
+  });
+
+  it('does not let protocol-less identification authorize pairing', async () => {
+    const reply = await request('POST', '/pair', { auth: null, protocol: null, body: {} });
+    expect(reply).toMatchObject({ status: 426, body: { error: 'incompatible_extension', bridge: BRIDGE_PROTOCOL } });
   });
 
   it('rejects protocol 17 even with an otherwise valid paired token', async () => {

@@ -41,11 +41,17 @@ export function providerTitleIgnored(summary: SessionSummary): boolean {
   return summary.origin?.kind === 'desktop';
 }
 
+/** "ChatGPT - <project>" is the project page's title, never the chat's. */
+export function projectPageTitle(title: string): boolean {
+  return /^ChatGPT\s*[-|·–]\s*\S/i.test(title.trim());
+}
+
 /** Rebuild only a preview. Provider/manual/origin titles keep their authority. */
 export function refreshUserTitle(summary: SessionSummary, events: Iterable<SessionEvent>): boolean {
   const first = firstTitleMessage(events);
   if (!first && !legacyContextTitle(summary)) return false;
-  if ((summary.titleSource === 'provider' && !providerTitleIgnored(summary)) || !automaticTitle(summary, first)) return false;
+  const replaceable = providerTitleIgnored(summary) || projectPageTitle(summary.title);
+  if ((summary.titleSource === 'provider' && !replaceable) || !automaticTitle(summary, first)) return false;
   const authored = first ? userTitle(first.message.text, first.authoredText) : '';
   // Without a readable request, a provider title is still better than a placeholder.
   if (!authored && summary.titleSource === 'provider') return false;

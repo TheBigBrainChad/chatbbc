@@ -51,6 +51,51 @@
     "checks": [
      "npx vitest run test/agents.test.ts"
     ]
+   },
+   {
+    "commit": "c7702509c6a2c1f8e96dfb04dec2a523a7e80230",
+    "author": "Maxim",
+    "subject": "Repair project page titles and answer /hello honestly without a protocol",
+    "pullRequest": 571,
+    "classification": "adapt",
+    "paths": [
+     "src/main/bridge.ts",
+     "src/main/session/store.ts",
+     "src/main/session/title.ts",
+     "test/bridge.test.ts",
+     "test/session.test.ts"
+    ],
+    "decision": "Port protocol-less /hello as identification-only tri-state compatibility while keeping all privileged routes protocol-strict; reject project shell titles at the existing session-title owner without changing conversation or manual-title authority.",
+    "checks": [
+     "npx vitest run test/bridge.test.ts",
+     "npx vitest run test/session.test.ts",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "c54d14853453a9e413585a38c9d8e60e593671ca",
+    "author": "Maxim",
+    "subject": "Merge remote-tracking branch 'upstream/main' into fix/hello-and-project-titles",
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge-only ancestry for the hello/title repair; behavior is represented once by c7702509c6a2c1f8e96dfb04dec2a523a7e80230.",
+    "checks": [
+     "npx vitest run test/bridge.test.ts",
+     "npx vitest run test/session.test.ts"
+    ]
+   },
+   {
+    "commit": "0e00b3f96571d7d5f518710e7b71fec2b08d670a",
+    "author": "Maxim",
+    "subject": "Merge pull request #571 from Maximapple/fix/hello-and-project-titles",
+    "pullRequest": 571,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for the hello/title repair; no duplicate functional patch is applied.",
+    "checks": [
+     "npx vitest run test/bridge.test.ts",
+     "npx vitest run test/session.test.ts"
+    ]
    }
   ]
  },
@@ -110,6 +155,7 @@
     "src/main/plugins/uv-runtime.ts",
     "src/main/secrets.ts",
     "src/main/session/handoff.ts",
+    "src/main/session/store.ts",
     "src/main/session/title.ts",
     "src/main/shutdown.ts",
     "src/main/skill-github.ts",

@@ -3191,6 +3191,21 @@ describe('naming the chats this app opened', () => {
     expect((await getSession(opened.sessionId!))?.title).toBe('My manual title');
   });
 
+  it('ignores the project page shell title and still accepts the later real conversation title', async () => {
+    const conversationId = 'project-page-title';
+    const opened = await recordChatObservations(conversationId, [
+      { kind: 'user_message', time: Date.now(), text: 'repair the title', messageId: 'u-project' }
+    ]);
+    await recordChatObservations(conversationId, [
+      { kind: 'conversation_title', time: Date.now(), text: 'ChatGPT - Homelab Development' }
+    ]);
+    expect((await getSession(opened.sessionId!))?.title).toBe('repair the title');
+    await recordChatObservations(conversationId, [
+      { kind: 'conversation_title', time: Date.now(), text: 'Repair Session Titles' }
+    ]);
+    expect((await getSession(opened.sessionId!))?.title).toBe('Repair Session Titles');
+  });
+
   it('keeps rendered instruction frames out of titles and repairs only their exact recorded fallback', async () => {
     const conversationId = 'conv-rendered-prompt-title';
     const rendered = '[[COS_CONTEXT:100]]\nGuidance whose Markdown whitespace changed.\n[[/COS_CONTEXT]]\n\nReal request';
