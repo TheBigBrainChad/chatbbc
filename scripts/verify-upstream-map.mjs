@@ -30,7 +30,18 @@ export const CATEGORIES = Object.freeze([
   'linux-release',
   'local-automation',
   'documentation',
-  'verification'
+  'verification',
+  'composer',
+  'content-reference',
+  'control-api'
+]);
+export const PORT_CLASSIFICATIONS = Object.freeze([
+  'port',
+  'adapt',
+  'already-equivalent',
+  'translate',
+  'provenance-only',
+  'intentionally-not-imported'
 ]);
 export const RETAINED_REASON_CODES = Object.freeze([
   'license',
@@ -166,6 +177,82 @@ export function validateMap(map) {
         if (problem) errors.push(`${label}.reason ${problem}`);
       }
     });
+  }
+  validatePortsShape(map.ports, errors);
+  return errors;
+}
+
+function validatePortsShape(ports, errors) {
+  if (ports === undefined) return;
+  if (!isRecord(ports)) {
+    errors.push('ports must be an object');
+    return;
+  }
+  checkKeys(ports, new Set(['from', 'to', 'entries']), 'ports', errors);
+  if (!COMMIT_PATTERN.test(String(ports.from))) errors.push('ports.from must be a full 40-character lowercase SHA');
+  if (!COMMIT_PATTERN.test(String(ports.to))) errors.push('ports.to must be a full 40-character lowercase SHA');
+  if (!Array.isArray(ports.entries)) {
+    errors.push('ports.entries must be an array');
+    return;
+  }
+  const seen = new Set();
+  ports.entries.forEach((port, index) => {
+    const label = `ports.entries[${index}]`;
+    if (!isRecord(port)) {
+      errors.push(`${label} must be an object`);
+      return;
+    }
+    checkKeys(port, new Set(['commit', 'author', 'subject', 'pullRequest', 'classification', 'paths', 'decision', 'checks']), label, errors);
+    if (!COMMIT_PATTERN.test(String(port.commit))) errors.push(`${label}.commit must be a full 40-character lowercase SHA`);
+    if (seen.has(port.commit)) errors.push(`${label}.commit duplicates ${port.commit}`);
+    else seen.add(port.commit);
+    nonEmptyString(port.author, `${label}.author`, errors);
+    nonEmptyString(port.subject, `${label}.subject`, errors);
+    if (port.pullRequest !== undefined && (!Number.isInteger(port.pullRequest) || port.pullRequest <= 0)) {
+      errors.push(`${label}.pullRequest must be a positive integer`);
+    }
+    if (!PORT_CLASSIFICATIONS.includes(port.classification)) {
+      errors.push(`${label}.classification ${JSON.stringify(port.classification)} is not one of ${PORT_CLASSIFICATIONS.join(', ')}`);
+    }
+    if (!Array.isArray(port.paths)) {
+      errors.push(`${label}.paths must be an array`);
+    } else {
+      port.paths.forEach((candidate, pathIndex) => {
+        if (typeof candidate !== 'string' || !validRepoPath(candidate)) {
+          errors.push(`${label}.paths[${pathIndex}] ${JSON.stringify(candidate)} is not a normalized repository-relative path`);
+        }
+      });
+    }
+    nonEmptyString(port.decision, `${label}.decision`, errors);
+    stringArray(port.checks, `${label}.checks`, errors);
+  });
+}
+
+/** A partial ledger is allowed only while the old baseline remains pinned; the target baseline requires exact coverage. */
+export function validatePortHistory(repo, map) {
+  if (!map.ports) return [];
+  const errors = [];
+  const { from, to, entries } = map.ports;
+  for (const commit of [from, to]) {
+    try {
+      runGit(repo, ['cat-file', '-e', `${commit}^{commit}`]);
+    } catch {
+      errors.push(`port range commit ${commit} is missing; fetch it explicitly from ${map.upstream.repository}`);
+    }
+  }
+  if (errors.length > 0) return errors;
+  const expected = runGit(repo, ['rev-list', '--reverse', `${from}..${to}`]).trim().split('\n').filter(Boolean);
+  const allowed = new Set(expected);
+  for (const port of entries) {
+    if (!allowed.has(port.commit)) errors.push(`port commit ${port.commit} is outside ${from}..${to}`);
+  }
+  if (map.upstream.commit !== from && map.upstream.commit !== to) {
+    errors.push('upstream.commit must equal ports.from during migration or ports.to after completion');
+  }
+  if (map.upstream.commit === to) {
+    const actual = new Set(entries.map(port => port.commit));
+    for (const commit of expected) if (!actual.has(commit)) errors.push(`final port ledger is missing ${commit}`);
+    for (const commit of actual) if (!allowed.has(commit)) errors.push(`final port ledger contains out-of-range ${commit}`);
   }
   return errors;
 }
@@ -376,6 +463,9 @@ async function main(argv) {
   }
   const metadataErrors = validateMap(map);
   if (metadataErrors.length > 0) throw new GuardError(`malformed ${MAP_PATH}:\n  ${metadataErrors.join('\n  ')}`);
+
+  const portHistoryErrors = validatePortHistory(repo, map);
+  if (portHistoryErrors.length > 0) throw new GuardError(`upstream port ledger problems:\n  ${portHistoryErrors.join('\n  ')}`);
 
   const commit = map.upstream.commit;
   let commitPresent = true;

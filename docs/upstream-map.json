@@ -9,6 +9,11 @@
   "repository": "https://github.com/TheBigBrainChad/chatbbc",
   "version": "2.2.0"
  },
+ "ports": {
+  "from": "dee4b5e94b8598d7630e6db62bada9ac6050f457",
+  "to": "4e51a04d8e89a559e16d17fc7df6f547e57d666d",
+  "entries": []
+ },
  "changes": [
   {
    "id": "hosted-workflow-removal",
@@ -387,13 +392,15 @@
    "category": "documentation",
    "paths": [
     "docs/UPSTREAM.md",
-    "docs/upstream-map.json"
+    "docs/upstream-map.json",
+    "docs/superpowers/plans/2026-09-29-upstream-2.1.20-migration.md",
+    "docs/superpowers/specs/2026-09-29-upstream-2.1.20-migration-design.md"
    ],
    "upstreamAnchors": [
     "AGENTS.md"
    ],
-   "decision": "docs/upstream-map.json is the machine-readable authority for which downstream path belongs to which decision; docs/UPSTREAM.md is the porting runbook and points at the map instead of duplicating it.",
-   "portRule": "Update the map in the same change as the port. Advance the pinned upstream commit only after the whole upstream delta is accounted for; record a partial port in ports instead.",
+   "decision": "docs/upstream-map.json is the machine-readable authority for which downstream path belongs to which decision; docs/UPSTREAM.md is the porting runbook; the committed superpowers spec and plan are downstream migration records and remain ChatBBC-owned documentation.",
+   "portRule": "Update the map in the same change as the port. Advance the pinned upstream commit only after the whole upstream delta is accounted for; record a partial port in ports instead. Keep the migration spec/plan as downstream records rather than attempting to source them from upstream.",
    "checks": [
     "npm run verify:upstream-map"
    ]

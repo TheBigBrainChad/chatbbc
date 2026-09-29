@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 // @ts-ignore Guard scripts are intentionally plain ESM JavaScript.
-import { CATEGORIES, RETAINED_REASON_CODES, parseNameStatus, retainedIdentifierErrors, validateMap, validateOwnership } from '../scripts/verify-upstream-map.mjs';
+import { CATEGORIES, PORT_CLASSIFICATIONS, RETAINED_REASON_CODES, parseNameStatus, retainedIdentifierErrors, validateMap, validateOwnership, validatePortHistory } from '../scripts/verify-upstream-map.mjs';
 import { makeTempDir, removeTempDir, writeTree } from './helpers.js';
 
 interface MapEntryFixture {
@@ -28,6 +28,24 @@ interface MapDocumentFixture {
   downstream: { repository: string; version: string };
   changes: MapEntryFixture[];
   retainedIdentifiers: RetainedFixture[];
+  ports?: PortRangeFixture;
+}
+
+interface PortEntryFixture {
+  commit: string;
+  author: string;
+  subject: string;
+  pullRequest?: number;
+  classification: 'port' | 'adapt' | 'already-equivalent' | 'translate' | 'provenance-only' | 'intentionally-not-imported';
+  paths: string[];
+  decision: string;
+  checks: string[];
+}
+
+interface PortRangeFixture {
+  from: string;
+  to: string;
+  entries: PortEntryFixture[];
 }
 
 let root: string;
@@ -172,8 +190,104 @@ describe('validateMap', () => {
 
   it('exposes the closed category vocabulary', () => {
     expect([...CATEGORIES].sort()).toEqual([
-      'assets', 'documentation', 'identity', 'linux-release', 'local-automation', 'omarchy', 'prompts', 'verification'
+      'assets', 'composer', 'content-reference', 'control-api', 'documentation', 'identity', 'linux-release', 'local-automation', 'omarchy', 'prompts', 'verification'
     ]);
+  });
+
+  it('validates a partial upstream port ledger while the old baseline is pinned', () => {
+    const map = mapDocument([entry('identity-docs', 'identity', ['docs/setup.md'])]);
+    map.ports = {
+      from: '1'.repeat(40),
+      to: '2'.repeat(40),
+      entries: [{
+        commit: '3'.repeat(40),
+        author: 'Author',
+        subject: 'Fix',
+        classification: 'adapt',
+        paths: ['src/main/bridge.ts'],
+        decision: 'Port through ChatBBC bridge ownership.',
+        checks: ['npm test -- test/bridge.test.ts']
+      }]
+    };
+    expect(validateMap(map)).toEqual([]);
+  });
+
+  it('rejects duplicate port commits and unknown classifications', () => {
+    const map = mapDocument([entry('identity-docs', 'identity', ['docs/setup.md'])]);
+    const repeated = '3'.repeat(40);
+    map.ports = {
+      from: '1'.repeat(40),
+      to: '2'.repeat(40),
+      entries: [
+        {
+          commit: repeated,
+          author: 'Author',
+          subject: 'Fix',
+          classification: 'adapt',
+          paths: ['src/main/bridge.ts'],
+          decision: 'Port it.',
+          checks: ['npm test -- test/bridge.test.ts']
+        },
+        {
+          commit: repeated,
+          author: 'Author',
+          subject: 'Copy it',
+          classification: 'copy' as PortEntryFixture['classification'],
+          paths: [],
+          decision: 'No.',
+          checks: ['npm run verify:upstream-map']
+        }
+      ]
+    };
+    const errors = validateMap(map).join('\n');
+    expect(errors).toContain(`duplicates ${repeated}`);
+    expect(errors).toMatch(/classification/);
+    expect(PORT_CLASSIFICATIONS).not.toContain('copy');
+  });
+});
+
+describe('validatePortHistory', () => {
+  it('allows partial coverage only while the old upstream baseline remains pinned', async () => {
+    const from = await commitUpstream({ 'one.txt': 'one\n' });
+    await writeTree(root, { 'two.txt': 'two\n' });
+    git('add', '-A');
+    git('-c', 'user.email=fixture@example.invalid', '-c', 'user.name=fixture', 'commit', '-m', 'second');
+    const to = git('rev-parse', 'HEAD').trim();
+    const map = mapDocument([]);
+    map.upstream.commit = from;
+    map.ports = { from, to, entries: [] };
+    expect(validatePortHistory(root, map)).toEqual([]);
+
+    map.upstream.commit = to;
+    expect(validatePortHistory(root, map).join('\n')).toContain('final port ledger is missing');
+  });
+
+  it('rejects a port entry outside the declared range', async () => {
+    const outside = await commitUpstream({ 'outside.txt': 'outside\n' });
+    await writeTree(root, { 'from.txt': 'from\n' });
+    git('add', '-A');
+    git('-c', 'user.email=fixture@example.invalid', '-c', 'user.name=fixture', 'commit', '-m', 'from');
+    const from = git('rev-parse', 'HEAD').trim();
+    await writeTree(root, { 'to.txt': 'to\n' });
+    git('add', '-A');
+    git('-c', 'user.email=fixture@example.invalid', '-c', 'user.name=fixture', 'commit', '-m', 'to');
+    const to = git('rev-parse', 'HEAD').trim();
+    const map = mapDocument([]);
+    map.upstream.commit = from;
+    map.ports = {
+      from,
+      to,
+      entries: [{
+        commit: outside,
+        author: 'Author',
+        subject: 'Outside',
+        classification: 'adapt',
+        paths: [],
+        decision: 'Invalid fixture.',
+        checks: ['npm run verify:upstream-map']
+      }]
+    };
+    expect(validatePortHistory(root, map).join('\n')).toContain('outside');
   });
 });
 
