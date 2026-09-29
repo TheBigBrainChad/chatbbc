@@ -1,3 +1,4 @@
+import { hasProviderDirective, resolvedCapture, withoutProviderDirectives } from '../shared/content-reference.js';
 import { createWorkspaceTerminal } from './workspace-terminal.js';
 import { createWorkspaceDocks } from './workspace-docks.js';
 import { ui, t } from './i18n.js';
@@ -1584,7 +1585,15 @@ export function renderedMarkdown(source: string, capture?: StoredText): HTMLElem
   // Fiber's canonical text can be complete while a background provider tab still
   // paints its first words. Render this revision directly; captured DOM HTML is
   // never evidence that it contains the current message revision.
-  const text = withoutMessageReaction(source).slice(0, MAX_RENDERED_HTML_CHARS);
+  let text = withoutMessageReaction(source).slice(0, MAX_RENDERED_HTML_CHARS);
+  // Provider directives this app does not draw are presentation syntax, not message content.
+  // A same-message native capture may resolve them; otherwise keep safe inner text and drop
+  // unknown control lines rather than showing raw provider syntax.
+  if (hasProviderDirective(text)) {
+    const plain = withoutProviderDirectives(text);
+    if (resolvedCapture(capture)) return renderedMessage(capture, plain);
+    text = plain || t('This reply points to content from another message that was not recorded.');
+  }
   const citations = text.includes('\uE200') ? citationLabels(text, capture) : new Map<string, string>();
   // An inline tokenizer leaves literal citation examples inside code spans/fences intact.
   const parser = new Marked({ gfm: true, extensions: [WRITING_BLOCK, {

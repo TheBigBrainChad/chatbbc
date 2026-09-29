@@ -124,6 +124,128 @@
     "checks": [
      "npx vitest run test/secrets.test.ts"
     ]
+   },
+   {
+    "commit": "62c897201a4ee6eee833851ce40738de3a7c77d3",
+    "author": "Maxim",
+    "subject": "Show replies that point to other content instead of the raw pointer",
+    "pullRequest": 576,
+    "classification": "adapt",
+    "paths": [
+     "src/shared/content-reference.ts",
+     "src/renderer/chat.ts",
+     "test/content-reference.test.ts",
+     "test/renderer-html.test.ts"
+    ],
+    "decision": "Port provider content-reference presentation through one shared resolver. A recorded same-message native rendering may resolve presentation, but it never creates conversation, turn, request, or session authority.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts test/renderer-html.test.ts",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "79f9f67c64da61261250873b0c6f84ff78fddfb5",
+    "author": "Maxim",
+    "subject": "Merge pull request #576 from Maximapple/fix/content-reference-directive",
+    "pullRequest": 576,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for the initial content-reference presentation fix; no duplicate functional patch is applied.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts test/renderer-html.test.ts"
+    ]
+   },
+   {
+    "commit": "d011888d4ec89d819b2c1861fe30073f13dba311",
+    "author": "Maxim",
+    "subject": "Let Goal and worker reports read the reply a content pointer stands for",
+    "pullRequest": 579,
+    "classification": "adapt",
+    "paths": [
+     "src/main/goal.ts",
+     "src/main/session/store.ts",
+     "src/shared/content-reference.ts",
+     "test/goal.test.ts",
+     "test/session.test.ts"
+    ],
+    "decision": "Use the same provider-directive resolver for Goal and completed-final projections after canonical message ownership is already established. Canonical stored text and identity fields remain unchanged.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts test/goal.test.ts test/session.test.ts"
+    ]
+   },
+   {
+    "commit": "6612df2a5ca377e51e01222a0796418229baa129",
+    "author": "Maxim",
+    "subject": "Merge remote-tracking branch 'upstream/main' into fix/content-reference-text",
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge-only ancestry for model-facing content-reference text; behavior is represented by the functional content-reference entries.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts test/goal.test.ts test/session.test.ts"
+    ]
+   },
+   {
+    "commit": "1348d8a28e0e36e2bbc4ca218ffc2d7622e54c95",
+    "author": "Maxim",
+    "subject": "Handle any unknown ChatGPT directive instead of one fix per name",
+    "pullRequest": 580,
+    "classification": "adapt",
+    "paths": [
+     "src/shared/content-reference.ts",
+     "src/renderer/chat.ts",
+     "test/content-reference.test.ts",
+     "test/renderer-html.test.ts"
+    ],
+    "decision": "Generalize the resolver to unknown provider leaf/container directives while explicitly excluding ChatBBC-supported writing blocks. Unknown syntax fails presentation-soft and cannot become execution authority.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts test/renderer-html.test.ts"
+    ]
+   },
+   {
+    "commit": "bdb8c7de77288b6bd94ec97ffabc7096bf73d0cb",
+    "author": "Maxim",
+    "subject": "Merge branch 'fix/content-reference-text' into fix/unknown-provider-directives",
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge-only ancestry joining the content-reference model-facing and generic-directive work; no duplicate functional delta is applied.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts"
+    ]
+   },
+   {
+    "commit": "01283bbdf8b90ef09220c663bfab535dda1e3c15",
+    "author": "Maxim",
+    "subject": "Note the generic ChatGPT directive handling in the changelog",
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Upstream changelog provenance for generic directive handling; it is not copied as a ChatBBC release claim.",
+    "checks": [
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "2738e8c049f90b7e2de902653652aafde4dda9ee",
+    "author": "Maxim",
+    "subject": "Merge pull request #579 from Maximapple/fix/content-reference-text",
+    "pullRequest": 579,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for model-facing content-reference text; the behavior is already represented once.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts test/goal.test.ts test/session.test.ts"
+    ]
+   },
+   {
+    "commit": "29a5141eaa423013b29a563e26c8d82ad3ac2080",
+    "author": "Maxim",
+    "subject": "Merge pull request #580 from Maximapple/fix/unknown-provider-directives",
+    "pullRequest": 580,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for generic unknown-provider directive handling; the functional delta is represented by 1348d8a28e0e36e2bbc4ca218ffc2d7622e54c95.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts test/renderer-html.test.ts"
+    ]
    }
   ]
  },
@@ -245,6 +367,25 @@
    "portRule": "Translate new product strings into every locale file and keep ChatBBC itself untranslated. Preserve the catalog artwork copyright sentence; do not machine-translate authored or provider text.",
    "checks": [
     "npm run verify:rebrand"
+   ]
+  },
+  {
+   "id": "content-reference",
+   "category": "content-reference",
+   "paths": [
+    "src/renderer/chat.ts",
+    "src/shared/content-reference.ts",
+    "test/content-reference.test.ts",
+    "test/renderer-html.test.ts"
+   ],
+   "upstreamAnchors": [
+    "src/renderer/chat.ts"
+   ],
+   "decision": "Provider directives are interpreted by one shared resolver. ChatBBC keeps its writing-block renderer, identity fences and sanitized message renderer while adopting upstream content-reference behavior.",
+   "portRule": "Port provider directive syntax/resolution through src/shared/content-reference.ts. Captured HTML is same-message presentation evidence only; never use it to infer conversation, turn, request or session ownership. Preserve ChatBBC writing blocks and sanitizer behavior.",
+   "checks": [
+    "npx vitest run test/content-reference.test.ts test/renderer-html.test.ts test/goal.test.ts test/session.test.ts",
+    "npm run verify:upstream-map"
    ]
   },
   {
