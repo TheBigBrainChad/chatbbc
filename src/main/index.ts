@@ -48,6 +48,7 @@ import {
   type SwarmSnapshot
 } from './agents.js';
 import { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
+import { initControlApiPath, shutdownControlApi, startControlApi } from './control-api.js';
 import { restoreRequestCorrelations } from './session/correlation.js';
 import { restoreBlockedChats } from './session/blocked-chats.js';
 import { stopComputerHelper } from './computer/index.js';
@@ -343,6 +344,7 @@ void app.whenReady().then(async () => {
   try { await initSkillsPath(userData); }
   catch (error) { logWarn(`Skills library unavailable: ${error instanceof Error ? error.message : String(error)}`); }
   initDurableStore(userData);
+  initControlApiPath(userData);
   initUvRuntime(userData);
   // Bundled pet packages: the packaged app's resources, or the repository's pets/ folder in dev.
   try { await initPetLibrary(userData, app.isPackaged ? path.join(process.resourcesPath, 'pets') : path.join(app.getAppPath(), 'pets')); }
@@ -496,6 +498,11 @@ void app.whenReady().then(async () => {
   if (browserExtensionRequired(getConfig())) {
     void startBridge();
   }
+  // Opt-in, and only once every fact it projects has been restored. Settings changes are wired
+  // in ipc.ts; a failed bind is logged and leaves the rest of the app untouched.
+  if (getConfig().controlApi.enabled) {
+    startControlApi().catch((error: Error) => logWarn(`control API did not start: ${error.message}`));
+  }
   if (getConfig().ui.autoConnect) void connect();
 
   // Never awaited: an unreachable GitHub, a slow download or a broken release must not delay a
@@ -549,7 +556,11 @@ app.on('will-quit', (event) => {
       // The budget has to clear the drains it contains, or it would silently defeat them:
       // the bridge force-closes wedged localhost sockets at 15s and the MCP endpoint forces
       // its own drain at 30s. This is the outer bound on both, not a competing one.
-      { name: 'admission/drain', budgetMs: 40_000, run: () => [shutdownConnection(), shutdownBridge()] },
+      {
+        name: 'admission/drain',
+        budgetMs: 40_000,
+        run: () => [shutdownConnection(), shutdownBridge(), shutdownControlApi()]
+      },
       // Phase 2: only after request handlers are done may their owned child processes go.
       {
         name: 'process cleanup',

@@ -471,6 +471,28 @@
    ]
   },
   {
+   "id": "control-api",
+   "category": "control-api",
+   "paths": [
+    "src/main/config.ts",
+    "src/main/control-api.ts",
+    "src/shared/control-api.ts",
+    "test/config.test.ts",
+    "test/control-api.test.ts"
+   ],
+   "upstreamAnchors": [
+    "src/main/config.ts"
+   ],
+   "decision": "ChatBBC adopts the opt-in read-only local control API as a projection of existing connection, bridge, plugin, update and call-context owners. The listener owns no application state, defaults off, binds loopback only, and publishes only an explicit non-secret status schema.",
+   "portRule": "Keep the control API disabled by default and fail malformed config to off. Preserve serialized start/stop/shutdown, per-process token files, Origin/Host/auth/body/rate fences and allowlist-only status projection. Never turn this into another MCP surface, browser bridge, session owner or settings authority.",
+   "checks": [
+    "npx vitest run test/config.test.ts test/control-api.test.ts",
+    "npm run typecheck",
+    "npm run verify:rebrand",
+    "npm run verify:upstream-map"
+   ]
+  },
+  {
    "id": "prompts",
    "category": "prompts",
    "paths": [
