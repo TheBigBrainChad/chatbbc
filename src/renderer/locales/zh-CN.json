@@ -1746,5 +1746,7 @@
   "Latest Omarchy colors are invalid; using the last valid palette.": "最新的 Omarchy 配色无效，继续使用上一次有效的配色。",
   "Omarchy colors are invalid; using saved colors.": "Omarchy 配色无效，正在使用已保存的配色。",
   "Omarchy theme unavailable; using saved colors.": "Omarchy 主题不可用，正在使用已保存的配色。",
-  "Omarchy theme unavailable; using the last valid palette.": "Omarchy 主题不可用，继续使用上一次有效的配色。"
+  "Omarchy theme unavailable; using the last valid palette.": "Omarchy 主题不可用，继续使用上一次有效的配色。",
+  "Local control API: let trusted tools on this computer read app status": "本地控制 API：允许本机上的受信任工具读取应用状态",
+  "Off by default. When enabled, this read-only API listens only on 127.0.0.1 for trusted local tooling.": "默认关闭。启用后，此只读 API 仅在 127.0.0.1 上侦听，供受信任的本地工具使用。"
 }

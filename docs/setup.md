@@ -54,6 +54,28 @@ The dropdown is disabled and explains the override; unrelated Settings changes r
 Remove the override from the launch environment and restart ChatBBC to use this selector. The existing
 comma-separated override and port `0` remain available for isolated development/tests.
 
+## Local control API
+
+**Settings → Setup → Advanced → Local control API** is off by default. It is a read-only,
+loopback-only status surface for trusted tooling running under your local account; it is not an
+MCP connector and it is not the ChatBBC Companion bridge.
+
+When enabled, ChatBBC writes two private files under `control-api/` in its user-data directory:
+
+- `endpoint.json`: the loopback port, process id, protocol and app version;
+- `token`: a new random bearer token for that launch.
+
+The listener binds only `127.0.0.1` and serves:
+
+- `GET /v1/health`: process id, version, uptime and the routes this build serves;
+- `GET /v1/status`: an allowlisted projection of connection, companion bridge, plugin, updater and in-flight MCP call state.
+
+Requests require `Authorization: Bearer <token>`. The token is never returned over HTTP, and
+requests carrying a browser `Origin` are refused. Status omits MCP token paths, tunnel ids and
+URLs, plugin source/configuration, and credentials. Turning the switch off or quitting cleanly
+stops the listener and removes both files. A crash may leave stale discovery files behind, so a
+caller must still connect successfully to the advertised port before treating ChatBBC as running.
+
 ## Permissions and connectors
 
 | Connector | What it adds |

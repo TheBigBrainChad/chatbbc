@@ -1746,5 +1746,7 @@
   "Latest Omarchy colors are invalid; using the last valid palette.": "Los últimos colores de Omarchy no son válidos; se usa la última paleta válida.",
   "Omarchy colors are invalid; using saved colors.": "Los colores de Omarchy no son válidos; se usan los colores guardados.",
   "Omarchy theme unavailable; using saved colors.": "El tema de Omarchy no está disponible; se usan los colores guardados.",
-  "Omarchy theme unavailable; using the last valid palette.": "El tema de Omarchy no está disponible; se usa la última paleta válida."
+  "Omarchy theme unavailable; using the last valid palette.": "El tema de Omarchy no está disponible; se usa la última paleta válida.",
+  "Local control API: let trusted tools on this computer read app status": "API de control local: permitir que herramientas de confianza de este equipo lean el estado de la app",
+  "Off by default. When enabled, this read-only API listens only on 127.0.0.1 for trusted local tooling.": "Desactivada de forma predeterminada. Al activarla, esta API de solo lectura escucha únicamente en 127.0.0.1 para herramientas locales de confianza."
 }

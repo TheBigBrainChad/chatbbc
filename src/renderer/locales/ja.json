@@ -1746,5 +1746,7 @@
   "Latest Omarchy colors are invalid; using the last valid palette.": "最新の Omarchy の色が無効なため、直前の有効な配色を使用中。",
   "Omarchy colors are invalid; using saved colors.": "Omarchy の色が無効なため、保存済みの色を使用中。",
   "Omarchy theme unavailable; using saved colors.": "Omarchy テーマを利用できないため、保存済みの色を使用中。",
-  "Omarchy theme unavailable; using the last valid palette.": "Omarchy テーマを利用できないため、直前の有効な配色を使用中。"
+  "Omarchy theme unavailable; using the last valid palette.": "Omarchy テーマを利用できないため、直前の有効な配色を使用中。",
+  "Local control API: let trusted tools on this computer read app status": "ローカル制御 API：このコンピューター上の信頼できるツールにアプリの状態の読み取りを許可",
+  "Off by default. When enabled, this read-only API listens only on 127.0.0.1 for trusted local tooling.": "既定では無効です。有効にすると、この読み取り専用 API は信頼できるローカルツール向けに 127.0.0.1 のみで待ち受けます。"
 }

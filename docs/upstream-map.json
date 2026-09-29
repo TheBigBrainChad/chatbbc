@@ -295,8 +295,60 @@
     "classification": "provenance-only",
     "paths": [],
     "decision": "PR merge provenance for the composer refinement; the functional delta is represented once by 0e3ff776d36570e334fe012ea86e25939ddd34c7.",
+   "checks": [
+    "npx electron scripts/verify-composer-ui.cjs"
+    ]
+   },
+   {
+    "commit": "3b792d9071dd507fcb0c43a94de37c3227504ba7",
+    "author": "Adrian Acurero",
+    "subject": "Add an opt-in local control API with read-only health and status",
+    "pullRequest": 583,
+    "classification": "adapt",
+    "paths": [
+     "AGENTS.md",
+     "SECURITY.md",
+     "docs/setup.md",
+     "src/main/config.ts",
+     "src/main/control-api.ts",
+     "src/main/index.ts",
+     "src/main/ipc.ts",
+     "src/preload/index.ts",
+     "src/renderer/index.html",
+     "src/renderer/locales/de.json",
+     "src/renderer/locales/es.json",
+     "src/renderer/locales/fr.json",
+     "src/renderer/locales/ja.json",
+     "src/renderer/locales/pt-BR.json",
+     "src/renderer/locales/pt-PT.json",
+     "src/renderer/locales/tr.json",
+     "src/renderer/locales/zh-CN.json",
+     "src/renderer/locales/zh-TW.json",
+     "src/renderer/main.ts",
+     "src/shared/control-api.ts",
+     "src/shared/types.ts",
+     "test/config.test.ts",
+     "test/control-api.test.ts",
+     "test/ipc.test.ts"
+    ],
+    "decision": "Adapt the upstream opt-in local control surface to ChatBBC as a read-only loopback projection with zero application-state ownership. Config remains the one owner of enablement; settings use the existing three-way merge; renderer state exposes only the boolean switch, never endpoint/token secrets; documentation keeps the boundary distinct from MCP and the companion bridge.",
     "checks": [
-     "npx electron scripts/verify-composer-ui.cjs"
+     "npx vitest run test/config.test.ts test/control-api.test.ts test/ipc.test.ts",
+     "npm run typecheck",
+     "npm run verify:rebrand",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "4e51a04d8e89a559e16d17fc7df6f547e57d666d",
+    "author": "Maxim",
+    "subject": "Merge pull request #583 from AcureroAdrian/control-surface",
+    "pullRequest": 583,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for the local control API; the functional delta is represented once by 3b792d9071dd507fcb0c43a94de37c3227504ba7.",
+    "checks": [
+     "npx vitest run test/config.test.ts test/control-api.test.ts test/ipc.test.ts"
     ]
    }
   ]
@@ -476,17 +528,19 @@
    "paths": [
     "src/main/config.ts",
     "src/main/control-api.ts",
+    "src/preload/index.ts",
     "src/shared/control-api.ts",
     "test/config.test.ts",
-    "test/control-api.test.ts"
+    "test/control-api.test.ts",
+    "test/ipc.test.ts"
    ],
    "upstreamAnchors": [
     "src/main/config.ts"
    ],
-   "decision": "ChatBBC adopts the opt-in read-only local control API as a projection of existing connection, bridge, plugin, update and call-context owners. The listener owns no application state, defaults off, binds loopback only, and publishes only an explicit non-secret status schema.",
-   "portRule": "Keep the control API disabled by default and fail malformed config to off. Preserve serialized start/stop/shutdown, per-process token files, Origin/Host/auth/body/rate fences and allowlist-only status projection. Never turn this into another MCP surface, browser bridge, session owner or settings authority.",
+   "decision": "ChatBBC adopts the opt-in read-only local control API as a projection of existing connection, bridge, plugin, update and call-context owners. The listener owns no application state, defaults off, binds loopback only, and publishes only an explicit non-secret status schema. Renderer/preload settings expose only the enablement boolean and use the existing stale-safe three-way settings merge.",
+   "portRule": "Keep the control API disabled by default and fail malformed config to off. Preserve serialized start/stop/shutdown, per-process token files, Origin/Host/auth/body/rate fences and allowlist-only status projection. Settings may start or stop it only when the authoritative config switch actually changes; never expose endpoint/token secrets to renderer state or turn this into another MCP surface, browser bridge, session owner or settings authority.",
    "checks": [
-    "npx vitest run test/config.test.ts test/control-api.test.ts",
+    "npx vitest run test/config.test.ts test/control-api.test.ts test/ipc.test.ts",
     "npm run typecheck",
     "npm run verify:rebrand",
     "npm run verify:upstream-map"

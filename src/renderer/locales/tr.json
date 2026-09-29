@@ -1746,5 +1746,7 @@
   "Latest Omarchy colors are invalid; using the last valid palette.": "Son Omarchy renkleri geçersiz; son geçerli palet kullanılıyor.",
   "Omarchy colors are invalid; using saved colors.": "Omarchy renkleri geçersiz; kayıtlı renkler kullanılıyor.",
   "Omarchy theme unavailable; using saved colors.": "Omarchy teması kullanılamıyor; kayıtlı renkler kullanılıyor.",
-  "Omarchy theme unavailable; using the last valid palette.": "Omarchy teması kullanılamıyor; son geçerli palet kullanılıyor."
+  "Omarchy theme unavailable; using the last valid palette.": "Omarchy teması kullanılamıyor; son geçerli palet kullanılıyor.",
+  "Local control API: let trusted tools on this computer read app status": "Yerel kontrol API'si: bu bilgisayardaki güvenilir araçların uygulama durumunu okumasına izin ver",
+  "Off by default. When enabled, this read-only API listens only on 127.0.0.1 for trusted local tooling.": "Varsayılan olarak kapalıdır. Etkinleştirildiğinde bu salt okunur API, güvenilir yerel araçlar için yalnızca 127.0.0.1 üzerinde dinler."
 }
