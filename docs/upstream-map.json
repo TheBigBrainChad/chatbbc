@@ -2,8 +2,8 @@
  "schemaVersion": 1,
  "upstream": {
   "repository": "https://github.com/totec448-spec/chat-on-steroids",
-  "commit": "dee4b5e94b8598d7630e6db62bada9ac6050f457",
-  "version": "2.1.18"
+  "commit": "4e51a04d8e89a559e16d17fc7df6f547e57d666d",
+  "version": "2.1.20"
  },
  "downstream": {
   "repository": "https://github.com/TheBigBrainChad/chatbbc",
@@ -510,7 +510,6 @@
     "src/main/plugins/uv-runtime.ts",
     "src/main/secrets.ts",
     "src/main/session/handoff.ts",
-    "src/main/session/store.ts",
     "src/main/session/title.ts",
     "src/main/shutdown.ts",
     "src/main/skill-github.ts",
@@ -595,19 +594,9 @@
    "id": "composer",
    "category": "composer",
    "paths": [
-    "scripts/fixtures/composer-ui.js",
-    "scripts/verify-composer-ui.cjs",
-    "scripts/verify-plan-collapse.cjs",
-    "src/renderer/chat-models.ts",
     "src/renderer/chat.ts",
-    "src/renderer/composer-motion.ts",
-    "src/renderer/context-meter.ts",
     "src/renderer/index.html",
-    "src/renderer/styles.css",
-    "test/composer-motion.test.ts",
-    "test/context-meter.test.ts",
-    "test/renderer-chat-models.test.ts",
-    "test/renderer-layout.test.ts"
+    "src/renderer/styles.css"
    ],
    "upstreamAnchors": [
     "src/renderer/chat.ts",
@@ -628,9 +617,7 @@
    "category": "control-api",
    "paths": [
     "src/main/config.ts",
-    "src/main/control-api.ts",
     "src/preload/index.ts",
-    "src/shared/control-api.ts",
     "test/config.test.ts",
     "test/control-api.test.ts",
     "test/ipc.test.ts"
@@ -791,7 +778,8 @@
     "scripts/verify-settings-layout.cjs",
     "scripts/verify-sidebar-setup.cjs",
     "scripts/verify-workspace-terminal.cjs",
-    "scripts/verify-windows-capture-border.mjs"
+    "scripts/verify-windows-capture-border.mjs",
+    "vitest.config.ts"
    ],
    "upstreamAnchors": [
     "scripts/verify-appearance.cjs",
@@ -813,14 +801,18 @@
     ".github/ISSUE_TEMPLATE/feature_request.yml",
     ".github/pull_request_template.md",
     "AGENTS.md",
+    "CHANGELOG.md",
     "CLAUDE.md",
     "CONTRIBUTING.md",
     "README.md",
     "SECURITY.md",
     "docs/plugins.md",
+    "docs/release-notes/v2.1.19.md",
+    "docs/release-notes/v2.1.20.md",
     "docs/setup.md",
     "docs/tool-surface.md",
-    "docs/worklog-2026-09-28-chatbbc-port.md"
+    "docs/worklog-2026-09-28-chatbbc-port.md",
+    "docs/worklog-2026-09-28-composer-integration.md"
    ],
    "upstreamAnchors": [
     "README.md",

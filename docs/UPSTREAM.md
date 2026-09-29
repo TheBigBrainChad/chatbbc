@@ -1,6 +1,6 @@
 # Porting upstream into ChatBBC
 
-ChatBBC 2.2.0 is a downstream of [Chat On Steroids](https://github.com/totec448-spec/chat-on-steroids), pinned to commit `dee4b5e94b8598d7630e6db62bada9ac6050f457` (upstream version 2.1.18). The [downstream change map](upstream-map.json) is the machine-readable authority for changed paths, exact upstream anchors, port rules, checks and retained brand-string exceptions. This runbook explains the procedure; it does not replace that map. Preserve the upstream MIT license, contributors and third-party attribution when porting.
+ChatBBC 2.2.0 is a downstream of [Chat On Steroids](https://github.com/totec448-spec/chat-on-steroids), pinned to commit `4e51a04d8e89a559e16d17fc7df6f547e57d666d` (upstream version 2.1.20). The [downstream change map](upstream-map.json) is the machine-readable authority for changed paths, exact upstream anchors, port rules, checks and retained brand-string exceptions. This runbook explains the procedure; it does not replace that map. Preserve the upstream MIT license, contributors and third-party attribution when porting.
 
 ## Product boundary
 

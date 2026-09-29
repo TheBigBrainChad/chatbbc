@@ -65,6 +65,6 @@ Supported release target: Linux x64 AppImage on a desktop Linux session (local a
 
 <p align="center">Built with our <a href="CONTRIBUTORS.md">community contributors</a>. Thank you to the people behind the code, designs, bug reports and testing.</p>
 
-<p align="center"><sub>ChatBBC is derived from <a href="https://github.com/totec448-spec/chat-on-steroids/tree/dee4b5e94b8598d7630e6db62bada9ac6050f457">Chat On Steroids at dee4b5e94b8598d7630e6db62bada9ac6050f457</a> (2.1.18). Original contributors retain their credit in <a href="CONTRIBUTORS.md">CONTRIBUTORS.md</a> and the MIT license. <a href="docs/UPSTREAM.md">Downstream porting notes</a>.</sub></p>
+<p align="center"><sub>ChatBBC is derived from <a href="https://github.com/totec448-spec/chat-on-steroids/tree/4e51a04d8e89a559e16d17fc7df6f547e57d666d">Chat On Steroids at 4e51a04d8e89a559e16d17fc7df6f547e57d666d</a> (2.1.20). Original contributors retain their credit in <a href="CONTRIBUTORS.md">CONTRIBUTORS.md</a> and the MIT license. <a href="docs/UPSTREAM.md">Downstream porting notes</a>.</sub></p>
 
 <p align="center"><sub>Not affiliated with or endorsed by OpenAI. ChatGPT and Codex are OpenAI trademarks.</sub></p>
