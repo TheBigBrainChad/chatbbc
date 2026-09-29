@@ -295,7 +295,7 @@
     "classification": "provenance-only",
     "paths": [],
     "decision": "PR merge provenance for the composer refinement; the functional delta is represented once by 0e3ff776d36570e334fe012ea86e25939ddd34c7.",
-   "checks": [
+    "checks": [
     "npx electron scripts/verify-composer-ui.cjs"
     ]
    },
@@ -347,8 +347,109 @@
     "classification": "provenance-only",
     "paths": [],
     "decision": "PR merge provenance for the local control API; the functional delta is represented once by 3b792d9071dd507fcb0c43a94de37c3227504ba7.",
-    "checks": [
+   "checks": [
      "npx vitest run test/config.test.ts test/control-api.test.ts test/ipc.test.ts"
+    ]
+   },
+   {
+    "commit": "f2ebc66553f41887c6b28b160fc89ec98f30d4c9",
+    "author": "Maxim",
+    "subject": "Retry failed tests on the Intel macOS release runner only",
+    "classification": "intentionally-not-imported",
+    "paths": [
+     ".github/workflows/release.yml",
+     "vitest.config.ts"
+    ],
+    "decision": "Do not import the Intel-macOS-only release-runner retry. ChatBBC has no hosted release workflow and its supported release/acceptance host is local Linux x64, so the retry policy has no downstream execution owner.",
+    "checks": [
+     "npm run verify:upstream-map",
+     "npm run verify:rebrand"
+    ]
+   },
+   {
+    "commit": "44d78f15bcb19953bfb124f80a8a47d0aada425d",
+    "author": "Maxim",
+    "subject": "Stamp the standalone extension ZIP like the packaged app",
+    "classification": "intentionally-not-imported",
+    "paths": [
+     ".github/workflows/release.yml"
+    ],
+    "decision": "Do not import standalone companion ZIP release stamping. ChatBBC ships the companion unpacked with the Linux x64 app and has no hosted standalone-extension ZIP release owner.",
+    "checks": [
+     "npm run verify:upstream-map",
+     "npm run verify:rebrand"
+    ]
+   },
+   {
+    "commit": "c5f09bb5b8c26898a1daf42195ce3c68a941582b",
+    "author": "Maxim",
+    "subject": "Release 2.1.19: the browser connects on its own again",
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Record upstream 2.1.19 release/version/changelog provenance only. ChatBBC versioning is independent at 2.2.0, and upstream release notes/changelog text are not republished as ChatBBC release claims.",
+    "checks": [
+     "npm run verify:rebrand",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "78b3f746e49787fc1f6ca955332549c7696a20ed",
+    "author": "Maxim",
+    "subject": "Merge pull request #573 from Maximapple/release/2.1.19-prep",
+    "pullRequest": 573,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge provenance for upstream 2.1.19 release preparation; no second functional or release delta is applied downstream.",
+    "checks": [
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "8720bee01776d99a114a20651f2c4c2345a2a2c2",
+    "author": "Maxim",
+    "subject": "Release 2.1.20: cleaner replies and working OpenRouter keys",
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Record upstream 2.1.20 release/version/changelog provenance only. Functional fixes from this release range are represented by their own port entries; ChatBBC remains version 2.2.0 with downstream release notes/history.",
+    "checks": [
+     "npm run verify:rebrand",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "d1b1518988218b7cdb04bc3f792f4dceb648a125",
+    "author": "Maxim",
+    "subject": "Merge pull request #581 from Maximapple/release/2.1.20-prep",
+    "pullRequest": 581,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge provenance for upstream 2.1.20 release preparation; no duplicate functional or release delta is applied downstream.",
+    "checks": [
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "f096c27a589296601a0331afb6dbfcb6a6b0b3de",
+    "author": "Maxim",
+    "subject": "Merge pull request #572 from Maximapple/ci/extension-zip-stamp",
+    "pullRequest": 572,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge provenance for the standalone extension ZIP stamping change, which is intentionally not imported under ChatBBC's unpacked-companion release policy.",
+    "checks": [
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "d0d4c856c56d1afa909271e45514d9ccd923f21e",
+    "author": "Maxim",
+    "subject": "Merge pull request #566 from Maximapple/ci/release-intel-retry",
+    "pullRequest": 566,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge provenance for the Intel macOS release-runner retry, which remains outside ChatBBC's local Linux x64 release scope.",
+    "checks": [
+     "npm run verify:upstream-map"
     ]
    }
   ]
@@ -367,8 +468,8 @@
     ".github/workflows/publish.yml",
     ".github/workflows/release.yml"
    ],
-   "decision": "Hosted GitHub Actions workflows are not imported. Build, test and release run on the local Linux x64 host, so the three workflow files are deleted rather than translated.",
-   "portRule": "Translate any new upstream workflow gate into a local script under scripts/ and map it; never restore a file under .github/workflows.",
+   "decision": "Hosted GitHub Actions workflows are not imported. Build, test and release run on the local Linux x64 host, so the three workflow files are deleted rather than translated. Upstream Intel-macOS retry and standalone-extension ZIP workflow changes therefore have no downstream execution owner.",
+   "portRule": "Translate only platform-independent upstream workflow intent that applies to the Linux x64 local release into a local script under scripts/ and map it. Never restore a file under .github/workflows, Intel/macOS runner policy, or a standalone companion ZIP release path.",
    "checks": [
     "npm run verify:upstream-map",
     "npm run verify:rebrand"
@@ -433,8 +534,8 @@
     "extension/manifest.json",
     "extension/background.js"
    ],
-   "decision": "The package, app, bridge, extension and connector identity is ChatBBC: slug chatbbc, protocol 18, app ID com.chatbbc.app, and the three connectors ChatBBC Core, Desktop and Plugins. Live product strings are renamed; tool schemas, route shapes and pairing behavior are unchanged.",
-   "portRule": "Reapply the ChatBBC identity values on every port. The slug and the protocol are independent fail-closed gates, so bump or rename them separately and update both sides together.",
+   "decision": "The package, app, bridge, extension and connector identity is ChatBBC: slug chatbbc, protocol 18, app ID com.chatbbc.app, and the three connectors ChatBBC Core, Desktop and Plugins. ChatBBC's downstream version is independently 2.2.0; upstream 2.1.19/2.1.20 version-only bumps are provenance, not downstream release authority. Live product strings are renamed; tool schemas, route shapes and pairing behavior are unchanged.",
+   "portRule": "Reapply the ChatBBC identity values and independent downstream version policy on every port. The slug and the protocol are independent fail-closed gates, so bump or rename them separately and update both sides together. Never inherit an upstream release version merely because functional commits are ported.",
    "checks": [
     "npm run verify:rebrand",
     "npm test -- test/bridge.test.ts"
@@ -697,8 +798,8 @@
     "scripts/verify-browser-control.mjs",
     ".github/workflows/ci.yml"
    ],
-   "decision": "Local verification and fetch scripts name ChatBBC in their fixtures, window titles and User-Agent strings, and scripts/verify-local-ui.mjs runs the Wayland GUI fixtures on the local host instead of a hosted runner.",
-   "portRule": "Keep verification local and on Wayland. Rename product strings in fixtures when the identity changes, and do not point a fixture at a hosted runner or a predecessor product name.",
+   "decision": "Local verification and fetch scripts name ChatBBC in their fixtures, window titles and User-Agent strings, and scripts/verify-local-ui.mjs runs the Wayland GUI fixtures on the local host instead of a hosted runner. Platform-specific Intel-macOS retry configuration is not adopted into the Linux-local Vitest policy.",
+   "portRule": "Keep verification local and on Wayland/Linux x64. Rename product strings in fixtures when the identity changes, and do not point a fixture at a hosted runner or a predecessor product name. Do not import retry policy whose only owner is an unsupported upstream release platform.",
    "checks": [
     "npm run verify:rebrand"
    ]
@@ -726,8 +827,8 @@
     "AGENTS.md",
     "CONTRIBUTING.md"
    ],
-   "decision": "Current docs, the agent guide and issue templates name ChatBBC, target Linux x64 and point at local commands. Upstream provenance links and historical reports stay, and the hosted-CI badges and Windows, macOS and ARM download promises are gone.",
-   "portRule": "Reapply the ChatBBC naming and Linux x64 scope to current docs. Keep upstream provenance links and historical reports as historical, and never restore a hosted-CI badge or a non-Linux download promise.",
+   "decision": "Current docs, the agent guide and issue templates name ChatBBC, target Linux x64 and point at local commands. Upstream provenance links and historical reports stay, while upstream 2.1.19/2.1.20 release notes, upstream composer worklog material and upstream changelog release claims are not copied into current ChatBBC documentation. Hosted-CI badges and Windows, macOS and ARM download promises are gone.",
+   "portRule": "Reapply the ChatBBC naming and Linux x64 scope to current docs. Keep upstream provenance links and genuinely historical reports as historical; map target-baseline-only upstream release notes/worklogs as intentional downstream omissions after the target baseline becomes authoritative. Never present an upstream release/changelog entry as a ChatBBC release, restore a hosted-CI badge, or add a non-Linux download promise.",
    "checks": [
     "npm run verify:rebrand"
    ]

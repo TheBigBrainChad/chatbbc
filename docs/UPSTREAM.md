@@ -14,6 +14,14 @@ ChatBBC 2.2.0 is a downstream of [Chat On Steroids](https://github.com/totec448-
 
 Repository Actions are disabled; do not restore `.github/workflows` or use hosted runners, Actions artifacts, workflow dispatch, or `act` as acceptance evidence. Build and verify on Linux x64 with the project-compatible Node/Electron runtime and the exact lockfile. Run `npm ci`, `npm run verify:rebrand`, `npm run verify:upstream-map`, `npm run verify`, `npm run build`, `npm run verify:ui`, and `npm run dist:linux:x64`; inspect the real Wayland UI, packaged runtime, companion and MCP paths. `npm run release:local` builds a checked local candidate with manifest and SHA-256 checksums; source tests do not prove a GUI/package/provider flow. A later explicit `npm run release:publish -- --tag v2.2.0` requires a reviewed immutable tag, an absent release, disabled Actions, online tunnel freshness and an asset readback before a draft is published. Do not create a tag, push or publish as a side effect of a port.
 
+Upstream release administration does not become downstream release authority. Upstream version,
+changelog and release-note commits are recorded in `ports.entries` for provenance while ChatBBC
+keeps its own package/manifest/version policy. Intel-macOS hosted-runner retries and standalone
+extension-ZIP workflow changes are intentionally not imported because ChatBBC verifies/releases
+locally on Linux x64 and ships the companion unpacked. When advancing to a target baseline, map
+new upstream-only release notes/worklogs as intentional downstream omissions rather than copying
+them into current ChatBBC documentation.
+
 ## Future port procedure
 
 1. Fetch upstream **without tags**. Record old and new exact SHAs and inspect `git diff --name-status <old> <new>`. Require the baseline Git object locally; if absent, fetch it explicitly rather than inventing a base.
