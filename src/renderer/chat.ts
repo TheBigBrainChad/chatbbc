@@ -24,7 +24,7 @@ import { renderRecoveryCountdowns } from './recovery.js';
 import type { RecoveryCountdown } from '../shared/recovery.js';
 import { communicationTitle, foldAgentCommunication } from './agent-communication.js';
 import { initContextMeter, paintContextMeter } from './context-meter.js';
-import { installComposerHeightMotion } from './composer-motion.js';
+import { installComposerDockMotion, installComposerHeightMotion } from './composer-motion.js';
 import { sanitizeHtmlTree } from './sanitize-html.js';
 import { isAstraModel } from '../shared/chat-models.js';
 import { supportsFinishAutomation } from '../shared/finish.js';
@@ -4291,7 +4291,11 @@ export function initChat(next: Deps): void {
   ], paintSessions);
   deps = next;
   const stopComposerHeightMotion = installComposerHeightMotion($('composer'));
-  window.addEventListener('beforeunload', stopComposerHeightMotion, { once: true });
+  const stopComposerDockMotion = installComposerDockMotion($('composerDock'));
+  window.addEventListener('beforeunload', () => {
+    stopComposerHeightMotion();
+    stopComposerDockMotion();
+  }, { once: true });
   const chatHost = document.querySelector<HTMLElement>('[data-panel="chat"]')!;
   const docks = createWorkspaceDocks(chatHost);
   workspaceDocks = docks;

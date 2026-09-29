@@ -1076,7 +1076,7 @@
 
               </div>
             </div>
-            <div class="composer-dock" id="composerDock"><section class="agent-plan" id="agentPlan" aria-label="Agent task plan" hidden></section><div id="recoveryStatus" role="status" hidden></div><div id="taskPlanPreview" aria-label="Plan stages" hidden></div><div id="finishQueue" aria-label="Queued tasks" hidden></div><div id="activeGoalRow" hidden></div></div>
+            <div class="composer-dock" id="composerDock"><div class="composer-dock-body"><section class="agent-plan" id="agentPlan" aria-label="Agent task plan" hidden></section><div id="recoveryStatus" role="status" hidden></div><div id="taskPlanPreview" aria-label="Plan stages" hidden></div><div id="finishQueue" aria-label="Queued tasks" hidden></div><div id="activeGoalRow" hidden></div></div></div>
             <form class="composer" id="composer">
               <div id="skillPicker" class="skill-autocomplete" aria-label="Skills" hidden></div>
               <div id="composerSelectedSkills" class="composer-selected-skills" aria-label="Selected skills" hidden></div>
@@ -1112,9 +1112,6 @@
                   <select hidden id="sessionObjectiveMode" aria-label="Goal behavior"><option value="goal">Goal · stop when complete</option><option value="loop">Loop · keep going</option></select>
                   <button id="createPlan" type="button"><i class="ico ph ph-chat-circle" aria-hidden="true"></i><span>Create plan</span></button>
                   <button id="queueAtFinish" type="button" hidden><i class="ico ph ph-clock" aria-hidden="true"></i><span>Queue at Session finish</span></button>
-                  <button id="compactSession" type="button"><i class="ico ph ph-copy" aria-hidden="true"></i><span>Compact &amp; resume</span></button>
-                  <button id="cancelCompaction" type="button" hidden><i class="ico ph ph-x" aria-hidden="true"></i><span>Cancel compaction</span></button>
-                  <p id="sessionControlStatus" role="status"></p>
                 </div>
               </div>
                     </div>
@@ -1123,7 +1120,14 @@
                   <button type="button" id="contextMeterButton" aria-label="Estimated session context" aria-expanded="false" aria-controls="contextMeterInfo">
                     <svg viewBox="0 0 16 16" aria-hidden="true"><circle class="context-track" cx="8" cy="8" r="6"/><circle id="contextMeterArc" cx="8" cy="8" r="6" stroke-dasharray="0 37.7"/></svg><span id="contextMeterCompact" aria-hidden="true"></span>
                   </button>
-                  <div id="contextMeterInfo" role="tooltip">Session context · estimated</div>
+                  <div id="contextMeterInfo" role="dialog" aria-label="Session context · estimated">
+                    <dl class="context-data"><dt>Current conversation</dt><dd id="contextTokens"></dd><dt>Local estimate</dt><dd id="contextPercent"></dd><dt>Auto-compaction threshold</dt><dd id="contextThreshold"></dd></dl>
+                    <div class="context-progress" role="progressbar" aria-label="Estimated session context" aria-valuemin="0" aria-valuemax="100"><span></span></div>
+                    <button type="button" class="context-action" id="contextDisplay"><i class="ico ph ph-arrows-clockwise" aria-hidden="true"></i><span>Show token values</span></button>
+                    <button id="compactSession" class="context-action" type="button" hidden><i class="ico ph ph-copy" aria-hidden="true"></i><span>Compact &amp; resume</span></button>
+                    <button id="cancelCompaction" class="context-action" type="button" hidden><i class="ico ph ph-x" aria-hidden="true"></i><span>Cancel compaction</span></button>
+                    <p id="sessionControlStatus" role="status"></p>
+                  </div>
                 </div>
                 </div>
                 <details class="composer-menu model-menu" id="modelMenu">

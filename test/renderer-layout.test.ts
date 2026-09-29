@@ -67,11 +67,14 @@ it('limits the existing tool-detail preference to handoff briefs', () => {
   expect(chatSource).toContain("applyChatChecked($<HTMLInputElement>('goalIncludeToolCalls')");
 });
 
-it('keeps the context circle in the gear group rather than an auto-placed composer grid cell', () => {
+it('keeps the context dialog with its native compaction actions in the existing composer group', () => {
   const group = document.getElementById('composerSettings')!.parentElement!;
   expect(group.classList.contains('composer-options')).toBe(true);
   expect(document.getElementById('contextMeter')!.parentElement).toBe(group);
   expect(document.getElementById('contextMeterInfo')!.parentElement?.id).toBe('contextMeter');
+  expect(document.getElementById('contextMeterInfo')!.getAttribute('role')).toBe('dialog');
+  expect(document.getElementById('compactSession')!.closest('[role=dialog]')?.id).toBe('contextMeterInfo');
+  expect(document.getElementById('cancelCompaction')!.closest('[role=dialog]')?.id).toBe('contextMeterInfo');
 });
 
 it('centers the accessible Chats refresh icon without an extra grid text row', () => {
@@ -366,7 +369,9 @@ describe('the chat panel cards', () => {
     // Subhead, scrolling conversation, shared plan/queue dock, composer and footer.
     const layoutChildren = [...card.children].filter(child => child.id !== 'chatSettingsBtn');
     expect(layoutChildren.length).toBe(5);
-    expect(document.getElementById('composerDock')!.firstElementChild?.id).toBe('agentPlan');
+    const dockBody = document.getElementById('composerDock')!.firstElementChild!;
+    expect(dockBody.classList.contains('composer-dock-body')).toBe(true);
+    expect(dockBody.firstElementChild?.id).toBe('agentPlan');
     expect(document.getElementById('inputQueue')!.closest('#chatBody')).not.toBeNull();
     expect(card.classList.contains('is-session')).toBe(true);
     expect(tracks("[data-panel='chat'] .card.is-session")).toHaveLength(layoutChildren.length);

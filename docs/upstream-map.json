@@ -313,7 +313,6 @@
     "src/main/update.ts",
     "src/main/version.ts",
     "src/main/workspace.ts",
-    "src/renderer/index.html",
     "src/renderer/main.ts",
     "src/renderer/pets.ts",
     "src/renderer/plugins.ts",
@@ -373,7 +372,6 @@
    "id": "content-reference",
    "category": "content-reference",
    "paths": [
-    "src/renderer/chat.ts",
     "src/shared/content-reference.ts",
     "test/content-reference.test.ts",
     "test/renderer-html.test.ts"
@@ -385,6 +383,36 @@
    "portRule": "Port provider directive syntax/resolution through src/shared/content-reference.ts. Captured HTML is same-message presentation evidence only; never use it to infer conversation, turn, request or session ownership. Preserve ChatBBC writing blocks and sanitizer behavior.",
    "checks": [
     "npx vitest run test/content-reference.test.ts test/renderer-html.test.ts test/goal.test.ts test/session.test.ts",
+    "npm run verify:upstream-map"
+   ]
+  },
+  {
+   "id": "composer",
+   "category": "composer",
+   "paths": [
+    "scripts/fixtures/composer-ui.js",
+    "scripts/verify-composer-ui.cjs",
+    "scripts/verify-plan-collapse.cjs",
+    "src/renderer/chat.ts",
+    "src/renderer/composer-motion.ts",
+    "src/renderer/context-meter.ts",
+    "src/renderer/index.html",
+    "src/renderer/styles.css",
+    "test/composer-motion.test.ts",
+    "test/context-meter.test.ts",
+    "test/renderer-layout.test.ts"
+   ],
+   "upstreamAnchors": [
+    "src/renderer/chat.ts",
+    "src/renderer/index.html",
+    "src/renderer/styles.css"
+   ],
+   "decision": "The upstream composer refinement is ported as presentation over ChatBBC's existing draft, Goal, outbox and model-observation owners. Composer motion never owns resting geometry; context values remain local estimates. The same files also preserve ChatBBC content-reference rendering, public identity and live Omarchy palette behavior.",
+   "portRule": "Port composer layout, motion, mode/model controls and verification without introducing a second send, draft, Goal, model or theme owner. Preserve ChatBBC identity strings, shared provider-directive handling and Omarchy variables whenever upstream changes chat.ts, index.html or styles.css.",
+   "checks": [
+    "npx vitest run test/composer-motion.test.ts test/context-meter.test.ts test/renderer-layout.test.ts",
+    "npx electron scripts/verify-plan-collapse.cjs",
+    "npx electron scripts/verify-composer-ui.cjs",
     "npm run verify:upstream-map"
    ]
   },
@@ -451,7 +479,6 @@
     "src/renderer/appearance.ts",
     "src/renderer/pet-overlay.ts",
     "src/renderer/settings.css",
-    "src/renderer/styles.css",
     "src/shared/appearance.ts",
     "src/shared/pets.ts",
     "test/appearance.test.ts",

@@ -3387,15 +3387,20 @@ select option::checkmark { order: 1; margin-inline-start: auto; color: var(--ink
 .agent-plan-step[data-status='completed'] .agent-plan-marker { color: var(--soft); border-color: transparent; }
 .agent-plan-details { padding: 0 14px 10px 32px; color: var(--faint); font-size: calc(12px * var(--text-scale, 1)); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 
-.composer-dock { --edge: var(--composer-edge); width: min(836px, calc(100% - 72px)); margin: 10px auto -15px; border: 1px solid var(--edge); border-bottom: 0; border-radius: 16px 16px 0 0; background: var(--card); overflow: hidden; }
-.composer-dock[hidden], .app[data-screen='settings'] .composer-dock, .composer-dock:not(:has(> :not([hidden]))) { display: none; }
+.composer-dock { --edge: var(--composer-edge); min-height: 0; width: min(836px, calc(100% - 72px)); margin: 15px auto -15px; border: 1px solid var(--edge); border-block-width: 0; border-radius: 16px 16px 0 0; background: var(--card); overflow: hidden; opacity: 0; pointer-events: none; transition: opacity 120ms ease-in, margin-top 140ms ease-out; }
+.composer-dock:has(> .composer-dock-body > :not([hidden])) { margin-top: 10px; border-top-width: 1px; opacity: 1; pointer-events: auto; animation: surface-in 140ms ease-out; }
+.composer-dock[hidden], .app[data-screen='settings'] .composer-dock { display: none; }
+.composer-dock-body { display: flow-root; }
+@media (prefers-reduced-motion: reduce) { .composer-dock { transition: none; animation: none !important; } }
 .composer-dock .queued-input, #activeGoalRow, .recovery-notice { display: flex; align-items: center; gap: 10px; min-height: 38px; padding: 7px 12px; margin: 0; border: 0; border-bottom: 1px solid var(--edge); font-size: calc(13px * var(--text-scale, 1)); color: var(--soft); }
 .recovery-countdown { flex-shrink: 0; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
-.composer-dock > :nth-last-child(1 of :not([hidden])) { border-bottom: 0; }
-.composer-dock > :nth-last-child(1 of :not([hidden])) > .queued-input:last-child { border-bottom: 0; }
-.composer-dock:not([hidden]):has(> :not([hidden])) + .composer { border-top-left-radius: 12px; border-top-right-radius: 12px; }
+.composer-dock-body > :nth-last-child(1 of :not([hidden])) { border-bottom: 0; }
+.composer-dock-body > :nth-last-child(1 of :not([hidden])) > .queued-input:last-child { border-bottom: 0; }
+.composer-dock:not([hidden]):has(> .composer-dock-body > :not([hidden])) + .composer { border-top-left-radius: 12px; border-top-right-radius: 12px; }
 .composer-dock .ico { --ico: 15px; flex-shrink: 0; }
 .composer-dock .queue-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-dock .queued-input .queue-label, .plan-stage-heading .queue-label { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-height: 1.45; white-space: normal; overflow-wrap: anywhere; }
+#finishQueue { max-height: 300px; overflow-y: auto; }
 .composer-dock button { flex-shrink: 0; }
 .composer-dock .dock-action { border: 0; border-radius: 5px; background: transparent; color: var(--soft); padding: 4px; display: inline-flex; align-items: center; cursor: pointer; }
 .composer-dock .dock-action:hover { color: var(--ink); background: var(--hover); }
@@ -3428,8 +3433,16 @@ select option::checkmark { order: 1; margin-inline-start: auto; color: var(--ink
 #contextMeterButton:hover { background: var(--hover); }
 #contextMeterButton svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; transform: rotate(-90deg); }
 .context-track { opacity: .35; }
-#contextMeterInfo { display: none; position: absolute; z-index: 20; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); width: max-content; max-width: min(310px, 75vw); white-space: pre-line; padding: 12px 16px; border: 1px solid var(--edge); border-radius: 12px; background: var(--popover, var(--card)); color: var(--ink); font-size: calc(12px * var(--text-scale, 1)); line-height: 1.6; box-shadow: 0 8px 24px #0003; text-align: center; }
-.context-meter:hover #contextMeterInfo, .context-meter:focus-within #contextMeterInfo, .context-meter.pinned #contextMeterInfo { display: block; }
+#contextMeterInfo { display: none; position: absolute; z-index: 30; bottom: calc(100% + 8px); right: 0; width: 310px; max-width: calc(100vw - 32px); padding: 14px 8px 8px; border: 1px solid var(--edge); border-radius: 12px; background: var(--popover, var(--card)); color: var(--ink); font-size: calc(12px * var(--text-scale, 1)); line-height: 1.6; box-shadow: 0 8px 24px #0003; text-align: left; }
+.context-meter.pinned #contextMeterInfo { display: block; animation: surface-in 140ms ease-out; }
+.context-data { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 16px; margin: 0 8px; font-size: calc(12px * var(--text-scale, 1)); }
+.context-data dt { color: var(--soft); }
+.context-data dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.context-progress { height: 5px; margin: 16px 8px 10px; overflow: hidden; border-radius: 3px; background: var(--edge); }
+.context-progress span { display: block; width: var(--context-used, 0%); height: 100%; background: var(--accent); }
+.context-action { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 8px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.context-action:disabled { opacity: .45; cursor: default; }
+.context-action:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .queue-delivery { flex-shrink: 0; font-size: calc(11px * var(--text-scale, 1)); padding: 3px 7px; }
 .queue-delivery[aria-pressed="true"] { color: var(--text); border-color: var(--soft); }
 
