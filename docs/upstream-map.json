@@ -246,6 +246,58 @@
     "checks": [
      "npx vitest run test/content-reference.test.ts test/renderer-html.test.ts"
     ]
+   },
+   {
+    "commit": "0e3ff776d36570e334fe012ea86e25939ddd34c7",
+    "author": "Haz4rdovisk",
+    "subject": "Refine the composer: mode picker, Plan toggle, context dialog and model menu",
+    "pullRequest": 582,
+    "classification": "adapt",
+    "paths": [
+     "scripts/fixtures/composer-ui.js",
+     "scripts/verify-composer-ui.cjs",
+     "scripts/verify-plan-collapse.cjs",
+     "src/renderer/chat-models.ts",
+     "src/renderer/chat.ts",
+     "src/renderer/composer-motion.ts",
+     "src/renderer/context-meter.ts",
+     "src/renderer/index.html",
+     "src/renderer/styles.css",
+     "src/renderer/locales/de.json",
+     "src/renderer/locales/es.json",
+     "src/renderer/locales/fr.json",
+     "src/renderer/locales/ja.json",
+     "src/renderer/locales/pt-BR.json",
+     "src/renderer/locales/pt-PT.json",
+     "src/renderer/locales/tr.json",
+     "src/renderer/locales/zh-CN.json",
+     "src/renderer/locales/zh-TW.json",
+     "test/composer-motion.test.ts",
+     "test/context-meter.test.ts",
+     "test/renderer-chat-models.test.ts",
+     "test/renderer-layout.test.ts",
+     "test/renderer-timeline.test.ts"
+    ],
+    "decision": "Port the composer refinement through ChatBBC's existing renderer authorities: draft key/generation, Goal/session controls, immutable outbox admission, provider-observed model catalog and live Omarchy theme projection. Visible mode/model/Plan controls remain projections over those existing owners rather than introducing new durable selection or send state.",
+    "checks": [
+     "npx vitest run test/renderer-chat-models.test.ts test/renderer-timeline.test.ts test/renderer-layout.test.ts test/context-meter.test.ts test/composer-motion.test.ts",
+     "npx electron scripts/verify-composer-ui.cjs",
+     "npx electron scripts/verify-plan-collapse.cjs",
+     "npm run verify:rebrand",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "557b2bdd6038c15c95f7a35114864bfeac4e50f0",
+    "author": "Maxim",
+    "subject": "Merge pull request #582 from Haz4rdovisk/feat/composer-polish",
+    "pullRequest": 582,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for the composer refinement; the functional delta is represented once by 0e3ff776d36570e334fe012ea86e25939ddd34c7.",
+    "checks": [
+     "npx electron scripts/verify-composer-ui.cjs"
+    ]
    }
   ]
  },
@@ -393,6 +445,7 @@
     "scripts/fixtures/composer-ui.js",
     "scripts/verify-composer-ui.cjs",
     "scripts/verify-plan-collapse.cjs",
+    "src/renderer/chat-models.ts",
     "src/renderer/chat.ts",
     "src/renderer/composer-motion.ts",
     "src/renderer/context-meter.ts",
@@ -400,6 +453,7 @@
     "src/renderer/styles.css",
     "test/composer-motion.test.ts",
     "test/context-meter.test.ts",
+    "test/renderer-chat-models.test.ts",
     "test/renderer-layout.test.ts"
    ],
    "upstreamAnchors": [
@@ -690,6 +744,21 @@
   }
  ],
  "retainedIdentifiers": [
+  {
+   "path": "docs/superpowers/plans/2026-09-29-upstream-2.1.20-migration.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: the approved migration plan names the upstream product being migrated, not the current ChatBBC product"
+  },
+  {
+   "path": "docs/superpowers/plans/2026-09-29-upstream-2.1.20-migration.md",
+   "literal": "chat-on-steroids",
+   "reason": "provenance-url: the approved migration plan names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "docs/superpowers/specs/2026-09-29-upstream-2.1.20-migration-design.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: the approved migration design names the upstream product being migrated, not the current ChatBBC product"
+  },
   {
    "path": "AGENTS.md",
    "literal": "Chat On Steroids",

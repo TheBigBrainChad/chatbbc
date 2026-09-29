@@ -67,14 +67,13 @@ it('limits the existing tool-detail preference to handoff briefs', () => {
   expect(chatSource).toContain("applyChatChecked($<HTMLInputElement>('goalIncludeToolCalls')");
 });
 
-it('keeps the context dialog with its native compaction actions in the existing composer group', () => {
+it('places context before the model picker and keeps native compaction actions in its dialog', () => {
   const group = document.getElementById('composerSettings')!.parentElement!;
-  expect(group.classList.contains('composer-options')).toBe(true);
-  expect(document.getElementById('contextMeter')!.parentElement).toBe(group);
-  expect(document.getElementById('contextMeterInfo')!.parentElement?.id).toBe('contextMeter');
-  expect(document.getElementById('contextMeterInfo')!.getAttribute('role')).toBe('dialog');
+  expect(group.classList.contains('composer-primary-controls')).toBe(true);
+  expect(document.getElementById('contextMeter')!.nextElementSibling?.id).toBe('modelMenu');
   expect(document.getElementById('compactSession')!.closest('[role=dialog]')?.id).toBe('contextMeterInfo');
   expect(document.getElementById('cancelCompaction')!.closest('[role=dialog]')?.id).toBe('contextMeterInfo');
+  expect(document.getElementById('contextMeterInfo')!.parentElement?.id).toBe('contextMeter');
 });
 
 it('centers the accessible Chats refresh icon without an extra grid text row', () => {
