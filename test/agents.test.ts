@@ -3587,6 +3587,41 @@ describe('through the MCP endpoint', () => {
     expect(report?.text).not.toContain('ended without ever confirming');
   });
 
+  it('does not call late queued work unread when the sleeping worker still owns it', async () => {
+    startSwarm(1);
+    bindConversation('worker-1', 'c-worker-1');
+    sendMessage(prime, 'worker-1', 'second assignment: run the canary again');
+
+    await asChat('c-worker-1', 'finish', { result: 'first assignment done' });
+
+    const report = offerMessagesForConversation(PRIME_CHAT)?.messages.find((message) =>
+      message.text.includes('[worker-1 reported]')
+    );
+    expect(report?.text).not.toContain('ended without ever confirming');
+    expect(report?.text).toContain('still queued for it');
+    expect(swarmStateForCaller(prime).agents.find((agent) => agent.id === 'worker-1')?.pending).toBe(1);
+  });
+
+  it('keeps a queued worker message inside its run incarnation when worker-1 is reused', () => {
+    const oldPrime: Caller = { conversationId: 'c-prime-old-run' };
+    startSwarm(1, oldPrime);
+    bindConversation('worker-1', 'c-worker-old-run');
+    const queued = sendMessage(oldPrime, 'worker-1', 'belongs only to the old run');
+    expect(pendingCount('worker-1')).toBe(1);
+
+    expect(clearAgent(PRIME_ID).cleared).toBe('run');
+    const newPrime: Caller = { conversationId: 'c-prime-new-run' };
+    startSwarm(1, newPrime);
+    bindConversation('worker-1', 'c-worker-new-run');
+
+    expect(pendingCount('worker-1')).toBe(0);
+    expect(offerMessagesForConversation('c-worker-new-run')?.messages.map((message) => message.id) ?? []).not.toContain(queued.id);
+    expect(retiredWorkerForConversation('c-worker-old-run')).toMatchObject({
+      id: 'worker-1',
+      conversationId: 'c-worker-old-run'
+    });
+  });
+
   it('tells the prime how much worker capacity the report just freed, and that the worker is reusable', async () => {
     // A worker that reports is capacity coming back, and the prime is the only party that can
     // spend it. The final report used to end at the result, so "finished" read as an ending

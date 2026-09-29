@@ -2,12 +2,457 @@
  "schemaVersion": 1,
  "upstream": {
   "repository": "https://github.com/totec448-spec/chat-on-steroids",
-  "commit": "dee4b5e94b8598d7630e6db62bada9ac6050f457",
-  "version": "2.1.18"
+  "commit": "4e51a04d8e89a559e16d17fc7df6f547e57d666d",
+  "version": "2.1.20"
  },
  "downstream": {
   "repository": "https://github.com/TheBigBrainChad/chatbbc",
   "version": "2.2.0"
+ },
+ "ports": {
+  "from": "dee4b5e94b8598d7630e6db62bada9ac6050f457",
+  "to": "4e51a04d8e89a559e16d17fc7df6f547e57d666d",
+  "entries": [
+   {
+    "commit": "e22a96779954ebc6dee9b5d541a50865611ad5ad",
+    "author": "Maxim",
+    "subject": "Do not call a queued message unread when a worker finishes",
+    "pullRequest": 569,
+    "classification": "adapt",
+    "paths": [
+     "src/main/agents.ts",
+     "test/agents.test.ts"
+    ],
+    "decision": "Port the reporting fix through ChatBBC's current run-scoped worker inbox. Never-offered rows for a reusable sleeping worker are described as still queued; exact prime-family/run/conversation ownership remains unchanged.",
+    "checks": [
+     "npx vitest run test/agents.test.ts",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "940fb2cf00c8c193e881646ac1198893959b0329",
+    "author": "Maxim",
+    "subject": "Merge remote-tracking branch 'upstream/main' into fix/worker-unconfirmed-caveat",
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge-only ancestry for the worker queued-message fix; behavior is represented once by e22a96779954ebc6dee9b5d541a50865611ad5ad.",
+    "checks": [
+     "npx vitest run test/agents.test.ts"
+    ]
+   },
+   {
+    "commit": "e7829a17639231874a7ee800d0c0c60d8a325d35",
+    "author": "Maxim",
+    "subject": "Merge pull request #569 from Maximapple/fix/worker-unconfirmed-caveat",
+    "pullRequest": 569,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for the worker queued-message fix; no second copy of the functional delta is applied.",
+    "checks": [
+     "npx vitest run test/agents.test.ts"
+    ]
+   },
+   {
+    "commit": "c7702509c6a2c1f8e96dfb04dec2a523a7e80230",
+    "author": "Maxim",
+    "subject": "Repair project page titles and answer /hello honestly without a protocol",
+    "pullRequest": 571,
+    "classification": "adapt",
+    "paths": [
+     "src/main/bridge.ts",
+     "src/main/session/store.ts",
+     "src/main/session/title.ts",
+     "test/bridge.test.ts",
+     "test/session.test.ts"
+    ],
+    "decision": "Port protocol-less /hello as identification-only tri-state compatibility while keeping all privileged routes protocol-strict; reject project shell titles at the existing session-title owner without changing conversation or manual-title authority.",
+    "checks": [
+     "npx vitest run test/bridge.test.ts",
+     "npx vitest run test/session.test.ts",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "c54d14853453a9e413585a38c9d8e60e593671ca",
+    "author": "Maxim",
+    "subject": "Merge remote-tracking branch 'upstream/main' into fix/hello-and-project-titles",
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge-only ancestry for the hello/title repair; behavior is represented once by c7702509c6a2c1f8e96dfb04dec2a523a7e80230.",
+    "checks": [
+     "npx vitest run test/bridge.test.ts",
+     "npx vitest run test/session.test.ts"
+    ]
+   },
+   {
+    "commit": "0e00b3f96571d7d5f518710e7b71fec2b08d670a",
+    "author": "Maxim",
+    "subject": "Merge pull request #571 from Maximapple/fix/hello-and-project-titles",
+    "pullRequest": 571,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for the hello/title repair; no duplicate functional patch is applied.",
+    "checks": [
+     "npx vitest run test/bridge.test.ts",
+     "npx vitest run test/session.test.ts"
+    ]
+   },
+   {
+    "commit": "afbe1284fe373fddba9ac017403f7ef34251458a",
+    "author": "Maxim",
+    "subject": "Remove invisible characters from stored API keys",
+    "pullRequest": 578,
+    "classification": "adapt",
+    "paths": [
+     "src/main/secrets.ts",
+     "test/secrets.test.ts"
+    ],
+    "decision": "Normalize invisible paste characters at ChatBBC's encrypted credential owner for API-key slots only. Existing secure-storage availability, mutation queue, cache publication and non-API secret semantics remain authoritative.",
+    "checks": [
+     "npx vitest run test/secrets.test.ts",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "702944ae455e198952dddc32d9e2cf675dcdf5ca",
+    "author": "Maxim",
+    "subject": "Merge pull request #578 from Maximapple/fix/openrouter-auth",
+    "pullRequest": 578,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for the credential normalization fix; behavior is represented once by afbe1284fe373fddba9ac017403f7ef34251458a.",
+    "checks": [
+     "npx vitest run test/secrets.test.ts"
+    ]
+   },
+   {
+    "commit": "62c897201a4ee6eee833851ce40738de3a7c77d3",
+    "author": "Maxim",
+    "subject": "Show replies that point to other content instead of the raw pointer",
+    "pullRequest": 576,
+    "classification": "adapt",
+    "paths": [
+     "src/shared/content-reference.ts",
+     "src/renderer/chat.ts",
+     "test/content-reference.test.ts",
+     "test/renderer-html.test.ts"
+    ],
+    "decision": "Port provider content-reference presentation through one shared resolver. A recorded same-message native rendering may resolve presentation, but it never creates conversation, turn, request, or session authority.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts test/renderer-html.test.ts",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "79f9f67c64da61261250873b0c6f84ff78fddfb5",
+    "author": "Maxim",
+    "subject": "Merge pull request #576 from Maximapple/fix/content-reference-directive",
+    "pullRequest": 576,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for the initial content-reference presentation fix; no duplicate functional patch is applied.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts test/renderer-html.test.ts"
+    ]
+   },
+   {
+    "commit": "d011888d4ec89d819b2c1861fe30073f13dba311",
+    "author": "Maxim",
+    "subject": "Let Goal and worker reports read the reply a content pointer stands for",
+    "pullRequest": 579,
+    "classification": "adapt",
+    "paths": [
+     "src/main/goal.ts",
+     "src/main/session/store.ts",
+     "src/shared/content-reference.ts",
+     "test/goal.test.ts",
+     "test/session.test.ts"
+    ],
+    "decision": "Use the same provider-directive resolver for Goal and completed-final projections after canonical message ownership is already established. Canonical stored text and identity fields remain unchanged.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts test/goal.test.ts test/session.test.ts"
+    ]
+   },
+   {
+    "commit": "6612df2a5ca377e51e01222a0796418229baa129",
+    "author": "Maxim",
+    "subject": "Merge remote-tracking branch 'upstream/main' into fix/content-reference-text",
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge-only ancestry for model-facing content-reference text; behavior is represented by the functional content-reference entries.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts test/goal.test.ts test/session.test.ts"
+    ]
+   },
+   {
+    "commit": "1348d8a28e0e36e2bbc4ca218ffc2d7622e54c95",
+    "author": "Maxim",
+    "subject": "Handle any unknown ChatGPT directive instead of one fix per name",
+    "pullRequest": 580,
+    "classification": "adapt",
+    "paths": [
+     "src/shared/content-reference.ts",
+     "src/renderer/chat.ts",
+     "test/content-reference.test.ts",
+     "test/renderer-html.test.ts"
+    ],
+    "decision": "Generalize the resolver to unknown provider leaf/container directives while explicitly excluding ChatBBC-supported writing blocks. Unknown syntax fails presentation-soft and cannot become execution authority.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts test/renderer-html.test.ts"
+    ]
+   },
+   {
+    "commit": "bdb8c7de77288b6bd94ec97ffabc7096bf73d0cb",
+    "author": "Maxim",
+    "subject": "Merge branch 'fix/content-reference-text' into fix/unknown-provider-directives",
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge-only ancestry joining the content-reference model-facing and generic-directive work; no duplicate functional delta is applied.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts"
+    ]
+   },
+   {
+    "commit": "01283bbdf8b90ef09220c663bfab535dda1e3c15",
+    "author": "Maxim",
+    "subject": "Note the generic ChatGPT directive handling in the changelog",
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Upstream changelog provenance for generic directive handling; it is not copied as a ChatBBC release claim.",
+    "checks": [
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "2738e8c049f90b7e2de902653652aafde4dda9ee",
+    "author": "Maxim",
+    "subject": "Merge pull request #579 from Maximapple/fix/content-reference-text",
+    "pullRequest": 579,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for model-facing content-reference text; the behavior is already represented once.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts test/goal.test.ts test/session.test.ts"
+    ]
+   },
+   {
+    "commit": "29a5141eaa423013b29a563e26c8d82ad3ac2080",
+    "author": "Maxim",
+    "subject": "Merge pull request #580 from Maximapple/fix/unknown-provider-directives",
+    "pullRequest": 580,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for generic unknown-provider directive handling; the functional delta is represented by 1348d8a28e0e36e2bbc4ca218ffc2d7622e54c95.",
+    "checks": [
+     "npx vitest run test/content-reference.test.ts test/renderer-html.test.ts"
+    ]
+   },
+   {
+    "commit": "0e3ff776d36570e334fe012ea86e25939ddd34c7",
+    "author": "Haz4rdovisk",
+    "subject": "Refine the composer: mode picker, Plan toggle, context dialog and model menu",
+    "pullRequest": 582,
+    "classification": "adapt",
+    "paths": [
+     "scripts/fixtures/composer-ui.js",
+     "scripts/verify-composer-ui.cjs",
+     "scripts/verify-plan-collapse.cjs",
+     "src/renderer/chat-models.ts",
+     "src/renderer/chat.ts",
+     "src/renderer/composer-motion.ts",
+     "src/renderer/context-meter.ts",
+     "src/renderer/index.html",
+     "src/renderer/styles.css",
+     "src/renderer/locales/de.json",
+     "src/renderer/locales/es.json",
+     "src/renderer/locales/fr.json",
+     "src/renderer/locales/ja.json",
+     "src/renderer/locales/pt-BR.json",
+     "src/renderer/locales/pt-PT.json",
+     "src/renderer/locales/tr.json",
+     "src/renderer/locales/zh-CN.json",
+     "src/renderer/locales/zh-TW.json",
+     "test/composer-motion.test.ts",
+     "test/context-meter.test.ts",
+     "test/renderer-chat-models.test.ts",
+     "test/renderer-layout.test.ts",
+     "test/renderer-timeline.test.ts"
+    ],
+    "decision": "Port the composer refinement through ChatBBC's existing renderer authorities: draft key/generation, Goal/session controls, immutable outbox admission, provider-observed model catalog and live Omarchy theme projection. Visible mode/model/Plan controls remain projections over those existing owners rather than introducing new durable selection or send state.",
+    "checks": [
+     "npx vitest run test/renderer-chat-models.test.ts test/renderer-timeline.test.ts test/renderer-layout.test.ts test/context-meter.test.ts test/composer-motion.test.ts",
+     "npx electron scripts/verify-composer-ui.cjs",
+     "npx electron scripts/verify-plan-collapse.cjs",
+     "npm run verify:rebrand",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "557b2bdd6038c15c95f7a35114864bfeac4e50f0",
+    "author": "Maxim",
+    "subject": "Merge pull request #582 from Haz4rdovisk/feat/composer-polish",
+    "pullRequest": 582,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for the composer refinement; the functional delta is represented once by 0e3ff776d36570e334fe012ea86e25939ddd34c7.",
+    "checks": [
+    "npx electron scripts/verify-composer-ui.cjs"
+    ]
+   },
+   {
+    "commit": "3b792d9071dd507fcb0c43a94de37c3227504ba7",
+    "author": "Adrian Acurero",
+    "subject": "Add an opt-in local control API with read-only health and status",
+    "pullRequest": 583,
+    "classification": "adapt",
+    "paths": [
+     "AGENTS.md",
+     "SECURITY.md",
+     "docs/setup.md",
+     "src/main/config.ts",
+     "src/main/control-api.ts",
+     "src/main/index.ts",
+     "src/main/ipc.ts",
+     "src/preload/index.ts",
+     "src/renderer/index.html",
+     "src/renderer/locales/de.json",
+     "src/renderer/locales/es.json",
+     "src/renderer/locales/fr.json",
+     "src/renderer/locales/ja.json",
+     "src/renderer/locales/pt-BR.json",
+     "src/renderer/locales/pt-PT.json",
+     "src/renderer/locales/tr.json",
+     "src/renderer/locales/zh-CN.json",
+     "src/renderer/locales/zh-TW.json",
+     "src/renderer/main.ts",
+     "src/shared/control-api.ts",
+     "src/shared/types.ts",
+     "test/config.test.ts",
+     "test/control-api.test.ts",
+     "test/ipc.test.ts"
+    ],
+    "decision": "Adapt the upstream opt-in local control surface to ChatBBC as a read-only loopback projection with zero application-state ownership. Config remains the one owner of enablement; settings use the existing three-way merge; renderer state exposes only the boolean switch, never endpoint/token secrets; documentation keeps the boundary distinct from MCP and the companion bridge.",
+    "checks": [
+     "npx vitest run test/config.test.ts test/control-api.test.ts test/ipc.test.ts",
+     "npm run typecheck",
+     "npm run verify:rebrand",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "4e51a04d8e89a559e16d17fc7df6f547e57d666d",
+    "author": "Maxim",
+    "subject": "Merge pull request #583 from AcureroAdrian/control-surface",
+    "pullRequest": 583,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for the local control API; the functional delta is represented once by 3b792d9071dd507fcb0c43a94de37c3227504ba7.",
+   "checks": [
+     "npx vitest run test/config.test.ts test/control-api.test.ts test/ipc.test.ts"
+    ]
+   },
+   {
+    "commit": "f2ebc66553f41887c6b28b160fc89ec98f30d4c9",
+    "author": "Maxim",
+    "subject": "Retry failed tests on the Intel macOS release runner only",
+    "classification": "intentionally-not-imported",
+    "paths": [
+     ".github/workflows/release.yml",
+     "vitest.config.ts"
+    ],
+    "decision": "Do not import the Intel-macOS-only release-runner retry. ChatBBC has no hosted release workflow and its supported release/acceptance host is local Linux x64, so the retry policy has no downstream execution owner.",
+    "checks": [
+     "npm run verify:upstream-map",
+     "npm run verify:rebrand"
+    ]
+   },
+   {
+    "commit": "44d78f15bcb19953bfb124f80a8a47d0aada425d",
+    "author": "Maxim",
+    "subject": "Stamp the standalone extension ZIP like the packaged app",
+    "classification": "intentionally-not-imported",
+    "paths": [
+     ".github/workflows/release.yml"
+    ],
+    "decision": "Do not import standalone companion ZIP release stamping. ChatBBC ships the companion unpacked with the Linux x64 app and has no hosted standalone-extension ZIP release owner.",
+    "checks": [
+     "npm run verify:upstream-map",
+     "npm run verify:rebrand"
+    ]
+   },
+   {
+    "commit": "c5f09bb5b8c26898a1daf42195ce3c68a941582b",
+    "author": "Maxim",
+    "subject": "Release 2.1.19: the browser connects on its own again",
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Record upstream 2.1.19 release/version/changelog provenance only. ChatBBC versioning is independent at 2.2.0, and upstream release notes/changelog text are not republished as ChatBBC release claims.",
+    "checks": [
+     "npm run verify:rebrand",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "78b3f746e49787fc1f6ca955332549c7696a20ed",
+    "author": "Maxim",
+    "subject": "Merge pull request #573 from Maximapple/release/2.1.19-prep",
+    "pullRequest": 573,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge provenance for upstream 2.1.19 release preparation; no second functional or release delta is applied downstream.",
+    "checks": [
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "8720bee01776d99a114a20651f2c4c2345a2a2c2",
+    "author": "Maxim",
+    "subject": "Release 2.1.20: cleaner replies and working OpenRouter keys",
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Record upstream 2.1.20 release/version/changelog provenance only. Functional fixes from this release range are represented by their own port entries; ChatBBC remains version 2.2.0 with downstream release notes/history.",
+    "checks": [
+     "npm run verify:rebrand",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "d1b1518988218b7cdb04bc3f792f4dceb648a125",
+    "author": "Maxim",
+    "subject": "Merge pull request #581 from Maximapple/release/2.1.20-prep",
+    "pullRequest": 581,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge provenance for upstream 2.1.20 release preparation; no duplicate functional or release delta is applied downstream.",
+    "checks": [
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "f096c27a589296601a0331afb6dbfcb6a6b0b3de",
+    "author": "Maxim",
+    "subject": "Merge pull request #572 from Maximapple/ci/extension-zip-stamp",
+    "pullRequest": 572,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge provenance for the standalone extension ZIP stamping change, which is intentionally not imported under ChatBBC's unpacked-companion release policy.",
+    "checks": [
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "d0d4c856c56d1afa909271e45514d9ccd923f21e",
+    "author": "Maxim",
+    "subject": "Merge pull request #566 from Maximapple/ci/release-intel-retry",
+    "pullRequest": 566,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge provenance for the Intel macOS release-runner retry, which remains outside ChatBBC's local Linux x64 release scope.",
+    "checks": [
+     "npm run verify:upstream-map"
+    ]
+   }
+  ]
  },
  "changes": [
   {
@@ -23,8 +468,8 @@
     ".github/workflows/publish.yml",
     ".github/workflows/release.yml"
    ],
-   "decision": "Hosted GitHub Actions workflows are not imported. Build, test and release run on the local Linux x64 host, so the three workflow files are deleted rather than translated.",
-   "portRule": "Translate any new upstream workflow gate into a local script under scripts/ and map it; never restore a file under .github/workflows.",
+   "decision": "Hosted GitHub Actions workflows are not imported. Build, test and release run on the local Linux x64 host, so the three workflow files are deleted rather than translated. Upstream Intel-macOS retry and standalone-extension ZIP workflow changes therefore have no downstream execution owner.",
+   "portRule": "Translate only platform-independent upstream workflow intent that applies to the Linux x64 local release into a local script under scripts/ and map it. Never restore a file under .github/workflows, Intel/macOS runner policy, or a standalone companion ZIP release path.",
    "checks": [
     "npm run verify:upstream-map",
     "npm run verify:rebrand"
@@ -72,7 +517,6 @@
     "src/main/update.ts",
     "src/main/version.ts",
     "src/main/workspace.ts",
-    "src/renderer/index.html",
     "src/renderer/main.ts",
     "src/renderer/pets.ts",
     "src/renderer/plugins.ts",
@@ -89,8 +533,8 @@
     "extension/manifest.json",
     "extension/background.js"
    ],
-   "decision": "The package, app, bridge, extension and connector identity is ChatBBC: slug chatbbc, protocol 18, app ID com.chatbbc.app, and the three connectors ChatBBC Core, Desktop and Plugins. Live product strings are renamed; tool schemas, route shapes and pairing behavior are unchanged.",
-   "portRule": "Reapply the ChatBBC identity values on every port. The slug and the protocol are independent fail-closed gates, so bump or rename them separately and update both sides together.",
+   "decision": "The package, app, bridge, extension and connector identity is ChatBBC: slug chatbbc, protocol 18, app ID com.chatbbc.app, and the three connectors ChatBBC Core, Desktop and Plugins. ChatBBC's downstream version is independently 2.2.0; upstream 2.1.19/2.1.20 version-only bumps are provenance, not downstream release authority. Live product strings are renamed; tool schemas, route shapes and pairing behavior are unchanged.",
+   "portRule": "Reapply the ChatBBC identity values and independent downstream version policy on every port. The slug and the protocol are independent fail-closed gates, so bump or rename them separately and update both sides together. Never inherit an upstream release version merely because functional commits are ported.",
    "checks": [
     "npm run verify:rebrand",
     "npm test -- test/bridge.test.ts"
@@ -126,6 +570,68 @@
    "portRule": "Translate new product strings into every locale file and keep ChatBBC itself untranslated. Preserve the catalog artwork copyright sentence; do not machine-translate authored or provider text.",
    "checks": [
     "npm run verify:rebrand"
+   ]
+  },
+  {
+   "id": "content-reference",
+   "category": "content-reference",
+   "paths": [
+    "src/shared/content-reference.ts",
+    "test/content-reference.test.ts",
+    "test/renderer-html.test.ts"
+   ],
+   "upstreamAnchors": [
+    "src/renderer/chat.ts"
+   ],
+   "decision": "Provider directives are interpreted by one shared resolver. ChatBBC keeps its writing-block renderer, identity fences and sanitized message renderer while adopting upstream content-reference behavior.",
+   "portRule": "Port provider directive syntax/resolution through src/shared/content-reference.ts. Captured HTML is same-message presentation evidence only; never use it to infer conversation, turn, request or session ownership. Preserve ChatBBC writing blocks and sanitizer behavior.",
+   "checks": [
+    "npx vitest run test/content-reference.test.ts test/renderer-html.test.ts test/goal.test.ts test/session.test.ts",
+    "npm run verify:upstream-map"
+   ]
+  },
+  {
+   "id": "composer",
+   "category": "composer",
+   "paths": [
+    "src/renderer/chat.ts",
+    "src/renderer/index.html",
+    "src/renderer/styles.css"
+   ],
+   "upstreamAnchors": [
+    "src/renderer/chat.ts",
+    "src/renderer/index.html",
+    "src/renderer/styles.css"
+   ],
+   "decision": "The upstream composer refinement is ported as presentation over ChatBBC's existing draft, Goal, outbox and model-observation owners. Composer motion never owns resting geometry; context values remain local estimates. The same files also preserve ChatBBC content-reference rendering, public identity and live Omarchy palette behavior.",
+   "portRule": "Port composer layout, motion, mode/model controls and verification without introducing a second send, draft, Goal, model or theme owner. Preserve ChatBBC identity strings, shared provider-directive handling and Omarchy variables whenever upstream changes chat.ts, index.html or styles.css.",
+   "checks": [
+    "npx vitest run test/composer-motion.test.ts test/context-meter.test.ts test/renderer-layout.test.ts",
+    "npx electron scripts/verify-plan-collapse.cjs",
+    "npx electron scripts/verify-composer-ui.cjs",
+    "npm run verify:upstream-map"
+   ]
+  },
+  {
+   "id": "control-api",
+   "category": "control-api",
+   "paths": [
+    "src/main/config.ts",
+    "src/preload/index.ts",
+    "test/config.test.ts",
+    "test/control-api.test.ts",
+    "test/ipc.test.ts"
+   ],
+   "upstreamAnchors": [
+    "src/main/config.ts"
+   ],
+   "decision": "ChatBBC adopts the opt-in read-only local control API as a projection of existing connection, bridge, plugin, update and call-context owners. The listener owns no application state, defaults off, binds loopback only, and publishes only an explicit non-secret status schema. Renderer/preload settings expose only the enablement boolean and use the existing stale-safe three-way settings merge.",
+   "portRule": "Keep the control API disabled by default and fail malformed config to off. Preserve serialized start/stop/shutdown, per-process token files, Origin/Host/auth/body/rate fences and allowlist-only status projection. Settings may start or stop it only when the authoritative config switch actually changes; never expose endpoint/token secrets to renderer state or turn this into another MCP surface, browser bridge, session owner or settings authority.",
+   "checks": [
+    "npx vitest run test/config.test.ts test/control-api.test.ts test/ipc.test.ts",
+    "npm run typecheck",
+    "npm run verify:rebrand",
+    "npm run verify:upstream-map"
    ]
   },
   {
@@ -191,7 +697,6 @@
     "src/renderer/appearance.ts",
     "src/renderer/pet-overlay.ts",
     "src/renderer/settings.css",
-    "src/renderer/styles.css",
     "src/shared/appearance.ts",
     "src/shared/pets.ts",
     "test/appearance.test.ts",
@@ -273,15 +778,16 @@
     "scripts/verify-settings-layout.cjs",
     "scripts/verify-sidebar-setup.cjs",
     "scripts/verify-workspace-terminal.cjs",
-    "scripts/verify-windows-capture-border.mjs"
+    "scripts/verify-windows-capture-border.mjs",
+    "vitest.config.ts"
    ],
    "upstreamAnchors": [
     "scripts/verify-appearance.cjs",
     "scripts/verify-browser-control.mjs",
     ".github/workflows/ci.yml"
    ],
-   "decision": "Local verification and fetch scripts name ChatBBC in their fixtures, window titles and User-Agent strings, and scripts/verify-local-ui.mjs runs the Wayland GUI fixtures on the local host instead of a hosted runner.",
-   "portRule": "Keep verification local and on Wayland. Rename product strings in fixtures when the identity changes, and do not point a fixture at a hosted runner or a predecessor product name.",
+   "decision": "Local verification and fetch scripts name ChatBBC in their fixtures, window titles and User-Agent strings, and scripts/verify-local-ui.mjs runs the Wayland GUI fixtures on the local host instead of a hosted runner. Platform-specific Intel-macOS retry configuration is not adopted into the Linux-local Vitest policy.",
+   "portRule": "Keep verification local and on Wayland/Linux x64. Rename product strings in fixtures when the identity changes, and do not point a fixture at a hosted runner or a predecessor product name. Do not import retry policy whose only owner is an unsupported upstream release platform.",
    "checks": [
     "npm run verify:rebrand"
    ]
@@ -295,22 +801,26 @@
     ".github/ISSUE_TEMPLATE/feature_request.yml",
     ".github/pull_request_template.md",
     "AGENTS.md",
+    "CHANGELOG.md",
     "CLAUDE.md",
     "CONTRIBUTING.md",
     "README.md",
     "SECURITY.md",
     "docs/plugins.md",
+    "docs/release-notes/v2.1.19.md",
+    "docs/release-notes/v2.1.20.md",
     "docs/setup.md",
     "docs/tool-surface.md",
-    "docs/worklog-2026-09-28-chatbbc-port.md"
+    "docs/worklog-2026-09-28-chatbbc-port.md",
+    "docs/worklog-2026-09-28-composer-integration.md"
    ],
    "upstreamAnchors": [
     "README.md",
     "AGENTS.md",
     "CONTRIBUTING.md"
    ],
-   "decision": "Current docs, the agent guide and issue templates name ChatBBC, target Linux x64 and point at local commands. Upstream provenance links and historical reports stay, and the hosted-CI badges and Windows, macOS and ARM download promises are gone.",
-   "portRule": "Reapply the ChatBBC naming and Linux x64 scope to current docs. Keep upstream provenance links and historical reports as historical, and never restore a hosted-CI badge or a non-Linux download promise.",
+   "decision": "Current docs, the agent guide and issue templates name ChatBBC, target Linux x64 and point at local commands. Upstream provenance links and historical reports stay, while upstream 2.1.19/2.1.20 release notes, upstream composer worklog material and upstream changelog release claims are not copied into current ChatBBC documentation. Hosted-CI badges and Windows, macOS and ARM download promises are gone.",
+   "portRule": "Reapply the ChatBBC naming and Linux x64 scope to current docs. Keep upstream provenance links and genuinely historical reports as historical; map target-baseline-only upstream release notes/worklogs as intentional downstream omissions after the target baseline becomes authoritative. Never present an upstream release/changelog entry as a ChatBBC release, restore a hosted-CI badge, or add a non-Linux download promise.",
    "checks": [
     "npm run verify:rebrand"
    ]
@@ -319,6 +829,7 @@
    "id": "verification",
    "category": "verification",
    "paths": [
+    "test/agents.test.ts",
     "test/bridge.test.ts",
     "test/connection.test.ts",
     "test/content-script.test.ts",
@@ -387,19 +898,36 @@
    "category": "documentation",
    "paths": [
     "docs/UPSTREAM.md",
-    "docs/upstream-map.json"
+    "docs/upstream-map.json",
+    "docs/superpowers/plans/2026-09-29-upstream-2.1.20-migration.md",
+    "docs/superpowers/specs/2026-09-29-upstream-2.1.20-migration-design.md"
    ],
    "upstreamAnchors": [
     "AGENTS.md"
    ],
-   "decision": "docs/upstream-map.json is the machine-readable authority for which downstream path belongs to which decision; docs/UPSTREAM.md is the porting runbook and points at the map instead of duplicating it.",
-   "portRule": "Update the map in the same change as the port. Advance the pinned upstream commit only after the whole upstream delta is accounted for; record a partial port in ports instead.",
+   "decision": "docs/upstream-map.json is the machine-readable authority for which downstream path belongs to which decision; docs/UPSTREAM.md is the porting runbook; the committed superpowers spec and plan are downstream migration records and remain ChatBBC-owned documentation.",
+   "portRule": "Update the map in the same change as the port. Advance the pinned upstream commit only after the whole upstream delta is accounted for; record a partial port in ports instead. Keep the migration spec/plan as downstream records rather than attempting to source them from upstream.",
    "checks": [
     "npm run verify:upstream-map"
    ]
   }
  ],
  "retainedIdentifiers": [
+  {
+   "path": "docs/superpowers/plans/2026-09-29-upstream-2.1.20-migration.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: the approved migration plan names the upstream product being migrated, not the current ChatBBC product"
+  },
+  {
+   "path": "docs/superpowers/plans/2026-09-29-upstream-2.1.20-migration.md",
+   "literal": "chat-on-steroids",
+   "reason": "provenance-url: the approved migration plan names or links to the pinned upstream repository; provenance is kept, not rebranded"
+  },
+  {
+   "path": "docs/superpowers/specs/2026-09-29-upstream-2.1.20-migration-design.md",
+   "literal": "Chat On Steroids",
+   "reason": "historical-report: the approved migration design names the upstream product being migrated, not the current ChatBBC product"
+  },
   {
    "path": "AGENTS.md",
    "literal": "Chat On Steroids",

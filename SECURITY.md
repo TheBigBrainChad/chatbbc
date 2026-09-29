@@ -22,6 +22,10 @@ ChatBBC is a permission boundary between ChatGPT and the logged-in OS user runni
 - Screen/control permissions also enable the companion's background browser tools on Chromium hosts. Chrome grants required debugger/tabs and HTTP(S) host permissions; there is no additional per-tab approval dialog. Read-only disables browser input, navigation, tab creation/closure and page JavaScript. Linux does not provide the native desktop screen/input API; retained Windows/macOS helpers are not supported release targets.
 - MCP servers bind to loopback and use secret tokenized paths. Public reachability comes only from the tunnel you configure.
 - The companion-extension bridge is a separate loopback service and exposes no filesystem, command or settings-mutation route.
+- The optional local control API is off by default and is a separate, loopback-only, read-only status projection for trusted local tooling.
+  - It binds only `127.0.0.1`; its per-launch bearer token is stored under ChatBBC's user-data directory and is never issued over HTTP. Any same-user process that can read that directory can use the API.
+  - Requests carrying a browser `Origin` are refused.
+  - Status responses are explicitly allowlisted and do not expose MCP paths, tunnel ids, plugin configuration or credentials.
 - Stored API/bridge credentials use Electron `safeStorage` backed by a secure desktop secret store on Linux. Linux `basic_text` is refused; normal Activity logs are redacted, capped and memory-only.
 - Session recording is separate durable local history. It is on for fresh installs and can be disabled.
 

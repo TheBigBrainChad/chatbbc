@@ -1,3 +1,4 @@
+import { hasProviderDirective, resolvedCapture, withoutProviderDirectives } from '../shared/content-reference.js';
 import { createWorkspaceTerminal } from './workspace-terminal.js';
 import { createWorkspaceDocks } from './workspace-docks.js';
 import { ui, t } from './i18n.js';
@@ -23,7 +24,7 @@ import { renderRecoveryCountdowns } from './recovery.js';
 import type { RecoveryCountdown } from '../shared/recovery.js';
 import { communicationTitle, foldAgentCommunication } from './agent-communication.js';
 import { initContextMeter, paintContextMeter } from './context-meter.js';
-import { installComposerHeightMotion } from './composer-motion.js';
+import { installComposerDockMotion, installComposerHeightMotion } from './composer-motion.js';
 import { sanitizeHtmlTree } from './sanitize-html.js';
 import { isAstraModel } from '../shared/chat-models.js';
 import { supportsFinishAutomation } from '../shared/finish.js';
@@ -999,7 +1000,7 @@ function dockAction(label: string | (() => string), symbol: string, click: (even
 function paintActiveGoal(): void {
   const row = $('activeGoalRow');
   const mode = $<HTMLSelectElement>('chatAutomation').value;
-  row.hidden = !selectedId || mode === 'off';
+  row.hidden = mode === 'off';
   if (row.hidden) { row.replaceChildren(); return; }
   const objective = $<HTMLTextAreaElement>('sessionObjective').value.trim();
   const label = el('span', 'queue-label', () => `${mode === 'loop' ? t("Loop") : t("Pursuing goal")}${objective ? ' · ' + objective : ''}`);
@@ -1009,9 +1010,28 @@ function paintActiveGoal(): void {
     dockAction(() => t("Edit task"), 'i-pencil', event => {
       // This opener is outside the menu; its click must not immediately dismiss it.
       event.stopPropagation();
-      $<HTMLDetailsElement>('composerSettings').open = true;
-      $<HTMLTextAreaElement>('sessionObjective').focus();
+      openObjectiveEditor();
     }));
+}
+// A mode-menu pencil edits that mode's objective without switching automation;
+// Save applies the objective and turns the mode on through the existing path.
+let objectiveEditMode: 'goal' | 'loop' | null = null;
+// Saving hands progress and failures to the dock's lifecycle row; the editor closes.
+function closeObjectiveEditor(): void {
+  $<HTMLDetailsElement>('composerSettings').open = false;
+  $('composerSettings').querySelector<HTMLElement>('summary')!.focus();
+}
+function openObjectiveEditor(mode: 'goal' | 'loop' | null = null): void {
+  const current = $<HTMLSelectElement>('chatAutomation').value;
+  const next = mode && mode !== current ? mode : null;
+  if (next && next !== $<HTMLSelectElement>('sessionObjectiveMode').value) {
+    cancelGoalRequest(); goalIntentGeneration++;
+    $('sessionObjective').dataset.edited = 'true'; delete $('sessionObjective').dataset.saved;
+  }
+  objectiveEditMode = next; paintAutomationSwitch();
+  $('composerSettings').classList.remove('mode-picker');
+  $<HTMLDetailsElement>('composerSettings').open = true;
+  $<HTMLTextAreaElement>('sessionObjective').focus();
 }
 type TaskPlanDraft = { text: string; requestId: string | null; stages: string[] | null; sending: boolean; progress: TaskProgress | null; error: string | null };
 // Planning belongs to its draft key. Completed stages own their captured objective
@@ -1158,14 +1178,13 @@ async function queuePreparedPlan(key: string, plan: TaskPlanDraft & { stages: st
 function paintTaskActions(): void {
   const objective = $<HTMLTextAreaElement>('sessionObjective');
   const save = $<HTMLButtonElement>('saveSessionObjective');
-  const off = $<HTMLSelectElement>('chatAutomation').value === 'off';
+  const off = $<HTMLSelectElement>('chatAutomation').value === 'off' && !objectiveEditMode;
   objective.hidden = off;
   document.querySelector<HTMLLabelElement>('label[for="sessionObjective"]')!.hidden = off;
   save.hidden = off;
   const saved = objective.dataset.saved === objective.value && !!objective.value.trim();
   save.disabled = objective.disabled || !objective.value.trim() || save.dataset.busy === 'true' || saved;
   ui(save.querySelector('span')!, 'textContent', () => save.dataset.busy === 'true' ? t("Saving…") : saved ? t("Saved") : t("Save task"));
-  const text = authoredComposerText().trim();
   for (const id of ['createPlan']) {
     const button = $<HTMLButtonElement>(id);
     const plan = taskPlans.get(draftKey()), planMode = !!plan;
@@ -1173,8 +1192,9 @@ function paintTaskActions(): void {
     else { delete button.dataset.busy; button.removeAttribute('aria-busy'); }
     button.disabled = plan?.sending === true;
     button.setAttribute('aria-pressed', String(planMode));
-    ui(button.querySelector('span')!, 'textContent', () => planMode ? t("Cancel plan") : t("Create plan"));
-    ui(button, 'title', () => planMode ? t("Return to a normal message; keep your draft") : text ? t("Split your message into editable stages") : t("Write a message in the composer first"));
+    ui(button.querySelector('span')!, 'textContent', () => t("Plan"));
+    ui(button, 'aria-label', () => planMode ? t("Cancel plan") : t("Create plan"));
+    ui(button, 'title', () => planMode ? t("Return to a normal message; keep your draft") : t("Split your message into editable stages"));
   }
 }
 function paintLoopDelivery(): void {
@@ -1190,12 +1210,19 @@ function paintAutomationSwitch(): void {
   paintGoalProgress();
   paintActiveGoal();
   const select = $<HTMLSelectElement>('chatAutomation');
+  const mode = select.value;
+  $('composerModeIcon').className = `ico ph ph-${mode === 'loop' ? 'arrows-clockwise' : mode === 'goal' ? 'target' : 'chat-circle'}`;
+  $('composerSettings').dataset.mode = mode;
+  ui($('composerModeLabel'), 'textContent', () => mode === 'off' ? t('Normal') : mode === 'goal' ? t('Goal') : t('Loop'));
   for (const button of $('automationSwitch').querySelectorAll<HTMLButtonElement>('[data-mode]')) {
     button.setAttribute('aria-checked', String(button.dataset.mode === select.value));
     button.disabled = select.disabled;
   }
-  $<HTMLSelectElement>('sessionObjectiveMode').value = select.value === 'loop' ? 'loop' : 'goal';
-  const loop = select.value === 'loop';
+  for (const button of $('automationSwitch').querySelectorAll<HTMLButtonElement>('[data-edit-mode]')) button.disabled = select.disabled;
+  if (objectiveEditMode === select.value) objectiveEditMode = null;
+  const editMode = objectiveEditMode ?? (select.value === 'loop' ? 'loop' : 'goal');
+  $<HTMLSelectElement>('sessionObjectiveMode').value = editMode;
+  const loop = editMode === 'loop';
   ui(document.querySelector('label[for="sessionObjective"]')!, 'textContent', () => loop ? t("Loop instructions") : t("Goal"));
   ui($<HTMLTextAreaElement>('sessionObjective'), 'placeholder', () => loop ? t("What should each continuation focus on?") : t("What should this chat achieve?"));
   paintTaskActions();
@@ -1251,8 +1278,8 @@ async function refreshSessionControls(): Promise<void> {
   paintDeliveryControls();
   paintStateLine();
   menu.hidden = !controls;
-  $('compactSession').hidden = false;
-  if (!controls) return;
+  $('compactSession').hidden = !controls;
+  if (!controls) { $('cancelCompaction').hidden = true; return; }
   const objective = $<HTMLTextAreaElement>('sessionObjective');
   if (objective.dataset.sessionId !== id || !objective.dataset.edited) {
     objective.value = controls.objective;
@@ -1584,7 +1611,15 @@ export function renderedMarkdown(source: string, capture?: StoredText): HTMLElem
   // Fiber's canonical text can be complete while a background provider tab still
   // paints its first words. Render this revision directly; captured DOM HTML is
   // never evidence that it contains the current message revision.
-  const text = withoutMessageReaction(source).slice(0, MAX_RENDERED_HTML_CHARS);
+  let text = withoutMessageReaction(source).slice(0, MAX_RENDERED_HTML_CHARS);
+  // Provider directives this app does not draw are presentation syntax, not message content.
+  // A same-message native capture may resolve them; otherwise keep safe inner text and drop
+  // unknown control lines rather than showing raw provider syntax.
+  if (hasProviderDirective(text)) {
+    const plain = withoutProviderDirectives(text);
+    if (resolvedCapture(capture)) return renderedMessage(capture, plain);
+    text = plain || t('This reply points to content from another message that was not recorded.');
+  }
   const citations = text.includes('\uE200') ? citationLabels(text, capture) : new Map<string, string>();
   // An inline tokenizer leaves literal citation examples inside code spans/fences intact.
   const parser = new Marked({ gfm: true, extensions: [WRITING_BLOCK, {
@@ -4282,7 +4317,11 @@ export function initChat(next: Deps): void {
   ], paintSessions);
   deps = next;
   const stopComposerHeightMotion = installComposerHeightMotion($('composer'));
-  window.addEventListener('beforeunload', stopComposerHeightMotion, { once: true });
+  const stopComposerDockMotion = installComposerDockMotion($('composerDock'));
+  window.addEventListener('beforeunload', () => {
+    stopComposerHeightMotion();
+    stopComposerDockMotion();
+  }, { once: true });
   const chatHost = document.querySelector<HTMLElement>('[data-panel="chat"]')!;
   const docks = createWorkspaceDocks(chatHost);
   workspaceDocks = docks;
@@ -4326,15 +4365,24 @@ export function initChat(next: Deps): void {
     paintDeliveryControls();
   });
   $('automationSwitch').addEventListener('click', (event) => {
+    const edit = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-edit-mode]');
+    if (edit) {
+      if (edit.disabled) return;
+      openObjectiveEditor(edit.dataset.editMode as 'goal' | 'loop');
+      return;
+    }
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-mode]');
     if (!button || button.disabled) return;
     const select = $<HTMLSelectElement>('chatAutomation');
     select.value = button.dataset.mode!;
     select.dispatchEvent(new Event('change'));
+    $<HTMLDetailsElement>('composerSettings').open = false;
+    $('composerSettings').querySelector<HTMLElement>('summary')!.focus();
   });
   $('chatAutomation').addEventListener('change', async () => {
     goalIntentGeneration++;
     const select = $<HTMLSelectElement>('chatAutomation');
+    objectiveEditMode = null;
     cancelGoalRequest();
     if (select.value === 'off') goalDraftView = null;
     select.dataset.edited = 'true'; paintAutomationSwitch();
@@ -4395,6 +4443,7 @@ export function initChat(next: Deps): void {
         if (!draft.trim()) return;
         const settings = confirmedComposerModel();
         if (!settings) { toast(t('Reload model choices and select an available model and thinking effort before sending.')); return; }
+        closeObjectiveEditor();
         const selection = selectionGeneration, intent = goalIntentGeneration, requestId = crypto.randomUUID();
         const projectId = selectedProjectId;
         const { model, reasoningEffort } = settings;
@@ -4435,6 +4484,7 @@ export function initChat(next: Deps): void {
       const selection = selectionGeneration, draft = objective.value;
       const text = objective.value.trim();
       if (!text) return;
+      closeObjectiveEditor();
       const mode = $<HTMLSelectElement>('sessionObjectiveMode').value as 'goal' | 'loop';
       const button = $<HTMLButtonElement>(buttonId); button.dataset.busy = 'true'; paintTaskActions();
       const requestId = crypto.randomUUID(); goalProgress = { requestId, selection, phase: 'saving', text: '' }; paintGoalProgress();
@@ -4593,7 +4643,7 @@ export function initChat(next: Deps): void {
   $('chatInput').addEventListener('input', () => {
     const hasText = !!authoredComposerText().trim();
     const plan = taskPlans.get(draftKey());
-    if (plan && !plan.stages && (plan.requestId || !hasText)) {
+    if (plan && !plan.stages && plan.requestId) {
       cancelTaskPlan();
       if (hasText) taskPlans.set(draftKey(), { text: '', requestId: null, stages: null, sending: false, progress: null, error: null });
     }
@@ -4604,8 +4654,20 @@ export function initChat(next: Deps): void {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (currentPreparedPlan() || authoredComposerText().trim() || imageDrafts.get(draftKey())?.length) $<HTMLFormElement>('composer').requestSubmit(); }
   });
   $('composerSettings').addEventListener('toggle', paintTaskActions);
+  $('composerSettings').querySelector('summary')!.addEventListener('click', () => {
+    // Retain the same contents through closing; switching views here on close
+    // would flash the task editor during the exit transition.
+    if (!$<HTMLDetailsElement>('composerSettings').open) {
+      $('composerSettings').classList.add('mode-picker');
+      if (objectiveEditMode) { objectiveEditMode = null; paintAutomationSwitch(); }
+    }
+  });
   initContextMeter();
-  $('createPlan').addEventListener('click', () => { if (taskPlans.has(draftKey())) cancelTaskPlan(); else void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); });
+  $('createPlan').addEventListener('click', () => {
+    // The toolbar toggle only arms planning; Send/Enter generates from the draft.
+    if (taskPlans.has(draftKey())) cancelTaskPlan();
+    else { taskPlans.set(draftKey(), { text: '', requestId: null, stages: null, sending: false, progress: null, error: null }); paintTaskPlan(); $('chatInput').focus(); }
+  });
   $('composer').addEventListener('submit', (event) => {
     event.preventDefault();
     const controlAction = event.submitter === $('chatSend') && $('chatSend').dataset.action === 'stop';

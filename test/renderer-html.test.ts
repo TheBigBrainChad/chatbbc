@@ -39,6 +39,14 @@ describe('captured ChatGPT rendered HTML', () => {
     expect(renderedMarkdown(':::writing{title="x"}\nno end').textContent).toContain(':::writing');
   });
 
+  it('never shows an unknown ChatGPT directive as raw text', () => {
+    const leaf = '::chatgpt-entity{type="place" id="42"}';
+    expect(renderedMarkdown(leaf, whole('<p>Berlin</p>')).textContent?.trim()).toBe('Berlin');
+    expect(renderedMarkdown(`Intro\n${leaf}`).textContent).not.toContain('::chatgpt-entity');
+    expect(renderedMarkdown(':::canvas{title="Plan"}\nStep one\n:::').textContent).toContain('Step one');
+    expect(renderedMarkdown(':::canvas{title="Plan"}\nStep one\n:::').textContent).not.toContain(':::');
+  });
+
   it('renders the recorded native URL token as its authored label and opens it through validated IPC', () => {
     const openLink = vi.fn(async () => ({ ok: true, data: true }));
     (dom.window as any).api.openLink = openLink;

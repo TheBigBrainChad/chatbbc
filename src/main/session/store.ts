@@ -21,6 +21,7 @@
  *   sessions/<id>/handoffs/<id>.json
  */
 
+import { modelFacingText } from '../../shared/content-reference.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { isProModel } from '../../shared/chat-models.js';
 import { constants as fsConstants, promises as fs } from 'node:fs';
@@ -42,7 +43,7 @@ import type {
 import { continuationMarkerOf, eventTokens, MAX_TOOL_RESULT_TOKENS, normalizedToolOutcome, storedTextTokens, workSequence } from '../../shared/session.js';
 import { applyTurnIdentity, authoredTimeOf, chronological, injectedUserMessage, positionOf, projectTimeline,
   recordedRequestTurn, responseTurnId, type Chronological, type TimelineTurns } from '../../shared/chronology.js';
-import { automaticTitle, firstTitleMessage, legacyContextTitle, providerTitleIgnored, refreshUserTitle } from './title.js';
+import { automaticTitle, firstTitleMessage, legacyContextTitle, projectPageTitle, providerTitleIgnored, refreshUserTitle } from './title.js';
 import { agentPlanSchema, agentPlanUpdateSchema, MAX_AGENT_PLAN_BYTES, type AgentPlan, type AgentPlanUpdate } from '../../shared/agent-plan.js';
 import { getConfig } from '../config.js';
 import { logError, logInfo, logWarn } from '../logger.js';
@@ -1801,7 +1802,7 @@ export async function readCompletedFinal(sessionId: string, conversationId: stri
     return event.kind === 'assistant_message' || event.kind === 'page_tool';
   })) return null;
   return { messageId, turnId: final.turnId ?? null, completedAt, contentSeq: seq,
-    text: final.kind === 'turn_end' ? '' : final.message.text };
+    text: final.kind === 'turn_end' ? '' : modelFacingText(final.message.text, final.renderedHtml) };
 }
 
 /** Recorded local execution, not a native tool label or a request-id sighting alone. */
@@ -3021,7 +3022,7 @@ export async function renameSession(id: string, title: string, source: SessionSu
       if (conversationId && entry.summary.conversationId !== conversationId) return;
       if (!automaticTitle(entry.summary, firstTitleMessage(entry.messages.values()))) return;
       if (source === 'fallback' && entry.summary.titleSource === 'provider') return;
-      if (source === 'provider' && providerTitleIgnored(entry.summary)) return;
+      if (source === 'provider' && (providerTitleIgnored(entry.summary) || projectPageTitle(title))) return;
     }
     if (entry.summary.title === title.slice(0, 120) && entry.summary.titleSource === source) return;
     entry.summary.title = title.slice(0, 120);

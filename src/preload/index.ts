@@ -52,6 +52,8 @@ export interface SettingsPatch {
   multiAgent: Config['multiAgent'];
   goal: Config['goal'];
   mcp: Config['mcp'];
+  /** Optional so stale/older settings writers do not have to carry this opt-in surface. */
+  controlApi?: Config['controlApi'];
 }
 
 /** One page of the model catalogue, as the model picker asks for it. */

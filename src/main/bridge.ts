@@ -1855,7 +1855,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         app: APP_SLUG,
         version: APP_VERSION,
         bridge: BRIDGE_PROTOCOL,
-        compatible: protocolCompatible(req),
+        compatible: extensionProtocol(req) === null ? null : protocolCompatible(req),
         paired: stored !== null && stored !== BROWSER_DISCONNECTED,
         disconnected: stored === BROWSER_DISCONNECTED
       },

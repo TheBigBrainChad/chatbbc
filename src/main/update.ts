@@ -71,11 +71,16 @@ const RECHECK_MS = 6 * 60 * 60_000;
 export function stagedArtifact(
   platform: NodeJS.Platform = process.platform,
   arch: string = process.arch,
-  appImage: string | undefined = process.env.APPIMAGE,
-  packaged: boolean = app.isPackaged
+  appImage?: string,
+  packaged?: boolean
 ): { name: string; target: string } | null {
-  if (!packaged || platform !== 'linux' || arch !== 'x64' || !appImage) return null;
-  return { name: 'ChatBBC-Linux-x64.AppImage', target: appImage };
+  // An explicitly supplied `undefined` means “no AppImage”. Only an omitted argument
+  // inherits the process environment. This keeps installation classification deterministic
+  // even when tests/tools themselves happen to be running from an AppImage.
+  const currentAppImage = arguments.length >= 3 ? appImage : process.env.APPIMAGE;
+  const currentPackaged = arguments.length >= 4 ? packaged : app.isPackaged;
+  if (!currentPackaged || platform !== 'linux' || arch !== 'x64' || !currentAppImage) return null;
+  return { name: 'ChatBBC-Linux-x64.AppImage', target: currentAppImage };
 }
 
 /**
@@ -85,10 +90,12 @@ export function stagedArtifact(
 export function manualDownloadName(
   platform: NodeJS.Platform = process.platform,
   arch: string = process.arch,
-  appImage: string | undefined = process.env.APPIMAGE,
-  packaged: boolean = app.isPackaged
+  appImage?: string,
+  packaged?: boolean
 ): string | null {
-  return packaged && platform === 'linux' && arch === 'x64' && !appImage
+  const currentAppImage = arguments.length >= 3 ? appImage : process.env.APPIMAGE;
+  const currentPackaged = arguments.length >= 4 ? packaged : app.isPackaged;
+  return currentPackaged && platform === 'linux' && arch === 'x64' && !currentAppImage
     ? 'ChatBBC-Linux-x64.AppImage' : null;
 }
 

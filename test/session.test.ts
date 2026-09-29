@@ -2849,6 +2849,62 @@ describe('canonical recorder 1.8', () => {
     expect(await readCompletedFinal(sessionId!, conversationId, turnId)).not.toBeNull();
   });
 
+  it('returns resolved model-facing text for a completed provider pointer without changing its message identity', async () => {
+    const conversationId = 'completed-provider-pointer';
+    const turnId = 'pointer-turn';
+    const session = await createSession({ conversationId, title: 'Pointer final' });
+    await appendEvent(session.id, {
+      time: 100,
+      source: 'extension',
+      kind: 'user_message',
+      turnId,
+      messageId: 'pointer-question',
+      message: { text: 'Answer this', chars: 11, truncated: false }
+    });
+    const pointer = '::chatgpt-content-reference{index="0" source_message_id="m-source"}';
+    await appendEvent(session.id, {
+      time: 110,
+      source: 'extension',
+      kind: 'assistant_message',
+      turnId,
+      messageId: 'pointer-answer',
+      final: true,
+      state: 'final',
+      message: { text: pointer, chars: pointer.length, truncated: false },
+      renderedHtml: { text: '<p>Resolved final answer</p>', chars: 28, truncated: false }
+    });
+    const { readCompletedFinal } = await import('../src/main/session/store.js');
+    expect(await readCompletedFinal(session.id, conversationId, turnId)).toMatchObject({
+      messageId: 'pointer-answer',
+      turnId,
+      text: 'Resolved final answer'
+    });
+
+    const unresolvedTurn = 'pointer-turn-unresolved';
+    await appendEvent(session.id, {
+      time: 120,
+      source: 'extension',
+      kind: 'user_message',
+      turnId: unresolvedTurn,
+      messageId: 'pointer-question-2',
+      message: { text: 'Answer again', chars: 12, truncated: false }
+    });
+    await appendEvent(session.id, {
+      time: 130,
+      source: 'extension',
+      kind: 'assistant_message',
+      turnId: unresolvedTurn,
+      messageId: 'pointer-unresolved',
+      final: true,
+      state: 'final',
+      message: { text: pointer, chars: pointer.length, truncated: false },
+      renderedHtml: { text: '<p>Unproved capture</p>', chars: 23, truncated: true }
+    });
+    const unresolved = await readCompletedFinal(session.id, conversationId, unresolvedTurn);
+    expect(unresolved?.text).not.toContain('::chatgpt-content-reference');
+    expect(unresolved?.text).not.toContain('Unproved capture');
+  });
+
   it('never cross-attributes concurrent same-tool calls from two chats', async () => {
     const now = Date.now();
     const firstId = 'conv-concurrent-a';
@@ -3189,6 +3245,21 @@ describe('naming the chats this app opened', () => {
       { kind: 'conversation_title', time: Date.now(), text: 'A Later ChatGPT Rename' }
     ]);
     expect((await getSession(opened.sessionId!))?.title).toBe('My manual title');
+  });
+
+  it('ignores the project page shell title and still accepts the later real conversation title', async () => {
+    const conversationId = 'project-page-title';
+    const opened = await recordChatObservations(conversationId, [
+      { kind: 'user_message', time: Date.now(), text: 'repair the title', messageId: 'u-project' }
+    ]);
+    await recordChatObservations(conversationId, [
+      { kind: 'conversation_title', time: Date.now(), text: 'ChatGPT - Homelab Development' }
+    ]);
+    expect((await getSession(opened.sessionId!))?.title).toBe('repair the title');
+    await recordChatObservations(conversationId, [
+      { kind: 'conversation_title', time: Date.now(), text: 'Repair Session Titles' }
+    ]);
+    expect((await getSession(opened.sessionId!))?.title).toBe('Repair Session Titles');
   });
 
   it('keeps rendered instruction frames out of titles and repairs only their exact recorded fallback', async () => {

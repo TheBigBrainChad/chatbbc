@@ -2475,12 +2475,23 @@ function planFinish(agent: Agent, result: string): { info: AgentInfo; report: Ag
     silenceRecoveryTurnId: null,
     silenceRecoveryRequestOriginMax: null
   };
+  // A message never offered to this worker is not lost: it remains in this run-scoped inbox and
+  // reaches the same reusable worker next. Only an earlier finish-offer retry, or any unconfirmed
+  // row for a terminal worker whose chat cannot be reused, is genuinely uncertain.
+  const queuedNext = terminal
+    ? []
+    : unconfirmed.filter((id) => agent.queue.some((message) => message.id === id && message.offeredAt === null));
+  const uncertain = unconfirmed.filter((id) => !queuedNext.includes(id));
+  const list = (ids: string[]) => `${ids.slice(0, 5).join(', ')}${ids.length > 5 ? ', …' : ''}`;
   const caveat =
-    unconfirmed.length > 0
-      ? `\n(${agent.info.id} ended without ever confirming ${unconfirmed.length} message(s) you sent it — ` +
-        `${unconfirmed.slice(0, 5).join(', ')}${unconfirmed.length > 5 ? ', …' : ''}. ` +
-        'Assume it may not have read them and check the result against what you asked for.)'
-      : '';
+    (uncertain.length > 0
+      ? `\n(${agent.info.id} ended without ever confirming ${uncertain.length} message(s) you sent it — ` +
+        `${list(uncertain)}. Assume it may not have read them and check the result against what you asked for.)`
+      : '') +
+    (queuedNext.length > 0
+      ? `\n(${queuedNext.length} message(s) you sent ${agent.info.id} arrived after its last step — ${list(queuedNext)}. ` +
+        'They are still queued for it and reach it next; there is no need to send them again.)'
+      : '');
   // A worker that stops is a freed slot, and the prime is the only party that can use it —
   // but nothing in the final report ever said so. The recorded runs show the consequence: a
   // prime that has just been told a worker ended sits on remaining work rather than putting

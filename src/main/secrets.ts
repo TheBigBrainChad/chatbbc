@@ -64,6 +64,16 @@ function enqueue<T>(operation: () => Promise<T>): Promise<T> {
  */
 export type SecretKey = 'openaiApiKey' | 'bridgeToken' | 'openRouterApiKey' | 'customProviderApiKey' | `plugin:${string}` | `setup:${string}`;
 
+const INVISIBLE_IN_KEYS = /[\s\u0085\u00AD\u180E\u200B-\u200F\u2028-\u202F\u205F-\u2064\u2066-\u206F\uFEFF]/g;
+
+function isApiKey(key: SecretKey): boolean {
+  return key === 'openaiApiKey' || key === 'openRouterApiKey' || key === 'customProviderApiKey' || key.startsWith('setup:');
+}
+
+export function cleanApiKey(value: string): string {
+  return value.replace(INVISIBLE_IN_KEYS, '');
+}
+
 export function initSecretsPath(userDataDir: string): void {
   secretsPath = path.join(userDataDir, FILE_NAME);
 }
@@ -250,8 +260,9 @@ async function rotateIfNeeded(): Promise<void> {
 
 export async function getSecret(key: SecretKey): Promise<string | null> {
   const all = await readAll();
-  const value = all[key];
+  const stored = all[key];
   await rotateIfNeeded();
+  const value = stored && isApiKey(key) ? cleanApiKey(stored) : stored;
   return value && value.length > 0 ? value : null;
 }
 
@@ -275,7 +286,7 @@ export function setSecret(key: SecretKey, value: string): Promise<void> {
       throw new Error('Secure OS credential storage is unavailable, so the key was not saved');
     }
     const all = { ...current };
-    const trimmed = value.trim();
+    const trimmed = isApiKey(key) ? cleanApiKey(value) : value.trim();
     if (trimmed === '') {
       delete all[key];
     } else {

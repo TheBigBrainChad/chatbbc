@@ -324,6 +324,12 @@ export interface McpSettings {
   instructions: string;
 }
 
+/** The opt-in local control API for a trusted local process watching this app. */
+export interface ControlApiSettings {
+  /** Serve the read-only loopback API and write its token to userData. Off unless explicitly enabled. */
+  enabled: boolean;
+}
+
 export interface Config {
   /** Inactive setups only. Keys remain in encrypted secret slots addressed by profile ID. */
   setupProfiles?: Array<{ id: string; name: string; tunnelId: string; desktopTunnelId: string; pluginsTunnelId: string }>;
@@ -338,6 +344,7 @@ export interface Config {
   commandAllowlist: CommandAllowlistSettings;
   goal: GoalSettings;
   mcp: McpSettings;
+  controlApi: ControlApiSettings;
 }
 
 export type ConnectionState =

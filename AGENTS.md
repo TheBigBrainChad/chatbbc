@@ -113,6 +113,8 @@ losing the project, history, workers or queued instructions when a chat grows to
 
 There are four cooperating planes. Core, Desktop and Plugins are three logical MCP surfaces on
 the local MCP listener; the browser bridge is a separate loopback service with separate auth.
+The optional local control API (§18) is a third loopback listener for trusted local tooling. It
+projects other owners' state and is not a plane or fact owner of its own.
 
 ```text
 ChatGPT model                         ChatGPT browser page
@@ -221,6 +223,7 @@ Paths in this section are repository-relative. Most mechanisms have `main`, `sha
 | App shell | `src/main/index.ts`, `window-lifecycle.ts`, `window-layout.ts`, `window-icon.ts`, `tray-image.ts`, `shutdown.ts`: bootstrap, activation, geometry, tray and bounded exit. |
 | Config/security | `src/main/config.ts`, `platform.ts`, `secrets.ts`, `sandbox.ts`, `redaction.ts`; `src/shared/types.ts`, `capabilities.ts`: permission and host projection, secrets, approved paths. |
 | Publication | `src/main/connection.ts`, `mcp/server.ts`, `mcp/surfaces.ts`, `tunnel/{index,health,locate}.ts`, `diagnostics.ts`: endpoint/tunnel generation and truthful status. |
+| Local control API | `src/main/control-api.ts`, `src/shared/control-api.ts`: opt-in loopback listener, per-launch token and allowlisted read-only projections of other owners. Owns zero application facts and is neither MCP nor the companion bridge. |
 | Tool dispatch | `src/main/mcp/{tools,kernel,inbound,call-context,tool-declarations}.ts`, `tools-core.ts`, `tools-desktop.ts`, `tools-plugins.ts`: declarations, exact caller, live guards and evidence. |
 | Code composition | `src/main/mcp/code-mode-{tool,runtime,worker}.ts`: surface-scoped `exec`, QuickJS admission, limits and explicit emissions. |
 | Instructions/plan | `src/main/mcp/{instructions,coding-instructions,plan-tool}.ts`, `src/shared/agent-plan.ts`, `src/renderer/agent-plan.ts`: executor contract and displayed progress plan. |
@@ -267,6 +270,7 @@ Paths in this section are repository-relative. Most mechanisms have `main`, `sha
 | Browser repair | `bridge.ts` process-memory episodes | Re-earn from live evidence; never restore an old reload token as action authority. |
 | Catalog/usage | Saved successful `chat-models`; derived `usage-cache`; live usage snapshot | Catalog is observation, not a send receipt; estimates are not provider billing. |
 | Connector refresh | `plugin-refresh.ts` / `state/plugin-refresh.json` | Exact installed app id + schema fingerprint, claimed before Refresh, verified after. |
+| Control API endpoint | `control-api.ts` / `control-api/{token,endpoint.json}` | Per launch, only while the listener runs. Token is written before the endpoint; endpoint is removed first on stop. Stale crash files are discovery hints only and never prove a live process. |
 
 ## 5. Startup, configuration and shutdown
 
@@ -283,7 +287,8 @@ plugin manager, loads Goal ledgers, exact correlations and blocked chats, then r
 and every active/dormant prime family. Persistence hooks exist even when multi-agent is Off.
 Continuation restore follows swarm restore because it may repair prime ownership. IPC/input
 hooks precede browser traffic. Then the secure window/tray, bridge for recording or agents,
-independent retention maintenance, optional connector auto-connect and updater lifetime begin.
+the opt-in local control API, independent retention maintenance, optional connector auto-connect
+and updater lifetime begin.
 The current first-window model-discovery exception is noted in §21.
 
 Settings use validated current config and `effectiveCapabilities()`. Fresh-install defaults,
@@ -3086,6 +3091,17 @@ Separate local listener health, public tunnel reachability, ChatGPT connector co
 browser attachment in both status and diagnosis. Stale connect/disconnect results cannot replace
 a newer endpoint. Secret paths/tokens are not public diagnostics.
 
+The local control API (`control-api.ts`, **Settings → Setup → Advanced**, off by default) serves
+`/v1/health` and `/v1/status` to trusted local tooling. It binds only `127.0.0.1` on an ephemeral
+port and writes a fresh per-launch bearer token under `userData/control-api/`; that token is never
+issued over HTTP. Browser `Origin` requests are refused, the request `Host` must name the live
+listener, and only bodyless GET requests are accepted. Status is an explicit allowlisted projection
+of the connection, bridge, plugin, updater and MCP call-context owners. MCP token paths, tunnel ids
+and URLs, plugin sources/configuration and credentials never appear; free text is redacted. The API
+owns no timer, retry, recovery or application fact. Start/stop are serialized, settings only alter
+the listener when `controlApi.enabled` actually changes, and final shutdown cannot be reversed by a
+late settings save. It is neither an MCP surface nor the companion bridge.
+
 Disconnect immediately publishes `disconnecting` and coalesces repeated clicks into one
 transition. MCP drain protects only complete requests admitted to the adapter: idle TCP,
 partial headers and incomplete bodies are closed without waiting for HTTP timeouts. Accepted
@@ -3259,7 +3275,7 @@ the whole run replaying one long workflow; avoid optimizing speculative edge cas
 | Transcript order, UI clobber, usage | store/chronology → IPC → renderer | `session`, `chronology`, `renderer-*`, `timeline-scroll`, `session-usage`, `usage-observer` |
 | Files/patch/output/code-mode | concrete tool owner → kernel serialization | `codex-*`, `exec-*`, `code-mode-*`, `mcp-tool-declarations` |
 | Plugins/auth/native Desktop | manager/exposure/OAuth or computer frame owner | `plugins-*`, `computer*`, `tools-desktop-*`, `macos-*` |
-| Startup/connection/shipping | lifecycle/config/connection or packaging script | `config`, `window-*`, `shutdown`, `tunnel*`, `packaging`, `update`, `third-party-notices` |
+| Startup/connection/shipping | lifecycle/config/connection or packaging script | `config`, `window-*`, `shutdown`, `tunnel*`, `control-api`, `packaging`, `update`, `third-party-notices` |
 
 Discover current suites with `rg --files test`; do not maintain a stale suite count. Validate
 both ends of every changed protocol: app↔extension, content↔MAIN, main↔preload↔renderer,
