@@ -12,7 +12,47 @@
  "ports": {
   "from": "dee4b5e94b8598d7630e6db62bada9ac6050f457",
   "to": "4e51a04d8e89a559e16d17fc7df6f547e57d666d",
-  "entries": []
+  "entries": [
+   {
+    "commit": "e22a96779954ebc6dee9b5d541a50865611ad5ad",
+    "author": "Maxim",
+    "subject": "Do not call a queued message unread when a worker finishes",
+    "pullRequest": 569,
+    "classification": "adapt",
+    "paths": [
+     "src/main/agents.ts",
+     "test/agents.test.ts"
+    ],
+    "decision": "Port the reporting fix through ChatBBC's current run-scoped worker inbox. Never-offered rows for a reusable sleeping worker are described as still queued; exact prime-family/run/conversation ownership remains unchanged.",
+    "checks": [
+     "npx vitest run test/agents.test.ts",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "940fb2cf00c8c193e881646ac1198893959b0329",
+    "author": "Maxim",
+    "subject": "Merge remote-tracking branch 'upstream/main' into fix/worker-unconfirmed-caveat",
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "Merge-only ancestry for the worker queued-message fix; behavior is represented once by e22a96779954ebc6dee9b5d541a50865611ad5ad.",
+    "checks": [
+     "npx vitest run test/agents.test.ts"
+    ]
+   },
+   {
+    "commit": "e7829a17639231874a7ee800d0c0c60d8a325d35",
+    "author": "Maxim",
+    "subject": "Merge pull request #569 from Maximapple/fix/worker-unconfirmed-caveat",
+    "pullRequest": 569,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for the worker queued-message fix; no second copy of the functional delta is applied.",
+    "checks": [
+     "npx vitest run test/agents.test.ts"
+    ]
+   }
+  ]
  },
  "changes": [
   {
@@ -324,6 +364,7 @@
    "id": "verification",
    "category": "verification",
    "paths": [
+    "test/agents.test.ts",
     "test/bridge.test.ts",
     "test/connection.test.ts",
     "test/content-script.test.ts",
