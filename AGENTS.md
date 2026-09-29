@@ -21,7 +21,7 @@ changed lines before applying an older patch. Document the work and its actual v
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: downstream **ChatBBC 2.2.0**, app/companion bridge protocol **18**, forked
+Source alignment: downstream **ChatBBC 2.2.1**, app/companion bridge protocol **18**, forked
 from [Chat On Steroids](https://github.com/totec448-spec/chat-on-steroids/tree/dee4b5e94b8598d7630e6db62bada9ac6050f457)
 at `dee4b5e94b8598d7630e6db62bada9ac6050f457` (upstream 2.1.18). See
 [`docs/UPSTREAM.md`](docs/UPSTREAM.md) for the porting procedure and
@@ -3377,7 +3377,7 @@ workflow or claim hosted verification. `npm run release:local` verifies this loc
 tree, runs Wayland UI and packaged checks, and assembles an immutable candidate containing
 AppImage, companion ZIP, native-sources archive, manifest and SHA-256 checksums. A tag is
 not required for a candidate and no upload is implied. Explicit
-`npm run release:publish -- --tag v2.2.0` requires a reviewed local tag at clean HEAD,
+`npm run release:publish -- --tag v2.2.1` requires a reviewed local tag at clean HEAD,
 disabled Actions, no tracked workflows, absent remote release, tunnel freshness and verified
 uploaded draft asset hashes before publication. Never silently overwrite a tag/release.
 

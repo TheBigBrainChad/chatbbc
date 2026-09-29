@@ -742,7 +742,7 @@ describe('explicit publication', () => {
     const project = await createProject();
     const { run, commands } = scriptedRunner({ root: project.root });
     await expect(publishRelease({ root: project.root, run, log: () => {}, tag: undefined })).rejects.toThrow(
-      /--tag v2\.2\.0/
+      /--tag v2\.2\.1/
     );
     await expect(publishRelease({ root: project.root, run, log: () => {}, tag: 'v2.2.1' })).rejects.toThrow(
       /does not match app version/

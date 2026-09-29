@@ -26,13 +26,13 @@ function git(...args: string[]): string {
 const IDENTITY_FILES: Record<string, string> = {
   'package.json': JSON.stringify({
     name: 'chatbbc',
-    version: '2.2.0',
+    version: '2.2.1',
     author: 'TheBigBrainChad',
     homepage: 'https://github.com/TheBigBrainChad/chatbbc',
     desktopName: 'com.chatbbc.app.desktop'
   }),
   'src/main/version.ts': [
-    "export const APP_VERSION = '2.2.0';",
+    "export const APP_VERSION = '2.2.1';",
     "export const APP_TITLE = 'ChatBBC';",
     "export const APP_SLUG = 'chatbbc';",
     'export function extensionDownloadUrl(version = APP_VERSION): string {',
@@ -41,7 +41,7 @@ const IDENTITY_FILES: Record<string, string> = {
     'export const BRIDGE_PROTOCOL = 18;',
     ''
   ].join('\n'),
-  'extension/manifest.json': JSON.stringify({ manifest_version: 3, name: '__MSG_extension_name__', version: '2.2.0', default_locale: 'en' }),
+  'extension/manifest.json': JSON.stringify({ manifest_version: 3, name: '__MSG_extension_name__', version: '2.2.1', default_locale: 'en' }),
   'extension/_locales/en/messages.json': JSON.stringify({ extension_name: { message: 'ChatBBC Companion' } }),
   'src/main/mcp/surfaces.ts': [
     "export const CONNECTOR_BRAND = 'ChatBBC';",

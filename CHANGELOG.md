@@ -19,6 +19,25 @@ the app refuses the extension and asks you to reload the matching copy.
 
 - **Reviewing ChatGPT's edits is more dependable.** Every file of a larger edit can now be reviewed, not just the first eight. When a diff couldn't be kept, for example because the file was too large, the edit says so instead of simply showing no Review button. A partly kept edit shows how many of its files you can review.
 
+## [2.2.1] — Upstream 2.1.20 migration
+
+### Added
+
+- Optional, default-off loopback control API for trusted local status tooling.
+- Updated composer controls for Goal/Loop, Plan, model/effort selection and context estimates.
+- Shared rendering for ChatGPT provider content directives with translated safe fallbacks.
+
+### Fixed
+
+- Worker queued-message reporting, bridge discovery, project-title capture and API-key cleanup.
+- Explicit AppImage detection for updater callers and translated provider-content fallback text.
+
+### Compatibility
+
+- Linux x64 AppImage remains the only supported release target.
+- Bridge protocol remains 18.
+- Upstream provenance is pinned to Chat On Steroids 2.1.20.
+
 ## [2.1.18] — Recommended skills install again
 
 A quick fix for 2.1.17.

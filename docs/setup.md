@@ -132,7 +132,7 @@ npm run dist:dir:linux:x64
 npm run release:local
 ```
 
-`npm run release:local` assembles a validated local candidate with checksums and corresponding native library sources; it does not publish. `npm run release:publish -- --tag v2.2.0` is a separate explicit, gated operation after review. Windows/macOS/ARM and DEB are not downstream release targets, and no hosted CI builds this release.
+`npm run release:local` assembles a validated local candidate with checksums and corresponding native library sources; it does not publish. `npm run release:publish -- --tag v2.2.1` is a separate explicit, gated operation after review. Windows/macOS/ARM and DEB are not downstream release targets, and no hosted CI builds this release.
 
 Read [AGENTS.md](../AGENTS.md) before changing the app, [CONTRIBUTING.md](../CONTRIBUTING.md) before opening a PR, and [UPSTREAM.md](UPSTREAM.md) before porting upstream work.
 

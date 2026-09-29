@@ -7,7 +7,7 @@
  },
  "downstream": {
   "repository": "https://github.com/TheBigBrainChad/chatbbc",
-  "version": "2.2.0"
+  "version": "2.2.1"
  },
  "ports": {
   "from": "dee4b5e94b8598d7630e6db62bada9ac6050f457",
@@ -533,7 +533,7 @@
     "extension/manifest.json",
     "extension/background.js"
    ],
-   "decision": "The package, app, bridge, extension and connector identity is ChatBBC: slug chatbbc, protocol 18, app ID com.chatbbc.app, and the three connectors ChatBBC Core, Desktop and Plugins. ChatBBC's downstream version is independently 2.2.0; upstream 2.1.19/2.1.20 version-only bumps are provenance, not downstream release authority. Live product strings are renamed; tool schemas, route shapes and pairing behavior are unchanged.",
+   "decision": "The package, app, bridge, extension and connector identity is ChatBBC: slug chatbbc, protocol 18, app ID com.chatbbc.app, and the three connectors ChatBBC Core, Desktop and Plugins. ChatBBC's downstream version is independently 2.2.1; upstream 2.1.19/2.1.20 version-only bumps are provenance, not downstream release authority. Live product strings are renamed; tool schemas, route shapes and pairing behavior are unchanged.",
    "portRule": "Reapply the ChatBBC identity values and independent downstream version policy on every port. The slug and the protocol are independent fail-closed gates, so bump or rename them separately and update both sides together. Never inherit an upstream release version merely because functional commits are ported.",
    "checks": [
     "npm run verify:rebrand",
@@ -725,6 +725,7 @@
     "docs/licenses/native/SOURCE-BUILD.md",
     "docs/licenses/native/sources.json",
     "docs/release-notes/v2.2.0.md",
+    "docs/release-notes/v2.2.1.md",
     "electron-builder.yml",
     "scripts/check-release-absent.mjs",
     "scripts/generate-third-party-notices.mjs",

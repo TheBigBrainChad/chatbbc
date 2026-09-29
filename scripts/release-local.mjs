@@ -4,7 +4,7 @@
  * There is no hosted workflow left to run the release. `npm run release:local` builds one
  * candidate with the owners that already exist (`npm run verify`, `npm run verify:ui`,
  * `npm run dist:linux:x64`, the packaged GUI smoke, the native-source packager) and stages
- * exactly the five files a release carries. `npm run release:publish -- --tag v2.2.0` repeats
+ * exactly the five files a release carries. `npm run release:publish -- --tag v2.2.1` repeats
  * that same build on this machine and only then uploads a draft release, re-downloads the
  * attached bytes and compares them with the tested ones, and finally undrafts it.
  *
@@ -61,7 +61,7 @@ const REQUIRED_NOTES_TITLE = /^## (.+)$/m;
 export function assertSupportedHost({ platform = process.platform, arch = process.arch } = {}) {
   if (platform !== 'linux' || arch !== 'x64') {
     throw new Error(
-      `ChatBBC 2.2.0 ships one artifact for Linux x64; this host is ${platform}-${arch}. ` +
+      `ChatBBC 2.2.1 ships one artifact for Linux x64; this host is ${platform}-${arch}. ` +
         'Release commands run only on the supported target.'
     );
   }
@@ -799,7 +799,7 @@ export async function publishRelease({
 } = {}) {
   assertSupportedHost(host);
   if (!tag) {
-    throw new Error('release:publish needs an explicit tag: npm run release:publish -- --tag v2.2.0');
+    throw new Error('release:publish needs an explicit tag: npm run release:publish -- --tag v2.2.1');
   }
   const source = readSourceState(run);
   assertCleanSource(source);
@@ -877,7 +877,7 @@ export function parseArguments(argv) {
     if (!known.has(arg)) throw new Error(`Unknown option ${arg}.`);
     if (arg === '--tag') {
       const value = argv[++index];
-      if (!value || value.startsWith('--')) throw new Error('--tag needs a value, for example --tag v2.2.0.');
+      if (!value || value.startsWith('--')) throw new Error('--tag needs a value, for example --tag v2.2.1.');
     }
   }
   const flags = new Set(argv.filter((arg) => arg.startsWith('--')));
@@ -920,7 +920,7 @@ async function main() {
     return;
   }
   if (options.tag) {
-    throw new Error('--tag only applies to release:publish; use npm run release:publish -- --tag v2.2.0');
+    throw new Error('--tag only applies to release:publish; use npm run release:publish -- --tag v2.2.1');
   }
   const candidate = await runCandidate();
   process.stdout.write(`verified candidate ${candidate.directory}\n`);

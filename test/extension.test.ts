@@ -26,7 +26,7 @@ beforeAll(async () => {
 });
 
 describe('extension release metadata', () => {
-  it('ships the same 2.2.0 release in the app package and bundled extension', async () => {
+  it('ships the same 2.2.1 release in the app package and bundled extension', async () => {
     const pkg = JSON.parse(await fs.readFile(path.join(process.cwd(), 'package.json'), 'utf8')) as { version: string };
     const lock = JSON.parse(await fs.readFile(path.join(process.cwd(), 'package-lock.json'), 'utf8')) as {
       version: string;
@@ -35,7 +35,7 @@ describe('extension release metadata', () => {
     const manifest = JSON.parse(
       await fs.readFile(path.join(process.cwd(), 'extension', 'manifest.json'), 'utf8')
     ) as { version: string };
-    expect(APP_VERSION).toBe('2.2.0');
+    expect(APP_VERSION).toBe('2.2.1');
     expect(pkg.version).toBe(APP_VERSION);
     expect(lock.version).toBe(APP_VERSION);
     expect(lock.packages?.['']?.version).toBe(APP_VERSION);

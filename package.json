@@ -1,6 +1,6 @@
 {
   "name": "chatbbc",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "ChatBBC: a local MCP workspace for ChatGPT with approved-folder tools, browser integration, and durable workflows.",
   "license": "MIT",
   "author": "TheBigBrainChad",

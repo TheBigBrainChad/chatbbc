@@ -1,6 +1,6 @@
 # Porting upstream into ChatBBC
 
-ChatBBC 2.2.0 is a downstream of [Chat On Steroids](https://github.com/totec448-spec/chat-on-steroids), pinned to commit `4e51a04d8e89a559e16d17fc7df6f547e57d666d` (upstream version 2.1.20). The [downstream change map](upstream-map.json) is the machine-readable authority for changed paths, exact upstream anchors, port rules, checks and retained brand-string exceptions. This runbook explains the procedure; it does not replace that map. Preserve the upstream MIT license, contributors and third-party attribution when porting.
+ChatBBC 2.2.1 is a downstream of [Chat On Steroids](https://github.com/totec448-spec/chat-on-steroids), pinned to commit `4e51a04d8e89a559e16d17fc7df6f547e57d666d` (upstream version 2.1.20). The [downstream change map](upstream-map.json) is the machine-readable authority for changed paths, exact upstream anchors, port rules, checks and retained brand-string exceptions. This runbook explains the procedure; it does not replace that map. Preserve the upstream MIT license, contributors and third-party attribution when porting.
 
 ## Product boundary
 
@@ -12,7 +12,7 @@ ChatBBC 2.2.0 is a downstream of [Chat On Steroids](https://github.com/totec448-
 
 ## Local gates and publication
 
-Repository Actions are disabled; do not restore `.github/workflows` or use hosted runners, Actions artifacts, workflow dispatch, or `act` as acceptance evidence. Build and verify on Linux x64 with the project-compatible Node/Electron runtime and the exact lockfile. Run `npm ci`, `npm run verify:rebrand`, `npm run verify:upstream-map`, `npm run verify`, `npm run build`, `npm run verify:ui`, and `npm run dist:linux:x64`; inspect the real Wayland UI, packaged runtime, companion and MCP paths. `npm run release:local` builds a checked local candidate with manifest and SHA-256 checksums; source tests do not prove a GUI/package/provider flow. A later explicit `npm run release:publish -- --tag v2.2.0` requires a reviewed immutable tag, an absent release, disabled Actions, online tunnel freshness and an asset readback before a draft is published. Do not create a tag, push or publish as a side effect of a port.
+Repository Actions are disabled; do not restore `.github/workflows` or use hosted runners, Actions artifacts, workflow dispatch, or `act` as acceptance evidence. Build and verify on Linux x64 with the project-compatible Node/Electron runtime and the exact lockfile. Run `npm ci`, `npm run verify:rebrand`, `npm run verify:upstream-map`, `npm run verify`, `npm run build`, `npm run verify:ui`, and `npm run dist:linux:x64`; inspect the real Wayland UI, packaged runtime, companion and MCP paths. `npm run release:local` builds a checked local candidate with manifest and SHA-256 checksums; source tests do not prove a GUI/package/provider flow. A later explicit `npm run release:publish -- --tag v2.2.1` requires a reviewed immutable tag, an absent release, disabled Actions, online tunnel freshness and an asset readback before a draft is published. Do not create a tag, push or publish as a side effect of a port.
 
 Upstream release administration does not become downstream release authority. Upstream version,
 changelog and release-note commits are recorded in `ports.entries` for provenance while ChatBBC

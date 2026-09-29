@@ -11,7 +11,7 @@
  *     Files are enumerated, never allowlisted wholesale: one historical comment in a runtime
  *     file does not excuse the rest of it.
  *  2. Live declarations. The identity values a release depends on — package, desktop entry,
- *     app slug/protocol, extension, connector titles — must state ChatBBC and version 2.2.0,
+ *     app slug/protocol, extension, connector titles — must state ChatBBC and version 2.2.1,
  *     and no `.github/workflows` file may exist at all.
  *
  * `docs/upstream-map.json` is not scanned because it is the inventory itself, and this script is
@@ -96,7 +96,7 @@ export const IDENTITY_CHECKS = Object.freeze([
         return ['package.json is not valid JSON'];
       }
       if (pkg.name !== 'chatbbc') problems.push(`package.json name must be "chatbbc", got ${JSON.stringify(pkg.name)}`);
-      if (pkg.version !== '2.2.0') problems.push(`package.json version must be "2.2.0", got ${JSON.stringify(pkg.version)}`);
+      if (pkg.version !== '2.2.1') problems.push(`package.json version must be "2.2.1", got ${JSON.stringify(pkg.version)}`);
       if (pkg.homepage !== 'https://github.com/TheBigBrainChad/chatbbc') problems.push(`package.json homepage must point at TheBigBrainChad/chatbbc, got ${JSON.stringify(pkg.homepage)}`);
       const author = record(pkg.author) ? pkg.author.name : pkg.author;
       if (author !== 'TheBigBrainChad') problems.push(`package.json author must be "TheBigBrainChad", got ${JSON.stringify(pkg.author)}`);
@@ -132,7 +132,7 @@ export const IDENTITY_CHECKS = Object.freeze([
     verify: files => {
       const problems = [];
       const version = files['src/main/version.ts'];
-      for (const expected of ["APP_VERSION = '2.2.0'", "APP_TITLE = 'ChatBBC'", "APP_SLUG = 'chatbbc'", 'BRIDGE_PROTOCOL = 18', 'TheBigBrainChad/chatbbc/releases/download', 'ChatBBC-Extension.zip']) {
+      for (const expected of ["APP_VERSION = '2.2.1'", "APP_TITLE = 'ChatBBC'", "APP_SLUG = 'chatbbc'", 'BRIDGE_PROTOCOL = 18', 'TheBigBrainChad/chatbbc/releases/download', 'ChatBBC-Extension.zip']) {
         if (!version.includes(expected)) problems.push(`src/main/version.ts must declare ${JSON.stringify(expected)}`);
       }
       const background = files['extension/background.js'];
@@ -152,7 +152,7 @@ export const IDENTITY_CHECKS = Object.freeze([
       } catch {
         return ['extension/manifest.json is not valid JSON'];
       }
-      if (manifest.version !== '2.2.0') problems.push(`extension/manifest.json version must be "2.2.0", got ${JSON.stringify(manifest.version)}`);
+      if (manifest.version !== '2.2.1') problems.push(`extension/manifest.json version must be "2.2.1", got ${JSON.stringify(manifest.version)}`);
       let messages;
       try {
         messages = JSON.parse(files['extension/_locales/en/messages.json']);

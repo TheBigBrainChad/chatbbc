@@ -1,4 +1,4 @@
-<p align="center"><a href="https://github.com/TheBigBrainChad/chatbbc/releases">ChatBBC 2.2.0 · Linux x64 AppImage (check releases for publication and SHA-256 checksums)</a></p>
+<p align="center"><a href="https://github.com/TheBigBrainChad/chatbbc/releases">ChatBBC 2.2.1 · Linux x64 AppImage (check releases for publication and SHA-256 checksums)</a></p>
 
 <p align="center"><sub>Independent beta. Use at your own risk and within your provider's rules. <a href="#responsible-use-and-provider-rules">Read the usage notice</a> before connecting.</sub></p>
 

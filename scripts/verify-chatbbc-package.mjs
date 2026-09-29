@@ -123,7 +123,7 @@ async function main() {
   if (!process.env.WAYLAND_DISPLAY?.trim()) fail('requires a working Wayland session: WAYLAND_DISPLAY is not set');
 
   const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
-  if (version !== '2.2.0') fail(`expected product version 2.2.0, package.json says ${version}`);
+  if (version !== '2.2.1') fail(`expected product version 2.2.1, package.json says ${version}`);
 
   const appImage = findAppImage();
   const run = path.join(output, randomUUID());
