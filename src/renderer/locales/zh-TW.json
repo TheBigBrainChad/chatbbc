@@ -1748,5 +1748,6 @@
   "Omarchy theme unavailable; using saved colors.": "Omarchy 主題無法使用，正在使用已儲存的配色。",
   "Omarchy theme unavailable; using the last valid palette.": "Omarchy 主題無法使用，繼續使用上一次有效的配色。",
   "Local control API: let trusted tools on this computer read app status": "本機控制 API：允許這台電腦上的受信任工具讀取應用程式狀態",
-  "Off by default. When enabled, this read-only API listens only on 127.0.0.1 for trusted local tooling.": "預設關閉。啟用後，此唯讀 API 僅在 127.0.0.1 上監聽，供受信任的本機工具使用。"
+  "Off by default. When enabled, this read-only API listens only on 127.0.0.1 for trusted local tooling.": "預設關閉。啟用後，此唯讀 API 僅在 127.0.0.1 上監聽，供受信任的本機工具使用。",
+  "This reply points to content from another message that was not recorded.": "此回覆指向另一則訊息中未被記錄的內容。"
 }

@@ -1748,5 +1748,6 @@
   "Omarchy theme unavailable; using saved colors.": "Omarchy-Design nicht verfügbar; gespeicherte Farben werden verwendet.",
   "Omarchy theme unavailable; using the last valid palette.": "Omarchy-Design nicht verfügbar; die letzte gültige Palette bleibt aktiv.",
   "Local control API: let trusted tools on this computer read app status": "Lokale Steuerungs-API: vertrauenswürdigen Tools auf diesem Computer erlauben, den App-Status zu lesen",
-  "Off by default. When enabled, this read-only API listens only on 127.0.0.1 for trusted local tooling.": "Standardmäßig deaktiviert. Wenn aktiviert, lauscht diese schreibgeschützte API nur auf 127.0.0.1 für vertrauenswürdige lokale Tools."
+  "Off by default. When enabled, this read-only API listens only on 127.0.0.1 for trusted local tooling.": "Standardmäßig deaktiviert. Wenn aktiviert, lauscht diese schreibgeschützte API nur auf 127.0.0.1 für vertrauenswürdige lokale Tools.",
+  "This reply points to content from another message that was not recorded.": "Diese Antwort verweist auf Inhalt aus einer anderen Nachricht, der nicht aufgezeichnet wurde."
 }
