@@ -96,6 +96,34 @@
      "npx vitest run test/bridge.test.ts",
      "npx vitest run test/session.test.ts"
     ]
+   },
+   {
+    "commit": "afbe1284fe373fddba9ac017403f7ef34251458a",
+    "author": "Maxim",
+    "subject": "Remove invisible characters from stored API keys",
+    "pullRequest": 578,
+    "classification": "adapt",
+    "paths": [
+     "src/main/secrets.ts",
+     "test/secrets.test.ts"
+    ],
+    "decision": "Normalize invisible paste characters at ChatBBC's encrypted credential owner for API-key slots only. Existing secure-storage availability, mutation queue, cache publication and non-API secret semantics remain authoritative.",
+    "checks": [
+     "npx vitest run test/secrets.test.ts",
+     "npm run verify:upstream-map"
+    ]
+   },
+   {
+    "commit": "702944ae455e198952dddc32d9e2cf675dcdf5ca",
+    "author": "Maxim",
+    "subject": "Merge pull request #578 from Maximapple/fix/openrouter-auth",
+    "pullRequest": 578,
+    "classification": "provenance-only",
+    "paths": [],
+    "decision": "PR merge provenance for the credential normalization fix; behavior is represented once by afbe1284fe373fddba9ac017403f7ef34251458a.",
+    "checks": [
+     "npx vitest run test/secrets.test.ts"
+    ]
    }
   ]
  },

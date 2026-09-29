@@ -89,6 +89,24 @@ describe('secret store', () => {
     expect(secureStorageCiphertextIsProtected(v10, 'darwin')).toBe(true);
   });
 
+  it('stores and returns API keys without invisible characters a paste can carry', async () => {
+    await setSecret('openRouterApiKey', '\u00ADprovider-key-test\u0085 ');
+    expect(await getSecret('openRouterApiKey')).toBe('provider-key-test');
+    await setSecret('customProviderApiKey', '\u200Bcustom-key-test\uFEFF');
+    expect(await getSecret('customProviderApiKey')).toBe('custom-key-test');
+
+    await setSecret('bridgeToken', ' bridge token with spaces ');
+    expect(await getSecret('bridgeToken')).toBe('bridge token with spaces');
+
+    await fs.writeFile(
+      path.join(dir, 'secrets.bin'),
+      Buffer.from(JSON.stringify({ openRouterApiKey: '\u00ADlegacy-key-test', bridgeToken: 'bridge-token' }), 'utf8')
+    );
+    resetSecretsCacheForTests();
+    expect(await getSecret('openRouterApiKey')).toBe('legacy-key-test');
+    expect(await getSecret('bridgeToken')).toBe('bridge-token');
+  });
+
   it('serializes concurrent writes so one credential cannot erase another', async () => {
     await Promise.all([
       setSecret('bridgeToken', 'bridge-token-456'),
